@@ -62,6 +62,26 @@ def tracing_server():
                         'choices': [{'index': 0, 'message': message, 'finish_reason':
                                      'tool_calls' if 'tool_calls' in message else 'stop'}],
                         'usage': {'prompt_tokens': 11, 'completion_tokens': 7, 'total_tokens': 18}}
+            if payload.get('stream'):
+                # Mirror the provider: usage arrives in a trailing chunk only when requested.
+                choice = response['choices'][0]
+                chunk = {**response, 'object': 'chat.completion.chunk', 'usage': None}
+                delta = message
+                if 'tool_calls' in message:
+                    delta = {**message, 'tool_calls': [{'index': 0, **message['tool_calls'][0]}]}
+                chunks = [{**chunk, 'choices': [{'index': 0, 'delta': delta,
+                                                 'finish_reason': None}]},
+                          {**chunk, 'choices': [{'index': 0, 'delta': {}, 'finish_reason':
+                                                 choice['finish_reason']}]}]
+                if (payload.get('stream_options') or {}).get('include_usage'):
+                    chunks.append({**chunk, 'choices': [], 'usage': response['usage']})
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream')
+                self.end_headers()
+                for item in chunks:
+                    self.wfile.write(f'data: {json.dumps(item)}\n\n'.encode())
+                self.wfile.write(b'data: [DONE]\n\n')
+                return
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
