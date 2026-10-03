@@ -37,9 +37,12 @@ async def test_implementation_publishes_only_successful_images(tmp_path, monkeyp
             if failure != 'empty':
                 (output / 'Dockerfile').write_text('FROM scratch')
             (output / 'Service.java').write_text('implemented')
+            (output / '.agent-output').mkdir()
+            (output / '.agent-output/shell-1.log').write_text('verbose build output')
         if args[0] == 'build' and '--iidfile' in args:
             context = Path(args[-1])
             assert (context / 'Service.java').read_text() == 'implemented'
+            assert not (context / '.agent-output').exists()
             if failure == 'build':
                 raise RuntimeError('build rejected')
             Path(args[args.index('--iidfile') + 1]).write_text(

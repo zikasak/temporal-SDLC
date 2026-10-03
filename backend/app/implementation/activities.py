@@ -8,11 +8,13 @@ from temporalio.exceptions import ApplicationError
 from app.agent_workflows.host import StageInputs, StageSpec, copy_regular_files, run_stage
 from app.config import GENERATED_CODE_DIR
 from app.docker_agents import default_agent_image
+from app.requirements.document import without_repeated_tables
 
 
 def copy_service(source: Path, target: Path) -> None:
-    """Copy regular source files only: never tests, symlinks or build metadata."""
-    excluded = {'test', 'tests', 'target', '.git', '.openapi-generator', '__pycache__'}
+    """Copy regular source files only: never tests, symlinks, build metadata or agent logs."""
+    excluded = {'test', 'tests', 'target', '.git', '.openapi-generator', '__pycache__',
+                '.agent-output'}
     copy_regular_files(source, target,
                        include=lambda relative: not any(part.lower() in excluded
                                                         for part in relative.parts))
@@ -26,7 +28,7 @@ def prepare_inputs(session_dir: Path, context: dict[str, Any]) -> StageInputs:
     def populate(workspace: Path) -> None:
         copy_service(source, workspace / 'service')
 
-    return StageInputs(context=context, populate=populate)
+    return StageInputs(context=without_repeated_tables(context), populate=populate)
 
 
 def validate_output(clean: Path) -> None:

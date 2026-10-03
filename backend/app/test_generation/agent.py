@@ -28,7 +28,9 @@ database structure, existing data or unspecified response ordering.
 Use only supplied requirements and /workspace/openapi.yaml as your authority. Document
 required environment credentials and any contract ambiguities in README.md. Credentials
 must come from environment variables; never put secrets in files.
-Use read_file, write_file and shell to create the suite and adjust test dependencies.
+Create files with write_file and change existing files with edit_file, not by
+rewriting them. Locate code with list_files and search_files, read only the relevant
+line ranges with read_file, and use shell to adjust and build test dependencies.
 Compile with mvn -B -DskipTests -Dmaven.test.skip=false test-compile and fix failures.
 The service is not available during authoring; do not execute service tests here.
 The outer worker builds the test runner image and independently compiles the suite.

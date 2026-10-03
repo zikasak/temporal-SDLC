@@ -9,6 +9,8 @@ from temporalio.testing import ActivityEnvironment
 
 from app import docker_agents
 from app.api_design.models import empty_api
+from app.api_design.openapi import render_openapi
+from app.requirements.document import render_requirements_markdown
 from app.test_generation import activities
 
 
@@ -25,7 +27,12 @@ async def test_contract_only_generation_publishes_compiled_suite(tmp_path, monke
     server = tmp_path / 'session/server'
     server.mkdir()
     (server / 'Generated.java').write_text('PRIVATE GENERATED SOURCE')
-    context = {'requirements': [], 'requirements_document': '# Requirements',
+    requirements = [{'id': 'FR-1', 'category': 'functional', 'title': 'Create orders',
+                     'description': 'Clients create orders.', 'priority': 'must',
+                     'rationale': 'Core flow'}]
+    context = {'requirements': requirements,
+               'requirements_document': render_requirements_markdown(
+                   requirements, 'Orders are never deleted.'),
                'api_design': empty_api(), 'implementation': private_source.read_text(),
                'source_path': str(implementation)}
     image_id = 'sha256:' + 'c' * 64
@@ -49,10 +56,12 @@ async def test_contract_only_generation_publishes_compiled_suite(tmp_path, monke
                 sent = [archive.extractfile(item).read() for item in members if item.isfile()]
                 assert not any(b'PRIVATE' in data for data in sent)
                 payload = json.loads(archive.extractfile('input.json').read())
-                assert payload == {key: context[key] for key in (
-                    'requirements', 'requirements_document', 'api_design',
-                )}
-                assert b'openapi: 3.' in archive.extractfile('openapi.yaml').read()
+                # One copy of each contract: the API only as OpenAPI, requirements only
+                # as the structured list plus the narrative its tables do not repeat.
+                assert payload == {'requirements': requirements,
+                                   'requirements_narrative': 'Orders are never deleted.'}
+                assert archive.extractfile('openapi.yaml').read().decode() == (
+                    render_openapi(context['api_design']))
         if args[0] == 'wait' and failure == 'cancel':
             raise asyncio.CancelledError()
         if args[0] == 'inspect':

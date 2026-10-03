@@ -93,9 +93,20 @@ def test_agent_stops_at_configured_turn_limit(profile, scripted_model, monkeypat
     assert (profile.root / 'progress.txt').read_text() == 'second'
 
 
-@pytest.mark.parametrize('name', ['read_file', 'write_file'])
+@pytest.fixture
+def tools(tmp_path):
+    return {item.name: item for item in runtime.workspace_tools(tmp_path)}
+
+
+@pytest.mark.parametrize('name,args', [
+    ('read_file', {}),
+    ('write_file', {'content': 'overwrite'}),
+    ('edit_file', {'old_text': 'private', 'new_text': 'overwrite'}),
+    ('search_files', {'regex': 'private'}),
+    ('list_files', {}),
+])
 @pytest.mark.parametrize('escape', ['relative', 'absolute', 'symlink'])
-def test_file_tools_reject_workspace_escapes(tmp_path, name, escape):
+def test_file_tools_reject_workspace_escapes(tmp_path, name, args, escape):
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     private = tmp_path / 'private'
@@ -106,26 +117,120 @@ def test_file_tools_reject_workspace_escapes(tmp_path, name, escape):
     path = {'relative': '../private/secret.txt', 'absolute': str(secret),
             'symlink': 'linked/secret.txt'}[escape]
     tools = {item.name: item for item in runtime.workspace_tools(workspace)}
-    args = {'path': path}
-    if name == 'write_file':
-        args['content'] = 'overwrite'
     with pytest.raises(ValueError, match='inside the project workspace'):
-        tools[name].invoke(args)
+        tools[name].invoke({'path': path, **args})
     assert secret.read_text() == 'private data'
 
 
-def test_workspace_tools_bound_outputs_and_use_project_cwd(tmp_path):
-    tools = {item.name: item for item in runtime.workspace_tools(tmp_path)}
-    (tmp_path / 'large.txt').write_text('x' * 40000)
-    assert len(tools['read_file'].invoke({'path': 'large.txt'})) == 30000
-    script = 'import os; print("x" * 20000); print(os.getcwd())'
+def test_discovery_tools_do_not_follow_links_out_of_the_workspace(tmp_path):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    (tmp_path / 'secret.txt').write_text('private data')
+    (workspace / 'linked.txt').symlink_to(tmp_path / 'secret.txt')
+    (workspace / 'linked').symlink_to(tmp_path, target_is_directory=True)
+    (workspace / 'own.txt').write_text('private notes')
+    tools = {item.name: item for item in runtime.workspace_tools(workspace)}
+    assert tools['list_files'].invoke({}) == 'own.txt'
+    assert tools['search_files'].invoke({'regex': 'private'}) == 'own.txt:1: private notes'
+
+
+def test_large_files_are_read_completely_in_continued_ranges(tmp_path, tools):
+    lines = [f'line {number} ' + 'x' * 90 for number in range(1, 1201)]
+    (tmp_path / 'large.txt').write_text('\n'.join(lines) + '\n')
+    collected, offset, reads = [], 1, 0
+    while offset:
+        result = tools['read_file'].invoke({'path': 'large.txt', 'offset': offset})
+        assert len(result) <= 30200
+        body, _, note = result.rpartition('\n[Showing lines ')
+        collected += body.splitlines()
+        offset = int(note.split('offset=')[1].rstrip('.]')) if 'offset=' in note else 0
+        reads += 1
+    assert collected == lines and reads > 1
+    assert tools['read_file'].invoke({'path': 'large.txt', 'offset': 7, 'limit': 2}) == (
+        f'{lines[6]}\n{lines[7]}\n\n[Showing lines 7-8 of 1200. Continue with offset=9.]'
+    )
+    (tmp_path / 'small.txt').write_text('whole\nfile\n')
+    assert tools['read_file'].invoke({'path': 'small.txt'}) == 'whole\nfile\n'
+    (tmp_path / 'minified.js').write_text('x' * 40000)
+    result = tools['read_file'].invoke({'path': 'minified.js'})
+    assert result.startswith('x' * 30000 + '\n[Line 1 truncated')
+
+
+def test_edit_file_changes_only_an_unambiguous_exact_match(tmp_path, tools):
+    source = tmp_path / 'Service.java'
+    source.write_text('int a = 1;\nint b = 1;\nreturn a;\n')
+    assert tools['edit_file'].invoke({
+        'path': 'Service.java', 'old_text': 'return a;', 'new_text': 'return a + b;',
+    }) == 'Edited (1 replacement)'
+    assert source.read_text() == 'int a = 1;\nint b = 1;\nreturn a + b;\n'
+    for old_text, error in [(' = 1;', 'matches 2 places'), ('missing', 'was not found'),
+                            ('', 'was not found')]:
+        with pytest.raises(ValueError, match=error):
+            tools['edit_file'].invoke({'path': 'Service.java', 'old_text': old_text,
+                                       'new_text': ' = 2;'})
+    assert source.read_text() == 'int a = 1;\nint b = 1;\nreturn a + b;\n'
+    assert tools['edit_file'].invoke({
+        'path': 'Service.java', 'old_text': ' = 1;', 'new_text': ' = 2;', 'replace_all': True,
+    }) == 'Edited (2 replacements)'
+    assert source.read_text() == 'int a = 2;\nint b = 2;\nreturn a + b;\n'
+
+
+def test_files_are_located_without_reading_build_output(tmp_path, tools):
+    for path, content in [('src/main/java/OrderController.java', 'class OrderController {}'),
+                          ('src/main/java/Order.java', 'class Order {}'),
+                          ('target/classes/Order.java', 'class Order {}'),
+                          ('pom.xml', '<project/>')]:
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text(content)
+    assert tools['list_files'].invoke({}).splitlines() == [
+        'pom.xml', 'src/main/java/Order.java', 'src/main/java/OrderController.java']
+    assert tools['list_files'].invoke({'pattern': '*Controller.java'}) == (
+        'src/main/java/OrderController.java')
+    assert tools['list_files'].invoke({'path': 'src', 'pattern': '*.xml'}) == 'No files found'
+    assert tools['search_files'].invoke({'regex': r'class Order\b', 'pattern': '*.java'}) == (
+        'src/main/java/Order.java:1: class Order {}')
+    assert tools['search_files'].invoke({'regex': 'absent'}) == 'No matches'
+    for number in range(300):
+        (tmp_path / f'src/Generated{number:03}.java').write_text('class Generated {}\n' * 2)
+    listed = tools['list_files'].invoke({'path': 'src'}).splitlines()
+    assert len(listed) == 201 and listed[-1].startswith('[More than 200 files')
+    found = tools['search_files'].invoke({'regex': 'Generated'}).splitlines()
+    assert len(found) == 51 and found[-1].startswith('[More than 50 matches')
+
+
+def test_shell_runs_in_project_and_returns_short_output_whole(tmp_path, tools):
+    script = 'import os, sys; print(os.getcwd()); sys.exit(3)'
     result = tools['shell'].invoke({
         'command': f'{shlex.quote(sys.executable)} -c {shlex.quote(script)}',
     })
-    header, output = result.split('\n', 1)
-    assert header == 'Exit code: 0'
-    assert len(output.encode()) <= 16000
-    assert output.endswith(str(tmp_path.resolve()) + '\n')
+    assert result == f'Exit code: 3\n{tmp_path.resolve()}\n'
+    assert tools['list_files'].invoke({'path': '.agent-output'}) == 'No files found'
+
+
+def test_long_shell_output_is_summarized_and_remains_retrievable(tmp_path, tools):
+    script = ('for n in range(1, 2001):\n'
+              '    print("[ERROR] Service.java:[12,5] cannot find symbol" if n == 700'
+              '          else f"[INFO] downloading artifact {n}")\n'
+              'print("BUILD FAILURE")')
+    result = tools['shell'].invoke({
+        'command': f'{shlex.quote(sys.executable)} -c {shlex.quote(script)}',
+    })
+    assert len(result) < 5000
+    assert result.startswith('Exit code: 0\n[Output was 2001 lines; the full log is '
+                             '.agent-output/shell-1.log.')
+    assert '700: [ERROR] Service.java:[12,5] cannot find symbol' in result
+    assert result.endswith('[INFO] downloading artifact 2000\nBUILD FAILURE\n')
+    assert 'artifact 100\n' not in result
+    assert tools['read_file'].invoke({
+        'path': '.agent-output/shell-1.log', 'offset': 699, 'limit': 3,
+    }).startswith('[INFO] downloading artifact 699\n[ERROR] Service.java:[12,5] cannot find '
+                  'symbol\n[INFO] downloading artifact 701\n')
+    assert tools['search_files'].invoke({
+        'regex': 'artifact 100$', 'path': '.agent-output/shell-1.log',
+    }) == '.agent-output/shell-1.log:100: [INFO] downloading artifact 100'
+    # Saved logs never surface in ordinary project discovery.
+    assert tools['list_files'].invoke({}) == 'No files found'
+    assert tools['search_files'].invoke({'regex': 'artifact'}) == 'No matches'
 
 
 async def test_new_stage_uses_its_own_toolchain_workspace_and_artifact_names(tmp_path, monkeypatch):

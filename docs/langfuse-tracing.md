@@ -65,7 +65,7 @@ the same session ID, and emit one distinctly named `agent` observation:
 build-implementation (host span)
 └── author-implementation (isolated agent)
     ├── decide-next-action (generation)
-    ├── read_file / write_file / shell (tools)
+    ├── read_file / write_file / edit_file / … / shell (tools)
     └── decide-next-action (generation)
 ```
 

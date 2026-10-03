@@ -118,11 +118,16 @@ host orchestration/config, and the other role's code are not copied into an agen
 The host worker builds the shared default with `AGENT_ROLE=implementation` and
 `WORKSPACE_NAME=service`, then creates a constrained, non-root container with Python,
 Maven and Java 21. Requirements, the requirements
-document and structured API design are supplied in `/workspace/input.json`. Generated
+document and structured API design are supplied in `/workspace/input.json`. When the
+document's tables exactly render the structured requirements, only its narrative is
+supplied (`requirements_narrative`); any other document is passed whole. Generated
 sources are copied to `/workspace/service`, excluding tests, symlinks and build output.
 Original codegen sources and tests remain untouched.
 
-The container's bounded LLM tool loop can read/write files and execute shell commands.
+The container's bounded LLM tool loop can list, search, read ranges of, write and
+exactly edit workspace files, and execute shell commands. Long command output is saved
+under `.agent-output/` in the workspace and returned as its diagnostic lines and tail;
+that directory is never published.
 It implements the service and writes its production `Dockerfile` and `.dockerignore`.
 The host retrieves sources, excludes tests/build output again, and builds that Dockerfile.
 Only a successful build publishes:
@@ -141,9 +146,10 @@ Failures set `implementation_error`.
 The test worker builds the shared default with `AGENT_ROLE=test_generation` and
 `WORKSPACE_NAME=tests`, then creates its own constrained, non-root container with
 Python, Maven and Java 21. Its only session inputs
-are requirements, the requirements document and the structured API design in
-`/workspace/input.json`, plus OpenAPI YAML rendered from that design in
-`/workspace/openapi.yaml`. Extra context fields are discarded.
+are requirements and the requirements document (reduced to its narrative as above) in
+`/workspace/input.json`, plus OpenAPI YAML rendered from the structured API design in
+`/workspace/openapi.yaml`. The structured design itself is not repeated. Extra context
+fields are discarded.
 
 `/workspace/tests` starts from a static Maven/JUnit 5 template. No generated server
 sources, implementation sources, implementation image, logs, or test stubs are copied
