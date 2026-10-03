@@ -7,8 +7,10 @@ ROOT = Path('/workspace/service')
 
 PROMPT = """Implement the Spring Boot service in /workspace/service using the supplied
 requirements and OpenAPI design. Generated interfaces and models are the API contract.
-Use read_file, write_file and shell to inspect and implement real business behavior,
-validation, persistence and error handling. Add the Spring Boot entry point and any
+Implement real business behavior, validation, persistence and error handling.
+Locate code with list_files and search_files and read only the relevant line ranges with
+read_file. Create files with write_file; change existing files with edit_file, not by
+rewriting them. Use shell for builds and anything else. Add the Spring Boot entry point and any
 needed dependencies/configuration. Do not generate, read, or execute tests.
 Compile/package with Maven using -Dmaven.test.skip=true. Fix compilation failures.
 Create a production Dockerfile at the project root: multi-stage Maven/Java build,

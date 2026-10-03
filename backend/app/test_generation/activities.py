@@ -9,6 +9,7 @@ from app.agent_workflows.host import StageInputs, StageSpec, copy_regular_files,
 from app.api_design.openapi import render_openapi
 from app.config import GENERATED_CODE_DIR
 from app.docker_agents import default_agent_image
+from app.requirements.document import without_repeated_tables
 
 TEMPLATE = Path(__file__).parent / 'template'
 
@@ -27,15 +28,17 @@ def copy_test_suite(source: Path, target: Path) -> None:
 
 def prepare_inputs(session_dir: Path, context: dict[str, Any]) -> StageInputs:
     # No codegen, implementation, image, log or arbitrary extra context is supplied.
-    contracts = {
+    api_design = context['api_design']
+    # The rendered OpenAPI file is the agent's API authority; the structured design
+    # it is rendered from would only repeat it in every model invocation.
+    contracts = without_repeated_tables({
         'requirements': context.get('requirements', []),
         'requirements_document': context.get('requirements_document', ''),
-        'api_design': context['api_design'],
-    }
+    })
 
     def populate(workspace: Path) -> None:
         shutil.copytree(TEMPLATE, workspace / 'tests')
-        (workspace / 'openapi.yaml').write_text(render_openapi(contracts['api_design']))
+        (workspace / 'openapi.yaml').write_text(render_openapi(api_design))
 
     return StageInputs(context=contracts, populate=populate)
 

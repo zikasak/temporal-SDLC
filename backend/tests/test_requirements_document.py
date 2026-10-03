@@ -1,6 +1,6 @@
 import pytest
 
-from app.requirements.document import render_requirements_markdown
+from app.requirements.document import render_requirements_markdown, without_repeated_tables
 from app.tools.requirements import RequirementsContext
 
 
@@ -57,3 +57,36 @@ def test_render_contains_every_requirement_and_escapes_tables():
     assert "| TR-1 | Python | Backend in Python. | Should |  |" in markdown
     non_functional = markdown.split("## Non-functional requirements")[1]
     assert non_functional.split("##")[0].strip() == "_None identified._"
+
+
+@pytest.mark.parametrize("narrative", ["Bookings are never deleted.\n\n## Assumptions\nOne site.", None])
+def test_coding_context_carries_requirements_once(narrative):
+    requirements = [
+        {"id": "FR-1", "category": "functional", "title": "Book | rooms",
+         "description": "Users can\nbook a room.", "priority": "must", "rationale": "Core"},
+        {"id": "NFR-1", "category": "non_functional", "title": "Fast",
+         "description": "Pages load within 1 s.", "priority": "should"},
+    ]
+    context = {"requirements": requirements, "api_design": {"endpoints": []},
+               "requirements_document": render_requirements_markdown(requirements, narrative)}
+    expected = {"requirements": requirements, "api_design": {"endpoints": []}}
+    if narrative:
+        expected["requirements_narrative"] = narrative
+    assert without_repeated_tables(context) == expected
+
+
+@pytest.mark.parametrize("change", ["edited", "stale", "foreign", "malformed"])
+def test_coding_context_keeps_documents_it_cannot_account_for(change):
+    requirements = [{"id": "FR-1", "category": "functional", "title": "Book rooms",
+                     "description": "Users can book a room.", "priority": "must"}]
+    document = render_requirements_markdown(requirements, "Overview")
+    if change == "edited":
+        document = document.replace("Users can book a room.", "Members can book a room.")
+    elif change == "stale":
+        requirements = [{**requirements[0], "priority": "could"}]
+    elif change == "foreign":
+        document = "Uploaded specification\n" + document
+    else:
+        requirements = [{"id": "FR-1"}]
+    context = {"requirements": requirements, "requirements_document": document}
+    assert without_repeated_tables(context) == context
