@@ -1,0 +1,115 @@
+// Project-local debug tasks
+//
+// For more documentation on how to configure debug tasks,
+// see: https://zed.dev/docs/debugger
+[
+  {
+    "label": "Full stack (API + workers + frontend)",
+    "adapter": "Debugpy",
+    "request": "launch",
+    "program": "$ZED_WORKTREE_ROOT/backend/tools/dev_stack.py",
+    "cwd": "$ZED_WORKTREE_ROOT/backend",
+    "python": "$ZED_WORKTREE_ROOT/backend/env/bin/python",
+    "env": {
+      "PYTHONPATH": "$ZED_WORKTREE_ROOT/backend",
+      "TEMPORAL_ADDRESS": "localhost:7233",
+      "TEMPORAL_DEBUG": "1",
+      "PYTHONUNBUFFERED": "1"
+    },
+    "subProcess": true,
+    "justMyCode": true,
+    "console": "integratedTerminal",
+    "build": {
+      "command": "docker",
+      "args": [
+        "compose",
+        "-f",
+        "$ZED_WORKTREE_ROOT/backend/docker-compose.yml",
+        "up",
+        "-d"
+      ],
+      "cwd": "$ZED_WORKTREE_ROOT",
+      "allow_concurrent_runs": false
+    }
+  },
+  {
+    "label": "Backend (FastAPI)",
+    "adapter": "Debugpy",
+    "request": "launch",
+    "module": "uvicorn",
+    "args": ["app.api.main:app", "--host", "127.0.0.1", "--port", "8000"],
+    "cwd": "$ZED_WORKTREE_ROOT/backend",
+    "python": "$ZED_WORKTREE_ROOT/backend/env/bin/python",
+    "env": { "PYTHONPATH": "$ZED_WORKTREE_ROOT/backend" },
+    "justMyCode": true
+  },
+  {
+    "label": "Worker (Temporal)",
+    "adapter": "Debugpy",
+    "request": "launch",
+    "module": "app.temporal.worker",
+    "cwd": "$ZED_WORKTREE_ROOT/backend",
+    "python": "$ZED_WORKTREE_ROOT/backend/env/bin/python",
+    "env": { "PYTHONPATH": "$ZED_WORKTREE_ROOT/backend" },
+    "justMyCode": true
+  },
+  {
+    "label": "Codegen worker (Temporal)",
+    "adapter": "Debugpy",
+    "request": "launch",
+    "module": "app.codegen.worker",
+    "cwd": "$ZED_WORKTREE_ROOT/backend",
+    "python": "$ZED_WORKTREE_ROOT/backend/env/bin/python",
+    "env": { "PYTHONPATH": "$ZED_WORKTREE_ROOT/backend" },
+    "justMyCode": true
+  },
+  {
+    "label": "Implementation worker (Temporal)",
+    "adapter": "Debugpy",
+    "request": "launch",
+    "module": "app.implementation.worker",
+    "cwd": "$ZED_WORKTREE_ROOT/backend",
+    "python": "$ZED_WORKTREE_ROOT/backend/env/bin/python",
+    "env": { "PYTHONPATH": "$ZED_WORKTREE_ROOT/backend" },
+    "justMyCode": true
+  },
+  {
+    "label": "Test generation worker (Temporal)",
+    "adapter": "Debugpy",
+    "request": "launch",
+    "module": "app.test_generation.worker",
+    "cwd": "$ZED_WORKTREE_ROOT/backend",
+    "python": "$ZED_WORKTREE_ROOT/backend/env/bin/python",
+    "env": { "PYTHONPATH": "$ZED_WORKTREE_ROOT/backend" },
+    "justMyCode": true
+  },
+  {
+    "label": "Verification worker (Temporal)",
+    "adapter": "Debugpy",
+    "request": "launch",
+    "module": "app.verification.worker",
+    "cwd": "$ZED_WORKTREE_ROOT/backend",
+    "python": "$ZED_WORKTREE_ROOT/backend/env/bin/python",
+    "env": { "PYTHONPATH": "$ZED_WORKTREE_ROOT/backend" },
+    "justMyCode": true
+  },
+  {
+    "label": "Frontend (Vite dev server)",
+    "adapter": "JavaScript",
+    "type": "pwa-node",
+    "request": "launch",
+    "runtimeExecutable": "npm",
+    "runtimeArgs": ["run", "dev"],
+    "cwd": "$ZED_WORKTREE_ROOT/frontend",
+    "console": "integratedTerminal"
+  },
+  {
+    "label": "Frontend (Chrome)",
+    "adapter": "JavaScript",
+    "type": "pwa-chrome",
+    "runtimeExecutable": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    "request": "launch",
+    "url": "http://localhost:5173",
+    "webRoot": "$ZED_WORKTREE_ROOT/frontend"
+  }
+]

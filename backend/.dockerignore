@@ -1,0 +1,16 @@
+# Agent builds are an allowlist, not a copy of the host application.
+**
+!app/
+!app/__init__.py
+!app/tracing.py
+!app/agent_workflows/
+!app/agent_workflows/__init__.py
+!app/agent_workflows/runtime.py
+!app/agent_workflows/Dockerfile
+!app/llm/
+!app/llm/__init__.py
+!app/llm/factory.py
+!app/implementation/
+!app/implementation/agent.py
+!app/test_generation/
+!app/test_generation/agent.py

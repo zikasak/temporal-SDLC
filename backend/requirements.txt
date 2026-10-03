@@ -1,0 +1,16 @@
+temporalio
+langchain
+langfuse==4.16.0
+python-dotenv==1.2.3
+langgraph
+langchain-openai
+langchain-google-genai
+fastapi
+uvicorn
+psycopg[binary]
+python-multipart
+pypdf
+pytest
+pytest-asyncio
+pyyaml
+openapi-spec-validator

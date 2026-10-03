@@ -1,0 +1,5 @@
+data/
+tools/*.jar
+.env
+.env.*
+!.env.example

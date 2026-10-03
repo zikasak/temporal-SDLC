@@ -1,0 +1,587 @@
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import Markdown from "react-markdown";
+import { errorMessage, failure, readBody } from "./api";
+import ForkButton from "./ForkButton";
+import { markdownComponents, remarkPlugins } from "./markdown";
+
+type SessionStatus = "interviewing" | "turn_running" | "finalizing" | "completed" | "failed";
+type Category = "functional" | "non_functional" | "technical";
+
+type Requirement = {
+  id: string;
+  category: Category;
+  title: string;
+  description: string;
+  priority: "must" | "should" | "could";
+  rationale?: string;
+};
+
+type RequirementsDocument = {
+  document_id: string;
+  filename: string;
+  size_bytes: number;
+  revision: number;
+};
+
+type Session = {
+  session_id: string;
+  status: SessionStatus;
+  messages: { role: "user" | "assistant"; content: string }[];
+  requirements: Requirement[];
+  document: RequirementsDocument | null;
+  error: string | null;
+  forked_from: { session_id: string; message_index: number } | null;
+};
+
+const sessionStatuses: SessionStatus[] = [
+  "interviewing",
+  "turn_running",
+  "finalizing",
+  "completed",
+  "failed",
+];
+const pendingStatuses: SessionStatus[] = ["turn_running", "finalizing"];
+const categories: [Category, string][] = [
+  ["functional", "Functional"],
+  ["non_functional", "Non-functional"],
+  ["technical", "Technical"],
+];
+const statusLabels: Record<SessionStatus, string> = {
+  interviewing: "Interviewing",
+  turn_running: "Thinking",
+  finalizing: "Writing document",
+  completed: "Complete",
+  failed: "Failed",
+};
+
+function sessionIdFromUrl() {
+  return new URLSearchParams(window.location.search).get("session_id") ?? "";
+}
+
+function rememberSessionId(sessionId: string) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("mode", "requirements");
+  if (sessionId) url.searchParams.set("session_id", sessionId);
+  else url.searchParams.delete("session_id");
+  window.history.replaceState(null, "", url);
+}
+
+function sessionRecord(value: unknown): Session {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("session_id" in value) ||
+    typeof value.session_id !== "string" ||
+    !("status" in value) ||
+    !(sessionStatuses as unknown[]).includes(value.status) ||
+    !("messages" in value) ||
+    !Array.isArray(value.messages) ||
+    !value.messages.every(
+      (item) =>
+        typeof item === "object" &&
+        item !== null &&
+        (item.role === "user" || item.role === "assistant") &&
+        typeof item.content === "string",
+    ) ||
+    !("requirements" in value) ||
+    !Array.isArray(value.requirements) ||
+    !value.requirements.every(
+      (item) =>
+        typeof item === "object" &&
+        item !== null &&
+        typeof item.id === "string" &&
+        categories.some(([category]) => category === item.category) &&
+        typeof item.title === "string" &&
+        typeof item.description === "string" &&
+        typeof item.priority === "string",
+    )
+  ) {
+    throw new Error("The backend returned an invalid session.");
+  }
+  const document =
+    "document" in value &&
+    typeof value.document === "object" &&
+    value.document !== null &&
+    "document_id" in value.document &&
+    typeof value.document.document_id === "string"
+      ? (value.document as RequirementsDocument)
+      : null;
+  return {
+    session_id: value.session_id,
+    status: value.status as SessionStatus,
+    messages: value.messages as Session["messages"],
+    requirements: value.requirements as Requirement[],
+    document,
+    error: "error" in value && typeof value.error === "string" ? value.error : null,
+    forked_from: forkOrigin(value),
+  };
+}
+
+function forkOrigin(value: object): Session["forked_from"] {
+  if (!("forked_from" in value)) return null;
+  const origin = value.forked_from;
+  return typeof origin === "object" &&
+    origin !== null &&
+    "session_id" in origin &&
+    typeof origin.session_id === "string" &&
+    "message_index" in origin &&
+    typeof origin.message_index === "number"
+    ? { session_id: origin.session_id, message_index: origin.message_index }
+    : null;
+}
+
+export default function Requirements() {
+  const [sessionId, setSessionId] = useState(sessionIdFromUrl);
+  const [lookupId, setLookupId] = useState(sessionIdFromUrl);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [session, setSession] = useState<Session | null>(null);
+  const [message, setMessage] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const conversation = useRef<HTMLDivElement>(null);
+  const chatEnd = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!sessionId) return;
+
+    const controller = new AbortController();
+    let timer: number | undefined;
+
+    async function poll() {
+      try {
+        const response = await fetch(
+          `/api/requirements/sessions/${encodeURIComponent(sessionId)}`,
+          { signal: controller.signal },
+        );
+        const body = await readBody(response);
+        if (!response.ok) throw new Error(errorMessage(body, response.status));
+        if (controller.signal.aborted) return;
+        const record = sessionRecord(body);
+        setSession(record);
+        setError("");
+        if (pendingStatuses.includes(record.status)) {
+          timer = window.setTimeout(poll, 2000);
+        }
+      } catch (caught) {
+        if (controller.signal.aborted) return;
+        setError(failure(caught, "Could not retrieve this session."));
+      }
+    }
+
+    void poll();
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [sessionId, refreshKey]);
+
+  function openSession(id: string) {
+    setSessionId(id);
+    setLookupId(id);
+    setRefreshKey((value) => value + 1);
+    rememberSessionId(id);
+  }
+
+  async function post(path: string, body?: unknown) {
+    const response = await fetch(`/api/requirements/sessions${path}`, {
+      method: "POST",
+      ...(body === undefined
+        ? {}
+        : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+    });
+    const parsed = await readBody(response);
+    if (!response.ok) throw new Error(errorMessage(parsed, response.status));
+    return parsed;
+  }
+
+  async function startSession() {
+    setSubmitting(true);
+    setError("");
+    setSession(null);
+    try {
+      const body = await post("");
+      if (
+        typeof body !== "object" ||
+        body === null ||
+        !("session_id" in body) ||
+        typeof body.session_id !== "string"
+      ) {
+        throw new Error("The backend did not return a session ID.");
+      }
+      openSession(body.session_id);
+    } catch (caught) {
+      setError(failure(caught, "Could not start a session."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function sendMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const content = message.trim();
+    if (!session || !content) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      await post(`/${encodeURIComponent(session.session_id)}/messages`, { message: content });
+      setMessage("");
+      setSession({
+        ...session,
+        status: "turn_running",
+        error: null,
+        messages: [...session.messages, { role: "user", content }],
+      });
+      setRefreshKey((value) => value + 1);
+    } catch (caught) {
+      setError(failure(caught, "Could not send the message."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function retryMessage() {
+    if (!session || submitting) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      await post(`/${encodeURIComponent(session.session_id)}/retry`);
+      setSession({ ...session, status: "turn_running", error: null });
+      setRefreshKey((value) => value + 1);
+    } catch (caught) {
+      setError(failure(caught, "Could not retry the message."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function generateDocument() {
+    if (!session) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      await post(`/${encodeURIComponent(session.session_id)}/finalize`);
+      setSession({ ...session, status: "finalizing", error: null });
+      setRefreshKey((value) => value + 1);
+    } catch (caught) {
+      setError(failure(caught, "Could not generate the document."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function forkSession(messageIndex: number) {
+    if (!session) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      const body = await post(`/${encodeURIComponent(session.session_id)}/fork`, {
+        message_index: messageIndex,
+      });
+      if (
+        typeof body !== "object" ||
+        body === null ||
+        !("session_id" in body) ||
+        typeof body.session_id !== "string"
+      ) {
+        throw new Error("The backend did not return a session ID.");
+      }
+      setSession(null);
+      setMessage("");
+      openSession(body.session_id);
+    } catch (caught) {
+      setError(failure(caught, "Could not fork the session."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function retrieveSession(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const id = lookupId.trim();
+    if (!id) return;
+    setSession(null);
+    setError("");
+    openSession(id);
+  }
+
+  // Scroll to the latest turn, not past it to the requirements list below.
+  useEffect(() => {
+    const el = conversation.current;
+    const end = chatEnd.current;
+    if (el && end) el.scrollTop = Math.max(0, end.offsetTop - el.clientHeight);
+  }, [session?.messages.length, session?.status]);
+
+  const unanswered = session?.messages.at(-1)?.role === "user" && session.status === "interviewing";
+  const canCompose = session?.status === "interviewing" && !unanswered && !submitting;
+  const forkedFrom = session?.forked_from ?? null;
+  const canFinalize = canCompose && session.requirements.length > 0;
+  const status = error ? "error" : session ? session.status : sessionId ? "loading" : "idle";
+  const documentUrl = session
+    ? `/api/requirements/sessions/${encodeURIComponent(session.session_id)}/document`
+    : "";
+
+  return (
+    <main className="page-shell">
+      <header className="page-heading">
+        <h1>Requirements interview</h1>
+        <p className="page-intro">
+          Describe the system you want to build. The LLM asks questions, records functional,
+          non-functional and technical requirements as you go, and writes them up as a document.
+        </p>
+      </header>
+
+      <div className="workspace">
+        <section className="request-panel" aria-labelledby="interview-title">
+          <div className="section-heading">
+            <h2 id="interview-title">{session ? "Your answer" : "New session"}</h2>
+          </div>
+
+          {session ? (
+            <form className="message-form" onSubmit={sendMessage}>
+              <label htmlFor="requirements-message">Message</label>
+              <textarea
+                id="requirements-message"
+                value={message}
+                onChange={(event) => setMessage(event.target.value)}
+                maxLength={10000}
+                rows={6}
+                placeholder="Answer the questions or add details…"
+                disabled={!canCompose}
+              />
+              <button
+                className="run-button"
+                type="submit"
+                disabled={!canCompose || !message.trim()}
+              >
+                <span>{submitting ? "Sending" : "Send answer"}</span>
+                {submitting ? (
+                  <span className="spinner" aria-hidden="true" />
+                ) : (
+                  <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                    <path d="M4.5 10h10m-4-4 4 4-4 4" />
+                  </svg>
+                )}
+              </button>
+              <button
+                className="generate-button"
+                type="button"
+                onClick={generateDocument}
+                disabled={!canFinalize}
+              >
+                Generate document
+              </button>
+            </form>
+          ) : (
+            <button
+              className="run-button"
+              type="button"
+              onClick={startSession}
+              disabled={submitting}
+            >
+              <span>{submitting ? "Starting" : "Start a session"}</span>
+              {submitting && <span className="spinner" aria-hidden="true" />}
+            </button>
+          )}
+
+          {session && (
+            <button
+              className="new-conversation"
+              type="button"
+              onClick={() => {
+                setSession(null);
+                setSessionId("");
+                setLookupId("");
+                setMessage("");
+                setError("");
+                rememberSessionId("");
+              }}
+            >
+              Start a new session
+            </button>
+          )}
+
+          <form className="lookup-form" onSubmit={retrieveSession}>
+            <label htmlFor="session-id">Retrieve by session ID</label>
+            <div className="lookup-controls">
+              <input
+                id="session-id"
+                value={lookupId}
+                onChange={(event) => setLookupId(event.target.value)}
+                placeholder="requirements-session-..."
+                disabled={submitting}
+              />
+              <button type="submit" disabled={submitting || !lookupId.trim()}>
+                Find
+              </button>
+            </div>
+          </form>
+        </section>
+
+        <section className="response-panel" aria-labelledby="session-title">
+          <div className="response-header">
+            <div className="section-heading">
+              <h2 id="session-title">Interview</h2>
+            </div>
+            <span className={`status status-${status}`}>
+              <span className="status-dot" aria-hidden="true" />
+              {status === "idle" && "Waiting"}
+              {status === "loading" && "Loading"}
+              {status === "error" && "Error"}
+              {session && !error && statusLabels[session.status]}
+            </span>
+          </div>
+
+          {sessionId && (
+            <p className="request-id">
+              Session ID <code>{sessionId}</code>
+            </p>
+          )}
+
+          {forkedFrom && (
+            <p className="fork-note">
+              Forked after message {forkedFrom.message_index + 1} of another session.
+              <button
+                type="button"
+                onClick={() => {
+                  setSession(null);
+                  openSession(forkedFrom.session_id);
+                }}
+              >
+                Open the original
+              </button>
+            </p>
+          )}
+
+          <div
+            ref={conversation}
+            className="response-content"
+            aria-live="polite"
+            aria-busy={session ? pendingStatuses.includes(session.status) : Boolean(sessionId)}
+          >
+            {session && (
+              <ol className="conversation-list">
+                {session.messages.map((item, index) => (
+                  <li className={`conversation-turn turn-${item.role}`} key={index}>
+                    <span className="turn-label">{item.role === "user" ? "You" : "Analyst"}</span>
+                    {item.role === "assistant" ? (
+                      <div className="turn-content turn-markdown">
+                        <Markdown remarkPlugins={remarkPlugins} components={markdownComponents}>
+                          {item.content}
+                        </Markdown>
+                      </div>
+                    ) : (
+                      <p className="turn-content">{item.content}</p>
+                    )}
+                    <ForkButton
+                      role={item.role}
+                      disabled={submitting}
+                      onFork={() => void forkSession(index)}
+                    />
+                  </li>
+                ))}
+              </ol>
+            )}
+
+            {session && pendingStatuses.includes(session.status) && (
+              <div className="pending-answer" role="status">
+                <span className="loading-line" aria-hidden="true" />
+                <p>
+                  {session.status === "finalizing"
+                    ? "Writing the requirements document…"
+                    : "Waiting for the analyst…"}
+                </p>
+              </div>
+            )}
+
+            <div ref={chatEnd} aria-hidden="true" />
+
+            {session?.document && (
+              <section className="generated-documents" aria-label="Requirements document">
+                <h3>Requirements document</h3>
+                <ul>
+                  <li>
+                    <a href={documentUrl} download={session.document.filename}>
+                      {session.document.filename}
+                    </a>
+                    <span>revision {session.document.revision}</span>
+                  </li>
+                </ul>
+                {session.status === "completed" && (
+                  <a
+                    className="next-step"
+                    href={`?mode=api-design&requirements_session_id=${encodeURIComponent(
+                      session.session_id,
+                    )}`}
+                  >
+                    Design the API from these requirements →
+                  </a>
+                )}
+              </section>
+            )}
+
+            {session && (
+              <section className="requirements-list" aria-label="Requirements gathered">
+                <h3>Requirements gathered ({session.requirements.length})</h3>
+                {categories.map(([category, label]) => {
+                  const items = session.requirements.filter(
+                    (item) => item.category === category,
+                  );
+                  return (
+                    <div className="requirement-group" key={category}>
+                      <h4>{label}</h4>
+                      {items.length === 0 ? (
+                        <p className="requirement-empty">None yet.</p>
+                      ) : (
+                        <ul>
+                          {items.map((item) => (
+                            <li key={item.id}>
+                              <div className="requirement-heading">
+                                <code>{item.id}</code>
+                                <strong>{item.title}</strong>
+                                <span className={`priority priority-${item.priority}`}>
+                                  {item.priority}
+                                </span>
+                              </div>
+                              <p>{item.description}</p>
+                              {item.rationale && <small>{item.rationale}</small>}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  );
+                })}
+              </section>
+            )}
+
+            {!session && !error && (
+              <div className="empty-state">
+                <p>{sessionId ? "Loading session…" : "Your interview starts here."}</p>
+                <span>
+                  {sessionId
+                    ? "Querying the workflow in Temporal."
+                    : "Start a session or retrieve an existing one."}
+                </span>
+              </div>
+            )}
+
+            {(error || session?.error) && (
+              <div className="error-state" role="alert">
+                <p>{error ? "Something went wrong." : "The last step did not complete."}</p>
+                <span>{error || session?.error}</span>
+                {unanswered && !submitting && (
+                  <button type="button" onClick={retryMessage}>Retry this message</button>
+                )}
+                {error && sessionId && (
+                  <button type="button" onClick={() => setRefreshKey((value) => value + 1)}>
+                    Reload session
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        </section>
+      </div>
+    </main>
+  );
+}

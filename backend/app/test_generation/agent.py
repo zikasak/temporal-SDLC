@@ -1,0 +1,56 @@
+"""Container-only test author. Its filesystem contains contracts and tests only."""
+from pathlib import Path
+
+from app.agent_workflows.runtime import AgentProfile, run_agent
+
+ROOT = Path('/workspace/tests')
+
+PROMPT = """Write a standalone Maven/JUnit 5 HTTP test suite in /workspace/tests
+for the service described by the supplied requirements and OpenAPI contract.
+The implementation is being written independently in another container. Its source,
+image and logs are unavailable. Derive all expected behavior from the contract.
+Use Java 21 java.net.http.HttpClient, JUnit assertions and Jackson for JSON as needed.
+Write test classes named *Test.java under src/test/java. Read SERVICE_BASE_URL from
+the environment and fail clearly if it is missing or the service cannot be reached.
+Use bounded HTTP connection and request timeouts. Never import implementation classes,
+create production sources, implement the service, or mock the behavior being tested.
+
+Cover each endpoint's documented success response, required inputs, schema constraints,
+documented errors and applicable business rules. Test multi-step behavior and persistence
+through HTTP when the requirements specify it. Use independent expected values. Avoid
+duplicate cases, assertion-free probes, source inspections, invented contracts and
+tests that only verify their own fixtures. Each test must protect observable behavior
+and fail for a credible regression. Do not disable/skip tests or swallow failures.
+Set up test data through documented public APIs and clean it up when supported.
+Keep tests independent and repeatable; do not assume implementation class names,
+database structure, existing data or unspecified response ordering.
+
+Use only supplied requirements and /workspace/openapi.yaml as your authority. Document
+required environment credentials and any contract ambiguities in README.md. Credentials
+must come from environment variables; never put secrets in files.
+Use read_file, write_file and shell to create the suite and adjust test dependencies.
+Compile with mvn -B -DskipTests -Dmaven.test.skip=false test-compile and fix failures.
+The service is not available during authoring; do not execute service tests here.
+The outer worker builds the test runner image and independently compiles the suite.
+Only finish when meaningful tests, successful compilation and README are complete.
+"""
+
+
+def validate_completion(root: Path) -> None:
+    if not any((root / 'src/test/java').rglob('*Test.java')):
+        raise RuntimeError('Agent finished without test classes')
+
+
+def main() -> None:
+    run_agent(AgentProfile(
+        root=ROOT, prompt=PROMPT,
+        initial_messages=[Path('/workspace/input.json').read_text(),
+                          'OpenAPI contract:\n' + Path('/workspace/openapi.yaml').read_text()],
+        max_turns_env='TEST_GENERATION_MAX_TURNS', validate_completion=validate_completion,
+        completion_message='Test generation completed',
+        exhaustion_message='Test generation exceeded the tool-turn limit',
+    ))
+
+
+if __name__ == '__main__':
+    main()

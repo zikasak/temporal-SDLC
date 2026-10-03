@@ -1,0 +1,344 @@
+# Service implementation, tests and verification workers
+
+The pipeline is API design → code generation → parallel implementation and test generation
+→ verification against the running service.
+New API-design sessions automatically start `ImplementationWorkflow` and
+`TestGenerationWorkflow` on separate task queues after successful code generation.
+Both children start before either is awaited to completion. Each result becomes
+available independently; failure in one branch does not cancel the other. Replay
+patches preserve the original behavior of existing histories. `VerificationWorkflow`
+starts only after both authoring children succeed. Failed assertions are completed test
+results, not workflow failures; failed builds skip verification.
+
+```mermaid
+flowchart LR
+    design[API design] --> codegen[Code generation]
+    codegen --> implementation[ImplementationWorkflow]
+    codegen --> tests[TestGenerationWorkflow]
+    implementation --> service[Service Docker image]
+    tests --> runner[JUnit HTTP test runner image]
+    service --> verification[VerificationWorkflow]
+    runner --> verification
+    verification --> results[Test results]
+```
+
+## Run
+
+From `backend`, using the same environment/database settings as the existing workers:
+
+```sh
+python -m app.temporal.worker
+python -m app.codegen.worker
+python -m app.implementation.worker
+python -m app.test_generation.worker
+python -m app.verification.worker
+```
+
+Run each command in a separate terminal/process. `backend/tools/dev_stack.py` launches
+all five workers, and `.zed/debug.json` includes individual worker launch profiles.
+Both coding workers need the Docker CLI, a running Docker daemon and writable
+`GENERATED_CODE_DIR`. The implementation worker also needs access to codegen's server
+tree. The test worker uses only contract inputs and its own static Maven template.
+The verification worker also needs Docker and writable `GENERATED_CODE_DIR`, and must
+use the same Docker daemon as both authoring workers: images are local immutable IDs,
+not registry tags. `TEMPORAL_VERIFICATION_TASK_QUEUE` defaults to `verification`.
+
+Configure `OPENAI_API_KEY`, `OPENAI_MODEL`, and `OPENAI_BASE_URL` through the environment.
+Loopback provider URLs are translated to `host.docker.internal` inside Docker; remote
+URLs are preserved. `TEMPORAL_IMPLEMENTATION_TASK_QUEUE` defaults to `implementation`
+and `TEMPORAL_TEST_GENERATION_TASK_QUEUE` defaults to `test-generation`. The containers
+require outbound access to the LLM provider and Maven repositories.
+
+## Langfuse tracing
+
+See [Langfuse tracing](langfuse-tracing.md) for environment setup, privacy controls,
+trace/session structure and the live smoke/audit command. Chat and design turns,
+coding-agent generations/tools, codegen and verification are instrumented.
+`backend/.env` is loaded for local development and never copied into agent images.
+
+## Docker diagnostics
+
+Worker logs now report Docker operation start/end, an operation ID, elapsed time and
+exit status (including timeout/cancellation). Arguments and environment values are
+not logged because they may contain credentials. Failure output tails are logged at
+ERROR; successful output tails are available with `LOG_LEVEL=DEBUG`. Known provider
+and environment secrets are redacted before output is returned, persisted or logged.
+
+Each authoring stage preserves bounded Docker build output in its artifact directory:
+
+- `agent-build.log`: building the authoring/toolchain image;
+- `image-build.log`: building the generated service or test-runner image;
+- `agent.log`: authoring container output, including provider errors.
+
+Build logs are saved on success, failure, timeout and cancellation. Verification logs
+also identify session/container/network names and report collection/result summaries.
+These are diagnostics, not an automatic retry or repair mechanism. The UI's test-stage
+failure label covers generation **or** build failure: provider rejection, connectivity
+and agent termination can fail the stage before compilation. Inspect `agent.log` first
+in that case. A host-side image build failure is not fed back into the completed coding
+agent, and automatic Temporal/model retries remain disabled.
+
+## Shared execution machinery
+
+`backend/app/agent_workflows/` contains the reusable execution machinery:
+
+- `host.py`: `StageSpec`, `StageInputs`, regular-file copying, and `run_stage` for
+  prepare → isolated authoring → sanitize/validate → image build → publish.
+- `runtime.py`: `AgentProfile`, workspace tools, and the bounded synchronous tool loop.
+  It has no Temporal, database, Docker, or host-config imports.
+- `workflows.py` and `worker.py`: deterministic activity execution and dedicated worker
+  bootstrap, used by the existing named workflows and worker entrypoints.
+- `Dockerfile`: today's shared Java 21/Maven default. The role entrypoint and workspace
+  are selected through `AGENT_ROLE` and `WORKSPACE_NAME` build arguments.
+
+Provider construction lives in the pure `app/llm/factory.py`. Host `get_model()` retains
+its cached configuration wrapper; containers pass their environment settings explicitly.
+Prompts, input visibility, completion checks, and output policies remain role-local.
+The generic lifecycle does not assume Maven, Java filenames, or access to sibling artifacts.
+
+Default images build from `backend/`, not a role directory:
+
+```sh
+# From backend/
+docker build -f app/agent_workflows/Dockerfile \
+  --build-arg AGENT_ROLE=implementation --build-arg WORKSPACE_NAME=service \
+  -t temporal-implementation-agent:local .
+docker build -f app/agent_workflows/Dockerfile \
+  --build-arg AGENT_ROLE=test_generation --build-arg WORKSPACE_NAME=tests \
+  -t temporal-test-generation-agent:local .
+```
+
+The workers perform these builds automatically. `backend/.dockerignore` is a strict
+allowlist: only the pure runtime/factory, empty package initializers, and role entrypoints
+are build inputs. Each image copies only its selected entrypoint. Generated data, secrets,
+host orchestration/config, and the other role's code are not copied into an agent image.
+
+## Implementation
+
+The host worker builds the shared default with `AGENT_ROLE=implementation` and
+`WORKSPACE_NAME=service`, then creates a constrained, non-root container with Python,
+Maven and Java 21. Requirements, the requirements
+document and structured API design are supplied in `/workspace/input.json`. Generated
+sources are copied to `/workspace/service`, excluding tests, symlinks and build output.
+Original codegen sources and tests remain untouched.
+
+The container's bounded LLM tool loop can read/write files and execute shell commands.
+It implements the service and writes its production `Dockerfile` and `.dockerignore`.
+The host retrieves sources, excludes tests/build output again, and builds that Dockerfile.
+Only a successful build publishes:
+
+- `<GENERATED_CODE_DIR>/<session-id>/implementation/service/`: implemented sources;
+- `<GENERATED_CODE_DIR>/<session-id>/implementation/image.json`: service image ID,
+  source path and session ID;
+- `<GENERATED_CODE_DIR>/<session-id>/implementation/agent.log`: bounded, API-key-redacted
+  agent output, captured before container removal, including failed runs.
+
+The same result is available through `ApiDesignWorkflow.get_state().implementation`.
+Failures set `implementation_error`.
+
+## Independent test generation
+
+The test worker builds the shared default with `AGENT_ROLE=test_generation` and
+`WORKSPACE_NAME=tests`, then creates its own constrained, non-root container with
+Python, Maven and Java 21. Its only session inputs
+are requirements, the requirements document and the structured API design in
+`/workspace/input.json`, plus OpenAPI YAML rendered from that design in
+`/workspace/openapi.yaml`. Extra context fields are discarded.
+
+`/workspace/tests` starts from a static Maven/JUnit 5 template. No generated server
+sources, implementation sources, implementation image, logs, or test stubs are copied
+into this container. Neither coding container has host mounts or a Docker socket, and
+their filesystems are separate. Source isolation is enforced by the supplied filesystem
+and inputs as well as the agent instructions.
+
+The test agent writes HTTP tests with Java's `HttpClient`, JUnit assertions and Jackson,
+using only documented API behavior and business requirements. It uses `SERVICE_BASE_URL`
+to address a running service and reads any required credentials from environment
+variables documented in the suite's README. It compiles tests during authoring without
+running service requests; the implementation may still be in progress.
+
+The host retrieves regular test files and Maven/README configuration, excludes
+symlinks, production sources and build output, and supplies its own runner Dockerfile
+and `.dockerignore`. Building the runner independently compiles the suite with
+`mvn -B -DskipTests -Dmaven.test.skip=false test-compile`. Only a successful build publishes:
+
+- `<GENERATED_CODE_DIR>/<session-id>/tests/suite/`: standalone Maven test project;
+- `<GENERATED_CODE_DIR>/<session-id>/tests/image.json`: test runner image ID, suite path
+  and session ID;
+- `<GENERATED_CODE_DIR>/<session-id>/tests/agent.log`: bounded, API-key-redacted agent
+  output, including failed runs.
+
+The result is available through `ApiDesignWorkflow.get_state().tests` and the existing
+session GET endpoint. Failures set `tests_error`. Requirements, API documents, codegen
+output and the successful sibling result remain available. Both activities heartbeat,
+have bounded execution times and disable automatic retries to avoid repeated model
+calls. Agent containers are removed on success, failure or cancellation.
+
+### Retry failed generation
+
+The API-design page offers **Retry server generation** and **Retry test generation**
+next to a failed stage. Wait for the current pipeline to finish before retrying.
+The corresponding API is `POST /api/api-design/sessions/{session_id}/generation/retry`
+with `{"stage": "server"}` or `{"stage": "tests"}`. Invalid or successful stages
+cannot be restarted; attempts while generation is active return HTTP 409.
+
+A retry starts a fresh `ApiDesignWorkflow` run under the same session ID, preserving
+its conversation, requirements, OpenAPI document and successful sibling artifacts.
+Server retries rerun implementation/build, or codegen followed by both authoring
+branches if codegen itself failed. Test retries rerun only test generation/build.
+Each retried child gets a run-specific ID. Verification resumes automatically once
+both images are available; repeated failures remain manually retryable. This is a
+fresh authoring attempt from the original inputs, not repair using failure logs.
+
+## Add a future stage
+
+1. Define explicit policies in the new role's host module. `prepare_inputs(session_dir,
+   context)` validates prerequisites before artifact creation and returns `StageInputs`:
+   `context` is the only JSON payload sent to the agent, and `populate(workspace)` copies
+   only approved files. Sanitization and validation hooks own the permitted build outputs.
+2. Define the container-only `agent.py` using `AgentProfile` and `runtime.run_agent`.
+   Supply its root, prompt, initial messages, turn-limit environment key, and completion
+   check/messages. Keep host imports out of this file. The current entrypoints are examples.
+3. Configure a `StageSpec` with unique role/artifact names. For the Java default, use
+   `default_agent_image(role, workspace_name)` and explicitly allow the new role's directory
+   and `agent.py` in `.dockerignore`. For another toolchain, supply `AgentImageBuild` with
+   its context, Dockerfile, and optional build arguments. Custom images must support UID
+   10001, a writable `/workspace`, provider environment variables, and the selected output
+   tree at `/workspace/<workspace_name>`; no Java/Maven assumptions are required.
+4. Add a thin decorated activity calling `run_stage(spec, session_id, context,
+   GENERATED_CODE_DIR)`, a named workflow using `execute_agent_activity`, and a worker
+   entrypoint using `run_agent_worker`. Register/schedule the new stage explicitly.
+   Specs/callbacks are host-side definitions, never Temporal input payloads.
+
+For a variant that intentionally retains implementation's input/output policies:
+
+```python
+from dataclasses import replace
+
+from temporalio import activity
+
+from app.agent_workflows.host import run_stage
+from app.config import GENERATED_CODE_DIR
+from app.docker_agents import default_agent_image
+from app.implementation.activities import STAGE
+
+VARIANT = replace(
+    STAGE, role='implementation_variant', artifact_subdir='implementation-variant',
+    image_build=default_agent_image('implementation_variant', 'service'),
+)
+
+@activity.defn
+async def implement_variant(session_id: str, context: dict) -> dict:
+    return await run_stage(VARIANT, session_id, context, GENERATED_CODE_DIR)
+```
+
+This needs its own allowlisted `implementation_variant/agent.py` and named workflow/worker,
+not changes to the execution engines. A later revision stage can replace `prepare_inputs`
+to seed a prior implementation and explicitly filter feedback. Never automatically give
+an independent test-authoring stage implementation sources/images/logs. Feedback/retry
+using failure logs is not implemented here; manual retries use the original inputs,
+and initial authoring branches remain parallel.
+
+## Automatic verification
+
+New sessions automatically start verification once the implementation and independent
+test suite have both built successfully. No images are rebuilt. The worker creates one
+unique bridge network and exactly two containers: the service (network alias `service`)
+and its test runner. Both use resource limits, dropped capabilities and declared non-root
+image users. There are no host mounts, Docker sockets, published ports or inherited
+worker credentials. Images declaring root/no user are rejected. Outbound access remains
+available for Maven dependencies.
+
+The trusted runner waits at most two minutes for TCP readiness at `service:8080` (not an
+assumed health endpoint), then runs Maven for at most ten minutes with
+`SERVICE_BASE_URL=http://service:8080`. The service must be self-contained; external
+databases, environment/credential configuration and automatic repair are not supported
+in this step. The activity heartbeats, has a fifteen-minute execution limit and does not
+automatically retry. Cancellation propagates; normal completion, failures and
+cancellation all attempt bounded removal of both containers and their network.
+
+The verification child returns a summary with:
+
+- `status`: `passed`, `failed` (assertions/JUnit errors), or `error` (infrastructure);
+- `tests`, `passed`, `failures`, `errors`, `skipped`, total `duration_seconds`, and runner
+  `exit_code`;
+- up to 50 failed/error-test details (class/name, kind and a bounded message), with
+  `details_truncated` when more failures exist;
+- bounded service/runner log tails (up to 200 lines/8,000 characters each), an optional
+  infrastructure `error`, and artifact `path`.
+
+A pass requires valid reports with executed tests, no failed/error tests, a successful
+runner exit and a still-running service. Missing/malformed/linked/oversized reports,
+all-skipped/zero tests, startup/test timeout, OOM or an unexplained nonzero exit are
+infrastructure errors, not false passes. Report copying accepts only regular Surefire
+`TEST-*.xml` files, bounds the tar stream to 8 MiB and each XML file to 1 MiB, and rejects
+XML DTD/entity declarations. Counts come from testcases, not duplicate suite counters.
+
+Artifacts live in `<GENERATED_CODE_DIR>/<session-id>/verification/<run-id>/` (`reports/`,
+container logs and `result.json`). The latest summary is atomically published as
+`verification/result.json` and exposed as `ApiDesignWorkflow.get_state().verification`
+and through the existing session GET endpoint. `verification_status` distinguishes
+waiting, running, completed, skipped, error and legacy not-applicable sessions;
+`verification_error` records unexpected child-workflow failures. Returned test results
+(including assertion failures/infrastructure errors) are completed verification steps.
+The parent still returns its OpenAPI document and retains all successful build artifacts.
+
+The API-design page keeps polling through verification, shows pass/fail/error counts,
+failed-test details and expandable container logs. Older histories replay without the
+new child and are not retroactively verified.
+
+To exercise real Docker networking, the trusted runner and Surefire collection without
+an LLM, run from `backend`:
+
+```sh
+RUN_DOCKER_VERIFICATION_TESTS=1 python -m pytest tests/test_verification_docker.py -q
+```
+
+These opt-in tests build disposable HTTP service and Maven test images, cover passing,
+failing, delayed and unavailable services, and verify resource cleanup. Normal backend
+tests do not require Docker.
+
+## Run the generated tests manually
+
+Generation compiles the service and test suite; automatic verification executes them.
+For manual execution, read the two `image_id` values from their manifests. On the
+same Docker daemon, create a network and start the service image:
+
+```sh
+docker network create service-tests
+docker run -d --name service --network service-tests SERVICE_IMAGE_ID
+```
+
+Wait for the service to be ready, then run the test image, supplying any credentials
+documented by the suite:
+
+```sh
+docker run --rm --network service-tests \
+  -e SERVICE_BASE_URL=http://service:8080 TEST_IMAGE_ID
+```
+
+The runner executes `mvn test`; assertion failures or no discovered tests produce a
+nonzero exit status. Its Maven dependencies may require outbound access. Alternatively,
+run `SERVICE_BASE_URL=http://localhost:8080 mvn -B test` in the published suite directory
+with Java 21 and Maven installed. Images are not pushed or exported; another Docker
+daemon needs an image registry or `docker save`/`docker load`.
+
+## Trust boundary
+
+No host directories or Docker socket are mounted into the coding container. Credentials
+are provided at container creation, not baked into images. The agent can nevertheless
+see its LLM key, execute arbitrary code and make outbound requests. Run this worker on
+a dedicated Docker host for untrusted requirements/code. The generated service
+Dockerfile is also executable build input; the build is not a sandbox for hostile code.
+Do not use production credentials. Hard process/host failure can leave a container
+behind; operators can remove containers named `implementation-*`, `test-generation-*`,
+or `verification-*`. Verification networks also use `verification-*` names. Containers
+and networks carry `temporal.verification=<session-id>` labels for identification:
+
+```sh
+docker ps -a --filter label=temporal.verification
+docker network ls --filter label=temporal.verification
+```
+
+Only remove resources from inactive runs after checking their labels/session IDs. No
+containers or networks are intentionally retained after verification.
