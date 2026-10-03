@@ -322,9 +322,14 @@ def run_agent(profile: AgentProfile) -> None:
 
 
 def _run_agent(profile: AgentProfile) -> None:
-    provider = create_model(model_name=os.environ['OPENAI_MODEL'],
-                            api_key=os.environ['OPENAI_API_KEY'],
-                            base_url=os.environ['OPENAI_BASE_URL'])
+    if os.getenv('LLM_HARNESS', '').lower() == 'pi':
+        from app.llm.pi import ChatPi
+
+        provider = ChatPi(model=os.getenv('PI_MODEL') or None)
+    else:
+        provider = create_model(model_name=os.environ['OPENAI_MODEL'],
+                                api_key=os.environ['OPENAI_API_KEY'],
+                                base_url=os.environ['OPENAI_BASE_URL'])
     tools = workspace_tools(profile.root, profile.contracts)
     by_name = {item.name: item for item in tools}
     model = provider.bind_tools(tools)
