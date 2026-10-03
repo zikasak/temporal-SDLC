@@ -59,6 +59,13 @@ URLs are preserved. `TEMPORAL_IMPLEMENTATION_TASK_QUEUE` defaults to `implementa
 and `TEMPORAL_TEST_GENERATION_TASK_QUEUE` defaults to `test-generation`. The containers
 require outbound access to the LLM provider and Maven repositories.
 
+Setting `LLM_HARNESS=pi` routes model calls through the Pi CLI instead: the host chat
+uses the `pi` on its `PATH`, and the coding-agent image installs its own. Pi signs in with
+the credentials in `PI_CREDENTIALS_DIR` (default `~/.pi/agent`). Each coding container gets
+that directory's `auth.json` mounted read-write, so a refreshed token is kept, and its
+`models.json` read-only. `PI_MODEL` selects the model; without it containers use the
+default model named in the directory's `settings.json`.
+
 ## Langfuse tracing
 
 See [Langfuse tracing](langfuse-tracing.md) for environment setup, privacy controls,
@@ -185,7 +192,8 @@ and is no longer embedded.
 
 `/workspace/tests` starts from a static Maven/JUnit 5 template. No generated server
 sources, implementation sources, implementation image, logs, or test stubs are copied
-into this container. Neither coding container has host mounts or a Docker socket, and
+into this container. Neither coding container has a Docker socket or host mounts (other
+than the Pi credential files under `LLM_HARNESS=pi`), and
 their filesystems are separate. Source isolation is enforced by the supplied filesystem
 and inputs as well as the agent instructions.
 
@@ -399,7 +407,9 @@ daemon needs an image registry or `docker save`/`docker load`.
 ## Trust boundary
 
 No host directories or Docker socket are mounted into the coding container. Credentials
-are provided at container creation, not baked into images. The agent can nevertheless
+are provided at container creation, not baked into images. Under `LLM_HARNESS=pi` those
+are the host's Pi `auth.json` (writable) and `models.json` as single-file mounts; the
+agent can read the sign-in tokens and overwrite that one file. The agent can nevertheless
 see its LLM key, execute arbitrary code and make outbound requests. Run this worker on
 a dedicated Docker host for untrusted requirements/code. The generated service
 Dockerfile is also executable build input; the build is not a sandbox for hostile code.

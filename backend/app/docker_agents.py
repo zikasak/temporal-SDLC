@@ -18,11 +18,15 @@ from urllib.parse import urlsplit, urlunsplit
 
 from temporalio import activity
 
-from app.config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
+from app.config import (
+    LLM_HARNESS, OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, PI_CREDENTIALS_DIR, PI_MODEL,
+)
 from app.tracing import container_trace_environment
 
 logger = logging.getLogger(__name__)
 AGENT_SETTINGS = ('AGENT_CONTEXT_TOKENS',)
+# Pi's configuration directory for the container's `agent` user.
+PI_CONTAINER_DIR = '/home/agent/.pi/agent'
 
 
 @dataclass(frozen=True)
@@ -115,6 +119,39 @@ def _container_url(base_url: str) -> str:
     return base_url
 
 
+def pi_container_args() -> list[str]:
+    """Select the Pi harness in the container and mount the credentials it needs."""
+    if LLM_HARNESS != 'pi':
+        return []
+    if not (PI_CREDENTIALS_DIR / 'auth.json').is_file():
+        raise RuntimeError(f'Pi credentials not found: {PI_CREDENTIALS_DIR / "auth.json"}. '
+                           'Sign in with pi or set PI_CREDENTIALS_DIR.')
+    # Single files, not the directory: the agent must not reach the host's Pi extensions
+    # or sessions. auth.json is writable so a refreshed token is not lost to the host.
+    args = ['-e', f'LLM_HARNESS={LLM_HARNESS}',
+            '-v', f'{PI_CREDENTIALS_DIR / "auth.json"}:{PI_CONTAINER_DIR}/auth.json']
+    if (PI_CREDENTIALS_DIR / 'models.json').is_file():
+        args += ['-v', f'{PI_CREDENTIALS_DIR / "models.json"}:{PI_CONTAINER_DIR}/models.json:ro']
+    model = PI_MODEL or _pi_default_model()
+    if model:
+        args += ['-e', f'PI_MODEL={model}']
+    return args
+
+
+def _pi_default_model() -> str | None:
+    """The host's default Pi model. settings.json itself stays out of the container: it
+    also lists extension packages, which Pi would try to install there."""
+    try:
+        settings = json.loads((PI_CREDENTIALS_DIR / 'settings.json').read_text())
+    except (OSError, ValueError):
+        return None
+    if not settings.get('defaultModel'):
+        return None
+    model = '/'.join(filter(None, [settings.get('defaultProvider'), settings['defaultModel']]))
+    level = settings.get('defaultThinkingLevel')
+    return f'{model}:{level}' if level else model
+
+
 @asynccontextmanager
 async def keep_activity_alive(message: str):
     async def heartbeat() -> None:
@@ -133,7 +170,8 @@ async def keep_activity_alive(message: str):
 async def run_agent(role: str, session_id: str, workspace: Path,
                     output: Path, output_name: str, log_path: Path, *,
                     image_build: AgentImageBuild) -> None:
-    """Copy only prepared inputs in and a single output tree out. No host mounts."""
+    """Copy only prepared inputs in and a single output tree out. The only host mounts are
+    the Pi credential files, when the Pi harness is selected."""
     label = role.replace('_', '-')
     name = f'{label}-{uuid.uuid4().hex}'
     digest = hashlib.sha256(session_id.encode()).hexdigest()[:16]
@@ -160,7 +198,7 @@ async def run_agent(role: str, session_id: str, workspace: Path,
             '--security-opt=no-new-privileges', '--pids-limit=256',
             '--memory=4g', '--cpus=2', '--user', '10001:10001',
             '-e', 'OPENAI_API_KEY', '-e', 'OPENAI_MODEL', '-e', 'OPENAI_BASE_URL',
-            *trace_args, *setting_args, agent_image, env=environment,
+            *trace_args, *setting_args, *pi_container_args(), agent_image, env=environment,
         )
         archive = workspace.parent / 'workspace.tar'
 

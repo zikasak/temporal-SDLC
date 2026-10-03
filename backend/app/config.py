@@ -45,6 +45,13 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "ddalcu/Qwen3.8-27B-MLX-Serve-4bit")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # The SDK appends /chat/completions to this API base URL.
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:1234/v1")
+# "pi" routes model calls through the Pi CLI instead of the provider above; Pi then
+# uses its own credentials and, unless PI_MODEL names one, its default model.
+LLM_HARNESS = os.getenv("LLM_HARNESS", "").lower()
+PI_MODEL = os.getenv("PI_MODEL") or None
+# Pi configuration directory whose auth.json (and models.json, when present) is mounted
+# into coding-agent containers.
+PI_CREDENTIALS_DIR = Path(os.getenv("PI_CREDENTIALS_DIR") or "~/.pi/agent").expanduser()
 
 # Contracts larger than this are supplied to coding agents as an index plus read-only
 # files instead of being embedded whole in every model invocation.

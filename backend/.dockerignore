@@ -10,6 +10,8 @@
 !app/llm/
 !app/llm/__init__.py
 !app/llm/factory.py
+!app/llm/pi.py
+!app/llm/pi_extension.ts
 !app/implementation/
 !app/implementation/agent.py
 !app/test_generation/
