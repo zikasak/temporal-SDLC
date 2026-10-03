@@ -25,6 +25,7 @@ CODEGEN_TASK_QUEUE = os.getenv("TEMPORAL_CODEGEN_TASK_QUEUE", "codegen")
 IMPLEMENTATION_TASK_QUEUE = os.getenv("TEMPORAL_IMPLEMENTATION_TASK_QUEUE", "implementation")
 TEST_GENERATION_TASK_QUEUE = os.getenv("TEMPORAL_TEST_GENERATION_TASK_QUEUE", "test-generation")
 VERIFICATION_TASK_QUEUE = os.getenv("TEMPORAL_VERIFICATION_TASK_QUEUE", "verification")
+DIAGNOSIS_TASK_QUEUE = os.getenv("TEMPORAL_DIAGNOSIS_TASK_QUEUE", "diagnosis")
 
 GENERATED_CODE_DIR = Path(
     os.getenv(
@@ -47,5 +48,5 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:1234/v1")
 
 # Contracts larger than this are supplied to coding agents as an index plus read-only
 # files instead of being embedded whole in every model invocation.
-CONTRACT_EMBED_CHARS = int(os.getenv("CONTRACT_EMBED_CHARS", "60000"))
+CONTRACT_EMBED_CHARS = int(os.getenv("CONTRACT_EMBED_CHARS", "32000"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()

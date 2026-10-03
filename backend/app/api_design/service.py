@@ -119,6 +119,7 @@ async def retry_generation(session_id: str, stage: Literal['server', 'tests']) -
     state.verification = None
     state.verification_error = None
     state.verification_status = 'waiting'
+    state.repairs = []
     if stage == 'server':
         state.code_error = None
         state.implementation = None

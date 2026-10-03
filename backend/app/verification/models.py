@@ -1,7 +1,8 @@
 """Bounded verification payloads stored in Temporal and exposed by the session API."""
 from typing import Literal, TypedDict
 
-VerificationStatus = Literal['not_applicable', 'waiting', 'running', 'completed', 'skipped', 'error']
+VerificationStatus = Literal['not_applicable', 'waiting', 'running', 'diagnosing', 'repairing',
+                             'completed', 'skipped', 'error']
 
 
 class TestFailure(TypedDict):

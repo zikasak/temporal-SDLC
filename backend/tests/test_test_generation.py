@@ -125,3 +125,41 @@ async def test_invalid_session_is_rejected_before_docker(tmp_path, monkeypatch):
     with pytest.raises(ApplicationError, match='Invalid session ID'):
         await ActivityEnvironment().run(activities.generate_service_tests, '../escape', {})
     assert list(tmp_path.iterdir()) == []
+
+
+async def test_repair_continues_from_the_published_suite_with_the_trusted_runner(tmp_path, monkeypatch):
+    monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
+    context = {'requirements': [], 'api_design': empty_api(),
+               'repair': {'attempt': 1, 'instructions': 'Expect 201.', 'test_failures': []}}
+    with pytest.raises(ApplicationError, match='Generated tests are unavailable'):
+        await ActivityEnvironment().run(activities.generate_service_tests, 'session', context)
+    published = tmp_path / 'session/tests/suite'
+    (published / 'src/test/java').mkdir(parents=True)
+    (published / 'src/test/java/OrdersTest.java').write_text('previous test')
+    (published / 'pom.xml').write_text('previous pom')
+    (published / 'run-tests.sh').write_text('exit 0 # tampered on disk')
+    sent = {}
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': 0})
+        if args[0] == 'cp' and args[1] == '-a':
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.update({item.name: archive.extractfile(item).read().decode()
+                             for item in archive.getmembers() if item.isfile()})
+        if args[0] == 'cp' and args[1].endswith(':/workspace/tests/.'):
+            tests = Path(args[2]) / 'src/test/java'
+            tests.mkdir(parents=True)
+            (tests / 'OrdersTest.java').write_text('repaired test')
+            (Path(args[2]) / 'pom.xml').write_text('previous pom')
+        if args[0] == 'build' and '--iidfile' in args:
+            Path(args[args.index('--iidfile') + 1]).write_text('sha256:' + 'd' * 64)
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    result = await ActivityEnvironment().run(activities.generate_service_tests, 'session', context)
+    assert sent['tests/src/test/java/OrdersTest.java'] == 'previous test'
+    assert sent['tests/pom.xml'] == 'previous pom'
+    assert sent['tests/run-tests.sh'] == (activities.TEMPLATE / 'run-tests.sh').read_text()
+    assert json.loads(sent['input.json'])['repair'] == context['repair']
+    assert (Path(result['path']) / 'src/test/java/OrdersTest.java').read_text() == 'repaired test'

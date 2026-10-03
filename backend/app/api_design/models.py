@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, NotRequired, TypedDict
 
 from app.conversations.models import ConversationMessage, ForkOrigin
+from app.diagnosis.models import RepairRound
 from app.requirements.models import Requirement, SessionStatus
 from app.verification.models import VerificationResult, VerificationStatus
 
@@ -98,6 +99,8 @@ class ApiDesignState:
     verification: VerificationResult | None = None
     verification_error: str | None = None
     verification_status: VerificationStatus = 'not_applicable'
+    # One entry per diagnosed verification failure: which side was sent back for repair.
+    repairs: list[RepairRound] = field(default_factory=list)
     forked_from: ForkOrigin | None = None
     # Manual generation retries start a new run under the same session ID.
     generation_retry_stage: Literal['server', 'tests'] | None = None

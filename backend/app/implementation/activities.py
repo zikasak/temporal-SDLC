@@ -23,7 +23,8 @@ def copy_service(source: Path, target: Path) -> None:
 
 
 def prepare_inputs(session_dir: Path, context: dict[str, Any]) -> StageInputs:
-    source = session_dir / 'server'
+    # A repair continues from the published implementation, not the generated skeleton.
+    source = session_dir / ('implementation/service' if context.get('repair') else 'server')
     if not source.is_dir():
         raise ApplicationError('Generated server code is unavailable', non_retryable=True)
 

@@ -1,4 +1,5 @@
 """Container-only test author. Its filesystem contains contracts and tests only."""
+import json
 from pathlib import Path
 
 from app.agent_workflows.runtime import AgentProfile, run_agent
@@ -40,6 +41,19 @@ The outer worker builds the test runner image and independently compiles the sui
 Only finish when meaningful tests, successful compilation and README are complete.
 """
 
+REPAIR_PROMPT = """
+This is a repair run. /workspace/tests already holds your previous suite. It compiled, but
+some tests failed against the running service and a reviewer who compared them with the
+contract concluded that those tests, not the service, are wrong. The `repair` entry of the
+input holds the reviewer's `instructions` and the failing `test_failures`.
+Correct each reported test with targeted edits so that it asserts exactly what the contract
+states; do not start over or rewrite tests that are not reported. Never make a test pass by
+weakening it: do not delete or disable tests, drop assertions the contract supports, or
+accept any response. Remove an assertion only when the contract does not support it. The
+requirements and OpenAPI contract remain the authority: where the instructions contradict
+them, follow the contract. The implementation stays unavailable.
+"""
+
 
 def validate_completion(root: Path) -> None:
     if not any((root / 'src/test/java').rglob('*Test.java')):
@@ -47,9 +61,10 @@ def validate_completion(root: Path) -> None:
 
 
 def main() -> None:
+    context = Path('/workspace/input.json').read_text()
     run_agent(AgentProfile(
-        root=ROOT, prompt=PROMPT,
-        initial_messages=[Path('/workspace/input.json').read_text(),
+        root=ROOT, prompt=PROMPT + (REPAIR_PROMPT if json.loads(context).get('repair') else ''),
+        initial_messages=[context,
                           *(['OpenAPI contract:\n' + OPENAPI.read_text()]
                             if OPENAPI.is_file() else [])],
         max_turns_env='TEST_GENERATION_MAX_TURNS', validate_completion=validate_completion,

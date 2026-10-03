@@ -98,3 +98,37 @@ async def test_generated_sources_are_required_before_creating_artifacts(tmp_path
     with pytest.raises(ApplicationError, match='Generated server code is unavailable'):
         await ActivityEnvironment().run(activities.implement_service, 'session', {})
     assert list(tmp_path.iterdir()) == []
+
+
+async def test_repair_continues_from_the_published_service(tmp_path, monkeypatch):
+    monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
+    (tmp_path / 'session/server').mkdir(parents=True)
+    (tmp_path / 'session/server/Api.java').write_text('generated skeleton')
+    published = tmp_path / 'session/implementation/service'
+    published.mkdir(parents=True)
+    (published / 'Service.java').write_text('previous implementation')
+    repair = {'attempt': 1, 'instructions': 'Return 404 for unknown orders.', 'test_failures': []}
+    sent = {}
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': 0})
+        if args[0] == 'cp' and args[1] == '-a':
+            import tarfile
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.update({item.name: archive.extractfile(item).read().decode()
+                             for item in archive.getmembers() if item.isfile()})
+        if args[0] == 'cp' and args[1].endswith(':/workspace/service/.'):
+            (Path(args[2]) / 'Dockerfile').write_text('FROM scratch')
+            (Path(args[2]) / 'Service.java').write_text('repaired implementation')
+        if args[0] == 'build' and '--iidfile' in args:
+            Path(args[args.index('--iidfile') + 1]).write_text('sha256:' + 'c' * 64)
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    result = await ActivityEnvironment().run(
+        activities.implement_service, 'session', {'requirements': [], 'repair': repair})
+    assert sent['service/Service.java'] == 'previous implementation'
+    assert 'service/Api.java' not in sent
+    assert json.loads(sent['input.json'])['repair'] == repair
+    assert (Path(result['path']) / 'Service.java').read_text() == 'repaired implementation'

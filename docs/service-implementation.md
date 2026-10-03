@@ -8,7 +8,10 @@ Both children start before either is awaited to completion. Each result becomes
 available independently; failure in one branch does not cancel the other. Replay
 patches preserve the original behavior of existing histories. `VerificationWorkflow`
 starts only after both authoring children succeed. Failed assertions are completed test
-results, not workflow failures; failed builds skip verification.
+results, not workflow failures; failed builds skip verification. Failed tests start the
+[repair loop](#automatic-repair-of-failed-tests): `DiagnosisWorkflow` decides whether the
+implementation or the tests are wrong, that side's own workflow corrects it, and
+verification runs again.
 
 ```mermaid
 flowchart LR
@@ -20,6 +23,9 @@ flowchart LR
     service --> verification[VerificationWorkflow]
     runner --> verification
     verification --> results[Test results]
+    verification -- tests failed --> diagnosis[DiagnosisWorkflow]
+    diagnosis -- implementation is wrong --> implementation
+    diagnosis -- tests are wrong --> tests
 ```
 
 ## Run
@@ -32,16 +38,20 @@ python -m app.codegen.worker
 python -m app.implementation.worker
 python -m app.test_generation.worker
 python -m app.verification.worker
+python -m app.diagnosis.worker
 ```
 
 Run each command in a separate terminal/process. `backend/tools/dev_stack.py` launches
-all five workers, and `.zed/debug.json` includes individual worker launch profiles.
+all six workers, and `.zed/debug.json` includes individual worker launch profiles.
 Both coding workers need the Docker CLI, a running Docker daemon and writable
 `GENERATED_CODE_DIR`. The implementation worker also needs access to codegen's server
 tree. The test worker uses only contract inputs and its own static Maven template.
 The verification worker also needs Docker and writable `GENERATED_CODE_DIR`, and must
 use the same Docker daemon as both authoring workers: images are local immutable IDs,
 not registry tags. `TEMPORAL_VERIFICATION_TASK_QUEUE` defaults to `verification`.
+The diagnosis worker has the same Docker and `GENERATED_CODE_DIR` needs as the coding
+workers and reads the published service, test suite and verification artifacts.
+`TEMPORAL_DIAGNOSIS_TASK_QUEUE` defaults to `diagnosis`.
 
 Configure `OPENAI_API_KEY`, `OPENAI_MODEL`, and `OPENAI_BASE_URL` through the environment.
 Loopback provider URLs are translated to `host.docker.internal` inside Docker; remote
@@ -280,8 +290,7 @@ available for Maven dependencies.
 The trusted runner waits at most two minutes for TCP readiness at `service:8080` (not an
 assumed health endpoint), then runs Maven for at most ten minutes with
 `SERVICE_BASE_URL=http://service:8080`. The service must be self-contained; external
-databases, environment/credential configuration and automatic repair are not supported
-in this step. The activity heartbeats, has a fifteen-minute execution limit and does not
+databases and environment/credential configuration are not supported in this step. The activity heartbeats, has a fifteen-minute execution limit and does not
 automatically retry. Cancellation propagates; normal completion, failures and
 cancellation all attempt bounded removal of both containers and their network.
 
@@ -314,6 +323,42 @@ The parent still returns its OpenAPI document and retains all successful build a
 The API-design page keeps polling through verification, shows pass/fail/error counts,
 failed-test details and expandable container logs. Older histories replay without the
 new child and are not retroactively verified.
+
+## Automatic repair of failed tests
+
+When verification completes with `status: failed`, the parent runs repair rounds until
+verification passes. Each round is:
+
+1. **Diagnosis** (`verification_status: diagnosing`). `DiagnosisWorkflow` runs a reviewing
+   agent in the same isolated container setup as the coding agents. Its workspace holds
+   the published implementation (`service/`), the published test suite (`tests/`), the
+   failed run (`verification/`: Surefire reports and both container logs) and the
+   requirements and API design, embedded or on demand like the coding stages. The contract
+   is the only authority. The agent writes `verdict.json` with `target`
+   (`implementation` or `tests`), a `summary` and self-contained repair `instructions`.
+   The host accepts only a bounded, well-formed verdict and publishes it as
+   `<GENERATED_CODE_DIR>/<session-id>/diagnosis/verdict.json`.
+2. **Repair** (`verification_status: repairing`). The blamed side's own workflow
+   (`ImplementationWorkflow` or `TestGenerationWorkflow`) runs again with a `repair` entry
+   in its context: the instructions, up to 30 clipped failing-test details and, for the
+   implementation only, the service log tail. The agent continues from its previously
+   published output rather than starting over, and the stage rebuilds and republishes its
+   image as usual. Source isolation is kept: neither author receives the other's sources.
+3. **Verification** of the current images.
+
+`ApiDesignWorkflow.get_state().repairs` lists each round's `attempt`, `target` and
+`summary`, and the page shows them. The loop stops when verification passes, or without
+passing when:
+
+- verification ends with an infrastructure `error` rather than failed tests;
+- diagnosis fails (`verification_error` is set);
+- the repair stage fails: the previous image stays published, the stage's error is
+  recorded and the existing manual retry for that stage is offered;
+- `MAX_REPAIR_ROUNDS` (5, in `app/temporal/workflows.py`) rounds did not produce a pass
+  (`verification_error` is set and the last failed result is kept).
+
+Histories from before the `verification-repair-loop` patch end with their first
+verification, as before.
 
 To exercise real Docker networking, the trusted runner and Surefire collection without
 an LLM, run from `backend`:

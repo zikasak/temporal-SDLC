@@ -17,9 +17,10 @@ from app.api_design import service
 from app.api_design.models import ApiDesignState, empty_api
 from app.api_design.prompt import OPENING_FALLBACK
 from app.config import (
-    CODEGEN_TASK_QUEUE, IMPLEMENTATION_TASK_QUEUE, TEST_GENERATION_TASK_QUEUE,
-    VERIFICATION_TASK_QUEUE,
+    CODEGEN_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, IMPLEMENTATION_TASK_QUEUE,
+    TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
 )
+from app.diagnosis.workflows import DiagnosisWorkflow
 from app.implementation.workflows import ImplementationWorkflow
 from app.temporal import sessions
 from app.temporal.workflows import ApiDesignWorkflow
@@ -61,7 +62,15 @@ class FakeActivities:
         self.release_verification = asyncio.Event()
         self.release_verification.set()
         self.verification_result = 'passed'
+        # Outcomes of successive verifications; the last one repeats.
+        self.verification_results: list[str] = []
         self.verification_images = None
+        self.verified_images: list[tuple[str, str]] = []
+        # The side each successive diagnosis blames; the last one repeats.
+        self.diagnoses = ['implementation']
+        self.diagnosed: list[dict[str, Any]] = []
+        self.fail_diagnosis = False
+        self.repairs: list[tuple[str, dict[str, Any]]] = []
 
     @activity.defn(name="api_design_turn")
     async def api_design_turn(self, state: ApiDesignState) -> dict[str, Any]:
@@ -90,6 +99,9 @@ class FakeActivities:
         await self.release_implementation.wait()
         if self.fail_implementation:
             raise ApplicationError("build failed", non_retryable=True)
+        if 'repair' in context:
+            self.repairs.append(('implementation', context['repair']))
+            return {"image_id": "sha256:" + "c" * 64}
         return {"image_id": "sha256:" + "a" * 64, "context": context}
 
     @activity.defn(name="generate_service_tests")
@@ -98,22 +110,42 @@ class FakeActivities:
         await self.release_tests.wait()
         if self.fail_tests:
             raise ApplicationError("test compilation failed", non_retryable=True)
+        if 'repair' in context:
+            self.repairs.append(('tests', context['repair']))
+            return {"image_id": "sha256:" + "d" * 64}
         return {"image_id": "sha256:" + "b" * 64, "context": context}
+
+    @activity.defn(name='diagnose_failure')
+    async def diagnose_failure(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
+        if self.fail_diagnosis:
+            raise ApplicationError('no verdict', non_retryable=True)
+        target = self.diagnoses[min(len(self.diagnosed), len(self.diagnoses) - 1)]
+        self.diagnosed.append(context)
+        return {'session_id': session_id, 'target': target, 'summary': f'The {target} is wrong.',
+                'instructions': f'Correct the {target}.', 'path': '/diagnosis'}
 
     @activity.defn(name='verify_service')
     async def verify_service(self, session_id: str, service_image: str,
                              test_image: str) -> dict[str, Any]:
         self.verification_images = (service_image, test_image)
+        self.verified_images.append((service_image, test_image))
         self.verification_started.set()
         await self.release_verification.wait()
-        if self.verification_result == 'child_error':
+        outcome = self.verification_result
+        if self.verification_results:
+            outcome = self.verification_results[
+                min(len(self.verified_images), len(self.verification_results)) - 1]
+        if outcome == 'child_error':
             raise ApplicationError('verification worker failed', non_retryable=True)
-        return {'status': self.verification_result, 'session_id': session_id,
-                'tests': 1, 'passed': int(self.verification_result == 'passed'),
-                'failures': int(self.verification_result == 'failed'), 'errors': 0,
+        failed = outcome == 'failed'
+        return {'status': outcome, 'session_id': session_id,
+                'tests': 1, 'passed': int(outcome == 'passed'),
+                'failures': int(failed), 'errors': 0,
                 'skipped': 0, 'duration_seconds': 1.0, 'exit_code': 0,
-                'test_failures': [], 'details_truncated': False,
-                'service_log': '', 'runner_log': '', 'error': None, 'path': '/verification'}
+                'test_failures': [{'class_name': 'RoomsTest', 'name': 'lists', 'kind': 'failure',
+                                   'message': 'Expected 200, got 500'}] if failed else [],
+                'details_truncated': False, 'service_log': 'NullPointerException' if failed else '',
+                'runner_log': '', 'error': None, 'path': '/verification'}
 
 
 @workflow.defn(name="CodegenWorkflow")
@@ -152,6 +184,9 @@ async def worker(env):
     ), Worker(
         env.client, task_queue=VERIFICATION_TASK_QUEUE,
         workflows=[VerificationWorkflow], activities=[activities.verify_service],
+    ), Worker(
+        env.client, task_queue=DIAGNOSIS_TASK_QUEUE,
+        workflows=[DiagnosisWorkflow], activities=[activities.diagnose_failure],
     ):
         FakeCodegenWorkflow.fail = False
         yield activities
@@ -195,7 +230,7 @@ async def test_draft_discuss_and_finalize(env, worker):
     await handle.terminate()
 
 
-@pytest.mark.parametrize('verification', ['passed', 'failed', 'error', 'child_error'])
+@pytest.mark.parametrize('verification', ['passed', 'error', 'child_error'])
 async def test_finalize_writes_document(env, worker, verification, monkeypatch):
     worker.verification_result = verification
     handle = await start(env)
@@ -233,6 +268,104 @@ async def test_finalize_writes_document(env, worker, verification, monkeypatch):
     assert response['verification'] == state.verification
     assert response['verification_status'] == state.verification_status
     assert response['verification_error'] == state.verification_error
+
+
+async def finalized(env) -> Any:
+    handle = await start(env)
+    await wait_for_status(handle, 'interviewing')
+    await handle.execute_update(ApiDesignWorkflow.send_message, '/rooms')
+    await handle.execute_update(ApiDesignWorkflow.finalize)
+    assert await handle.result() == DOCUMENT
+    return handle
+
+
+async def test_failed_tests_send_the_diagnosed_side_back_until_verification_passes(env, worker):
+    worker.verification_results = ['failed', 'failed', 'passed']
+    worker.diagnoses = ['tests', 'implementation']
+    handle = await finalized(env)
+    state = await handle.query(ApiDesignWorkflow.get_state)
+    assert state.verification['status'] == 'passed'
+    assert state.verification_status == 'completed' and state.verification_error is None
+    assert [(item['attempt'], item['target']) for item in state.repairs] == [
+        (1, 'tests'), (2, 'implementation')]
+    assert state.repairs[0]['summary'] == 'The tests is wrong.'
+    # Every diagnosis sees the contracts and the verification that just failed.
+    assert [item['verification']['status'] for item in worker.diagnosed] == ['failed', 'failed']
+    assert worker.diagnosed[0]['api_design']['endpoints'][0]['path'] == '/rooms'
+    assert worker.diagnosed[0]['requirements_document'] == '# Requirements'
+    # Only the blamed side is rewritten each round, with the verdict and its failing tests.
+    assert [stage for stage, _ in worker.repairs] == ['tests', 'implementation']
+    tests_repair, service_repair = (repair for _, repair in worker.repairs)
+    assert tests_repair['instructions'] == 'Correct the tests.'
+    assert tests_repair['test_failures'][0]['name'] == 'lists'
+    assert 'service_log' not in tests_repair
+    assert service_repair['service_log'] == 'NullPointerException'
+    # Each verification runs the images as they stand after the preceding repair.
+    original, repaired = ('sha256:' + 'a' * 64, 'sha256:' + 'b' * 64), ('sha256:' + 'c' * 64, 'sha256:' + 'd' * 64)
+    assert worker.verified_images == [original, (original[0], repaired[1]), repaired]
+    assert (state.implementation['image_id'], state.tests['image_id']) == repaired
+
+
+async def test_repair_stops_after_the_round_limit_with_the_last_failure(env, worker):
+    worker.verification_result = 'failed'
+    handle = await finalized(env)
+    state = await handle.query(ApiDesignWorkflow.get_state)
+    assert len(state.repairs) == len(worker.repairs) == 5
+    assert len(worker.verified_images) == 6
+    assert state.verification['status'] == 'failed' and state.verification_status == 'completed'
+    assert state.verification_error == 'Tests still fail after 5 automatic repair rounds.'
+
+
+@pytest.mark.parametrize('broken', ['diagnosis', 'implementation'])
+async def test_failed_diagnosis_or_repair_keeps_the_published_images(env, worker, broken, monkeypatch):
+    worker.verification_results = ['failed', 'passed']
+    worker.fail_diagnosis = broken == 'diagnosis'
+    worker.release_verification.clear()
+    handle = await start(env)
+    await wait_for_status(handle, 'interviewing')
+    await handle.execute_update(ApiDesignWorkflow.send_message, '/rooms')
+    await handle.execute_update(ApiDesignWorkflow.finalize)
+    await asyncio.wait_for(worker.verification_started.wait(), timeout=10)
+    # The first build succeeded; only the repair of it fails.
+    worker.fail_implementation = broken == 'implementation'
+    worker.release_verification.set()
+    assert await handle.result() == DOCUMENT
+    state = await handle.query(ApiDesignWorkflow.get_state)
+    assert len(worker.verified_images) == 1 and not worker.repairs
+    assert state.verification['status'] == 'failed' and state.verification_status == 'completed'
+    assert state.implementation['image_id'] == 'sha256:' + 'a' * 64
+    if broken == 'diagnosis':
+        assert state.verification_error == 'The failed tests could not be diagnosed.'
+        assert state.repairs == [] and state.implementation_error is None
+        return
+    assert state.implementation_error == 'The service could not be implemented or built.'
+
+    async def connect():
+        return env.client
+
+    # The failed repair is recoverable through the existing manual retry, which
+    # rebuilds the service and resumes verification with a clean repair history.
+    monkeypatch.setattr(service, 'connect_temporal', connect)
+    worker.fail_implementation = False
+    await service.retry_generation(handle.id, 'server')
+    retry = env.client.get_workflow_handle(handle.id)
+    assert await retry.result() == DOCUMENT
+    state = await retry.query(ApiDesignWorkflow.get_state)
+    assert state.verification['status'] == 'passed' and state.repairs == []
+
+
+async def test_pre_repair_history_replays_without_diagnosis(env, worker, monkeypatch):
+    """A history that ended on failed tests must not schedule a diagnosis on replay."""
+    worker.verification_result = 'failed'
+    patched = workflow.patched
+    with monkeypatch.context() as legacy:
+        legacy.setattr(workflow, 'patched', lambda name: False if name == 'verification-repair-loop' else patched(name))
+        handle = await finalized(env)
+        state = await handle.query(ApiDesignWorkflow.get_state)
+        assert state.verification['status'] == 'failed' and state.verification_error is None
+        assert not worker.diagnosed
+        history = await handle.fetch_history()
+    await Replayer(workflows=[ApiDesignWorkflow]).replay_workflow(history)
 
 
 @pytest.mark.parametrize('failed', [{'implementation'}, {'tests'}, {'implementation', 'tests'}])

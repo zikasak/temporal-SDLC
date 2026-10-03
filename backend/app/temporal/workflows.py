@@ -12,9 +12,10 @@ with workflow.unsafe.imports_passed_through():
     from app.api_design.openapi import api_problems
     from app.api_design.prompt import OPENING_FALLBACK
     from app.config import (
-        CODEGEN_TASK_QUEUE, IMPLEMENTATION_TASK_QUEUE, TEST_GENERATION_TASK_QUEUE,
-        VERIFICATION_TASK_QUEUE,
+        CODEGEN_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, IMPLEMENTATION_TASK_QUEUE,
+        TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
     )
+    from app.diagnosis.models import repair_request
     from app.requirements.models import RequirementsState
     from app.requirements.prompt import OPENING_MESSAGE
     from app.temporal.activities import (
@@ -30,6 +31,8 @@ with workflow.unsafe.imports_passed_through():
 SESSION_IDLE_TIMEOUT = timedelta(hours=24)
 MAX_TRANSCRIPT_BYTES = 64 * 1024
 MAX_MESSAGE_CHARS = 10000
+# Each round is a diagnosis, a repair of one side and a new verification.
+MAX_REPAIR_ROUNDS = 5
 
 
 @workflow.defn
@@ -418,14 +421,16 @@ class ApiDesignWorkflow:
         if verification_enabled:
             if (self.state.implementation and self.state.tests
                     and not self.state.implementation_error and not self.state.tests_error):
-                await self._verify_service(session_id)
+                await self._verify_and_repair(session_id)
             else:
                 self.state.verification_status = 'skipped'
 
-    def _generation_child_id(self, stage: str, session_id: str) -> str:
+    def _generation_child_id(self, stage: str, session_id: str, repair: int = 0) -> str:
         child_id = f'{stage}-{session_id}'
         if self.state.generation_retry_stage:
             child_id += f'-{workflow.info().run_id}'
+        if repair:
+            child_id += f'-repair-{repair}'
         return child_id
 
     async def _retry_generation(self) -> None:
@@ -440,17 +445,69 @@ class ApiDesignWorkflow:
             await self._generate_tests(session_id)
         if (self.state.implementation and self.state.tests
                 and not self.state.implementation_error and not self.state.tests_error):
-            await self._verify_service(session_id)
+            await self._verify_and_repair(session_id)
         else:
             self.state.verification_status = 'skipped'
 
-    async def _verify_service(self, session_id: str) -> None:
+    def _tests_failed(self) -> bool:
+        return bool(self.state.verification_status == 'completed' and self.state.verification
+                    and self.state.verification['status'] == 'failed')
+
+    async def _verify_and_repair(self, session_id: str) -> None:
+        """Verify; while tests fail, repair the side at fault and verify again."""
+        await self._verify_service(session_id)
+        # Histories from before the repair loop end with their first verification.
+        if not self._tests_failed() or not workflow.patched('verification-repair-loop'):
+            return
+        for attempt in range(1, MAX_REPAIR_ROUNDS + 1):
+            if not await self._repair(session_id, attempt):
+                return
+            await self._verify_service(session_id, attempt)
+            if not self._tests_failed():
+                return
+        self.state.verification_error = (
+            f'Tests still fail after {MAX_REPAIR_ROUNDS} automatic repair rounds.')
+
+    async def _repair(self, session_id: str, attempt: int) -> bool:
+        """Decide which side the failed tests condemn and have its own stage correct it."""
+        self.state.verification_status = 'diagnosing'
+        try:
+            diagnosis = await workflow.execute_child_workflow(
+                'DiagnosisWorkflow',
+                args=[session_id, {**self._coding_context(),
+                                   'verification': self.state.verification}],
+                id=self._generation_child_id('diagnosis', session_id, attempt),
+                task_queue=DIAGNOSIS_TASK_QUEUE,
+                result_type=dict,
+            )
+        except ChildWorkflowError as exc:
+            workflow.logger.warning('Verification diagnosis failed: %s', exc.cause or exc)
+            self.state.verification_error = 'The failed tests could not be diagnosed.'
+            self.state.verification_status = 'completed'
+            return False
+        target = diagnosis['target']
+        workflow.logger.info('Repair round %d: correcting the %s', attempt, target)
+        self.state.repairs.append(
+            {'attempt': attempt, 'target': target, 'summary': diagnosis['summary']})
+        self.state.verification_status = 'repairing'
+        repair = repair_request(diagnosis, self.state.verification, attempt)
+        # A failed repair keeps the previous image and records the stage's own error.
+        if target == 'implementation':
+            await self._implement_service(session_id, repair)
+        else:
+            await self._generate_tests(session_id, repair)
+        if self.state.implementation_error or self.state.tests_error:
+            self.state.verification_status = 'completed'
+            return False
+        return True
+
+    async def _verify_service(self, session_id: str, repair: int = 0) -> None:
         self.state.verification_status = 'running'
         try:
             self.state.verification = await workflow.execute_child_workflow(
                 'VerificationWorkflow',
                 args=[session_id, self.state.implementation['image_id'], self.state.tests['image_id']],
-                id=self._generation_child_id('verification', session_id),
+                id=self._generation_child_id('verification', session_id, repair),
                 task_queue=VERIFICATION_TASK_QUEUE,
                 result_type=dict,
             )
@@ -468,12 +525,17 @@ class ApiDesignWorkflow:
             "api_design": self.state.api,
         }
 
-    async def _implement_service(self, session_id: str) -> None:
+    def _stage_context(self, repair: dict[str, Any] | None) -> dict[str, Any]:
+        return {**self._coding_context(), 'repair': repair} if repair else self._coding_context()
+
+    async def _implement_service(self, session_id: str,
+                                 repair: dict[str, Any] | None = None) -> None:
         try:
             self.state.implementation = await workflow.execute_child_workflow(
                 "ImplementationWorkflow",
-                args=[session_id, self._coding_context()],
-                id=self._generation_child_id('implementation', session_id),
+                args=[session_id, self._stage_context(repair)],
+                id=self._generation_child_id('implementation', session_id,
+                                             repair['attempt'] if repair else 0),
                 task_queue=IMPLEMENTATION_TASK_QUEUE,
                 result_type=dict,
             )
@@ -481,12 +543,14 @@ class ApiDesignWorkflow:
             workflow.logger.warning("Service implementation failed: %s", exc.cause or exc)
             self.state.implementation_error = "The service could not be implemented or built."
 
-    async def _generate_tests(self, session_id: str) -> None:
+    async def _generate_tests(self, session_id: str,
+                              repair: dict[str, Any] | None = None) -> None:
         try:
             self.state.tests = await workflow.execute_child_workflow(
                 "TestGenerationWorkflow",
-                args=[session_id, self._coding_context()],
-                id=self._generation_child_id('test-generation', session_id),
+                args=[session_id, self._stage_context(repair)],
+                id=self._generation_child_id('test-generation', session_id,
+                                             repair['attempt'] if repair else 0),
                 task_queue=TEST_GENERATION_TASK_QUEUE,
                 result_type=dict,
             )

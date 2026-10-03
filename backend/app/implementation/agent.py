@@ -1,4 +1,5 @@
 """Container-only coding agent. No Temporal, database, or Docker access."""
+import json
 from pathlib import Path
 
 from app.agent_workflows.runtime import AgentProfile, run_agent
@@ -22,6 +23,16 @@ You have no Docker daemon; the outer worker will build your Dockerfile.
 Only finish once implementation, compilation and Dockerfile are complete.
 """
 
+REPAIR_PROMPT = """
+This is a repair run. /workspace/service already holds your previous implementation. It
+compiled, but independently written HTTP contract tests failed against the running service
+and a reviewer traced the failures to the implementation. The `repair` entry of the input
+holds the reviewer's `instructions`, the failing `test_failures` and the `service_log` tail.
+Fix every reported defect with targeted edits to the existing code; do not start over or
+rewrite code that works. The requirements and OpenAPI design remain the authority: where
+the instructions contradict them, follow the contract. The test sources stay unavailable.
+"""
+
 
 def validate_completion(root: Path) -> None:
     if not (root / 'Dockerfile').is_file():
@@ -29,9 +40,10 @@ def validate_completion(root: Path) -> None:
 
 
 def main() -> None:
+    context = Path('/workspace/input.json').read_text()
     run_agent(AgentProfile(
-        root=ROOT, prompt=PROMPT,
-        initial_messages=[Path('/workspace/input.json').read_text()],
+        root=ROOT, prompt=PROMPT + (REPAIR_PROMPT if json.loads(context).get('repair') else ''),
+        initial_messages=[context],
         max_turns_env='IMPLEMENTATION_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Implementation completed',
         exhaustion_message='Implementation exceeded the tool-turn limit',

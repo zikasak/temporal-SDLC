@@ -57,7 +57,9 @@ type GeneratedCode = {
 };
 
 type ImageArtifact = { image_id: string };
-type VerificationStatus = "not_applicable" | "waiting" | "running" | "completed" | "skipped" | "error";
+type VerificationStatus = "not_applicable" | "waiting" | "running" | "diagnosing" | "repairing" |
+  "completed" | "skipped" | "error";
+type RepairRound = { attempt: number; target: "implementation" | "tests"; summary: string };
 type VerificationResult = {
   status: "passed" | "failed" | "error";
   tests: number;
@@ -74,8 +76,15 @@ type VerificationResult = {
 };
 
 const verificationStatuses: VerificationStatus[] = [
-  "not_applicable", "waiting", "running", "completed", "skipped", "error",
+  "not_applicable", "waiting", "running", "diagnosing", "repairing", "completed", "skipped", "error",
 ];
+
+function repairRounds(value: unknown): RepairRound[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is RepairRound => isObject(item) &&
+    typeof item.attempt === "number" && typeof item.summary === "string" &&
+    (item.target === "implementation" || item.target === "tests"));
+}
 
 function verificationRecord(value: unknown): VerificationResult | null {
   if (!isObject(value)) return null;
@@ -109,6 +118,7 @@ function VerificationResults({ session, retrying, disabled, onRetry }: {
   const result = session.verification;
   const stage = session.verification_status;
   const pending = stage === "waiting" || stage === "running";
+  const repairing = session.repairs[session.repairs.length - 1];
   return (
     <section className="verification-results" aria-labelledby="verification-title">
       <h3 id="verification-title">Service verification</h3>
@@ -122,6 +132,12 @@ function VerificationResults({ session, retrying, disabled, onRetry }: {
           </p>}
         </div>
       )}
+      {stage === "diagnosing" && <p role="status">
+        Tests failed. Deciding whether the implementation or the tests are wrong…
+      </p>}
+      {stage === "repairing" && repairing && <p role="status">
+        Repair round {repairing.attempt}: correcting the {repairing.target}…
+      </p>}
       {stage === "not_applicable" && <p>Verification is not available for this session.</p>}
       {stage === "skipped" && <p>Verification skipped because a prerequisite did not complete.</p>}
       {session.implementation_error && <div className="generation-failure">
@@ -155,6 +171,12 @@ function VerificationResults({ session, retrying, disabled, onRetry }: {
             <pre>{item.message || "No failure message was reported."}</pre>
           </li>)}
         </ul>}
+        {session.repairs.length > 0 && <ol className="verification-failures">
+          {session.repairs.map((round) => <li key={round.attempt}>
+            <strong>Repair round {round.attempt}: {round.target} corrected</strong>
+            {round.summary && <span>{round.summary}</span>}
+          </li>)}
+        </ol>}
         {result.details_truncated && <p>Showing the first {result.test_failures.length} failures. Full reports are saved with the verification artifacts.</p>}
         {(result.service_log || result.runner_log) && <details className="verification-logs">
           <summary>Container logs (last 200 lines, up to 8,000 characters each)</summary>
@@ -185,6 +207,7 @@ type Session = {
   verification_status: VerificationStatus;
   verification: VerificationResult | null;
   verification_error: string | null;
+  repairs: RepairRound[];
   forked_from: { session_id: string; message_index: number } | null;
 };
 
@@ -278,6 +301,7 @@ function sessionRecord(value: unknown): Session {
       ? value.verification_status as VerificationStatus : "not_applicable",
     verification: verificationRecord(value.verification),
     verification_error: typeof value.verification_error === "string" ? value.verification_error : null,
+    repairs: repairRounds(value.repairs),
     forked_from:
       isObject(value.forked_from) &&
       typeof value.forked_from.session_id === "string" &&
@@ -296,8 +320,8 @@ function codePending(session: Session) {
 }
 
 function pipelinePending(session: Session) {
-  return codePending(session) || session.verification_status === "waiting" ||
-    session.verification_status === "running";
+  return codePending(session) ||
+    ["waiting", "running", "diagnosing", "repairing"].includes(session.verification_status);
 }
 
 function typeLabel(type: string | null, array: boolean) {
@@ -446,6 +470,7 @@ export default function ApiDesign() {
         verification: null,
         verification_error: null,
         verification_status: "waiting",
+        repairs: [],
       });
       setRefreshKey((value) => value + 1);
     } catch (caught) {

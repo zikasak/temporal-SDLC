@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import StageInputs, StageSpec, copy_regular_files, run_stage
@@ -37,6 +38,12 @@ def prepare_inputs(session_dir: Path, context: dict[str, Any]) -> StageInputs:
         'requirements': context.get('requirements', []),
         'requirements_document': context.get('requirements_document', ''),
     })
+    repair = context.get('repair')
+    previous = session_dir / 'tests/suite'
+    if repair:
+        if not previous.is_dir():
+            raise ApplicationError('Generated tests are unavailable', non_retryable=True)
+        contracts['repair'] = repair
 
     openapi = render_openapi(api_design)
     index, files = on_demand_contracts({**contracts, 'api_design': api_design},
@@ -44,6 +51,9 @@ def prepare_inputs(session_dir: Path, context: dict[str, Any]) -> StageInputs:
 
     def populate(workspace: Path) -> None:
         shutil.copytree(TEMPLATE, workspace / 'tests')
+        if repair:
+            # A repair continues from the published suite; runner files stay the template's.
+            copy_test_suite(previous, workspace / 'tests')
         if files:
             write_contracts(workspace, files)
         else:
