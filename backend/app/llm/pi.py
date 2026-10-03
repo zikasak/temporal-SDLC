@@ -18,6 +18,8 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 # Registers the bound tools and swaps the caller's history in as native messages.
 EXTENSION = Path(__file__).with_name('pi_extension.ts')
 INPUT_ENV = 'PI_LANGCHAIN_INPUT'
+# Pi's own override for its configuration directory.
+AGENT_DIR_ENV = 'PI_CODING_AGENT_DIR'
 # Pi runs as a bare model: no saved session, none of its built-in tools and none of the
 # user's local extensions, skills, templates or project context files.
 PI_FLAGS = ('--mode', 'json', '--no-session', '--no-extensions', '--no-skills',
@@ -32,11 +34,13 @@ MAX_ERROR_CHARS = 2000
 
 class ChatPi(BaseChatModel):
     """Each call is one fresh `pi` process making one model request. Credentials and the
-    default model come from Pi's own configuration (`~/.pi/agent`)."""
+    default model come from Pi's own configuration (`agent_dir`, else `~/.pi/agent`)."""
 
     # Pi model pattern such as `openai/gpt-4o` or `sonnet:high`; None uses Pi's default.
     model: str | None = None
     command: str = 'pi'
+    # Pi configuration directory; None leaves Pi to its environment and default.
+    agent_dir: str | None = None
     # Bounds the whole generation: the process is killed when it runs longer.
     timeout: float = 600
 
@@ -63,13 +67,14 @@ class ChatPi(BaseChatModel):
             command += ['--model', self.model]
         if system:
             command += ['--system-prompt', system]
+        env = {**os.environ, AGENT_DIR_ENV: self.agent_dir} if self.agent_dir else os.environ
         with tempfile.NamedTemporaryFile('w', suffix='.json') as request:
             json.dump({'tools': list(tools), 'messages': _pi_messages(messages)}, request)
             request.flush()
             try:
                 process = subprocess.run(
                     command, input=PLACEHOLDER_PROMPT, capture_output=True, text=True,
-                    timeout=self.timeout, env={**os.environ, INPUT_ENV: request.name})
+                    timeout=self.timeout, env={**env, INPUT_ENV: request.name})
             except subprocess.TimeoutExpired as exc:
                 raise TimeoutError(
                     f'pi did not finish within {self.timeout:g} seconds') from exc

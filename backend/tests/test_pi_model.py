@@ -12,6 +12,7 @@ from langchain_core.tools import tool
 from app import docker_agents
 from app.agent_workflows import runtime
 from app.implementation.agent import validate_completion
+from app.llm import model as llm_model
 from app.llm.pi import ChatPi
 
 # Answers each invocation with the next scripted event stream and records what it was given.
@@ -20,6 +21,7 @@ import json, os, pathlib, sys
 log = pathlib.Path({log!r})
 calls = json.loads(log.read_text()) if log.exists() else []
 calls.append({{'argv': sys.argv[1:], 'stdin': sys.stdin.read(),
+              'agent_dir': os.environ.get('PI_CODING_AGENT_DIR'),
               'input': json.load(open(os.environ['PI_LANGCHAIN_INPUT']))}})
 log.write_text(json.dumps(calls))
 sys.stderr.write({stderr!r})
@@ -142,6 +144,25 @@ def test_bound_tools_are_declared_and_their_calls_returned(fake_pi):
     assert set(declared['parameters']['properties']) == {'term', 'limit'}
 
 
+def test_host_model_runs_pi_against_the_configured_directory(fake_pi, tmp_path, monkeypatch):
+    install, calls = fake_pi
+    monkeypatch.setenv('PI_CODING_AGENT_DIR', str(tmp_path / 'inherited'))
+    monkeypatch.setattr(llm_model, 'LLM_HARNESS', 'pi')
+    monkeypatch.setattr(llm_model, 'PI_CREDENTIALS_DIR', tmp_path / 'configured')
+    llm_model.get_model.cache_clear()
+    install([assistant('ok')], [assistant('ok')])
+    monkeypatch.setenv('PATH', str(tmp_path) + os.pathsep + os.environ['PATH'])
+    try:
+        llm_model.get_model().invoke('hi')
+    finally:
+        llm_model.get_model.cache_clear()
+    # Without a directory of its own the adapter leaves Pi's environment alone.
+    ChatPi().invoke('hi')
+
+    assert [call['agent_dir'] for call in calls()] == [
+        str(tmp_path / 'configured'), str(tmp_path / 'inherited')]
+
+
 def test_failed_response_raises(fake_pi):
     install, _ = fake_pi
     model = ChatPi(command=install([assistant(stop='error', errorMessage='quota exceeded')]))
@@ -213,7 +234,7 @@ def created_container(tmp_path, monkeypatch):
     return run
 
 
-async def test_pi_harness_mounts_only_credential_files(created_container, tmp_path, monkeypatch):
+async def test_pi_harness_mounts_credential_files_in_a_shared_directory(created_container, tmp_path, monkeypatch):
     credentials = tmp_path / 'pi'
     (credentials / 'extensions').mkdir(parents=True)
     for name in ('auth.json', 'models.json'):
@@ -228,8 +249,14 @@ async def test_pi_harness_mounts_only_credential_files(created_container, tmp_pa
     args = await created_container()
 
     mounts = [args[index + 1] for index, arg in enumerate(args) if arg == '-v']
-    assert mounts == [f'{credentials}/auth.json:/home/agent/.pi/agent/auth.json',
+    # Every container gets the same host directory, so Pi's auth.json.lock is shared.
+    assert mounts == [f'{credentials}/containers:/home/agent/.pi/agent',
+                      f'{credentials}/auth.json:/home/agent/.pi/agent/auth.json',
                       f'{credentials}/models.json:/home/agent/.pi/agent/models.json:ro']
+    assert mounts == [args[index + 1] for index, arg in enumerate(await created_container())
+                      if arg == '-v']
+    assert sorted(item.name for item in (credentials / 'containers').iterdir()) == [
+        'auth.json', 'models.json']
     # The host's default model is passed by name, as its settings file is not mounted.
     assert 'LLM_HARNESS=pi' in args and 'PI_MODEL=openai/gpt-test:high' in args
 

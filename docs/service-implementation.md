@@ -61,9 +61,14 @@ require outbound access to the LLM provider and Maven repositories.
 
 Setting `LLM_HARNESS=pi` routes model calls through the Pi CLI instead: the host chat
 uses the `pi` on its `PATH`, and the coding-agent image installs its own. Pi signs in with
-the credentials in `PI_CREDENTIALS_DIR` (default `~/.pi/agent`). Each coding container gets
+the credentials in `PI_CREDENTIALS_DIR` (default: Pi's own `PI_CODING_AGENT_DIR`, else
+`~/.pi/agent`). Host calls run Pi with that directory as its configuration directory, and
+each coding container gets
 that directory's `auth.json` mounted read-write, so a refreshed token is kept, and its
-`models.json` read-only. `PI_MODEL` selects the model; without it containers use the
+`models.json` read-only, inside a `containers/` subdirectory of it that all containers share
+as their Pi directory. Pi locks `auth.json` through a lock directory beside it, so sharing
+that directory lets parallel agents take turns refreshing an OAuth token instead of each
+rotating it. `PI_MODEL` selects the model; without it containers use the
 default model named in the directory's `settings.json`.
 
 ## Langfuse tracing
