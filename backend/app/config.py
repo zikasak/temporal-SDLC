@@ -45,4 +45,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # The SDK appends /chat/completions to this API base URL.
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:1234/v1")
 
+# Contracts larger than this are supplied to coding agents as an index plus read-only
+# files instead of being embedded whole in every model invocation.
+CONTRACT_EMBED_CHARS = int(os.getenv("CONTRACT_EMBED_CHARS", "60000"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()

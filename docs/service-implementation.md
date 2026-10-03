@@ -128,6 +128,26 @@ The container's bounded LLM tool loop can list, search, read ranges of, write an
 exactly edit workspace files, and execute shell commands. Long command output is saved
 under `.agent-output/` in the workspace and returned as its diagnostic lines and tail;
 that directory is never published.
+
+The loop keeps its context inside `AGENT_CONTEXT_TOKENS` (default 64000; set it to the
+model's context window, `0` disables). Usage reported by the provider is used when
+available, otherwise a character-based estimate. Past 75% of the budget, the oldest
+complete assistant/tool-result batches are replaced by one checkpoint message: the files
+written or edited so far, plus decisions, completed and remaining work and unresolved
+errors summarized by an extra `compact-history` model call. The system prompt, the
+supplied contracts and the most recent batches (about 25% of the budget, always at
+least the latest) are kept verbatim; current code is re-read from disk. The setting is
+forwarded from the worker's environment to both coding containers.
+
+Contracts whose embedded form exceeds `CONTRACT_EMBED_CHARS` (default 60000 characters)
+are supplied on demand instead. `/workspace/input.json` then holds an index of every
+requirement (ID, category, priority, title), endpoint (operation, summary, requirement
+IDs) and schema name, and the complete documents are written to `/workspace/contracts/`
+(`requirements.json`, `openapi.yaml`, and `requirements.md` when there is a narrative or
+unrecognised document). The agent gets two extra read-only tools, `read_contract` and
+`search_contracts`, confined to that directory, which lies outside the published
+project. Smaller contracts are embedded exactly as described here.
+
 It implements the service and writes its production `Dockerfile` and `.dockerignore`.
 The host retrieves sources, excludes tests/build output again, and builds that Dockerfile.
 Only a successful build publishes:
@@ -149,7 +169,9 @@ Python, Maven and Java 21. Its only session inputs
 are requirements and the requirements document (reduced to its narrative as above) in
 `/workspace/input.json`, plus OpenAPI YAML rendered from the structured API design in
 `/workspace/openapi.yaml`. The structured design itself is not repeated. Extra context
-fields are discarded.
+fields are discarded. History compaction and on-demand contracts work as for the
+implementation agent; on demand, the OpenAPI document is `/workspace/contracts/openapi.yaml`
+and is no longer embedded.
 
 `/workspace/tests` starts from a static Maven/JUnit 5 template. No generated server
 sources, implementation sources, implementation image, logs, or test stubs are copied

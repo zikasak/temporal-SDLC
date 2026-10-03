@@ -4,6 +4,9 @@ from pathlib import Path
 from app.agent_workflows.runtime import AgentProfile, run_agent
 
 ROOT = Path('/workspace/tests')
+OPENAPI = Path('/workspace/openapi.yaml')
+# Supplied instead of the embedded OpenAPI contract when the contracts are too large.
+CONTRACTS = Path('/workspace/contracts')
 
 PROMPT = """Write a standalone Maven/JUnit 5 HTTP test suite in /workspace/tests
 for the service described by the supplied requirements and OpenAPI contract.
@@ -25,7 +28,7 @@ Set up test data through documented public APIs and clean it up when supported.
 Keep tests independent and repeatable; do not assume implementation class names,
 database structure, existing data or unspecified response ordering.
 
-Use only supplied requirements and /workspace/openapi.yaml as your authority. Document
+Use only the supplied requirements and OpenAPI contract as your authority. Document
 required environment credentials and any contract ambiguities in README.md. Credentials
 must come from environment variables; never put secrets in files.
 Create files with write_file and change existing files with edit_file, not by
@@ -47,10 +50,12 @@ def main() -> None:
     run_agent(AgentProfile(
         root=ROOT, prompt=PROMPT,
         initial_messages=[Path('/workspace/input.json').read_text(),
-                          'OpenAPI contract:\n' + Path('/workspace/openapi.yaml').read_text()],
+                          *(['OpenAPI contract:\n' + OPENAPI.read_text()]
+                            if OPENAPI.is_file() else [])],
         max_turns_env='TEST_GENERATION_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Test generation completed',
         exhaustion_message='Test generation exceeded the tool-turn limit',
+        contracts=CONTRACTS if CONTRACTS.is_dir() else None,
     ))
 
 

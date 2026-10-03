@@ -1,10 +1,12 @@
 """Implementation policies; shared host machinery builds and publishes the service."""
+import json
 from pathlib import Path
 from typing import Any
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import StageInputs, StageSpec, copy_regular_files, run_stage
 from app.config import GENERATED_CODE_DIR
 from app.docker_agents import default_agent_image
@@ -25,10 +27,15 @@ def prepare_inputs(session_dir: Path, context: dict[str, Any]) -> StageInputs:
     if not source.is_dir():
         raise ApplicationError('Generated server code is unavailable', non_retryable=True)
 
+    context = without_repeated_tables(context)
+    index, files = on_demand_contracts(context, len(json.dumps(context))) or (context, {})
+
     def populate(workspace: Path) -> None:
         copy_service(source, workspace / 'service')
+        if files:
+            write_contracts(workspace, files)
 
-    return StageInputs(context=without_repeated_tables(context), populate=populate)
+    return StageInputs(context=index, populate=populate)
 
 
 def validate_output(clean: Path) -> None:

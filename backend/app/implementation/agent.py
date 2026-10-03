@@ -4,6 +4,8 @@ from pathlib import Path
 from app.agent_workflows.runtime import AgentProfile, run_agent
 
 ROOT = Path('/workspace/service')
+# Present only when the contracts were too large to embed in input.json.
+CONTRACTS = Path('/workspace/contracts')
 
 PROMPT = """Implement the Spring Boot service in /workspace/service using the supplied
 requirements and OpenAPI design. Generated interfaces and models are the API contract.
@@ -33,6 +35,7 @@ def main() -> None:
         max_turns_env='IMPLEMENTATION_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Implementation completed',
         exhaustion_message='Implementation exceeded the tool-turn limit',
+        contracts=CONTRACTS if CONTRACTS.is_dir() else None,
     ))
 
 

@@ -22,6 +22,7 @@ from app.config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
 from app.tracing import container_trace_environment
 
 logger = logging.getLogger(__name__)
+AGENT_SETTINGS = ('AGENT_CONTEXT_TOKENS',)
 
 
 @dataclass(frozen=True)
@@ -144,6 +145,9 @@ async def run_agent(role: str, session_id: str, workspace: Path,
     environment = {**os.environ, **trace_environment, 'OPENAI_API_KEY': OPENAI_API_KEY,
                    'OPENAI_BASE_URL': container_base_url(), 'OPENAI_MODEL': OPENAI_MODEL}
     trace_args = [argument for key in trace_environment for argument in ('-e', key)]
+    # Runtime tuning is forwarded by name; nothing else of the host environment is.
+    setting_args = [argument for key in AGENT_SETTINGS if key in os.environ
+                    for argument in ('-e', key)]
     logger.info('%s agent starting (session=%s, container=%s)', role, session_id, name)
     try:
         build_args = ['build', '-t', agent_image, '-f', str(image_build.dockerfile)]
@@ -156,7 +160,7 @@ async def run_agent(role: str, session_id: str, workspace: Path,
             '--security-opt=no-new-privileges', '--pids-limit=256',
             '--memory=4g', '--cpus=2', '--user', '10001:10001',
             '-e', 'OPENAI_API_KEY', '-e', 'OPENAI_MODEL', '-e', 'OPENAI_BASE_URL',
-            *trace_args, agent_image, env=environment,
+            *trace_args, *setting_args, agent_image, env=environment,
         )
         archive = workspace.parent / 'workspace.tar'
 
