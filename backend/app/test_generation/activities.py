@@ -1,10 +1,12 @@
 """Contracts-only test authoring policies and trusted standalone runner publication."""
+import json
 import shutil
 from pathlib import Path
 from typing import Any
 
 from temporalio import activity
 
+from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import StageInputs, StageSpec, copy_regular_files, run_stage
 from app.api_design.openapi import render_openapi
 from app.config import GENERATED_CODE_DIR
@@ -36,11 +38,18 @@ def prepare_inputs(session_dir: Path, context: dict[str, Any]) -> StageInputs:
         'requirements_document': context.get('requirements_document', ''),
     })
 
+    openapi = render_openapi(api_design)
+    index, files = on_demand_contracts({**contracts, 'api_design': api_design},
+                                       len(json.dumps(contracts)) + len(openapi)) or (contracts, {})
+
     def populate(workspace: Path) -> None:
         shutil.copytree(TEMPLATE, workspace / 'tests')
-        (workspace / 'openapi.yaml').write_text(render_openapi(api_design))
+        if files:
+            write_contracts(workspace, files)
+        else:
+            (workspace / 'openapi.yaml').write_text(openapi)
 
-    return StageInputs(context=contracts, populate=populate)
+    return StageInputs(context=index, populate=populate)
 
 
 def validate_output(clean: Path) -> None:

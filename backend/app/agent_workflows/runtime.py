@@ -1,6 +1,7 @@
 """Container-only tools and bounded model loop. No host config, Temporal or Docker."""
 import fnmatch
 import itertools
+import json
 import os
 import re
 import signal
@@ -9,8 +10,11 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage,
+)
 from langchain_core.tools import BaseTool, tool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from app.llm.factory import create_model
 from app.tracing import (
@@ -28,6 +32,8 @@ class AgentProfile:
     completion_message: str
     exhaustion_message: str
     default_max_turns: int = 80
+    # Read-only contract files supplied instead of embedding large contracts in full.
+    contracts: Path | None = None
 
 
 READ_LINES = 500
@@ -41,20 +47,43 @@ LINE_CHARS = 300
 # Verbose command output is kept here for explicit retrieval; stages never publish it.
 OUTPUT_DIR = '.agent-output'
 SKIPPED_DIRS = {OUTPUT_DIR, '.git', 'target', 'node_modules', '__pycache__'}
+# Size of the model's context window in tokens; 0 disables history compaction.
+CONTEXT_TOKENS_ENV = 'AGENT_CONTEXT_TOKENS'
+DEFAULT_CONTEXT_TOKENS = 64000
+# Compacting at this share of the window leaves room for the reply and estimate error.
+COMPACT_AT = 0.75
+KEEP_RECENT = 0.25
+# Code and JSON run near three characters a token; used when the provider reports no usage.
+TOKEN_CHARS = 3
+CLIP_CHARS = 1500
+CHECKPOINT_PROMPT = """You keep the working notes of a coding agent. The oldest part of its
+tool history is about to be removed from its context. Write the checkpoint it will continue
+from, merging any previous checkpoint with the history below. Use these sections:
+Decisions: design choices, conventions and facts learned that the files do not make obvious.
+Done: work that is complete and verified.
+Remaining: work still to do, in order.
+Unresolved errors: exact messages and file locations of failures not yet fixed.
+Current file contents stay on disk and will be re-read, so do not reproduce code.
+Be specific and concise. Record only what the history shows; never guess.
+"""
+CHECKPOINT_NOTICE = ('[Checkpoint] Older tool calls and their results were removed to save '
+                     'context. Files on disk are the source of truth: re-read the regions '
+                     'you need before changing them.')
 DIAGNOSTIC = re.compile(r'\[ERROR\]|\berror\b|BUILD (SUCCESS|FAILURE)|Exception|FAILED|Tests run:')
 
 
-def workspace_tools(root: Path) -> list[BaseTool]:
+def workspace_tools(root: Path, contracts: Path | None = None) -> list[BaseTool]:
     root = root.resolve()
     commands = itertools.count(1)
 
-    def workspace_path(path: str) -> Path:
-        result = (root / path).resolve()
-        if not result.is_relative_to(root):
-            raise ValueError('Path must be inside the project workspace')
+    def workspace_path(path: str, base: Path = root, area: str = 'project workspace') -> Path:
+        result = (base / path).resolve()
+        if not result.is_relative_to(base):
+            raise ValueError(f'Path must be inside the {area}')
         return result
 
-    def workspace_files(start: Path, pattern: str | None = None) -> Iterator[Path]:
+    def workspace_files(start: Path, pattern: str | None = None,
+                        base: Path = root) -> Iterator[Path]:
         """Regular files in stable order, never links, build output or saved logs."""
         if start.is_file():
             yield start
@@ -63,20 +92,14 @@ def workspace_tools(root: Path) -> list[BaseTool]:
             names[:] = sorted(name for name in names if name not in SKIPPED_DIRS)
             for name in sorted(files):
                 item = Path(directory, name)
-                relative = item.relative_to(root).as_posix()
+                relative = item.relative_to(base).as_posix()
                 if item.is_symlink() or (pattern and not (fnmatch.fnmatch(relative, pattern)
                                                           or fnmatch.fnmatch(name, pattern))):
                     continue
                 yield item
 
-    @tool
-    def read_file(path: str, offset: int = 1, limit: int = READ_LINES) -> str:
-        """Read a UTF-8 file relative to the project root.
-
-        Returns up to `limit` lines starting at 1-based line `offset`. A final note
-        says how to continue when more of the file remains.
-        """
-        lines = workspace_path(path).read_text().splitlines(keepends=True)
+    def read_lines(target: Path, offset: int, limit: int) -> str:
+        lines = target.read_text().splitlines(keepends=True)
         first = max(offset, 1)
         selected, size = [], 0
         for line in lines[first - 1:first - 1 + max(limit, 1)]:
@@ -93,6 +116,33 @@ def workspace_tools(root: Path) -> list[BaseTool]:
             more = f' Continue with offset={last + 1}.' if last < len(lines) else ''
             text += f'\n[Showing lines {first}-{last} of {len(lines)}.{more}]'
         return text
+
+    def search_lines(regex: str, start: Path, pattern: str | None = None,
+                     base: Path = root) -> str:
+        expression = re.compile(regex)
+        matches = []
+        for item in workspace_files(start, pattern, base):
+            try:
+                lines = item.read_text().splitlines()
+            except (UnicodeDecodeError, OSError):
+                continue
+            for number, line in enumerate(lines, 1):
+                if expression.search(line):
+                    if len(matches) == SEARCH_MATCHES:
+                        matches.append(f'[More than {SEARCH_MATCHES} matches; narrow the search.]')
+                        return '\n'.join(matches)
+                    matches.append(f'{item.relative_to(base).as_posix()}:{number}: '
+                                   f'{line.strip()[:LINE_CHARS]}')
+        return '\n'.join(matches) or 'No matches'
+
+    @tool
+    def read_file(path: str, offset: int = 1, limit: int = READ_LINES) -> str:
+        """Read a UTF-8 file relative to the project root.
+
+        Returns up to `limit` lines starting at 1-based line `offset`. A final note
+        says how to continue when more of the file remains.
+        """
+        return read_lines(workspace_path(path), offset, limit)
 
     @tool
     def write_file(path: str, content: str) -> str:
@@ -146,21 +196,7 @@ def workspace_tools(root: Path) -> list[BaseTool]:
         `path` is a file or directory relative to the project root and `pattern` an
         optional file glob such as `*.java`. Use this to locate code before reading it.
         """
-        expression = re.compile(regex)
-        matches = []
-        for item in workspace_files(workspace_path(path), pattern):
-            try:
-                lines = item.read_text().splitlines()
-            except (UnicodeDecodeError, OSError):
-                continue
-            for number, line in enumerate(lines, 1):
-                if expression.search(line):
-                    if len(matches) == SEARCH_MATCHES:
-                        matches.append(f'[More than {SEARCH_MATCHES} matches; narrow the search.]')
-                        return '\n'.join(matches)
-                    matches.append(f'{item.relative_to(root).as_posix()}:{number}: '
-                                   f'{line.strip()[:LINE_CHARS]}')
-        return '\n'.join(matches) or 'No matches'
+        return search_lines(regex, workspace_path(path), pattern)
 
     @tool
     def shell(command: str) -> str:
@@ -206,7 +242,69 @@ def workspace_tools(root: Path) -> list[BaseTool]:
             tail,
         ])
 
-    return [read_file, write_file, edit_file, list_files, search_files, shell]
+    tools = [read_file, write_file, edit_file, list_files, search_files, shell]
+    if contracts is None:
+        return tools
+    contracts = contracts.resolve()
+
+    @tool
+    def read_contract(name: str, offset: int = 1, limit: int = READ_LINES) -> str:
+        """Read a contract file named in the contract index, such as `openapi.yaml`.
+
+        Contract files are the read-only authority and live outside the project. Takes
+        the same 1-based line `offset` and `limit` as read_file.
+        """
+        return read_lines(workspace_path(name, contracts, 'contracts directory'), offset, limit)
+
+    @tool
+    def search_contracts(regex: str, name: str = '.') -> str:
+        """Search contract files for a regular expression, returning `file:line: text`.
+
+        `name` limits the search to one contract file. Use this to find a requirement
+        ID, endpoint path or schema name, then read around it with read_contract.
+        """
+        return search_lines(regex, workspace_path(name, contracts, 'contracts directory'),
+                            base=contracts)
+
+    return [*tools, read_contract, search_contracts]
+
+
+def _tokens(message: BaseMessage) -> int:
+    calls = getattr(message, 'tool_calls', None) or []
+    return (len(str(message.content)) + len(json.dumps(calls, default=str))) // TOKEN_CHARS + 1
+
+
+def _recent_start(history: Sequence[BaseMessage], keep_tokens: float) -> int:
+    """Index of the first batch to keep. Only whole assistant/tool-result batches are
+    dropped, so every remaining result still follows its call; the latest always stays."""
+    start, kept = len(history), 0
+    for index in range(len(history) - 1, -1, -1):
+        kept += _tokens(history[index])
+        if isinstance(history[index], AIMessage):
+            if start < len(history) and kept > keep_tokens:
+                break
+            start = index
+    return start
+
+
+def _clip(text: str) -> str:
+    if len(text) <= CLIP_CHARS:
+        return text
+    half = CLIP_CHARS // 2
+    return f'{text[:half]}\n[{len(text) - CLIP_CHARS} characters omitted]\n{text[-half:]}'
+
+
+def _transcript(messages: Sequence[BaseMessage]) -> str:
+    lines = []
+    for message in messages:
+        if isinstance(message, ToolMessage):
+            lines.append(f'Result: {_clip(str(message.content))}')
+            continue
+        if message.text:
+            lines.append(f'Agent: {_clip(message.text)}')
+        lines += [f'Call {call["name"]}: {_clip(json.dumps(call["args"], ensure_ascii=False))}'
+                  for call in message.tool_calls]
+    return '\n'.join(lines)
 
 
 def run_agent(profile: AgentProfile) -> None:
@@ -224,20 +322,34 @@ def run_agent(profile: AgentProfile) -> None:
 
 
 def _run_agent(profile: AgentProfile) -> None:
-    model = create_model(model_name=os.environ['OPENAI_MODEL'],
-                         api_key=os.environ['OPENAI_API_KEY'],
-                         base_url=os.environ['OPENAI_BASE_URL'])
-    tools = workspace_tools(profile.root)
+    provider = create_model(model_name=os.environ['OPENAI_MODEL'],
+                            api_key=os.environ['OPENAI_API_KEY'],
+                            base_url=os.environ['OPENAI_BASE_URL'])
+    tools = workspace_tools(profile.root, profile.contracts)
     by_name = {item.name: item for item in tools}
-    model = model.bind_tools(tools)
-    messages = [SystemMessage(content=profile.prompt),
-                *(HumanMessage(content=text) for text in profile.initial_messages)]
+    model = provider.bind_tools(tools)
+    # The instructions and authoritative inputs are never compacted.
+    head = [SystemMessage(content=profile.prompt),
+            *(HumanMessage(content=text) for text in profile.initial_messages)]
+    checkpoint: list[BaseMessage] = []
+    history: list[BaseMessage] = []
+    notes = ''
+    changed: dict[str, None] = {}
+    budget = int(os.getenv(CONTEXT_TOKENS_ENV, str(DEFAULT_CONTEXT_TOKENS)))
+    schemas = len(json.dumps([convert_to_openai_tool(item) for item in tools])) // TOKEN_CHARS
+    fixed = schemas + sum(_tokens(message) for message in head)
+    # `measured` tokens cover everything sent before history[counted:], which is estimated.
+    measured, counted = fixed, 0
     config = langchain_config(run_name='decide-next-action')
     # Disabled tracing leaves the invocation unchanged for custom model adapters.
     traced_config = {'config': config} if 'callbacks' in config else {}
     for _ in range(int(os.getenv(profile.max_turns_env, str(profile.default_max_turns)))):
-        response = model.invoke(messages, **traced_config)
-        messages.append(response)
+        response = model.invoke([*head, *checkpoint, *history], **traced_config)
+        history.append(response)
+        usage = getattr(response, 'usage_metadata', None) or {}
+        if usage.get('input_tokens'):
+            measured = usage['input_tokens'] + usage.get('output_tokens', 0)
+            counted = len(history)
         if not response.tool_calls:
             profile.validate_completion(profile.root)
             print(profile.completion_message, flush=True)
@@ -248,7 +360,25 @@ def _run_agent(profile: AgentProfile) -> None:
                     call['args'], **({'config': {**config, 'run_name': call['name']}}
                                     if traced_config else {}),
                 )
+                if call['name'] in {'write_file', 'edit_file'}:
+                    changed[call['args']['path']] = None
             except Exception as exc:
                 result = f'Tool failed: {type(exc).__name__}: {exc}'
-            messages.append(ToolMessage(content=str(result), tool_call_id=call['id']))
+            history.append(ToolMessage(content=str(result), tool_call_id=call['id']))
+        used = measured + sum(_tokens(message) for message in history[counted:])
+        start = _recent_start(history, budget * KEEP_RECENT)
+        if not budget or used <= budget * COMPACT_AT or not start:
+            continue
+        request = [SystemMessage(content=CHECKPOINT_PROMPT), HumanMessage(content=(
+            (f'Previous checkpoint:\n{notes}\n\n' if notes else '')
+            + 'History being removed:\n' + _transcript(history[:start])))]
+        notes = provider.invoke(request, **(
+            {'config': {**config, 'run_name': 'compact-history'}} if traced_config else {}
+        )).text.strip()
+        files = f'\nFiles written or edited so far: {", ".join(changed)}' if changed else ''
+        checkpoint = [HumanMessage(content=f'{CHECKPOINT_NOTICE}{files}\n\n{notes}'.strip())]
+        del history[:start]
+        measured, counted = fixed + _tokens(checkpoint[0]), 0
+        print(f'Compacted {start} messages into a checkpoint (about {used} tokens in use)',
+              flush=True)
     raise RuntimeError(profile.exhaustion_message)

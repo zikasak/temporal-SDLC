@@ -6,13 +6,17 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from temporalio.testing import ActivityEnvironment
 
 from app import docker_agents
-from app.agent_workflows import runtime
+from app.agent_workflows import contracts, runtime
 from app.agent_workflows.host import StageInputs, StageSpec, copy_regular_files, run_stage
+from app.api_design.openapi import render_openapi
+from app.implementation import activities as implementation
 from app.implementation.agent import validate_completion as validate_implementation
+from app.requirements.document import render_requirements_markdown
+from app.test_generation import activities as test_generation
 from app.test_generation.agent import validate_completion as validate_tests
 
 
@@ -23,18 +27,21 @@ def scripted_model(monkeypatch):
     monkeypatch.setenv('OPENAI_API_KEY', 'test-key')
     monkeypatch.setenv('OPENAI_BASE_URL', 'https://provider.example/v1')
     monkeypatch.delenv('TEST_AGENT_MAX_TURNS', raising=False)
+    monkeypatch.delenv('AGENT_CONTEXT_TOKENS', raising=False)
 
     def install(responses):
         class Model:
             def __init__(self):
                 self.responses = iter(responses)
                 self.messages = []
+                self.requests = []
 
             def bind_tools(self, tools):
                 return self
 
             def invoke(self, messages):
                 self.messages = list(messages)
+                self.requests.append(self.messages)
                 return next(self.responses)
 
         model = Model()
@@ -91,6 +98,170 @@ def test_agent_stops_at_configured_turn_limit(profile, scripted_model, monkeypat
     with pytest.raises(RuntimeError, match='Tool-turn limit exceeded'):
         runtime.run_agent(profile)
     assert (profile.root / 'progress.txt').read_text() == 'second'
+
+
+def write(path, content='x'):
+    return AIMessage(content='', tool_calls=[
+        {'name': 'write_file', 'args': {'path': path, 'content': content}, 'id': path}])
+
+
+def assert_calls_and_results_correlate(messages):
+    """Every provider rejects a tool result without its call, or a call without results."""
+    pending = []
+    for message in messages:
+        if isinstance(message, ToolMessage):
+            assert message.tool_call_id == pending.pop(0)
+            continue
+        assert not pending
+        pending = [call['id'] for call in getattr(message, 'tool_calls', [])]
+    assert not pending
+
+
+def test_stale_history_becomes_a_checkpoint_within_the_context_budget(
+        profile, scripted_model, monkeypatch, capsys):
+    monkeypatch.setenv('AGENT_CONTEXT_TOKENS', '6000')
+    source = 'class Body {}\n' * 430
+    model = scripted_model([
+        write('Orders.java', source),
+        write('Stock.java', source),
+        AIMessage(content='Decisions: money is stored in cents\nRemaining: Payments, Dockerfile'),
+        write('Payments.java', source),
+        AIMessage(content='Decisions: money is stored in cents\nRemaining: Dockerfile'),
+        AIMessage(content='', tool_calls=[
+            {'name': 'read_file', 'args': {'path': 'missing.txt'}, 'id': 'missing'},
+            {'name': 'write_file', 'args': {'path': 'Dockerfile', 'content': 'FROM scratch'},
+             'id': 'docker'},
+        ]),
+        AIMessage(content='Finished'),
+    ])
+    runtime.run_agent(profile)
+
+    first_turn, second_turn, first_summary, third_turn, second_summary, *later = model.requests
+    assert len(second_turn) == len(first_turn) + 2
+    # The summary sees what is being removed, clipped, and builds on the last checkpoint.
+    assert 'Call write_file: {"path": "Orders.java"' in first_summary[1].content
+    assert 'Stock.java' not in first_summary[1].content
+    assert len(first_summary[1].content) < 2000
+    assert second_summary[1].content.startswith(
+        'Previous checkpoint:\nDecisions: money is stored in cents\nRemaining: Payments')
+    assert 'Call write_file: {"path": "Stock.java"' in second_summary[1].content
+
+    for request, files, remaining in [
+            (third_turn, 'Orders.java, Stock.java', 'Payments, Dockerfile'),
+            (later[-1], 'Orders.java, Stock.java, Payments.java', 'Dockerfile')]:
+        system, inputs, checkpoint, *recent = request
+        assert isinstance(system, SystemMessage) and system.content == profile.prompt
+        assert isinstance(inputs, HumanMessage) and inputs.content == 'requirements'
+        assert isinstance(checkpoint, HumanMessage)
+        assert f'Files written or edited so far: {files}\n' in checkpoint.content
+        assert checkpoint.content.endswith(f'Remaining: {remaining}')
+        assert_calls_and_results_correlate(recent)
+    assert [call['id'] for call in third_turn[3].tool_calls] == ['Stock.java']
+    results = {message.tool_call_id: message.content for message in later[-1]
+               if isinstance(message, ToolMessage)}
+    assert set(results) == {'Payments.java', 'missing', 'docker'}
+    assert results['missing'].startswith('Tool failed: FileNotFoundError:')
+    # Removed history costs nothing further, and the work it did is still on disk.
+    assert sum(len(str(message.content)) for message in later[-1]) < len(source) * 2
+    assert (profile.root / 'Orders.java').read_text() == source
+    assert capsys.readouterr().out.count('Compacted 2 messages into a checkpoint') == 2
+
+
+@pytest.mark.parametrize('budget,compacted', [('64000', True), ('0', False)])
+def test_compaction_follows_provider_reported_usage(profile, scripted_model, monkeypatch,
+                                                    budget, compacted):
+    monkeypatch.setenv('AGENT_CONTEXT_TOKENS', budget)
+    usage = {'input_tokens': 60000, 'output_tokens': 20, 'total_tokens': 60020}
+    # By size alone this history is well inside the budget; the provider's count decides.
+    model = scripted_model([
+        write('first.txt', 'x' * 60000),
+        AIMessage(content='', usage_metadata=usage, tool_calls=write('Dockerfile').tool_calls),
+        *([AIMessage(content='Remaining: nothing')] if compacted else []),
+        AIMessage(content='Finished'),
+    ])
+    runtime.run_agent(profile)
+    assert len(model.requests) == (4 if compacted else 3)
+    assert_calls_and_results_correlate(model.messages[2:])
+    assert [type(message) for message in model.messages[2:]] == (
+        [HumanMessage, AIMessage, ToolMessage] if compacted
+        else [AIMessage, ToolMessage, AIMessage, ToolMessage])
+
+
+def test_contract_files_are_read_and_searched_but_never_written(tmp_path):
+    workspace = tmp_path / 'tests'
+    supplied = tmp_path / 'contracts'
+    workspace.mkdir()
+    supplied.mkdir()
+    (supplied / 'openapi.yaml').write_text('paths:\n  /orders:\n    post:\n      summary: Create\n')
+    (tmp_path / 'secret.txt').write_text('private data')
+    assert 'read_contract' not in {item.name for item in runtime.workspace_tools(workspace)}
+    tools = {item.name: item for item in runtime.workspace_tools(workspace, supplied)}
+    assert tools['read_contract'].invoke({'name': 'openapi.yaml', 'offset': 2, 'limit': 1}) == (
+        '  /orders:\n\n[Showing lines 2-2 of 4. Continue with offset=3.]')
+    assert tools['search_contracts'].invoke({'regex': 'summary'}) == (
+        'openapi.yaml:4: summary: Create')
+    assert tools['search_contracts'].invoke({'regex': 'private'}) == 'No matches'
+    for name, args in [('read_contract', {'name': '../secret.txt'}),
+                       ('search_contracts', {'regex': 'private', 'name': '..'}),
+                       ('read_file', {'path': '../contracts/openapi.yaml'}),
+                       ('write_file', {'path': '../contracts/openapi.yaml', 'content': ''})]:
+        with pytest.raises(ValueError, match='Path must be inside'):
+            tools[name].invoke(args)
+    assert tools['list_files'].invoke({}) == 'No files found'
+
+
+@pytest.mark.parametrize('stage', [implementation, test_generation])
+def test_large_contracts_are_indexed_and_supplied_whole_on_demand(tmp_path, monkeypatch, stage):
+    (tmp_path / 'server').mkdir()
+    requirements = [{'id': f'FR-{number}', 'category': 'functional', 'title': f'Rule {number}',
+                     'description': f'Detailed behaviour {number}. ' * 20, 'priority': 'must',
+                     'rationale': f'Reason {number}'} for number in range(1, 31)]
+    api = {
+        'info': {'title': 'Orders', 'version': '1.0.0', 'description': '', 'auth': 'bearer'},
+        'schemas': [{'name': 'Order', 'description': 'A placed order', 'properties': [
+            {'name': 'total', 'type': 'integer', 'required': True, 'array': False}]}],
+        'endpoints': [{'method': 'POST', 'path': '/orders', 'summary': 'Create an order',
+                       'description': 'Totals are in cents.', 'tag': 'orders', 'parameters': [],
+                       'request_schema': 'Order', 'response_status': 201,
+                       'response_schema': 'Order', 'response_array': False,
+                       'error_statuses': [400, 409], 'requirement_ids': ['FR-1', 'FR-2']}],
+    }
+    context = {'requirements': requirements, 'api_design': api,
+               'requirements_document': render_requirements_markdown(
+                   requirements, 'Orders are never deleted.')}
+
+    def prepared(workspace):
+        inputs = stage.prepare_inputs(tmp_path, context)
+        workspace.mkdir()
+        inputs.populate(workspace)
+        return inputs.context
+
+    embedded = prepared(tmp_path / 'embedded')
+    assert embedded['requirements'] == requirements
+    assert not (tmp_path / 'embedded/contracts').exists()
+
+    monkeypatch.setattr(contracts, 'CONTRACT_EMBED_CHARS', 2000)
+    index = prepared(tmp_path / 'on-demand')
+    supplied = tmp_path / 'on-demand/contracts'
+    assert len(json.dumps(index)) < len(json.dumps(embedded)) / 3
+    # Nothing is lost: the index names everything and the files hold all of it.
+    assert index['requirements'] == [{'id': item['id'], 'category': 'functional',
+                                      'priority': 'must', 'title': item['title']}
+                                     for item in requirements]
+    assert index['api'] == {'title': 'Orders', 'auth': 'bearer', 'schemas': ['Order'],
+                            'endpoints': [{'operation': 'POST /orders',
+                                           'summary': 'Create an order',
+                                           'requirements': ['FR-1', 'FR-2']}]}
+    assert sorted(index['contract_files']) == sorted(item.name for item in supplied.iterdir())
+    assert json.loads((supplied / 'requirements.json').read_text()) == requirements
+    assert (supplied / 'openapi.yaml').read_text() == render_openapi(api)
+    assert (supplied / 'requirements.md').read_text() == 'Orders are never deleted.'
+    assert not (tmp_path / 'on-demand/openapi.yaml').exists()
+    assert not any(supplied.is_relative_to(project) for project in
+                   (tmp_path / 'on-demand/service', tmp_path / 'on-demand/tests'))
+    tools = {item.name: item for item in runtime.workspace_tools(tmp_path, supplied)}
+    assert tools['search_contracts'].invoke({'regex': '"FR-17"'}).startswith(
+        'requirements.json:')
 
 
 @pytest.fixture
