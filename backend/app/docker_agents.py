@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 AGENT_SETTINGS = ('AGENT_CONTEXT_TOKENS',)
 # Pi's configuration directory for the container's `agent` user.
 PI_CONTAINER_DIR = '/home/agent/.pi/agent'
+# Subdirectory of PI_CREDENTIALS_DIR that every container gets as its Pi directory.
+PI_SHARED_DIR = 'containers'
 
 
 @dataclass(frozen=True)
@@ -126,12 +128,22 @@ def pi_container_args() -> list[str]:
     if not (PI_CREDENTIALS_DIR / 'auth.json').is_file():
         raise RuntimeError(f'Pi credentials not found: {PI_CREDENTIALS_DIR / "auth.json"}. '
                            'Sign in with pi or set PI_CREDENTIALS_DIR.')
-    # Single files, not the directory: the agent must not reach the host's Pi extensions
-    # or sessions. auth.json is writable so a refreshed token is not lost to the host.
-    args = ['-e', f'LLM_HARNESS={LLM_HARNESS}',
+    # Pi serializes token refreshes with a lock directory created beside auth.json, so
+    # the containers' Pi directory is one host directory: agents running in parallel then
+    # contend for the same lock instead of each refreshing the token on its own.
+    shared = PI_CREDENTIALS_DIR / PI_SHARED_DIR
+    shared.mkdir(mode=0o700, exist_ok=True)
+    # Single files, not the credentials directory: the agent must not reach the host's Pi
+    # extensions or sessions. auth.json is writable so a refreshed token is not lost to
+    # the host. Each file is mounted over a placeholder inside the shared directory.
+    (shared / 'auth.json').touch(mode=0o600)
+    args = ['-e', f'LLM_HARNESS={LLM_HARNESS}', '-v', f'{shared}:{PI_CONTAINER_DIR}',
             '-v', f'{PI_CREDENTIALS_DIR / "auth.json"}:{PI_CONTAINER_DIR}/auth.json']
     if (PI_CREDENTIALS_DIR / 'models.json').is_file():
+        (shared / 'models.json').touch(mode=0o600)
         args += ['-v', f'{PI_CREDENTIALS_DIR / "models.json"}:{PI_CONTAINER_DIR}/models.json:ro']
+    else:
+        (shared / 'models.json').unlink(missing_ok=True)
     model = PI_MODEL or _pi_default_model()
     if model:
         args += ['-e', f'PI_MODEL={model}']
@@ -171,7 +183,8 @@ async def run_agent(role: str, session_id: str, workspace: Path,
                     output: Path, output_name: str, log_path: Path, *,
                     image_build: AgentImageBuild) -> None:
     """Copy only prepared inputs in and a single output tree out. The only host mounts are
-    the Pi credential files, when the Pi harness is selected."""
+    the Pi credential files and their shared lock directory, when the Pi harness is
+    selected."""
     label = role.replace('_', '-')
     name = f'{label}-{uuid.uuid4().hex}'
     digest = hashlib.sha256(session_id.encode()).hexdigest()[:16]

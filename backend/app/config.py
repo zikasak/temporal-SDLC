@@ -49,9 +49,12 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:1234/v1")
 # uses its own credentials and, unless PI_MODEL names one, its default model.
 LLM_HARNESS = os.getenv("LLM_HARNESS", "").lower()
 PI_MODEL = os.getenv("PI_MODEL") or None
-# Pi configuration directory whose auth.json (and models.json, when present) is mounted
-# into coding-agent containers.
-PI_CREDENTIALS_DIR = Path(os.getenv("PI_CREDENTIALS_DIR") or "~/.pi/agent").expanduser()
+# Pi configuration directory: host Pi calls run against it, and its auth.json (and
+# models.json, when present) is mounted into coding-agent containers. Pi's own
+# PI_CODING_AGENT_DIR is honoured when this is unset.
+PI_CREDENTIALS_DIR = Path(
+    os.getenv("PI_CREDENTIALS_DIR") or os.getenv("PI_CODING_AGENT_DIR") or "~/.pi/agent"
+).expanduser()
 
 # Contracts larger than this are supplied to coding agents as an index plus read-only
 # files instead of being embedded whole in every model invocation.
