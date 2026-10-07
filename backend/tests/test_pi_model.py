@@ -2,8 +2,6 @@
 import json
 import os
 import sys
-import tempfile
-from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -208,30 +206,6 @@ def test_coding_agent_runs_its_tools_through_pi(fake_pi, tmp_path, monkeypatch):
     assert [item['role'] for item in second['input']['messages']] == [
         'user', 'assistant', 'toolResult']
     assert second['input']['messages'][-1]['content'] == [{'type': 'text', 'text': 'Written'}]
-
-
-@pytest.fixture
-def created_container(tmp_path, monkeypatch):
-    """Runs the agent lifecycle against a stand-in Docker; returns `docker create` args."""
-    async def run():
-        created = []
-
-        async def docker(*args, **kwargs):
-            if args[0] == 'create':
-                created.extend(args)
-            return '{"ExitCode": 0}' if args[0] == 'inspect' else ''
-
-        monkeypatch.setattr(docker_agents, 'docker', docker)
-        work = Path(tempfile.mkdtemp(dir=tmp_path))
-        (work / 'workspace').mkdir()
-        (work / 'workspace' / 'input.json').write_text('{}')
-        await docker_agents.run_agent(
-            'implementation', 'session-1', work / 'workspace', work / 'output', 'service',
-            tmp_path / 'agent.log',
-            image_build=docker_agents.default_agent_image('implementation', 'service'))
-        return created
-
-    return run
 
 
 async def test_pi_harness_mounts_credential_files_in_a_shared_directory(created_container, tmp_path, monkeypatch):

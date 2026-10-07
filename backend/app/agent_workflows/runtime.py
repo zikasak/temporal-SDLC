@@ -322,10 +322,15 @@ def run_agent(profile: AgentProfile) -> None:
 
 
 def _run_agent(profile: AgentProfile) -> None:
-    if os.getenv('LLM_HARNESS', '').lower() == 'pi':
+    harness = os.getenv('LLM_HARNESS', '').lower()
+    if harness == 'pi':
         from app.llm.pi import ChatPi
 
         provider = ChatPi(model=os.getenv('PI_MODEL') or None)
+    elif harness == 'claude':
+        from app.llm.claude import ChatClaude
+
+        provider = ChatClaude(model=os.getenv('CLAUDE_MODEL') or None)
     else:
         provider = create_model(model_name=os.environ['OPENAI_MODEL'],
                                 api_key=os.environ['OPENAI_API_KEY'],

@@ -49,6 +49,9 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:1234/v1")
 # uses its own credentials and, unless PI_MODEL names one, its default model.
 LLM_HARNESS = os.getenv("LLM_HARNESS", "").lower()
 PI_MODEL = os.getenv("PI_MODEL") or None
+# "claude" routes them through Claude Code (the Claude Agent SDK) instead, with Claude
+# Code's credentials and, unless CLAUDE_MODEL names one, its default model.
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL") or None
 # Pi configuration directory: host Pi calls run against it, and its auth.json (and
 # models.json, when present) is mounted into coding-agent containers. Pi's own
 # PI_CODING_AGENT_DIR is honoured when this is unset.

@@ -71,6 +71,22 @@ that directory lets parallel agents take turns refreshing an OAuth token instead
 rotating it. `PI_MODEL` selects the model; without it containers use the
 default model named in the directory's `settings.json`.
 
+Setting `LLM_HARNESS=claude` routes model calls through Claude Code instead, driven by the
+Claude Agent SDK (`app/llm/claude.py`). The `claude-agent-sdk` package bundles the CLI, so
+neither the host nor the coding-agent image installs anything else. Each model call is one
+Claude Code process making one request: its built-in tools, settings, skills and project
+context files are switched off, the application's tools are declared to it as an
+in-process MCP server, and the turn limit hands every tool call back to LangGraph or the
+coding-agent loop to run. Earlier messages are resumed as a native session transcript.
+Claude Code still adds its own short environment notes to each request, and a conversation
+that ends in tool results is resumed with a `Continue.` prompt, because Claude Code only
+starts a turn from a user message. `CLAUDE_MODEL` selects the model; without it Claude
+Code uses its default. On the host Claude Code signs in with its own login, or with
+`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) when set. A
+host login lives in the keychain or `~/.claude` and is not shared with containers: coding
+agents require one of those variables (or `ANTHROPIC_AUTH_TOKEN`), which is forwarded by
+name along with `ANTHROPIC_BASE_URL`.
+
 ## Langfuse tracing
 
 See [Langfuse tracing](langfuse-tracing.md) for environment setup, privacy controls,
