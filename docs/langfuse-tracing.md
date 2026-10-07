@@ -54,6 +54,11 @@ The SDK automatically calculates cost only for recognized model pricing; configu
 custom model pricing in Langfuse for the local Qwen model if cost accounting is
 needed. No fabricated user IDs or token/cost estimates are added.
 
+Under `LLM_HARNESS=claude` each Claude Code request is one generation like any other
+provider's: it carries the model Claude Code actually used, and prompt-cache reads and
+writes are reported as `input_cache_read` / `input_cache_creation` beside the uncached
+input. Claude Code's own telemetry is not enabled.
+
 Feature tags, environment, release and session attributes propagate to children.
 Host roots include Temporal workflow/run/activity IDs and attempt numbers. API
 design roots also identify their source requirements session.

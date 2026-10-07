@@ -12,6 +12,8 @@ import pytest
 from google.protobuf.json_format import MessageToDict
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
+from tests.conftest import claude_reply
+
 SECRET = 'private-provider-key-for-trace-tests'
 EMAIL = 'private@example.com'
 
@@ -197,6 +199,52 @@ shutdown_tracing()
                 for key in ('langfuse.observation.input', 'langfuse.observation.output'):
                     if key in attributes(span):
                         assert attributes(span)[key] == '[CONTENT CAPTURE DISABLED]'
+    assert_no_sensitive_content(spans)
+
+
+def test_claude_harness_turn_exports_generations_with_model_and_cached_usage(
+        tracing_server, fake_claude):
+    environment, spans = tracing_server
+    install, _ = fake_claude
+    environment.update(LLM_HARNESS='claude', CLAUDE_MODEL='claude-test', FAKE_CLAUDE=install(
+        claude_reply(('call_1', 'mcp__langchain__record_requirement', {
+            'category': 'functional', 'title': 'Search', 'description': 'Search listings',
+            'priority': 'must'})),
+        claude_reply('Recorded')))
+    run_script('''
+import asyncio, os
+from functools import partial
+from temporalio.testing import ActivityEnvironment
+from app.llm import claude
+claude.ChatClaude = partial(claude.ChatClaude, cli_path=os.environ['FAKE_CLAUDE'])
+from app.temporal.activities import requirements_turn
+from app.tracing import shutdown_tracing
+async def main():
+    result = await ActivityEnvironment().run(requirements_turn,
+        [{'role':'user', 'content':'Search listings'}], [])
+    assert result['reply'] == 'Recorded'
+    assert result['requirements'][0]['title'] == 'Search'
+asyncio.run(main())
+shutdown_tracing()
+''', environment)
+    root, = [span for span in spans if span.name == 'gather-requirements']
+    generations = [span for span in spans
+                   if attributes(span).get('langfuse.observation.type') == 'generation']
+    assert len(generations) == 2
+    for generation in generations:
+        assert generation.parent_span_id == root.span_id
+        attrs = attributes(generation)
+        assert attrs['langfuse.observation.model.name'] == 'claude-test'
+        usage = json.loads(attrs['langfuse.observation.usage_details'])
+        # Cached prompt tokens are reported apart from the uncached input they add to.
+        assert (usage['input'], usage['input_cache_read'], usage['input_cache_creation'],
+                usage['output']) == (20, 7, 3, 5)
+    call, = next(calls for span in generations if (calls := json.loads(
+        attributes(span)['langfuse.observation.output']).get('tool_calls')))
+    assert call['function']['name'] == 'record_requirement'
+    tool, = [span for span in spans
+             if attributes(span).get('langfuse.observation.type') == 'tool']
+    assert tool.name == 'record_requirement' and tool.parent_span_id == root.span_id
     assert_no_sensitive_content(spans)
 
 

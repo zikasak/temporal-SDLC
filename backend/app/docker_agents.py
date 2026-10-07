@@ -19,7 +19,8 @@ from urllib.parse import urlsplit, urlunsplit
 from temporalio import activity
 
 from app.config import (
-    LLM_HARNESS, OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, PI_CREDENTIALS_DIR, PI_MODEL,
+    CLAUDE_MODEL, LLM_HARNESS, OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL,
+    PI_CREDENTIALS_DIR, PI_MODEL,
 )
 from app.tracing import container_trace_environment
 
@@ -29,6 +30,9 @@ AGENT_SETTINGS = ('AGENT_CONTEXT_TOKENS',)
 PI_CONTAINER_DIR = '/home/agent/.pi/agent'
 # Subdirectory of PI_CREDENTIALS_DIR that every container gets as its Pi directory.
 PI_SHARED_DIR = 'containers'
+# Credentials Claude Code reads from its environment; a login kept in the host's
+# keychain or ~/.claude cannot follow it into a container.
+CLAUDE_CREDENTIALS = ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN')
 
 
 @dataclass(frozen=True)
@@ -150,6 +154,24 @@ def pi_container_args() -> list[str]:
     return args
 
 
+def claude_container_args() -> list[str]:
+    """Select the Claude harness in the container and forward the credentials it needs."""
+    if LLM_HARNESS != 'claude':
+        return []
+    credentials = [key for key in CLAUDE_CREDENTIALS if os.getenv(key)]
+    if not credentials:
+        raise RuntimeError('Claude credentials not found: set ANTHROPIC_API_KEY, or '
+                           'CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`.')
+    # Secrets are forwarded by name, so their values stay out of the docker arguments.
+    args = ['-e', f'LLM_HARNESS={LLM_HARNESS}',
+            *(argument for key in credentials for argument in ('-e', key))]
+    if os.getenv('ANTHROPIC_BASE_URL'):
+        args += ['-e', f'ANTHROPIC_BASE_URL={_container_url(os.environ["ANTHROPIC_BASE_URL"])}']
+    if CLAUDE_MODEL:
+        args += ['-e', f'CLAUDE_MODEL={CLAUDE_MODEL}']
+    return args
+
+
 def _pi_default_model() -> str | None:
     """The host's default Pi model. settings.json itself stays out of the container: it
     also lists extension packages, which Pi would try to install there."""
@@ -211,7 +233,8 @@ async def run_agent(role: str, session_id: str, workspace: Path,
             '--security-opt=no-new-privileges', '--pids-limit=256',
             '--memory=4g', '--cpus=2', '--user', '10001:10001',
             '-e', 'OPENAI_API_KEY', '-e', 'OPENAI_MODEL', '-e', 'OPENAI_BASE_URL',
-            *trace_args, *setting_args, *pi_container_args(), agent_image, env=environment,
+            *trace_args, *setting_args, *pi_container_args(),
+            *claude_container_args(), agent_image, env=environment,
         )
         archive = workspace.parent / 'workspace.tar'
 
