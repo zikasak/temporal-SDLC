@@ -29,7 +29,7 @@ The API creates `app.github_connection` at startup, storing only the encrypted t
 
 ## Access and credential safety
 
-**There is no application authentication.** Any caller with API access can use or replace this shared connection. Keep it on loopback or behind trusted internal access control. Public or remote deployment requires authentication/authorization and HTTPS before exposure. Encryption at rest does not protect against a caller who can access the running API or a host compromise.
+The API requires sign-in (see the frontend README), but the connection is shared: any signed-in user can use or replace it. Remote deployment requires HTTPS. Encryption at rest does not protect against a signed-in caller or a host compromise.
 
 Connector mutation routes require JSON and check browser `Origin` against `GITHUB_ALLOWED_ORIGINS`. Defaults are:
 

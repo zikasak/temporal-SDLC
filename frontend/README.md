@@ -6,7 +6,21 @@ This page starts a Temporal workflow for each message, returns its workflow ID i
 
 The **GitHub** tab configures one shared personal access token, encrypted in PostgreSQL using a stable backend `GITHUB_TOKEN_ENCRYPTION_KEY`. New Chat and Requirements sessions can optionally choose an accessible repository and branch. Replies, retries, forks, and API-design sessions derived from Requirements inherit that fixed selection. Sessions without repositories still work.
 
-This is configuration/metadata only: agents do not clone, read, edit, or push repository code yet. There is no application authentication; keep the shared connector local or behind trusted internal access controls. See [GitHub setup, permissions, security, and API details](../docs/github-connector.md).
+This is configuration/metadata only: agents do not clone, read, edit, or push repository code yet. The connection is shared by every signed-in user. See [GitHub setup, permissions, security, and API details](../docs/github-connector.md).
+
+## Sign-in
+
+Every API route except `POST /auth/login` and `POST /auth/logout` requires a signed-in user. There is no public sign-up; create users from `backend/` (a login is an email address or a username, case-insensitive):
+
+```sh
+env/bin/python -m app.auth.users add you@example.com   # prompts for the password; also resets one
+env/bin/python -m app.auth.users list
+env/bin/python -m app.auth.users remove you@example.com
+```
+
+Set `AUTH_JWT_SECRET` (at least 32 random characters) in `backend/.env` first; without it the API answers 503. Passwords are stored only as salted scrypt hashes in `app.users`.
+
+`POST /auth/login` accepts `{"login":"you@example.com","password":"..."}` and returns a JWT (HS256, valid for `AUTH_TOKEN_TTL_HOURS`, default 12) as `access_token` and as an `HttpOnly`, `SameSite=Strict` cookie. The browser uses the cookie; other clients send `Authorization: Bearer <token>`. `GET /auth/me` returns the signed-in login and the token's expiry. Tokens are stateless: signing out clears the cookie, and removing a user or changing a password does not revoke tokens already issued. Change `AUTH_JWT_SECRET` to sign everyone out. All signed-in users share the same sessions and data; there are no roles.
 
 ## Start locally
 

@@ -1118,6 +1118,15 @@ h2 {
   background: var(--paper);
 }
 
+.mode-switch-user {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
 .mode-switch + .page-shell {
   padding-top: clamp(44px, 9vh, 112px);
 }
@@ -1532,6 +1541,7 @@ h2 {
   border-top: 1px solid var(--line);
 }
 
+.login-form input,
 .github-token-form input,
 .repository-picker select {
   width: 100%;
@@ -1545,6 +1555,7 @@ h2 {
   caret-color: var(--green);
 }
 
+.login-form input:disabled,
 .github-token-form input:disabled,
 .repository-picker select:disabled {
   color: var(--muted);

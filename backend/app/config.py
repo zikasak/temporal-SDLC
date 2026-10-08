@@ -72,3 +72,8 @@ GITHUB_ALLOWED_ORIGINS = frozenset(
         "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000",
     ).split(",") if origin.strip()
 )
+
+# Signs session tokens: at least 32 random characters, the same for every API replica.
+# Changing it signs everyone out.
+AUTH_JWT_SECRET = os.getenv("AUTH_JWT_SECRET", "")
+AUTH_TOKEN_TTL_HOURS = float(os.getenv("AUTH_TOKEN_TTL_HOURS", "12"))
