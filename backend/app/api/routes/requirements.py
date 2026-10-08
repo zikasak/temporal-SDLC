@@ -5,6 +5,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.api.downloads import session_document_download
 from app.api.errors import http_error
+from app.api.routes.github import RepositoryInput
+from app.github.service import resolve_repository_selection
 from app.requirements.service import (
     finalize_session,
     fork_session,
@@ -16,6 +18,10 @@ from app.requirements.service import (
 
 router = APIRouter(prefix="/requirements/sessions")
 SESSION_ID_PATTERN = re.compile(r"requirements-session-[0-9a-f]{32}")
+
+
+class CreateBody(BaseModel):
+    repository: RepositoryInput | None = None
 
 
 class MessageBody(BaseModel):
@@ -41,9 +47,12 @@ def _check_session_id(session_id: str) -> None:
 
 
 @router.post("", status_code=201)
-async def create_session():
+async def create_session(body: CreateBody | None = None):
     try:
-        session_id = await start_session()
+        repository = await resolve_repository_selection(
+            body.repository.full_name, body.repository.branch,
+        ) if body and body.repository else None
+        session_id = await start_session(repository=repository)
     except Exception as exc:
         raise http_error(exc) from exc
     return {"session_id": session_id}

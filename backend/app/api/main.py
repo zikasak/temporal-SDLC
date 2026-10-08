@@ -6,9 +6,10 @@ from contextlib import asynccontextmanager, suppress
 import psycopg
 from fastapi import FastAPI, Request
 
-from app.api.routes import api_design, hello, llm_requests, requirements, workflows
+from app.api.routes import api_design, github, hello, llm_requests, requirements, workflows
 from app.documents import cleanup_expired_documents, ensure_document_schema
 from app.logging_setup import configure_logging
+from app.github.storage import ensure_schema as ensure_github_schema
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ async def _cleanup_loop() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await ensure_document_schema()
+    await ensure_github_schema()
     cleanup_task = asyncio.create_task(_cleanup_loop())
     logger.info("API started")
     try:
@@ -43,6 +45,7 @@ app.include_router(llm_requests.router)
 app.include_router(requirements.router)
 app.include_router(api_design.router)
 app.include_router(workflows.router)
+app.include_router(github.router)
 
 
 @app.middleware("http")

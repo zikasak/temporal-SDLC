@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import Markdown from "react-markdown";
 import { errorMessage, failure, readBody } from "./api";
 import ForkButton from "./ForkButton";
+import { RepositorySummary } from "./RepositoryPicker";
+import { repositorySelection, type RepositorySelection } from "./github";
 import { markdownComponents, remarkPlugins } from "./markdown";
 
 type SessionStatus = "interviewing" | "turn_running" | "finalizing" | "completed" | "failed";
@@ -209,6 +211,7 @@ type Session = {
   verification_error: string | null;
   repairs: RepairRound[];
   forked_from: { session_id: string; message_index: number } | null;
+  repository: RepositorySelection | null;
 };
 
 const sessionStatuses: SessionStatus[] = [
@@ -277,6 +280,7 @@ function sessionRecord(value: unknown): Session {
       : null;
   return {
     session_id: value.session_id,
+    repository: repositorySelection(value.repository),
     source_session_id:
       typeof value.source_session_id === "string" ? value.source_session_id : "",
     status: value.status as SessionStatus,
@@ -670,6 +674,8 @@ export default function ApiDesign() {
               {session && !error && statusLabels[session.status]}
             </span>
           </div>
+
+          <RepositorySummary repository={session?.repository ?? null} />
 
           {sessionId && (
             <p className="request-id">

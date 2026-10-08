@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import Markdown from "react-markdown";
 import { errorMessage, readBody } from "./api";
 import ForkButton from "./ForkButton";
+import RepositoryPicker, { RepositorySummary } from "./RepositoryPicker";
+import { repositorySelection, selectionInput, type RepositorySelection } from "./github";
 import { markdownComponents, remarkPlugins } from "./markdown";
 
 type RequestStatus =
@@ -37,6 +39,7 @@ type RequestRecord = {
   messages: ConversationMessage[];
   parent_request_id: string | null;
   generated_documents: GeneratedDocument[];
+  repository: RepositorySelection | null;
 };
 
 type Submission = {
@@ -46,12 +49,13 @@ type Submission = {
   fallbackRecord: RequestRecord | null;
   selectedFile: File | null;
   forkAfterIndex: number | null;
+  repository: RepositorySelection | null;
 };
 
 type ViewState =
   | { kind: "idle" }
   | { kind: "loading"; requestId: string }
-  | { kind: "submitting"; messages: ConversationMessage[] }
+  | { kind: "submitting"; messages: ConversationMessage[]; repository: RepositorySelection | null }
   | { kind: "request"; record: RequestRecord }
   | {
       kind: "error";
@@ -154,6 +158,7 @@ function requestRecord(value: unknown): RequestRecord {
       "error" in value && typeof value.error === "string" ? value.error : null,
     messages: messages as ConversationMessage[],
     generated_documents: generatedDocuments as GeneratedDocument[],
+    repository: repositorySelection("repository" in value ? value.repository : null),
     parent_request_id:
       "parent_request_id" in value && typeof value.parent_request_id === "string"
         ? value.parent_request_id
@@ -171,6 +176,7 @@ export default function App() {
   const [message, setMessage] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [fileError, setFileError] = useState("");
+  const [repositoryChoice, setRepositoryChoice] = useState<RepositorySelection | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const conversation = useRef<HTMLDivElement>(null);
   const [requestId, setRequestId] = useState(requestIdFromUrl);
@@ -237,6 +243,7 @@ export default function App() {
     fallbackRecord: RequestRecord | null,
     selectedFile: File | null,
     forkAfterIndex: number | null,
+    repository: RepositorySelection | null = parentRequestId ? fallbackRecord?.repository ?? null : repositoryChoice,
   ) {
     const attachment: AttachmentMetadata | undefined = selectedFile
       ? {
@@ -250,7 +257,7 @@ export default function App() {
       ...priorMessages,
       { role: "user", content, ...(attachment ? { attachment } : {}) },
     ];
-    setView({ kind: "submitting", messages: pendingMessages });
+    setView({ kind: "submitting", messages: pendingMessages, repository });
 
     try {
       const payload = selectedFile ? new FormData() : null;
@@ -259,6 +266,7 @@ export default function App() {
         if (parentRequestId) payload.append("parent_request_id", parentRequestId);
         if (forkAfterIndex !== null) payload.append("fork_after", String(forkAfterIndex));
         payload.append("file", selectedFile);
+        if (!parentRequestId && repository) payload.append("repository", JSON.stringify(selectionInput(repository)));
       }
       const response = await fetch("/api/llm/requests", {
         method: "POST",
@@ -269,6 +277,7 @@ export default function App() {
             message: content,
             ...(parentRequestId ? { parent_request_id: parentRequestId } : {}),
             ...(forkAfterIndex !== null ? { fork_after: forkAfterIndex } : {}),
+            ...(!parentRequestId && repository ? { repository: selectionInput(repository) } : {}),
           }),
       });
       const body = await readBody(response);
@@ -299,6 +308,7 @@ export default function App() {
           result: null,
           error: null,
           messages: pendingMessages,
+          repository,
           parent_request_id: parentRequestId,
           generated_documents:
             forkAfterIndex === null ? fallbackRecord?.generated_documents ?? [] : [],
@@ -315,7 +325,7 @@ export default function App() {
               ? error.message
               : "Could not submit the message.",
         record: fallbackRecord,
-        submission: { content, parentRequestId, priorMessages, fallbackRecord, selectedFile, forkAfterIndex },
+        submission: { content, parentRequestId, priorMessages, fallbackRecord, selectedFile, forkAfterIndex, repository },
       });
     }
   }
@@ -323,7 +333,7 @@ export default function App() {
   function submitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = message.trim();
-    if (!trimmed || fileError) return;
+    if (!trimmed || fileError || (!visibleRecord(view) && repositoryChoice && !repositoryChoice.branch)) return;
     const record = visibleRecord(view);
     if (record && forkAfter !== null) {
       void sendMessage(
@@ -345,7 +355,7 @@ export default function App() {
     }
     // Forking after your own message answers it again in a new branch.
     const kept = record.messages.slice(0, index + 1);
-    setView({ kind: "submitting", messages: kept });
+    setView({ kind: "submitting", messages: kept, repository: record.repository });
     try {
       const response = await fetch(
         `/api/llm/requests/${encodeURIComponent(record.request_id)}/fork`,
@@ -378,6 +388,7 @@ export default function App() {
           result: null,
           error: null,
           messages: kept,
+          repository: record.repository,
           parent_request_id: record.request_id,
           generated_documents: [],
         },
@@ -397,7 +408,7 @@ export default function App() {
     if (!record || record.status === "completed" || !record.messages.length) return;
     const pending = record.messages.at(-1);
     if (pending?.role !== "user") return;
-    setView({ kind: "submitting", messages: record.messages });
+    setView({ kind: "submitting", messages: record.messages, repository: record.repository });
     try {
       const response = await fetch(
         `/api/llm/requests/${encodeURIComponent(record.request_id)}/retry`,
@@ -446,6 +457,7 @@ export default function App() {
   }
 
   function startNewConversation() {
+    setRepositoryChoice(null);
     setMessage("");
     setForkAfter(null);
     setFile(null);
@@ -532,6 +544,7 @@ export default function App() {
           </div>
 
           <form className="message-form" onSubmit={submitMessage}>
+            {!record && !requestId && <RepositoryPicker value={repositoryChoice} onChange={setRepositoryChoice} disabled={!canCompose} />}
             <label htmlFor="message">{record ? "Reply" : "Message"}</label>
             <textarea
               id="message"
@@ -596,7 +609,7 @@ export default function App() {
             <button
               className="run-button"
               type="submit"
-              disabled={!canCompose || !message.trim() || Boolean(fileError)}
+              disabled={!canCompose || !message.trim() || Boolean(fileError) || (!record && Boolean(repositoryChoice && !repositoryChoice.branch))}
             >
               <span>
                 {view.kind === "submitting"
@@ -659,6 +672,9 @@ export default function App() {
               {status === "timed_out" && "Timed out"}
             </span>
           </div>
+
+          <RepositorySummary repository={view.kind === "submitting" ? view.repository :
+            record?.repository ?? (view.kind === "error" ? view.submission?.repository ?? null : null)} />
 
           {displayedRequestId && (
             <p className="request-id">
@@ -779,12 +795,14 @@ export default function App() {
                     const attempt = view.submission!;
                     void sendMessage(
                       attempt.content, attempt.parentRequestId, attempt.priorMessages,
-                      attempt.fallbackRecord, attempt.selectedFile, attempt.forkAfterIndex,
+                      attempt.fallbackRecord, attempt.selectedFile, attempt.forkAfterIndex, attempt.repository,
                     );
                   }}>Retry this message</button>
                 ) : canRetry && (
                   <button type="button" onClick={retryMessage}>Retry this message</button>
                 )}
+                {view.submission && !view.submission.parentRequestId && <button type="button"
+                  onClick={() => setView({ kind: "idle" })}>Change message or repository</button>}
               </div>
             )}
 

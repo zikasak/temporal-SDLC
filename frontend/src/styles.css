@@ -46,12 +46,14 @@ button,
 code,
 pre,
 input,
+select,
 textarea {
   font: inherit;
 }
 
 button:focus-visible,
 input:focus-visible,
+select:focus-visible,
 textarea:focus-visible {
   outline: 3px solid #5b9d7e;
   outline-offset: 3px;
@@ -1088,6 +1090,7 @@ h2 {
 
 .mode-switch {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   width: min(1120px, calc(100% - 64px));
   margin: 0 auto;
@@ -1487,6 +1490,172 @@ h2 {
 
 @media (max-width: 420px) {
   .workflows-panel {
+    padding: 22px;
+  }
+}
+
+.github-settings {
+  max-width: 760px;
+  padding: 28px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+}
+
+.github-connection-header,
+.repository-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.github-connection-header {
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+
+.github-account strong {
+  font-size: 1.2rem;
+}
+
+.github-account p,
+.github-boundary {
+  max-width: 65ch;
+  margin: 8px 0 16px;
+  color: var(--muted);
+  font-size: 0.87rem;
+  line-height: 1.6;
+}
+
+.github-token-form {
+  padding-top: 22px;
+  border-top: 1px solid var(--line);
+}
+
+.github-token-form input,
+.repository-picker select {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--ink);
+  background: #fff;
+  caret-color: var(--green);
+}
+
+.github-token-form input:disabled,
+.repository-picker select:disabled {
+  color: var(--muted);
+  background: #eceee9;
+  cursor: not-allowed;
+}
+
+.github-token-link,
+.connector-error a,
+.repository-summary a {
+  color: var(--green-dark);
+  text-underline-offset: 3px;
+}
+
+.github-token-link {
+  font-size: 0.84rem;
+}
+
+.field-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.55;
+}
+
+.repository-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  margin: 18px 0;
+  padding: 0;
+  border: 0;
+}
+
+.message-form .repository-picker {
+  margin: 0 0 8px;
+}
+
+.repository-picker legend,
+.repository-picker label {
+  font-size: 0.85rem;
+  font-weight: 650;
+}
+
+.repository-picker legend {
+  margin-bottom: 10px;
+}
+
+.repository-picker legend span {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.repository-picker select,
+.repository-actions button {
+  max-width: 100%;
+  font-size: 0.82rem;
+}
+
+.connector-error,
+.connector-notice {
+  margin: 16px 0 0;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.repository-picker .connector-error {
+  margin-top: 0;
+}
+
+.connector-error,
+.disconnect-button {
+  color: var(--red);
+}
+
+.connector-notice {
+  color: var(--green-dark);
+}
+
+.github-boundary {
+  margin: 26px 0 0;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.repository-summary {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px 10px;
+  margin: 16px 0;
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
+}
+
+.repository-branch {
+  color: var(--muted);
+}
+
+.repository-summary small {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+@media (max-width: 420px) {
+  .github-settings {
     padding: 22px;
   }
 }

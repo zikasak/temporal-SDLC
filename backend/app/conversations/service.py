@@ -23,6 +23,8 @@ from app.documents import (
     touch_documents,
     touch_generated_documents,
 )
+from app.github.models import RepositorySelection
+from app.github.errors import GitHubError
 from app.temporal.client import connect_temporal
 from app.temporal.sessions import InvalidForkPoint, fork_messages
 
@@ -36,12 +38,15 @@ async def start_llm_request(
     parent_request_id: str | None = None,
     attachment: AttachmentMetadata | None = None,
     fork_after: int | None = None,
+    repository: RepositorySelection | None = None,
 ) -> str:
     """Start a conversation, reply to a completed request, or, with `fork_after`,
     reply to an earlier answer in the parent's conversation as a new branch."""
     request_id = _new_request_id()
     if not parent_request_id:
-        return await _start(request_id, [], message, attachment, None, request_id)
+        return await _start(request_id, [], message, attachment, None, request_id, repository)
+    if repository is not None:
+        raise GitHubError(422, "Repository selection is inherited and cannot be changed.")
     parent = await get_llm_request(parent_request_id)
     if fork_after is None:
         if parent["status"] != "completed" or not parent["messages"]:
@@ -49,7 +54,7 @@ async def start_llm_request(
                 "Only completed requests with conversation history can be continued."
             )
         return await _start(request_id, parent["messages"], message, attachment,
-                            parent_request_id, parent["session_id"])
+                            parent_request_id, parent["session_id"], parent.get("repository"))
     prior = fork_messages(parent["messages"], fork_after)
     if prior[-1]["role"] != "assistant":
         raise InvalidForkPoint(
@@ -57,7 +62,7 @@ async def start_llm_request(
             "message to have it answered again."
         )
     return await _start(request_id, prior, message, attachment, parent_request_id,
-                        await _fork_session(parent, fork_after, request_id))
+                        await _fork_session(parent, fork_after, request_id), parent.get("repository"))
 
 
 async def fork_llm_request(request_id: str, message_index: int) -> str:
@@ -72,7 +77,7 @@ async def fork_llm_request(request_id: str, message_index: int) -> str:
     new_request_id = _new_request_id()
     session_id = await _fork_session(source, message_index - 1, new_request_id)
     return await _start(new_request_id, kept, pending["content"], pending.get("attachment"),
-                        request_id, session_id)
+                        request_id, session_id, source.get("repository"))
 
 
 async def retry_llm_request(request_id: str) -> str:
@@ -86,7 +91,7 @@ async def retry_llm_request(request_id: str) -> str:
     new_request_id = _new_request_id()
     return await _start(new_request_id, previous["messages"][:-1], pending["content"],
                         pending.get("attachment"), previous["parent_request_id"],
-                        previous["session_id"])
+                        previous["session_id"], previous.get("repository"))
 
 
 def _new_request_id() -> str:
@@ -131,6 +136,7 @@ async def _start(
     attachment: AttachmentMetadata | None,
     parent_request_id: str | None,
     session_id: str,
+    repository: RepositorySelection | None = None,
 ) -> str:
     user_message: ConversationMessage = {"role": "user", "content": message}
     if attachment:
@@ -161,7 +167,7 @@ async def _start(
         task_queue=TASK_QUEUE,
         run_timeout=timedelta(minutes=8),
         memo={"messages": messages, "parent_request_id": parent_request_id or "",
-              "session_id": session_id},
+              "session_id": session_id, "repository": repository},
     )
     logger.info("Started LLM request %s (session %s, parent %s, attachment %s)",
                 request_id, session_id, parent_request_id,
@@ -196,6 +202,7 @@ async def get_llm_request(request_id: str) -> LLMRequestRecord:
     ) or None
     session_id = await _session_id_for_request(client, request_id, description)
     generated_documents = await list_generated_documents(session_id)
+    repository = await description.memo_value("repository", None)
 
     if status == WorkflowExecutionStatus.COMPLETED:
         result: str = await handle.result()
@@ -210,6 +217,7 @@ async def get_llm_request(request_id: str) -> LLMRequestRecord:
             "parent_request_id": parent_request_id,
             "session_id": session_id,
             "generated_documents": generated_documents,
+            "repository": repository,
         }
 
     errors = {
@@ -237,4 +245,5 @@ async def get_llm_request(request_id: str) -> LLMRequestRecord:
         "parent_request_id": parent_request_id,
         "session_id": session_id,
         "generated_documents": generated_documents,
+        "repository": repository,
     }

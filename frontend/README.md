@@ -2,6 +2,12 @@
 
 This page starts a Temporal workflow for each message, returns its workflow ID immediately, and retrieves the answer by that ID. Replies include the conversation in the LLM call. A message can include one PDF, DOCX, or TXT file. The original is kept on disk, extracted text is kept in PostgreSQL, and the workflow carries only its document ID. The LLM receives a `document://` link and can read or search the parsed text with tools. It can also create, edit, and delete its own `.txt` and `.md` documents in the conversation. The latest request ID restores the conversation, attachments, and generated document links while Temporal retains it. The existing greeting workflow and `POST /start` endpoint are still available.
 
+## GitHub connection and session repositories
+
+The **GitHub** tab configures one shared personal access token, encrypted in PostgreSQL using a stable backend `GITHUB_TOKEN_ENCRYPTION_KEY`. New Chat and Requirements sessions can optionally choose an accessible repository and branch. Replies, retries, forks, and API-design sessions derived from Requirements inherit that fixed selection. Sessions without repositories still work.
+
+This is configuration/metadata only: agents do not clone, read, edit, or push repository code yet. There is no application authentication; keep the shared connector local or behind trusted internal access controls. See [GitHub setup, permissions, security, and API details](../docs/github-connector.md).
+
 ## Start locally
 
 In Zed, run `debugger: start` and select **Full stack (API + workers + frontend)**.

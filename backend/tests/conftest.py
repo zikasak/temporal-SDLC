@@ -5,6 +5,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import httpx
 import pytest
 
 # Set before application imports/.env loading. Tracing transport tests opt in
@@ -127,3 +128,33 @@ def created_container(tmp_path, monkeypatch):
         return created
 
     return run
+
+
+@pytest.fixture
+def repository_selection():
+    return {"provider": "github", "repository_id": 42, "full_name": "octocat/private-project",
+            "html_url": "https://github.com/octocat/private-project", "private": True,
+            "branch": "feature/one"}
+
+
+@pytest.fixture
+def github_http(monkeypatch):
+    """Mock only GitHub's wire responses, not the connector's behavior."""
+    from app.github import client
+
+    responses = {}
+    requests = []
+    async_client = httpx.AsyncClient
+
+    def respond(request):
+        requests.append(request)
+        response = responses[request.url.path]
+        if isinstance(response, Exception):
+            raise response
+        return response(request) if callable(response) else response
+
+    def create_client(**kwargs):
+        return async_client(transport=httpx.MockTransport(respond), **kwargs)
+
+    monkeypatch.setattr(client.httpx, "AsyncClient", create_client)
+    return responses, requests

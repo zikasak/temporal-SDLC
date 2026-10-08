@@ -1,5 +1,7 @@
 from typing import Literal, NotRequired, TypedDict
 
+from app.github.models import RepositorySelection
+
 
 class AttachmentMetadata(TypedDict):
     document_id: str
@@ -23,6 +25,7 @@ class LLMRequestRecord(TypedDict):
     parent_request_id: str | None
     session_id: str
     generated_documents: list[dict[str, object]]
+    repository: RepositorySelection | None
 
 
 class ForkOrigin(TypedDict):

@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, NotRequired, TypedDict
 
 from app.conversations.models import ConversationMessage, ForkOrigin
+from app.github.models import RepositorySelection
 
 Category = Literal["functional", "non_functional", "technical"]
 Priority = Literal["must", "should", "could"]
@@ -34,3 +35,4 @@ class RequirementsState:
     document: dict[str, Any] | None = None
     error: str | None = None
     forked_from: ForkOrigin | None = None
+    repository: RepositorySelection | None = None

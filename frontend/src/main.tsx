@@ -3,16 +3,18 @@ import ApiDesign from "./ApiDesign";
 import App from "./App";
 import Requirements from "./Requirements";
 import Workflows from "./Workflows";
+import GitHubSettings from "./GitHubSettings";
 import "./styles.css";
 import React, { useState } from "react";
 
-type Mode = "chat" | "requirements" | "api-design" | "workflows";
+type Mode = "chat" | "requirements" | "api-design" | "workflows" | "github";
 
 const modes: [Mode, string][] = [
   ["chat", "Chat"],
   ["requirements", "Requirements"],
   ["api-design", "API design"],
   ["workflows", "Workflows"],
+  ["github", "GitHub"],
 ];
 
 function modeFromUrl(): Mode {
@@ -48,6 +50,7 @@ function Shell() {
       {mode === "requirements" && <Requirements />}
       {mode === "api-design" && <ApiDesign />}
       {mode === "workflows" && <Workflows />}
+      {mode === "github" && <GitHubSettings />}
     </>
   );
 }

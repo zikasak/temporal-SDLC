@@ -1,3 +1,4 @@
+import json
 import re
 from urllib.parse import quote
 
@@ -8,6 +9,8 @@ from starlette.datastructures import UploadFile
 
 from app.api.errors import http_error
 from app.api.routes.requirements import ForkBody
+from app.api.routes.github import RepositoryInput
+from app.github.service import resolve_repository_selection
 from app.conversations.errors import ConversationNotReady, ConversationTooLarge
 from app.conversations.service import (
     fork_llm_request,
@@ -38,6 +41,7 @@ class LLMRequestBody(BaseModel):
     )
     # Reply to this answer in the parent's conversation, as a new branch.
     fork_after: int | None = Field(default=None, ge=0)
+    repository: RepositoryInput | None = None
 
     @field_validator("message")
     @classmethod
@@ -51,6 +55,8 @@ class LLMRequestBody(BaseModel):
     def require_parent_for_fork(self) -> "LLMRequestBody":
         if self.fork_after is not None and not self.parent_request_id:
             raise ValueError("fork_after needs a parent_request_id")
+        if self.parent_request_id and "repository" in self.model_fields_set:
+            raise ValueError("Repository selection is inherited and cannot be changed")
         return self
 
 
@@ -81,7 +87,8 @@ async def _request_body(request: Request) -> tuple[LLMRequestBody, UploadFile | 
             body = LLMRequestBody.model_validate(
                 {"message": form.get("message"),
                  "parent_request_id": form.get("parent_request_id") or None,
-                 "fork_after": form.get("fork_after") or None}
+                 "fork_after": form.get("fork_after") or None,
+                 **({"repository": json.loads(str(form["repository"]))} if "repository" in form else {})}
             )
             return body, file
     except (ValidationError, ValueError) as exc:
@@ -104,6 +111,9 @@ async def _request_body(request: Request) -> tuple[LLMRequestBody, UploadFile | 
                             "message": {"type": "string", "maxLength": 10000},
                             "parent_request_id": {"type": "string"},
                             "fork_after": {"type": "integer", "minimum": 0},
+                            "repository": {"type": "object", "properties": {
+                                "full_name": {"type": "string"}, "branch": {"type": "string"},
+                            }, "required": ["full_name", "branch"]},
                         },
                     }
                 },
@@ -116,6 +126,7 @@ async def _request_body(request: Request) -> tuple[LLMRequestBody, UploadFile | 
                             "parent_request_id": {"type": "string"},
                             "fork_after": {"type": "integer", "minimum": 0},
                             "file": {"type": "string", "format": "binary"},
+                            "repository": {"type": "string", "description": "JSON object with full_name and branch; standalone requests only"},
                         },
                     }
                 },
@@ -127,10 +138,13 @@ async def submit_llm_request(request: Request):
     body, upload = await _request_body(request)
     attachment = None
     try:
+        repository = await resolve_repository_selection(
+            body.repository.full_name, body.repository.branch,
+        ) if body.repository else None
         if upload:
             attachment = await store_original(upload)
         request_id = await start_llm_request(
-            body.message, body.parent_request_id, attachment, body.fork_after
+            body.message, body.parent_request_id, attachment, body.fork_after, repository
         )
     except Exception as exc:
         if attachment and isinstance(

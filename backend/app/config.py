@@ -63,3 +63,12 @@ PI_CREDENTIALS_DIR = Path(
 # files instead of being embedded whole in every model invocation.
 CONTRACT_EMBED_CHARS = int(os.getenv("CONTRACT_EMBED_CHARS", "32000"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+# Shared GitHub connector: persist the encryption key separately from the database.
+GITHUB_TOKEN_ENCRYPTION_KEY = os.getenv("GITHUB_TOKEN_ENCRYPTION_KEY", "")
+GITHUB_ALLOWED_ORIGINS = frozenset(
+    origin.strip() for origin in os.getenv(
+        "GITHUB_ALLOWED_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000",
+    ).split(",") if origin.strip()
+)

@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 
 from app.config import TASK_QUEUE
+from app.github.models import RepositorySelection
 from app.requirements.models import RequirementsState
 from app.requirements.prompt import OPENING_MESSAGE
 from app.temporal.client import connect_temporal
@@ -14,7 +15,13 @@ from app.temporal.sessions import fork_messages, start_update, state_at_message
 logger = logging.getLogger(__name__)
 
 
-async def start_session(state: RequirementsState | None = None) -> str:
+async def start_session(
+    state: RequirementsState | None = None, *, repository: RepositorySelection | None = None,
+) -> str:
+    if state is None and repository is not None:
+        state = RequirementsState(
+            messages=[{"role": "assistant", "content": OPENING_MESSAGE}], repository=repository,
+        )
     session_id = f"requirements-session-{uuid.uuid4().hex}"
     client = await connect_temporal()
     handle = await client.start_workflow(
@@ -44,6 +51,7 @@ async def fork_session(session_id: str, message_index: int) -> str:
     fork_id = await start_session(RequirementsState(
         messages=messages,
         requirements=requirements,
+        repository=source.repository,
         forked_from={"session_id": session_id, "message_index": message_index},
     ))
     logger.info("Forked requirements session %s after message %d as %s",

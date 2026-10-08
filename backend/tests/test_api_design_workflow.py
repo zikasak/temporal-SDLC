@@ -192,13 +192,42 @@ async def worker(env):
         yield activities
 
 
-async def start(env):
+async def start(env, repository=None):
     state = ApiDesignState(source_session_id="requirements-session-" + "0" * 32,
-                           requirements_document="# Requirements", api=empty_api())
+                           requirements_document="# Requirements", api=empty_api(), repository=repository)
     return await env.client.start_workflow(
         ApiDesignWorkflow.run, state,
         id=f"api-design-session-{uuid.uuid4().hex}", task_queue=TASK_QUEUE,
     )
+
+
+@pytest.mark.parametrize("linked", [False, True])
+async def test_new_api_design_inherits_the_requirements_repository(env, worker, monkeypatch, repository_selection, linked):
+    from app.requirements.models import RequirementsState
+
+    selected = repository_selection if linked else None
+    source = RequirementsState(status="completed", document={"document_id": "0" * 32}, repository=selected)
+
+    async def requirements_state(session_id):
+        return source
+
+    async def document(*args):
+        return {"parsed_text": "# Requirements"}
+
+    async def connect():
+        return env.client
+
+    monkeypatch.setattr(service.requirements_service, "get_state", requirements_state)
+    monkeypatch.setattr(service, "get_generated_document", document)
+    monkeypatch.setattr(service, "connect_temporal", connect)
+    monkeypatch.setattr(service, "TASK_QUEUE", TASK_QUEUE)
+    handle = env.client.get_workflow_handle(await service.start_session("requirements-session-" + "0" * 32))
+    try:
+        state = await wait_for_status(handle, "interviewing")
+        assert state.repository == selected
+        assert (await service.get_session(handle.id))["repository"] == selected
+    finally:
+        await handle.terminate()
 
 
 async def wait_for_status(handle, status: str) -> ApiDesignState:
@@ -369,10 +398,10 @@ async def test_pre_repair_history_replays_without_diagnosis(env, worker, monkeyp
 
 
 @pytest.mark.parametrize('failed', [{'implementation'}, {'tests'}, {'implementation', 'tests'}])
-async def test_failed_coding_branches_preserve_other_artifacts(env, worker, failed, monkeypatch):
+async def test_failed_coding_branches_preserve_other_artifacts(env, worker, failed, monkeypatch, repository_selection):
     worker.fail_implementation = 'implementation' in failed
     worker.fail_tests = 'tests' in failed
-    handle = await start(env)
+    handle = await start(env, repository_selection)
     await wait_for_status(handle, "interviewing")
     await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
     await handle.execute_update(ApiDesignWorkflow.finalize)
@@ -441,6 +470,7 @@ async def test_failed_coding_branches_preserve_other_artifacts(env, worker, fail
         assert getattr(state, f'{branch}_error') is None
         assert not getattr(worker, f'{sibling}_started').is_set()
         assert state.document == DOCUMENT and state.code == CODE
+        assert state.repository == repository_selection
         assert worker.documents == [handle.id]
     assert state.verification_status == 'completed'
     assert worker.verification_started.is_set()
@@ -451,6 +481,7 @@ async def test_failed_coding_branches_preserve_other_artifacts(env, worker, fail
     try:
         fork_state = await fork.query(ApiDesignWorkflow.get_state)
         assert fork_state.api['endpoints'] == []
+        assert fork_state.repository == repository_selection
     finally:
         await fork.terminate()
 
@@ -633,7 +664,7 @@ async def test_idle_session_with_problems_fails(env, worker):
     assert state.status == "failed" and worker.documents == []
 
 
-async def test_fork_keeps_api_as_it_was_at_the_message(env, worker, monkeypatch):
+async def test_fork_keeps_api_as_it_was_at_the_message(env, worker, monkeypatch, repository_selection):
     async def connect():
         return env.client
 
@@ -641,7 +672,7 @@ async def test_fork_keeps_api_as_it_was_at_the_message(env, worker, monkeypatch)
     monkeypatch.setattr(sessions, "connect_temporal", connect)
     monkeypatch.setattr(service, "TASK_QUEUE", TASK_QUEUE)
     worker.draft_endpoints = [endpoint("/rooms")]
-    source = await start(env)
+    source = await start(env, repository_selection)
     await wait_for_status(source, "interviewing")
     await source.execute_update(ApiDesignWorkflow.send_message, "/bookings")
     # draft, /bookings, Recorded.
@@ -651,11 +682,16 @@ async def test_fork_keeps_api_as_it_was_at_the_message(env, worker, monkeypatch)
     assert [item["path"] for item in state.api["endpoints"]] == ["/rooms"]
     assert state.requirements_document == "# Requirements"
     assert state.forked_from == {"session_id": source.id, "message_index": 0}
+    assert (await service.get_session(fork.id))["repository"] == repository_selection
 
     # Forking after a user message answers it again from the API it had then.
     regenerated = env.client.get_workflow_handle(await service.fork_session(source.id, 1))
     state = await wait_for_status(regenerated, "interviewing")
     assert len(state.messages) == 3
     assert [item["path"] for item in state.api["endpoints"]] == ["/rooms", "/bookings"]
+    assert state.repository == repository_selection
+    nested = env.client.get_workflow_handle(await service.fork_session(fork.id, 0))
+    assert (await nested.query(ApiDesignWorkflow.get_state)).repository == repository_selection
+    await nested.terminate()
     for handle in (source, fork, regenerated):
         await handle.terminate()

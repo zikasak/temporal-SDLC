@@ -11,11 +11,15 @@ from app.conversations.errors import (
 )
 from app.documents import DocumentNotFound, DocumentParseError, DocumentTooLarge
 from app.temporal.sessions import InvalidForkPoint, SessionBusy
+from app.github.errors import GitHubError
 
 logger = logging.getLogger(__name__)
 
 
 def http_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, GitHubError):
+        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after is not None else None
+        return HTTPException(status_code=exc.status_code, detail=str(exc), headers=headers)
     if isinstance(exc, (ConversationNotReady, ConversationNotRetryable, DocumentNotFound,
                         SessionBusy)):
         return _client_error(409, exc)

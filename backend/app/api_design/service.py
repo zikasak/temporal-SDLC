@@ -39,6 +39,7 @@ async def start_session(requirements_session_id: str) -> str:
         source_session_id=requirements_session_id,
         requirements=source.requirements,
         requirements_document=requirements_document,
+        repository=source.repository,
     )
     return await _start(state)
 
@@ -74,6 +75,7 @@ async def fork_session(session_id: str, message_index: int) -> str:
         requirements_document=source.requirements_document,
         messages=messages,
         api=api,
+        repository=source.repository,
         forked_from={"session_id": session_id, "message_index": message_index},
     ))
     logger.info("Forked API design session %s after message %d as %s",

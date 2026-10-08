@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import Markdown from "react-markdown";
 import { errorMessage, failure, readBody } from "./api";
 import ForkButton from "./ForkButton";
+import RepositoryPicker, { RepositorySummary } from "./RepositoryPicker";
+import { repositorySelection, selectionInput, type RepositorySelection } from "./github";
 import { markdownComponents, remarkPlugins } from "./markdown";
 
 type SessionStatus = "interviewing" | "turn_running" | "finalizing" | "completed" | "failed";
@@ -31,6 +33,7 @@ type Session = {
   document: RequirementsDocument | null;
   error: string | null;
   forked_from: { session_id: string; message_index: number } | null;
+  repository: RepositorySelection | null;
 };
 
 const sessionStatuses: SessionStatus[] = [
@@ -114,6 +117,7 @@ function sessionRecord(value: unknown): Session {
     document,
     error: "error" in value && typeof value.error === "string" ? value.error : null,
     forked_from: forkOrigin(value),
+    repository: repositorySelection("repository" in value ? value.repository : null),
   };
 }
 
@@ -138,6 +142,7 @@ export default function Requirements() {
   const [message, setMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [repositoryChoice, setRepositoryChoice] = useState<RepositorySelection | null>(null);
   const conversation = useRef<HTMLDivElement>(null);
   const chatEnd = useRef<HTMLDivElement>(null);
 
@@ -195,11 +200,12 @@ export default function Requirements() {
   }
 
   async function startSession() {
+    if (repositoryChoice && !repositoryChoice.branch) return;
     setSubmitting(true);
     setError("");
     setSession(null);
     try {
-      const body = await post("");
+      const body = await post("", repositoryChoice ? { repository: selectionInput(repositoryChoice) } : undefined);
       if (
         typeof body !== "object" ||
         body === null ||
@@ -372,15 +378,18 @@ export default function Requirements() {
               </button>
             </form>
           ) : (
-            <button
-              className="run-button"
-              type="button"
-              onClick={startSession}
-              disabled={submitting}
-            >
-              <span>{submitting ? "Starting" : "Start a session"}</span>
-              {submitting && <span className="spinner" aria-hidden="true" />}
-            </button>
+            <>
+              {!sessionId && <RepositoryPicker value={repositoryChoice} onChange={setRepositoryChoice} disabled={submitting} />}
+              <button
+                className="run-button"
+                type="button"
+                onClick={startSession}
+                disabled={submitting || Boolean(repositoryChoice && !repositoryChoice.branch)}
+              >
+                <span>{submitting ? "Starting" : "Start a session"}</span>
+                {submitting && <span className="spinner" aria-hidden="true" />}
+              </button>
+            </>
           )}
 
           {session && (
@@ -389,6 +398,7 @@ export default function Requirements() {
               type="button"
               onClick={() => {
                 setSession(null);
+                setRepositoryChoice(null);
                 setSessionId("");
                 setLookupId("");
                 setMessage("");
@@ -430,6 +440,8 @@ export default function Requirements() {
               {session && !error && statusLabels[session.status]}
             </span>
           </div>
+
+          <RepositorySummary repository={session?.repository ?? (submitting && !session ? repositoryChoice : null)} />
 
           {sessionId && (
             <p className="request-id">

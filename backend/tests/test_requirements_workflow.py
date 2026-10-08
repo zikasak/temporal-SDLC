@@ -99,6 +99,7 @@ async def test_interview_and_finalize(env, worker):
     handle = await start(env)
     state = await handle.query(RequirementsWorkflow.get_state)
     assert state.status == "interviewing" and state.messages[0]["role"] == "assistant"
+    assert state.repository is None
 
     with pytest.raises(WorkflowUpdateFailedError):
         await handle.execute_update(RequirementsWorkflow.finalize)
@@ -181,8 +182,9 @@ def titles(state: RequirementsState) -> list[str]:
     return [item["title"] for item in state.requirements]
 
 
-async def test_fork_keeps_requirements_as_they_were_at_the_message(env, worker, temporal):
-    source = await start(env)
+async def test_fork_keeps_requirements_as_they_were_at_the_message(env, worker, temporal, repository_selection):
+    source = env.client.get_workflow_handle(await service.start_session(repository=repository_selection))
+    assert (await source.query(RequirementsWorkflow.get_state)).repository == repository_selection
     await source.execute_update(RequirementsWorkflow.send_message, "A")
     await source.execute_update(RequirementsWorkflow.send_message, "B")
     # opening, A, Question 1?, B, Question 2?
@@ -192,6 +194,7 @@ async def test_fork_keeps_requirements_as_they_were_at_the_message(env, worker, 
     assert [item["content"] for item in state.messages][1:] == ["A", "Question 1?"]
     assert titles(state) == ["A"] and state.status == "interviewing"
     assert state.forked_from == {"session_id": source.id, "message_index": 2}
+    assert (await service.get_session(fork.id))["repository"] == repository_selection
 
     # Forking after a user message answers it again.
     regenerated = env.client.get_workflow_handle(await service.fork_session(source.id, 3))
@@ -205,7 +208,9 @@ async def test_fork_keeps_requirements_as_they_were_at_the_message(env, worker, 
     assert titles(state) == ["A", "C"]
     for index, expected in [(0, []), (2, ["A"]), (4, ["A", "C"])]:
         nested = env.client.get_workflow_handle(await service.fork_session(fork.id, index))
-        assert titles(await nested.query(RequirementsWorkflow.get_state)) == expected
+        nested_state = await nested.query(RequirementsWorkflow.get_state)
+        assert titles(nested_state) == expected
+        assert nested_state.repository == repository_selection
         await nested.terminate()
 
     with pytest.raises(InvalidForkPoint):
@@ -220,6 +225,7 @@ class ContinuingRequirements:
 
     @workflow.run
     async def run(self, state: RequirementsState) -> None:
+        self.state = state
         state.messages.append({"role": "user", "content": f"Topic {len(state.messages)}"})
         result = await workflow.execute_activity(
             "requirements_turn", args=[state.messages, state.requirements],
@@ -230,8 +236,12 @@ class ContinuingRequirements:
         if len(state.messages) < 5:
             workflow.continue_as_new(state)
 
+    @workflow.query
+    def get_state(self) -> RequirementsState:
+        return self.state
 
-async def test_state_at_message_spans_continue_as_new_runs(env, worker, temporal):
+
+async def test_state_at_message_spans_continue_as_new_runs(env, worker, temporal, repository_selection):
     session_id = f"requirements-session-{uuid.uuid4().hex}"
     async with Worker(
         env.client, task_queue="continuing-test", workflows=[ContinuingRequirements],
@@ -239,9 +249,11 @@ async def test_state_at_message_spans_continue_as_new_runs(env, worker, temporal
     ):
         await env.client.execute_workflow(
             ContinuingRequirements.run,
-            RequirementsState(messages=[{"role": "assistant", "content": "Hello"}]),
+            RequirementsState(messages=[{"role": "assistant", "content": "Hello"}], repository=repository_selection),
             id=session_id, task_queue="continuing-test",
         )
+        state = await env.client.get_workflow_handle(session_id).query("get_state", result_type=RequirementsState)
+        assert state.repository == repository_selection
     messages = [
         {"role": "assistant", "content": "Hello"},
         {"role": "user", "content": "Topic 1"}, {"role": "assistant", "content": "Question 1?"},

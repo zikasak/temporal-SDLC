@@ -7,6 +7,8 @@ langchain-openai
 langchain-google-genai
 claude-agent-sdk==0.2.164
 fastapi
+httpx
+cryptography
 uvicorn
 psycopg[binary]
 python-multipart
