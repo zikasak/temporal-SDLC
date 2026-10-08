@@ -7,6 +7,7 @@ from temporalio.testing import ActivityEnvironment
 
 from app import docker_agents
 from app.implementation import activities
+from app.languages import get_language
 
 
 @pytest.mark.parametrize('previous', [False, True])
@@ -72,7 +73,8 @@ async def test_implementation_publishes_only_successful_images(tmp_path, monkeyp
         expected = {'agent': 'model unavailable', 'build': 'build rejected',
                     'empty': 'did not produce a Dockerfile', 'image_id': 'invalid service image ID'}[failure]
         with pytest.raises(RuntimeError, match=expected) as raised:
-            await environment.run(activities.implement_service, 'session', {'requirements': []})
+            await environment.run(activities.implement_service, 'session',
+                                  {'requirements': [], 'language': 'java'})
         if previous:
             assert json.loads(manifest.read_text()) == old_result
             assert (destination / 'Previous.java').read_text() == 'previous successful service'
@@ -84,7 +86,8 @@ async def test_implementation_publishes_only_successful_images(tmp_path, monkeyp
             assert 'test-secret-key' not in log
             assert 'test-secret-key' not in str(raised.value)
     else:
-        result = await environment.run(activities.implement_service, 'session', {'requirements': []})
+        result = await environment.run(activities.implement_service, 'session',
+                                  {'requirements': [], 'language': 'java'})
         assert json.loads(manifest.read_text()) == result
         assert result['image_id'] == image_id
         assert (Path(result['path']) / 'Service.java').read_text() == 'implemented'
@@ -96,7 +99,16 @@ async def test_implementation_publishes_only_successful_images(tmp_path, monkeyp
 async def test_generated_sources_are_required_before_creating_artifacts(tmp_path, monkeypatch):
     monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
     with pytest.raises(ApplicationError, match='Generated server code is unavailable'):
-        await ActivityEnvironment().run(activities.implement_service, 'session', {})
+        await ActivityEnvironment().run(activities.implement_service, 'session',
+                                        {'language': 'java'})
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_unsupported_language_is_rejected_before_creating_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
+    for context in ({}, {'language': 'cobol'}):
+        with pytest.raises(ApplicationError, match='Unsupported language'):
+            await ActivityEnvironment().run(activities.implement_service, 'session', context)
     assert list(tmp_path.iterdir()) == []
 
 
@@ -127,7 +139,7 @@ async def test_repair_continues_from_the_published_service(tmp_path, monkeypatch
 
     monkeypatch.setattr(docker_agents, 'docker', docker)
     result = await ActivityEnvironment().run(
-        activities.implement_service, 'session', {'requirements': [], 'repair': repair})
+        activities.implement_service, 'session', {'requirements': [], 'language': 'java', 'repair': repair})
     assert sent['service/Service.java'] == 'previous implementation'
     assert 'service/Api.java' not in sent
     assert json.loads(sent['input.json'])['repair'] == repair
@@ -149,7 +161,7 @@ async def test_session_with_a_repository_is_implemented_inside_its_checkout(tmp_
         (checkout / name).write_text(text)
     (checkout / 'mvnw').write_text('#!/bin/sh')
     (checkout / 'mvnw').chmod(0o755)
-    context = {'requirements': [], 'repository': {'full_name': 'octocat/project', 'branch': 'main'}}
+    context = {'requirements': [], 'language': 'java', 'repository': {'full_name': 'octocat/project', 'branch': 'main'}}
     sent = {}
     executable = {}
 
@@ -179,6 +191,9 @@ async def test_session_with_a_repository_is_implemented_inside_its_checkout(tmp_
     assert sent.pop('service/mvnw') == '#!/bin/sh' and executable['agent'] and executable['build']
     # The repository's own code, with the generated contract replacing its sources and
     # filling gaps only; never Git metadata or either kind of tests.
+    # The stack is the registered language's, not the author's choice.
+    assert json.loads(sent.pop('language.json')) == {
+        'name': 'java', 'build_dirs': ['target'], 'instructions': get_language('java').implementation.instructions}
     assert sent == {'service/src/main/Api.java': 'generated contract',
                     'service/src/main/Orders.java': 'existing code',
                     'service/pom.xml': 'project pom', 'service/README.md': 'generated readme'}

@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 from app.api_design.openapi import render_openapi
-from app.codegen.generator import CodegenError, generate_spring_server
+from app.codegen.generator import CodegenError, generate_server
+from app.languages import get_language
 from app.config import OPENAPI_GENERATOR_CMD
 from tests.test_openapi_render import sample_api
 
@@ -22,7 +23,7 @@ async def test_generates_spring_interfaces_and_models(tmp_path):
     target.mkdir(parents=True)
     (target / "stale.txt").write_text("old")
 
-    files = await generate_spring_server(render_openapi(sample_api()), target)
+    files = await generate_server(get_language("java"), render_openapi(sample_api()), target)
 
     sources = target / "src" / "main" / "java" / "com" / "example"
     assert files > 0
@@ -42,5 +43,5 @@ async def test_generates_spring_interfaces_and_models(tmp_path):
 
 async def test_invalid_spec_raises(tmp_path):
     with pytest.raises(CodegenError):
-        await generate_spring_server("not: [an openapi document", tmp_path / "server")
+        await generate_server(get_language("java"), "not: [an openapi document", tmp_path / "server")
     assert not (tmp_path / "server").exists()

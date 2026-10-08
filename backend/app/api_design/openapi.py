@@ -33,6 +33,14 @@ def endpoint_key(endpoint: Endpoint) -> str:
     return f"{endpoint['method']} {endpoint['path']}"
 
 
+LANGUAGE_PROBLEM = "The implementation language is not chosen."
+
+
+def design_problems(api: ApiModel, language: str | None) -> list[str]:
+    """What must be settled before the OpenAPI document and its code can be generated."""
+    return [*api_problems(api), *([] if language else [LANGUAGE_PROBLEM])]
+
+
 def api_problems(api: ApiModel) -> list[str]:
     """What must be fixed before the model can become a valid OpenAPI document."""
     problems: list[str] = []

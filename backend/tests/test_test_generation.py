@@ -11,7 +11,10 @@ from app import docker_agents
 from app.api_design.models import empty_api
 from app.api_design.openapi import render_openapi
 from app.requirements.document import render_requirements_markdown
+from app.languages import get_language
 from app.test_generation import activities
+
+TEMPLATE = get_language('java').test_suite.template
 
 
 @pytest.mark.parametrize('failure', [None, 'agent', 'build', 'empty', 'cancel'])
@@ -33,7 +36,8 @@ async def test_contract_only_generation_publishes_compiled_suite(tmp_path, monke
     context = {'requirements': requirements,
                'requirements_document': render_requirements_markdown(
                    requirements, 'Orders are never deleted.'),
-               'api_design': empty_api(), 'implementation': private_source.read_text(),
+               'api_design': empty_api(), 'language': 'java',
+               'implementation': private_source.read_text(),
                'source_path': str(implementation)}
     image_id = 'sha256:' + 'c' * 64
     container_name = None
@@ -62,6 +66,10 @@ async def test_contract_only_generation_publishes_compiled_suite(tmp_path, monke
                                    'requirements_narrative': 'Orders are never deleted.'}
                 assert archive.extractfile('openapi.yaml').read().decode() == (
                     render_openapi(context['api_design']))
+                # The stack is the registered language's, not the test author's choice.
+                assert json.loads(archive.extractfile('language.json').read()) == {
+                    'name': 'java', 'build_dirs': ['target'], 'instructions': get_language('java').test_suite.instructions,
+                    'test_glob': 'src/test/java/**/*Test.java'}
         if args[0] == 'wait' and failure == 'cancel':
             raise asyncio.CancelledError()
         if args[0] == 'inspect':
@@ -70,7 +78,7 @@ async def test_contract_only_generation_publishes_compiled_suite(tmp_path, monke
             return 'Provider rejected test-secret-key: model unavailable'
         if args[0] == 'cp' and args[1].endswith(':/workspace/tests/.'):
             output = Path(args[2])
-            (output / 'pom.xml').write_text((activities.TEMPLATE / 'pom.xml').read_text())
+            (output / 'pom.xml').write_text((TEMPLATE / 'pom.xml').read_text())
             if failure != 'empty':
                 tests = output / 'src/test/java/example'
                 tests.mkdir(parents=True)
@@ -88,8 +96,8 @@ async def test_contract_only_generation_publishes_compiled_suite(tmp_path, monke
             assert (build / 'src/test/java/example/ContractTest.java').is_file()
             assert not (build / 'src/main').exists() and not (build / 'target').exists()
             assert not (build / 'src/test/java/example/linked.java').exists()
-            assert (build / 'Dockerfile').read_text() == (activities.TEMPLATE / 'Dockerfile').read_text()
-            assert (build / 'run-tests.sh').read_text() == (activities.TEMPLATE / 'run-tests.sh').read_text()
+            assert (build / 'Dockerfile').read_text() == (TEMPLATE / 'Dockerfile').read_text()
+            assert (build / 'run-tests.sh').read_text() == (TEMPLATE / 'run-tests.sh').read_text()
             if failure == 'build':
                 raise RuntimeError('test compilation failed')
             Path(args[args.index('--iidfile') + 1]).write_text(image_id)
@@ -102,7 +110,7 @@ async def test_contract_only_generation_publishes_compiled_suite(tmp_path, monke
     environment = ActivityEnvironment()
     if failure:
         expected = {'agent': 'model unavailable', 'build': 'test compilation failed',
-                    'empty': 'did not produce a Maven test suite', 'cancel': None}[failure]
+                    'empty': 'did not produce a test suite', 'cancel': None}[failure]
         exception = asyncio.CancelledError if failure == 'cancel' else RuntimeError
         with pytest.raises(exception, match=expected) as raised:
             await environment.run(activities.generate_service_tests, 'session', context)
@@ -123,13 +131,22 @@ async def test_contract_only_generation_publishes_compiled_suite(tmp_path, monke
 async def test_invalid_session_is_rejected_before_docker(tmp_path, monkeypatch):
     monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
     with pytest.raises(ApplicationError, match='Invalid session ID'):
-        await ActivityEnvironment().run(activities.generate_service_tests, '../escape', {})
+        await ActivityEnvironment().run(activities.generate_service_tests, '../escape',
+                                        {'language': 'java'})
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_unsupported_language_is_rejected_before_docker(tmp_path, monkeypatch):
+    monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
+    for context in ({'api_design': empty_api()}, {'api_design': empty_api(), 'language': 'cobol'}):
+        with pytest.raises(ApplicationError, match='Unsupported language'):
+            await ActivityEnvironment().run(activities.generate_service_tests, 'session', context)
     assert list(tmp_path.iterdir()) == []
 
 
 async def test_repair_continues_from_the_published_suite_with_the_trusted_runner(tmp_path, monkeypatch):
     monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
-    context = {'requirements': [], 'api_design': empty_api(),
+    context = {'requirements': [], 'api_design': empty_api(), 'language': 'java',
                'repair': {'attempt': 1, 'instructions': 'Expect 201.', 'test_failures': []}}
     with pytest.raises(ApplicationError, match='Generated tests are unavailable'):
         await ActivityEnvironment().run(activities.generate_service_tests, 'session', context)
@@ -160,7 +177,7 @@ async def test_repair_continues_from_the_published_suite_with_the_trusted_runner
     result = await ActivityEnvironment().run(activities.generate_service_tests, 'session', context)
     assert sent['tests/src/test/java/OrdersTest.java'] == 'previous test'
     assert sent['tests/pom.xml'] == 'previous pom'
-    assert sent['tests/run-tests.sh'] == (activities.TEMPLATE / 'run-tests.sh').read_text()
+    assert sent['tests/run-tests.sh'] == (TEMPLATE / 'run-tests.sh').read_text()
     assert json.loads(sent['input.json'])['repair'] == context['repair']
     assert (Path(result['path']) / 'src/test/java/OrdersTest.java').read_text() == 'repaired test'
 
@@ -173,7 +190,7 @@ async def test_repository_session_continues_only_the_repositorys_contract_tests(
                        'src/main/Orders.java': 'implementation'}.items():
         (checkout / name).parent.mkdir(parents=True, exist_ok=True)
         (checkout / name).write_text(text)
-    context = {'requirements': [], 'api_design': empty_api(),
+    context = {'requirements': [], 'api_design': empty_api(), 'language': 'java',
                'repository': {'full_name': 'octocat/project', 'branch': 'main'}}
     sent = {}
 
@@ -196,7 +213,7 @@ async def test_repository_session_continues_only_the_repositorys_contract_tests(
     monkeypatch.setattr(docker_agents, 'docker', docker)
     await ActivityEnvironment().run(activities.generate_service_tests, 'session', context)
     assert sent['tests/src/test/java/OrdersTest.java'] == 'existing contract test'
-    assert sent['tests/run-tests.sh'] == (activities.TEMPLATE / 'run-tests.sh').read_text()
+    assert sent['tests/run-tests.sh'] == (TEMPLATE / 'run-tests.sh').read_text()
     assert json.loads(sent['input.json'])['repository'] == context['repository']
     # The implementation in the same repository stays out of the test author's reach.
     assert not any('Orders.java' in name for name in sent)

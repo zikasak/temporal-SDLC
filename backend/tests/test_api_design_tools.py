@@ -6,8 +6,8 @@ from app.api_design.models import empty_api
 from app.tools.api_design import ApiDesignContext, build, parse_type
 
 
-def context() -> ApiDesignContext:
-    return ApiDesignContext.from_model(empty_api(), {"FR-1", "FR-2"})
+def context(language: str | None = "java") -> ApiDesignContext:
+    return ApiDesignContext.from_model(empty_api(), {"FR-1", "FR-2"}, language)
 
 
 @pytest.mark.parametrize(("value", "expected"), [
@@ -170,6 +170,19 @@ async def test_tools_decode_json_string_arguments():
     }))
     assert result["action"] == "recorded"
     assert result["endpoint"]["error_statuses"] == [400]
+
+
+async def test_set_language_records_only_supported_languages():
+    ctx = context(language=None)
+    tools = {item.name: item for item in build(ctx)}
+    assert "The implementation language is not chosen." in json.loads(
+        await tools["show_api"].ainvoke({}))["problems"]
+    refused = await tools["set_language"].ainvoke({"language": "cobol"})
+    assert refused.startswith("Language not recorded:") and "java" in refused
+    assert ctx.language is None
+    result = json.loads(await tools["set_language"].ainvoke({"language": " Java "}))
+    assert result["language"] == "java" and ctx.language == "java"
+    assert "The implementation language is not chosen." not in result["problems"]
 
 
 def test_tool_schemas_still_describe_lists():

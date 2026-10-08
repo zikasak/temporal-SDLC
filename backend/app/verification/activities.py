@@ -1,5 +1,6 @@
 """Host-only execution of the published service and independent HTTP test image."""
 import asyncio
+import fnmatch
 import io
 import json
 import logging
@@ -16,6 +17,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from app import docker_agents
+from app.languages import TestReports, UnsupportedLanguage, get_language
 from app.config import GENERATED_CODE_DIR
 from app.verification.models import TestFailure, VerificationResult
 from app.temporal.tracing import trace_activity
@@ -34,12 +36,12 @@ CONSTRAINTS = (
 )
 
 
-async def collect_reports(container: str, destination: Path) -> None:
+async def collect_reports(container: str, destination: Path, reports: TestReports) -> None:
     """Bound the Docker tar stream before touching any untrusted archive paths."""
-    logger.info('Collecting Surefire reports (container=%s, path=%s)', container, destination)
+    logger.info('Collecting test reports (container=%s, path=%s)', container, destination)
     with tempfile.TemporaryFile() as stderr:
         process = await asyncio.create_subprocess_exec(
-            'docker', 'cp', f'{container}:/tests/target/surefire-reports/.', '-',
+            'docker', 'cp', f'{container}:{reports.directory}/.', '-',
             stdout=asyncio.subprocess.PIPE, stderr=stderr,
         )
         try:
@@ -51,7 +53,7 @@ async def collect_reports(container: str, destination: Path) -> None:
                         raise RuntimeError('Test report archive exceeds size limit')
                 await process.wait()
                 if process.returncode:
-                    raise RuntimeError('Surefire reports are unavailable')
+                    raise RuntimeError('Test reports are unavailable')
         finally:
             if process.returncode is None:
                 process.kill()
@@ -64,7 +66,7 @@ async def collect_reports(container: str, destination: Path) -> None:
             if member.issym() or member.islnk():
                 raise RuntimeError('Linked test reports are not allowed')
             name = member.name.removeprefix('./')
-            if not (name.startswith('TEST-') and name.endswith('.xml')):
+            if not fnmatch.fnmatchcase(name, reports.pattern):
                 continue
             if not member.isfile() or '/' in name or '\\' in name or name in names:
                 raise RuntimeError('Invalid test report archive entry')
@@ -73,16 +75,16 @@ async def collect_reports(container: str, destination: Path) -> None:
                 raise RuntimeError('Test reports exceed size limits')
             with tar.extractfile(member) as source:
                 (destination / name).write_bytes(source.read(MAX_REPORT_BYTES + 1))
-        logger.info('Collected %d Surefire reports (container=%s)', len(names), container)
+        logger.info('Collected %d test reports (container=%s)', len(names), container)
 
 
-def summarize_reports(directory: Path) -> dict:
-    """Count testcase outcomes, not redundant nested suite summary attributes."""
+def summarize_reports(directory: Path, reports: TestReports) -> dict:
+    """Count JUnit XML testcase outcomes, not redundant nested suite summary attributes."""
     totals = dict(tests=0, passed=0, failures=0, errors=0, skipped=0)
     failures: list[TestFailure] = []
-    files = sorted(directory.glob('TEST-*.xml'))
+    files = sorted(directory.glob(reports.pattern))
     if not files or len(files) > MAX_REPORT_FILES:
-        raise RuntimeError('Valid Surefire reports are unavailable')
+        raise RuntimeError('Valid test reports are unavailable')
     for file in files:
         if file.is_symlink() or not file.is_file() or file.stat().st_size > MAX_REPORT_BYTES:
             raise RuntimeError('Invalid or oversized test report')
@@ -94,7 +96,7 @@ def summarize_reports(directory: Path) -> dict:
             raise RuntimeError('XML declarations are not allowed in test reports')
         root = ElementTree.fromstring(data)
         if root.tag not in {'testsuite', 'testsuites'}:
-            raise RuntimeError('Invalid Surefire report root')
+            raise RuntimeError('Invalid test report root')
         for case in root.iter('testcase'):
             totals['tests'] += 1
             if totals['tests'] > MAX_TESTS:
@@ -134,12 +136,16 @@ async def cleanup(service: str, runner: str, network: str) -> None:
         activity.logger.warning('Could not remove verification network %s', network)
 
 
-async def run_verification(session_id: str, service_image: str,
-                           test_image: str) -> VerificationResult:
+async def run_verification(session_id: str, service_image: str, test_image: str,
+                           language: str | None = None) -> VerificationResult:
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
         raise ApplicationError('Invalid session ID', non_retryable=True)
     if not all(re.fullmatch(r'sha256:[0-9a-f]{64}', image) for image in (service_image, test_image)):
         raise ApplicationError('Invalid verification image ID', non_retryable=True)
+    try:
+        reports = get_language(language).test_reports
+    except UnsupportedLanguage as exc:
+        raise ApplicationError(str(exc), non_retryable=True) from exc
     token = uuid.uuid4().hex
     network = f'verification-{token}'
     service, runner = f'{network}-service', f'{network}-tests'
@@ -187,7 +193,7 @@ async def run_verification(session_id: str, service_image: str,
                 await docker_agents.docker('start', runner, timeout=30)
                 runner_started = True
                 logger.info('Verification containers running (session=%s); waiting for readiness/tests', session_id)
-                # Includes readiness, Maven execution, and its forced-kill grace period.
+                # Includes readiness, test execution, and its forced-kill grace period.
                 await docker_agents.docker('wait', runner, timeout=750)
             except Exception as exc:
                 result['error'] = str(exc)[-2000:]
@@ -217,8 +223,8 @@ async def run_verification(session_id: str, service_image: str,
                         result['error'] = result['error'] or f'Could not inspect container: {str(exc)[-1000:]}'
                 if runner_started:
                     try:
-                        await collect_reports(runner, run_dir / 'reports')
-                        result.update(summarize_reports(run_dir / 'reports'))
+                        await collect_reports(runner, run_dir / 'reports', reports)
+                        result.update(summarize_reports(run_dir / 'reports', reports))
                     except Exception as exc:
                         result['error'] = result['error'] or f'Could not read test reports: {str(exc)[-1000:]}'
             if runner_state.get('OOMKilled') or service_state.get('OOMKilled'):
@@ -260,6 +266,6 @@ async def run_verification(session_id: str, service_image: str,
 
 @activity.defn
 @trace_activity('verify-service', feature='verification', input_parameter='service_image')
-async def verify_service(session_id: str, service_image: str,
-                         test_image: str) -> VerificationResult:
-    return await run_verification(session_id, service_image, test_image)
+async def verify_service(session_id: str, service_image: str, test_image: str,
+                         language: str | None = None) -> VerificationResult:
+    return await run_verification(session_id, service_image, test_image, language)

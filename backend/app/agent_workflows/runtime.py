@@ -34,6 +34,8 @@ class AgentProfile:
     default_max_turns: int = 80
     # Read-only contract files supplied instead of embedding large contracts in full.
     contracts: Path | None = None
+    # Directory names holding the language's build output and installed dependencies.
+    build_dirs: Sequence[str] = ()
 
 
 READ_LINES = 500
@@ -46,7 +48,8 @@ LISTED_FILES = 200
 LINE_CHARS = 300
 # Verbose command output is kept here for explicit retrieval; stages never publish it.
 OUTPUT_DIR = '.agent-output'
-SKIPPED_DIRS = {OUTPUT_DIR, '.git', 'target', 'node_modules', '__pycache__'}
+# Never listed or searched, besides the build directories of the project's language.
+SKIPPED_DIRS = {OUTPUT_DIR, '.git'}
 # Size of the model's context window in tokens; 0 disables history compaction.
 CONTEXT_TOKENS_ENV = 'AGENT_CONTEXT_TOKENS'
 DEFAULT_CONTEXT_TOKENS = 64000
@@ -72,8 +75,10 @@ CHECKPOINT_NOTICE = ('[Checkpoint] Older tool calls and their results were remov
 DIAGNOSTIC = re.compile(r'\[ERROR\]|\berror\b|BUILD (SUCCESS|FAILURE)|Exception|FAILED|Tests run:')
 
 
-def workspace_tools(root: Path, contracts: Path | None = None) -> list[BaseTool]:
+def workspace_tools(root: Path, contracts: Path | None = None,
+                    build_dirs: Sequence[str] = ()) -> list[BaseTool]:
     root = root.resolve()
+    skipped = SKIPPED_DIRS | set(build_dirs)
     commands = itertools.count(1)
 
     def workspace_path(path: str, base: Path = root, area: str = 'project workspace') -> Path:
@@ -89,7 +94,7 @@ def workspace_tools(root: Path, contracts: Path | None = None) -> list[BaseTool]
             yield start
             return
         for directory, names, files in os.walk(start):
-            names[:] = sorted(name for name in names if name not in SKIPPED_DIRS)
+            names[:] = sorted(name for name in names if name not in skipped)
             for name in sorted(files):
                 item = Path(directory, name)
                 relative = item.relative_to(base).as_posix()
@@ -335,7 +340,7 @@ def _run_agent(profile: AgentProfile) -> None:
         provider = create_model(model_name=os.environ['OPENAI_MODEL'],
                                 api_key=os.environ['OPENAI_API_KEY'],
                                 base_url=os.environ['OPENAI_BASE_URL'])
-    tools = workspace_tools(profile.root, profile.contracts)
+    tools = workspace_tools(profile.root, profile.contracts, profile.build_dirs)
     by_name = {item.name: item for item in tools}
     model = provider.bind_tools(tools)
     # The instructions and authoritative inputs are never compacted.

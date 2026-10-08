@@ -89,6 +89,8 @@ class ApiDesignState:
     requirements_document: str = ""
     messages: list[ConversationMessage] = field(default_factory=list)
     api: ApiModel = field(default_factory=empty_api)
+    # Name of the registered language the server code is generated in, once chosen.
+    language: str | None = None
     status: SessionStatus = "interviewing"
     document: dict[str, Any] | None = None
     error: str | None = None

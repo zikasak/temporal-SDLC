@@ -24,7 +24,8 @@ from app.api_design.models import (
     Property,
     Schema,
 )
-from app.api_design.openapi import PATH_PATTERN, api_problems, endpoint_key
+from app.api_design.openapi import PATH_PATTERN, design_problems, endpoint_key
+from app.languages import get_language
 
 logger = logging.getLogger(__name__)
 
@@ -138,15 +139,17 @@ class ApiDesignContext:
     schemas: dict[str, Schema] = field(default_factory=dict)
     endpoints: dict[str, Endpoint] = field(default_factory=dict)
     requirement_ids: set[str] = field(default_factory=set)
+    language: str | None = None
 
     @classmethod
-    def from_model(cls, api: ApiModel, requirement_ids: set[str] | None = None
-                   ) -> "ApiDesignContext":
+    def from_model(cls, api: ApiModel, requirement_ids: set[str] | None = None,
+                   language: str | None = None) -> "ApiDesignContext":
         return cls(
             dict(api["info"]),  # type: ignore[arg-type]
             {item["name"]: item for item in api["schemas"]},
             {endpoint_key(item): item for item in api["endpoints"]},
             requirement_ids or set(),
+            language,
         )
 
     def as_model(self) -> ApiModel:
@@ -157,6 +160,11 @@ class ApiDesignContext:
             "schemas": list(self.schemas.values()),
             "endpoints": sorted(self.endpoints.values(), key=order),
         }
+
+    def set_language(self, language: str) -> str:
+        """Only registered languages can be recorded; anything else raises."""
+        self.language = get_language(language).name
+        return self.language
 
     def set_info(self, title: str = "", version: str = "", description: str = "",
                  auth: str = "") -> ApiInfo:
@@ -298,7 +306,7 @@ class ApiDesignContext:
 
 def build(ctx: ApiDesignContext) -> list[BaseTool]:
     def result(action: str, **values: Any) -> str:
-        problems = api_problems(ctx.as_model())
+        problems = design_problems(ctx.as_model(), ctx.language)
         return json.dumps({"action": action, **values, "problems": problems},
                           ensure_ascii=False)
 
@@ -317,6 +325,19 @@ def build(ctx: ApiDesignContext) -> list[BaseTool]:
             logger.warning("API info not recorded: %s", exc)
             return f"API info not recorded: {exc}"
         return result("recorded", info=info)
+
+    @tool
+    async def set_language(language: str) -> str:
+        """Record the language the server code is generated in.
+
+        Only a supported language is accepted; the error lists them.
+        """
+        try:
+            recorded = ctx.set_language(language)
+        except ValueError as exc:
+            logger.warning("Language not recorded: %s", exc)
+            return f"Language not recorded: {exc}"
+        return result("recorded", language=recorded)
 
     @tool
     async def record_schema(
@@ -396,8 +417,9 @@ def build(ctx: ApiDesignContext) -> list[BaseTool]:
     @tool
     async def show_api() -> str:
         """Show the whole API model recorded so far and its open problems."""
-        return json.dumps({**ctx.as_model(), "problems": api_problems(ctx.as_model())},
+        return json.dumps({**ctx.as_model(), "language": ctx.language,
+                           "problems": design_problems(ctx.as_model(), ctx.language)},
                           ensure_ascii=False)
 
-    return [set_api_info, record_schema, remove_schema, record_endpoint,
+    return [set_api_info, set_language, record_schema, remove_schema, record_endpoint,
             remove_endpoint, show_api]

@@ -66,6 +66,7 @@ class FakeActivities:
         self.verification_results: list[str] = []
         self.verification_images = None
         self.verified_images: list[tuple[str, str]] = []
+        self.verified_languages: list[str | None] = []
         # The side each successive diagnosis blames; the last one repeats.
         self.diagnoses = ['implementation']
         self.diagnosed: list[dict[str, Any]] = []
@@ -77,6 +78,8 @@ class FakeActivities:
         self.fail_checkout = False
         self.published: list[tuple[str, str]] = []
         self.fail_publication = False
+        # The language the model records on its next turn, when any.
+        self.language: str | None = None
 
     @activity.defn(name="checkout_repository")
     async def checkout_repository(self, session_id: str, repository: dict[str, Any]) -> dict[str, Any]:
@@ -86,7 +89,8 @@ class FakeActivities:
         return {"commit": "1" * 40}
 
     @activity.defn(name="publish_repository")
-    async def publish_repository(self, session_id: str, repository: dict[str, Any]) -> dict[str, Any]:
+    async def publish_repository(self, session_id: str, repository: dict[str, Any],
+                                 language: str | None = None) -> dict[str, Any]:
         if self.fail_publication:
             raise ApplicationError("remote: Permission denied", non_retryable=True)
         self.published.append((session_id, repository["full_name"]))
@@ -107,7 +111,7 @@ class FakeActivities:
         if self.fail_turn:
             raise ApplicationError("model unavailable", non_retryable=True)
         api["endpoints"] = [*api["endpoints"], endpoint(state.messages[-1]["content"])]
-        return {"reply": "Recorded.", "api": api}
+        return {"reply": "Recorded.", "api": api, "language": self.language or state.language}
 
     @activity.defn(name="write_openapi_document")
     async def write_openapi_document(self, session_id: str, api: dict[str, Any]
@@ -147,8 +151,9 @@ class FakeActivities:
                 'instructions': f'Correct the {target}.', 'path': '/diagnosis'}
 
     @activity.defn(name='verify_service')
-    async def verify_service(self, session_id: str, service_image: str,
-                             test_image: str) -> dict[str, Any]:
+    async def verify_service(self, session_id: str, service_image: str, test_image: str,
+                             language: str | None = None) -> dict[str, Any]:
+        self.verified_languages.append(language)
         self.verification_images = (service_image, test_image)
         self.verified_images.append((service_image, test_image))
         self.verification_started.set()
@@ -173,9 +178,12 @@ class FakeActivities:
 @workflow.defn(name="CodegenWorkflow")
 class FakeCodegenWorkflow:
     fail = False
+    languages: list[str | None] = []
 
     @workflow.run
-    async def run(self, session_id: str, document_id: str) -> dict[str, Any]:
+    async def run(self, session_id: str, document_id: str, language: str | None = None
+                  ) -> dict[str, Any]:
+        FakeCodegenWorkflow.languages.append(language)
         if FakeCodegenWorkflow.fail:
             raise ApplicationError("generator failed", non_retryable=True)
         return CODE
@@ -212,12 +220,14 @@ async def worker(env):
         workflows=[DiagnosisWorkflow], activities=[activities.diagnose_failure],
     ):
         FakeCodegenWorkflow.fail = False
+        FakeCodegenWorkflow.languages = []
         yield activities
 
 
-async def start(env, repository=None):
+async def start(env, repository=None, language: str | None = "java"):
     state = ApiDesignState(source_session_id="requirements-session-" + "0" * 32,
-                           requirements_document="# Requirements", api=empty_api(), repository=repository)
+                           requirements_document="# Requirements", api=empty_api(),
+                           language=language, repository=repository)
     return await env.client.start_workflow(
         ApiDesignWorkflow.run, state,
         id=f"api-design-session-{uuid.uuid4().hex}", task_queue=TASK_QUEUE,
@@ -382,6 +392,7 @@ async def test_finalize_writes_document(env, worker, verification, monkeypatch):
     assert state.tests_error is None
     assert state.tests["context"] == {
         "requirements": [], "requirements_document": "# Requirements", "api_design": state.api,
+        "language": "java",
     }
     assert worker.verification_images == ('sha256:' + 'a' * 64, 'sha256:' + 'b' * 64)
     if verification == 'child_error':
@@ -756,6 +767,36 @@ async def test_idle_session_with_complete_api_finalizes(env, worker):
     await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
     await env.sleep(timedelta(hours=25))
     assert await handle.result() == DOCUMENT
+
+
+async def test_language_must_be_chosen_before_code_is_generated(env, worker):
+    handle = await start(env, language=None)
+    await wait_for_status(handle, "interviewing")
+    await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
+    with pytest.raises(WorkflowUpdateFailedError) as refused:
+        await handle.execute_update(ApiDesignWorkflow.finalize)
+    assert "implementation language is not chosen" in str(refused.value.cause)
+
+    worker.language = "java"
+    await handle.execute_update(ApiDesignWorkflow.send_message, "/bookings")
+    await handle.execute_update(ApiDesignWorkflow.finalize)
+    assert await handle.result() == DOCUMENT
+    state = await handle.query(ApiDesignWorkflow.get_state)
+    assert state.language == "java" and state.code == CODE
+    assert FakeCodegenWorkflow.languages == ["java"]
+    assert worker.verified_languages == ["java"]
+
+
+async def test_idle_session_without_a_language_keeps_the_document_only(env, worker):
+    handle = await start(env, language=None)
+    await wait_for_status(handle, "interviewing")
+    await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
+    await env.sleep(timedelta(hours=25))
+    assert await handle.result() == DOCUMENT
+    state = await handle.query(ApiDesignWorkflow.get_state)
+    assert state.code is None and FakeCodegenWorkflow.languages == []
+    assert state.code_error == "No implementation language was chosen for this session."
+    assert state.verification_status == 'skipped'
 
 
 async def test_idle_session_with_problems_fails(env, worker):

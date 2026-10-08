@@ -9,7 +9,10 @@ ROOT = Path('/workspace/review')
 CONTRACTS = Path('/workspace/contracts')
 VERDICT = 'verdict.json'
 
-PROMPT = """A generated Spring Boot service failed HTTP contract tests that were written
+# What the session's language calls itself and its test reports, written by the host.
+LANGUAGE = Path('/workspace/language.json')
+
+PROMPT = """A generated {label} service failed HTTP contract tests that were written
 independently from the same requirements and OpenAPI design. Decide which side is wrong:
 the implementation or the tests. The supplied requirements and API design are the only
 authority; neither the implementation nor the tests are evidence of correct behavior.
@@ -17,7 +20,7 @@ authority; neither the implementation nor the tests are evidence of correct beha
 /workspace/review contains, read-only for your purposes:
 - service/ the implementation sources
 - tests/ the test suite sources
-- verification/ the failed run: reports/TEST-*.xml with assertion messages and stack
+- verification/ the failed run: reports/{report_pattern} with assertion messages and stack
   traces, service_log.log and runner_log.log
 The `verification` entry of the input lists the failing tests.
 
@@ -36,9 +39,9 @@ side is reviewed again after the next verification.
 
 Do not change service/ or tests/ and do not run the tests. Finish by writing verdict.json
 in the project root with write_file, containing exactly this JSON object:
-{"target": "implementation" or "tests",
+{{"target": "implementation" or "tests",
  "summary": "one short paragraph explaining the decision",
- "instructions": "what must be corrected"}
+ "instructions": "what must be corrected"}}
 The author who repairs the chosen side receives only `instructions` and the failing test
 names and messages: the implementation author never sees the tests and the test author
 never sees the implementation. Make `instructions` self-contained: for every defect name
@@ -57,13 +60,16 @@ def validate_completion(root: Path) -> None:
 
 
 def main() -> None:
+    language = json.loads(LANGUAGE.read_text())
     run_agent(AgentProfile(
-        root=ROOT, prompt=PROMPT,
+        root=ROOT, prompt=PROMPT.format(label=language['label'],
+                                        report_pattern=language['report_pattern']),
         initial_messages=[Path('/workspace/input.json').read_text()],
         max_turns_env='DIAGNOSIS_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Diagnosis completed',
         exhaustion_message='Diagnosis exceeded the tool-turn limit',
         contracts=CONTRACTS if CONTRACTS.is_dir() else None,
+        build_dirs=language['build_dirs'],
     ))
 
 

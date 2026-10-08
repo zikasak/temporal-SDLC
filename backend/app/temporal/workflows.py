@@ -9,7 +9,7 @@ from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflow
 
 with workflow.unsafe.imports_passed_through():
     from app.api_design.models import ApiDesignState
-    from app.api_design.openapi import api_problems
+    from app.api_design.openapi import api_problems, design_problems
     from app.api_design.prompt import OPENING_FALLBACK
     from app.config import (
         CODEGEN_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, IMPLEMENTATION_TASK_QUEUE,
@@ -394,7 +394,7 @@ class ApiDesignWorkflow:
     def validate_finalize(self) -> None:
         if self.state.status != "interviewing" or (self.state.messages and self.state.messages[-1]["role"] == "user"):
             raise ValueError("Retry the unanswered message before generating the OpenAPI.")
-        problems = api_problems(self.state.api)
+        problems = design_problems(self.state.api, self.state.language)
         if problems:
             raise ValueError("Fix these problems first: " + " ".join(problems))
 
@@ -416,6 +416,8 @@ class ApiDesignWorkflow:
         else:
             self.state.messages.append({"role": "assistant", "content": result["reply"]})
             self.state.api = result["api"]
+            # Turns recorded before languages were chosen carry none.
+            self.state.language = result.get("language", self.state.language)
             ok = True
         self.state.status = "interviewing"
         return ok
@@ -452,11 +454,17 @@ class ApiDesignWorkflow:
             if verification_enabled:
                 self.state.verification_status = 'skipped'
             return
+        # Histories from before languages were chosen replay their original generation.
+        if not self.state.language and workflow.patched("codegen-language"):
+            self.state.code_error = "No implementation language was chosen for this session."
+            if verification_enabled:
+                self.state.verification_status = 'skipped'
+            return
         session_id = workflow.info().workflow_id
         try:
             self.state.code = await workflow.execute_child_workflow(
                 "CodegenWorkflow",
-                args=[session_id, self.state.document["document_id"]],
+                args=[session_id, self.state.document["document_id"], self.state.language],
                 id=self._generation_child_id('codegen', session_id),
                 task_queue=CODEGEN_TASK_QUEUE,
                 result_type=dict,
@@ -568,7 +576,8 @@ class ApiDesignWorkflow:
         try:
             self.state.verification = await workflow.execute_child_workflow(
                 'VerificationWorkflow',
-                args=[session_id, self.state.implementation['image_id'], self.state.tests['image_id']],
+                args=[session_id, self.state.implementation['image_id'],
+                      self.state.tests['image_id'], self.state.language],
                 id=self._generation_child_id('verification', session_id, repair),
                 task_queue=VERIFICATION_TASK_QUEUE,
                 result_type=dict,
@@ -581,11 +590,14 @@ class ApiDesignWorkflow:
             self.state.verification_status = 'completed'
 
     def _coding_context(self) -> dict[str, Any]:
-        return {
+        context = {
             "requirements": self.state.requirements,
             "requirements_document": self.state.requirements_document,
             "api_design": self.state.api,
         }
+        if self.state.language:
+            context["language"] = self.state.language
+        return context
 
     def _stage_context(self, repair: dict[str, Any] | None) -> dict[str, Any]:
         context = self._coding_context()
@@ -609,7 +621,7 @@ class ApiDesignWorkflow:
         try:
             self.state.publication = await workflow.execute_activity(
                 publish_repository,
-                args=[workflow.info().workflow_id, self.state.repository],
+                args=[workflow.info().workflow_id, self.state.repository, self.state.language],
                 start_to_close_timeout=timedelta(minutes=10),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )

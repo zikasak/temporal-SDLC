@@ -3,6 +3,7 @@ import shlex
 import sys
 import tarfile
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from app.api_design.openapi import render_openapi
 from app.implementation import activities as implementation
 from app.implementation.agent import validate_completion as validate_implementation
 from app.requirements.document import render_requirements_markdown
+from app.languages import get_language
 from app.test_generation import activities as test_generation
 from app.test_generation.agent import validate_completion as validate_tests
 
@@ -80,7 +82,7 @@ def test_agent_executes_tools_and_returns_correlated_errors(profile, scripted_mo
 
 @pytest.mark.parametrize('validator,error', [
     (validate_implementation, 'without a Dockerfile'),
-    (validate_tests, 'without test classes'),
+    (partial(validate_tests, get_language('java').test_suite.test_glob), 'without test files'),
 ])
 def test_agent_cannot_finish_without_role_artifacts(profile, scripted_model, validator, error):
     scripted_model([AIMessage(content='Finished')])
@@ -210,8 +212,12 @@ def test_contract_files_are_read_and_searched_but_never_written(tmp_path):
     assert tools['list_files'].invoke({}) == 'No files found'
 
 
-@pytest.mark.parametrize('stage', [implementation, test_generation])
-def test_large_contracts_are_indexed_and_supplied_whole_on_demand(tmp_path, monkeypatch, stage):
+@pytest.mark.parametrize('prepare_inputs', [
+    partial(implementation.prepare_inputs, get_language('java')),
+    partial(test_generation.prepare_inputs, get_language('java')),
+])
+def test_large_contracts_are_indexed_and_supplied_whole_on_demand(tmp_path, monkeypatch,
+                                                                  prepare_inputs):
     (tmp_path / 'server').mkdir()
     requirements = [{'id': f'FR-{number}', 'category': 'functional', 'title': f'Rule {number}',
                      'description': f'Detailed behaviour {number}. ' * 20, 'priority': 'must',
@@ -231,7 +237,7 @@ def test_large_contracts_are_indexed_and_supplied_whole_on_demand(tmp_path, monk
                    requirements, 'Orders are never deleted.')}
 
     def prepared(workspace):
-        inputs = stage.prepare_inputs(tmp_path, context)
+        inputs = prepare_inputs(tmp_path, context)
         workspace.mkdir()
         inputs.populate(workspace)
         return inputs.context
@@ -266,7 +272,8 @@ def test_large_contracts_are_indexed_and_supplied_whole_on_demand(tmp_path, monk
 
 @pytest.fixture
 def tools(tmp_path):
-    return {item.name: item for item in runtime.workspace_tools(tmp_path)}
+    return {item.name: item
+            for item in runtime.workspace_tools(tmp_path, build_dirs=['target'])}
 
 
 @pytest.mark.parametrize('name,args', [

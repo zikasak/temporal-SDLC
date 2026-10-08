@@ -105,7 +105,7 @@ async def test_verification_publishes_test_outcomes_and_releases_resources(
 ):
     transport['archive'].write_bytes(report_archive(data))
     transport['exit_code'] = exit_code
-    result = await ActivityEnvironment().run(activities.verify_service, 'session', SERVICE_IMAGE, TEST_IMAGE)
+    result = await ActivityEnvironment().run(activities.verify_service, 'session', SERVICE_IMAGE, TEST_IMAGE, 'java')
     assert result['status'] == status
     assert tuple(result[key] for key in ('tests', 'passed', 'failures', 'errors', 'skipped')) == counts
     if counts[2] or counts[3]:
@@ -131,7 +131,7 @@ async def test_verification_publishes_test_outcomes_and_releases_resources(
 async def test_infrastructure_errors_are_not_assertion_failures(transport, failure, exit_code):
     transport['failure'] = failure
     transport['exit_code'] = exit_code
-    result = await ActivityEnvironment().run(activities.verify_service, 'session', SERVICE_IMAGE, TEST_IMAGE)
+    result = await ActivityEnvironment().run(activities.verify_service, 'session', SERVICE_IMAGE, TEST_IMAGE, 'java')
     assert result['status'] == 'error' and result['error']
     assert transport['created'] <= transport['removed'] and not transport['networks']
     if failure in {'missing_image', 'root_image', 'root_uid'}:
@@ -149,7 +149,7 @@ async def test_infrastructure_errors_are_not_assertion_failures(transport, failu
 ])
 async def test_missing_or_untrusted_reports_cannot_pass(transport, data, link):
     transport['archive'].write_bytes(report_archive(data, link=link))
-    result = await ActivityEnvironment().run(activities.verify_service, 'session', SERVICE_IMAGE, TEST_IMAGE)
+    result = await ActivityEnvironment().run(activities.verify_service, 'session', SERVICE_IMAGE, TEST_IMAGE, 'java')
     assert result['status'] == 'error' and result['error']
     assert transport['created'] <= transport['removed'] and not transport['networks']
 
@@ -158,7 +158,7 @@ async def test_failure_details_are_bounded_without_losing_totals(transport):
     data = ('<testsuite>' + '<testcase name="bad"><failure message="wrong"/></testcase>' * 51 + '</testsuite>').encode()
     transport['archive'].write_bytes(report_archive(data))
     transport['exit_code'] = 1
-    result = await ActivityEnvironment().run(activities.verify_service, 'session', SERVICE_IMAGE, TEST_IMAGE)
+    result = await ActivityEnvironment().run(activities.verify_service, 'session', SERVICE_IMAGE, TEST_IMAGE, 'java')
     assert result['status'] == 'failed' and result['failures'] == 51
     assert len(result['test_failures']) == 50 and result['details_truncated']
 
@@ -166,16 +166,20 @@ async def test_failure_details_are_bounded_without_losing_totals(transport):
 async def test_cancellation_cleans_up_without_publishing_a_result(transport, tmp_path):
     transport['failure'] = 'cancel'
     with pytest.raises(asyncio.CancelledError):
-        await ActivityEnvironment().run(activities.verify_service, 'session', SERVICE_IMAGE, TEST_IMAGE)
+        await ActivityEnvironment().run(activities.verify_service, 'session', SERVICE_IMAGE, TEST_IMAGE, 'java')
     assert transport['created'] <= transport['removed'] and not transport['networks']
     assert not (tmp_path / 'generated/session/verification/result.json').exists()
 
 
-@pytest.mark.parametrize('session,service_image,test_image', [
-    ('../escape', SERVICE_IMAGE, TEST_IMAGE),
-    ('session', 'untrusted:latest', TEST_IMAGE), ('session', SERVICE_IMAGE, '--privileged'),
+@pytest.mark.parametrize('session,service_image,test_image,language', [
+    ('../escape', SERVICE_IMAGE, TEST_IMAGE, 'java'),
+    ('session', 'untrusted:latest', TEST_IMAGE, 'java'),
+    ('session', SERVICE_IMAGE, '--privileged', 'java'),
+    ('session', SERVICE_IMAGE, TEST_IMAGE, 'cobol'), ('session', SERVICE_IMAGE, TEST_IMAGE, None),
 ])
-async def test_invalid_inputs_never_touch_docker_or_files(transport, tmp_path, session, service_image, test_image):
+async def test_invalid_inputs_never_touch_docker_or_files(
+        transport, tmp_path, session, service_image, test_image, language):
     with pytest.raises(ApplicationError):
-        await ActivityEnvironment().run(activities.verify_service, session, service_image, test_image)
+        await ActivityEnvironment().run(
+            activities.verify_service, session, service_image, test_image, language)
     assert not transport['calls'] and not (tmp_path / 'generated').exists()

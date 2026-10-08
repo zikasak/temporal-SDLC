@@ -27,7 +27,7 @@ flowchart LR
 
         subgraph codeworker["Codegen Temporal worker · codegen"]
             codegen["CodegenWorkflow<br/>generate_server_code activity"]
-            generator["Local Java subprocess<br/>OpenAPI Generator CLI<br/>Spring interfaces + models + test stubs"]
+            generator["Local Java subprocess<br/>OpenAPI Generator CLI<br/>registered language: interfaces + models + test stubs"]
         end
 
         subgraph implworker["Implementation worker · implementation"]
@@ -102,7 +102,7 @@ The main worker's workflows, activities, agent, and tools are logical modules wi
 | Chat | Browser → API → Temporal → `LLMRequestWorkflow` → agent/provider/tools | Async answer; each reply gets a new workflow/request ID. Attachments are parsed before the model turn. |
 | Requirements interview | Browser → API → Temporal updates → `RequirementsWorkflow` → agent | Long-running interview with structured requirements; finalization writes a Markdown document. |
 | API design | Browser → API loads completed requirements → `ApiDesignWorkflow` → agent | Structured API model; finalization renders and stores OpenAPI YAML. |
-| Code generation | `ApiDesignWorkflow` → Temporal child workflow → codegen worker → local generator | Spring server interfaces, models, and disabled test stubs written to disk. |
+| Code generation | `ApiDesignWorkflow` → Temporal child workflow → codegen worker → local generator | Server code in the session's language, chosen during API design from the registry in `backend/app/languages/` (today Java: Spring interfaces, models, and disabled test stubs), written to disk. |
 | Implementation and tests | After codegen, `ApiDesignWorkflow` starts two child workflows on separate queues and Docker containers in parallel | Service image and independent JUnit HTTP test runner image; results/errors reported separately. Test authoring receives only requirements and API contracts. |
 | Repository checkout and push | `RequirementsWorkflow` / `ApiDesignWorkflow` → main worker → `git` → GitHub | Selected branch cloned before the first model turn; verified sources pushed to a new `generated/…` branch. |
 | Retrieve / browse | Browser → API → Temporal queries, descriptions, history, or visibility listing | Session state, request status/results, and workflow listing. |
