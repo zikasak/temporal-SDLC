@@ -4,7 +4,7 @@
 
 One shared GitHub App installation belongs to the app instance: the backend holds the app's ID and private key and acts on the repositories the app is installed on. Repository and branch selections belong to individual sessions, not global settings:
 
-- A Requirements session **must** select a repository/branch. Standalone Chat may select one or start without; Chat only records the selection.
+- A Requirements session **must** select a repository/branch. Standalone Chat may select one or start without; with one, the model answers from a read-only checkout of it (`list_files`, `search_files`, `read_file`).
 - Chat replies, retries, and both fork paths inherit the source selection.
 - Requirements forks and API-design sessions created from Requirements inherit it; API-design forks and generation retries retain it too. An API-design session cannot start from a Requirements session without a repository.
 - A selection cannot change after creation. Start a new standalone session to choose a different repository.
@@ -56,7 +56,7 @@ Configure the exact frontend origins if Vite uses another port or the app is ser
 
 GitHub REST calls stay on the backend, use only `https://api.github.com` (Git itself talks to `https://github.com`), and do not forward credentials through redirects or arbitrary pagination URLs. The private key signs a short-lived JWT that is sent only to mint installation tokens. Keys, tokens and ciphertext must not be put in query parameters, logs, tracing, Temporal payloads, or browser storage. Avoid enabling request-body logging in reverse proxies or debugging middleware: the connection submission necessarily contains the private key.
 
-Commits are authored by the app's bot user (`<app-slug>[bot]`). A failed replacement leaves the previous connection intact. **Check connection** verifies that the key is still accepted and the app still installed; the timestamp in the UI is not a continuous availability check. Disconnect deletes saved credentials but preserves historical session metadata; the app itself stays on GitHub until it is deleted there, as does one replaced by creating another. Existing session conversations/forks do not require GitHub access; new repository choices do.
+Commits are authored by the app's bot user (`<app-slug>[bot]`). A failed replacement leaves the previous connection intact. **Check connection** verifies that the key is still accepted and the app still installed; the timestamp in the UI is not a continuous availability check. Disconnect deletes saved credentials but preserves historical session metadata; the app itself stays on GitHub until it is deleted there, as does one replaced by creating another. Existing session conversations keep reading the checkout they already have without GitHub access; new repository choices need it, and so does a Chat fork, which clones the branch again for its own session. A Chat message whose repository cannot be checked out is still answered, with the model told that it cannot read the files.
 
 If the encryption key is missing or invalid, saving or using the private key fails safely, while other sessions still work. If the encryption key changes, restore the original or disconnect/reconnect with the app's private key (generate a new one on GitHub if the file is gone). Disconnect does not require decryption. Back up the database and key separately; database-only backups cannot recover credentials without the key. Future access to historical selections must be revalidated before reading or modifying repository code.
 

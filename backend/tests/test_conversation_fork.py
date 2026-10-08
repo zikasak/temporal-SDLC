@@ -15,7 +15,8 @@ TASK_QUEUE = "conversation-fork-test"
 @workflow.defn(name="LLMRequestWorkflow")
 class FakeRequest:
     @workflow.run
-    async def run(self, messages: list, parse_document_id: str | None, session_id: str) -> str:
+    async def run(self, messages: list, parse_document_id: str | None, session_id: str,
+                  repository: dict | None = None) -> str:
         if messages[-1]["content"] == "Fail":
             raise ApplicationError("model failed")
         return f"Answer {len(messages)}"

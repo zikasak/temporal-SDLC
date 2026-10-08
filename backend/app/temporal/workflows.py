@@ -16,6 +16,7 @@ with workflow.unsafe.imports_passed_through():
         TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
     )
     from app.diagnosis.models import repair_request
+    from app.github.models import RepositorySelection
     from app.requirements.models import RequirementsState
     from app.requirements.prompt import OPENING_MESSAGE
     from app.temporal.activities import (
@@ -31,6 +32,8 @@ with workflow.unsafe.imports_passed_through():
     )
 
 SESSION_IDLE_TIMEOUT = timedelta(hours=24)
+# How long a Chat message may wait for its session's repository.
+REPOSITORY_CHECKOUT_TIMEOUT = timedelta(minutes=10)
 MAX_TRANSCRIPT_BYTES = 64 * 1024
 MAX_MESSAGE_CHARS = 10000
 # Each round is a diagnosis, a repair of one side and a new verification.
@@ -86,10 +89,23 @@ class LLMRequestWorkflow:
     @workflow.run
     async def run(
         self, messages: Any, parse_document_id: str | None = None,
-        session_id: str | None = None,
+        session_id: str | None = None, repository: RepositorySelection | None = None,
     ) -> str:
         workflow.logger.info("LLM request started (session %s, parse document %s)",
                              session_id, parse_document_id)
+        if repository:
+            # Only a session's first message clones; later ones find the working copy.
+            try:
+                await workflow.execute_activity(
+                    checkout_repository,
+                    args=[session_id or workflow.info().workflow_id, repository],
+                    start_to_close_timeout=REPOSITORY_CHECKOUT_TIMEOUT,
+                    schedule_to_close_timeout=REPOSITORY_CHECKOUT_TIMEOUT,
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            except ActivityError as exc:
+                # The model still answers, and tells the user what it could not read.
+                workflow.logger.warning("Repository checkout failed: %s", exc.cause or exc)
         if parse_document_id:
             await workflow.execute_activity(
                 parse_document,
@@ -100,7 +116,7 @@ class LLMRequestWorkflow:
             )
         return await workflow.execute_activity(
             send_llm_message,
-            args=[messages, session_id],
+            args=[messages, session_id, repository],
             start_to_close_timeout=timedelta(minutes=6),
             schedule_to_close_timeout=timedelta(minutes=7),
             retry_policy=RetryPolicy(maximum_attempts=1),

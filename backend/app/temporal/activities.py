@@ -73,11 +73,14 @@ async def _inline_texts(document_ids: list[str]) -> dict[str, str]:
     return texts
 
 
-def _repository_tools() -> list[BaseTool]:
-    """Read-only tools over the session's checkout; none for a session without one."""
+def _repository_tools(session_id: str | None = None) -> list[BaseTool]:
+    """Read-only tools over the session's checkout; none for a session without one.
+
+    A session is its workflow, except in Chat, where each message is its own."""
     if not activity.in_activity():
         return []
-    root = repository_checkout.checkout_path(GENERATED_CODE_DIR, activity.info().workflow_id)
+    root = repository_checkout.checkout_path(
+        GENERATED_CODE_DIR, session_id or activity.info().workflow_id)
     return repository_tools.build(root) if root.is_dir() else []
 
 
@@ -166,7 +169,10 @@ async def parse_document(document_id: str) -> None:
 
 @activity.defn
 @trace_activity('respond-to-message', feature='chat', as_type='agent')
-async def send_llm_message(messages: Any, session_id: str | None = None) -> str:
+async def send_llm_message(
+    messages: Any, session_id: str | None = None,
+    repository: RepositorySelection | None = None,
+) -> str:
 
     # Older workflows can still have a single string as their activity input.
     if isinstance(messages, str):
@@ -182,18 +188,23 @@ async def send_llm_message(messages: Any, session_id: str | None = None) -> str:
     except psycopg.Error:
         activity.logger.warning("Could not load remembered passages", exc_info=True)
         remembered = []
+    repository_files = _repository_tools(session_id) if repository else []
     prompt, document_ids = model_messages(
-        messages, generated_documents, inline_texts, remembered
+        messages, generated_documents, inline_texts, remembered,
+        repository_tools.chat_guidance(repository, bool(repository_files))
+        if repository else "",
     )
     activity.logger.info(
         "LLM request for session %s: %d messages, %d attachments (%d inline), "
-        "%d remembered passages, %d generated documents",
+        "%d remembered passages, %d generated documents, repository %s",
         session_id, len(messages), len(attached_ids), len(inline_texts),
         len(remembered), len(generated_documents),
+        "none" if not repository else "checked out" if repository_files else "unavailable",
     )
     started = time.perf_counter()
     try:
-        graph = get_message_graph(build_tools(ToolContext(session_id, document_ids)))
+        graph = get_message_graph(
+            [*build_tools(ToolContext(session_id, document_ids)), *repository_files])
         result = await graph.ainvoke(
             {"messages": prompt}, config=langchain_config(recursion_limit=20, run_name='respond-with-tools')
         )
