@@ -7,6 +7,9 @@ from pathlib import Path
 
 import httpx
 import pytest
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 # Set before application imports/.env loading. Tracing transport tests opt in
 # explicitly in isolated child processes with disposable local credentials.
@@ -138,6 +141,39 @@ def repository_selection():
     return {"provider": "github", "repository_id": 42, "full_name": "octocat/private-project",
             "html_url": "https://github.com/octocat/private-project", "private": True,
             "branch": "feature/one"}
+
+
+@pytest.fixture(scope="session")
+def app_private_key():
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
+                             serialization.NoEncryption()).decode()
+
+
+@pytest.fixture
+def github_connection(monkeypatch, github_http, app_private_key):
+    """save(token) stores GitHub App 123 (my-app), installed on octocat as installation
+    99, whose installation tokens are `token`. Returns the stored row."""
+    from datetime import datetime, timezone
+
+    from app.github import storage
+
+    def save(token):
+        key = Fernet.generate_key()
+        row = {"app_id": 123, "app_slug": "my-app", "installation_id": 99, "account": "octocat",
+               "encrypted_private_key": Fernet(key).encrypt(app_private_key.encode()),
+               "bot_user_id": 77, "validated_at": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+
+        async def get_connection():
+            return row
+
+        monkeypatch.setattr(storage, "GITHUB_TOKEN_ENCRYPTION_KEY", key.decode())
+        monkeypatch.setattr(storage, "get_connection", get_connection)
+        github_http[0]["/app/installations/99/access_tokens"] = httpx.Response(
+            201, json={"token": token, "expires_at": "2026-01-01T01:00:00Z"})
+        return row
+
+    return save
 
 
 @pytest.fixture

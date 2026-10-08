@@ -64,7 +64,8 @@ PI_CREDENTIALS_DIR = Path(
 CONTRACT_EMBED_CHARS = int(os.getenv("CONTRACT_EMBED_CHARS", "32000"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
-# Shared GitHub connector: persist the encryption key separately from the database.
+# Shared GitHub connector: encrypts the saved GitHub App private key. Persist it
+# separately from the database.
 GITHUB_TOKEN_ENCRYPTION_KEY = os.getenv("GITHUB_TOKEN_ENCRYPTION_KEY", "")
 GITHUB_ALLOWED_ORIGINS = frozenset(
     origin.strip() for origin in os.getenv(

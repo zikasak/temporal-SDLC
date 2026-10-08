@@ -22,7 +22,9 @@ export type RepositoryPublication = {
 export type Connection = {
   configured: boolean;
   encryption_ready: boolean;
-  account: { id: number; login: string } | null;
+  app: { id: number; slug: string } | null;
+  // Null while the app is created but not installed yet.
+  installation: { id: number; account: string } | null;
   validated_at: string | null;
 };
 
@@ -65,8 +67,11 @@ export function repositoryPublication(value: unknown, repository: RepositorySele
 export function connectionRecord(value: unknown): Connection {
   if (!object(value) || typeof value.configured !== "boolean" || typeof value.encryption_ready !== "boolean" ||
       !(value.validated_at === null || typeof value.validated_at === "string") ||
-      !(value.account === null || (object(value.account) && Number.isSafeInteger(value.account.id) &&
-        typeof value.account.login === "string")) || value.configured !== (value.account !== null)) {
+      !(value.app === null || (object(value.app) && Number.isSafeInteger(value.app.id) &&
+        typeof value.app.slug === "string")) ||
+      !(value.installation === null || (object(value.installation) &&
+        Number.isSafeInteger(value.installation.id) && typeof value.installation.account === "string")) ||
+      value.configured !== (value.app !== null) || (!value.configured && value.installation !== null)) {
     throw new Error("The backend returned invalid GitHub connection metadata.");
   }
   return value as Connection;
@@ -100,4 +105,52 @@ export async function githubRequest(path: string, init?: RequestInit): Promise<u
 
 export function selectionInput(repository: RepositorySelection) {
   return { full_name: repository.full_name, branch: repository.branch };
+}
+
+// Where GitHub sends the browser back after creating or installing the app.
+export const APP_RETURN_PATH = "/github-app";
+const APP_STATE_KEY = "github-app-state";
+
+export function installUrl(slug: string): string {
+  return `https://github.com/apps/${encodeURIComponent(slug)}/installations/new`;
+}
+
+/** Leave for GitHub's confirmation page of an app described by this instance's manifest. */
+export function createGitHubApp(name: string, organization: string) {
+  const state = crypto.randomUUID();
+  window.sessionStorage.setItem(APP_STATE_KEY, state);
+  const origin = window.location.origin;
+  const manifest = {
+    name, url: origin, public: false,
+    redirect_url: origin + APP_RETURN_PATH, setup_url: origin + APP_RETURN_PATH,
+    // GitHub wants a webhook address; nothing is delivered to it.
+    hook_attributes: { url: `${origin}/api/connectors/github/events`, active: false },
+    default_permissions: { contents: "write", metadata: "read" }, default_events: [],
+  };
+  const form = document.createElement("form");
+  form.method = "post";
+  form.action = `https://github.com/${organization ? `organizations/${encodeURIComponent(organization)}/` : ""}settings/apps/new?state=${state}`;
+  const input = document.createElement("input");
+  input.type = "hidden";
+  input.name = "manifest";
+  input.value = JSON.stringify(manifest);
+  form.append(input);
+  document.body.append(form);
+  form.submit();
+}
+
+export type AppReturn = { code: string } | { installed: true } | { error: string };
+
+/** What GitHub returned to this page, once: the address is cleaned as it is read. */
+export function takeAppReturn(): AppReturn | null {
+  if (window.location.pathname !== APP_RETURN_PATH) return null;
+  const params = new URLSearchParams(window.location.search);
+  window.history.replaceState(null, "", "/?mode=github");
+  const code = params.get("code");
+  if (!code) return { installed: true };
+  const expected = window.sessionStorage.getItem(APP_STATE_KEY);
+  window.sessionStorage.removeItem(APP_STATE_KEY);
+  // The code of an app someone else created must not be connected here.
+  return expected && params.get("state") === expected ? { code }
+    : { error: "This GitHub App was not created from this browser tab. Create it again." };
 }
