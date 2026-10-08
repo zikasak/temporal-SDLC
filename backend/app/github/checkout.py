@@ -15,6 +15,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
+from app.agent_workflows.host import copy_file
 from app.github.client import validate_selection
 from app.github.models import RepositoryCheckout, RepositoryPublication, RepositorySelection
 
@@ -27,6 +28,7 @@ BRANCH_PREFIX = 'generated/'
 GITHUB_URL = 'https://github.com/'
 GIT_TIMEOUT = 540
 OUTPUT_CHARS = 1500
+LISTED_IGNORED = 20
 
 
 class CheckoutError(RuntimeError):
@@ -134,7 +136,7 @@ def replace_files(source: Path, target: Path, include: Callable[[Path], bool]) -
     """Make the included files under `target` exactly those of `source`.
 
     Files the filter excludes were never shown to the author and stay as they are;
-    included files the author removed are deleted. Existing files keep their mode.
+    included files the author removed are deleted. Executable files stay executable.
     """
     target.mkdir(parents=True, exist_ok=True)
     root = target.resolve()
@@ -152,22 +154,32 @@ def replace_files(source: Path, target: Path, include: Callable[[Path], bool]) -
         if relative.parts[0] == '.git' or not destination.resolve().is_relative_to(root):
             raise CheckoutError('Generated files must stay inside the working copy')
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(item, destination)
+        copy_file(item, destination)
 
 
 async def push(target: Path, repository: RepositorySelection, token: str, *, branch: str,
                message: str, author: tuple[str, str]) -> RepositoryPublication:
     """Commit the working copy to `branch` and push it. Never forces: a remote branch
-    of that name with other history is an error. Safe to repeat after a failure."""
+    of that name with other history is an error. Safe to repeat after a failure.
+
+    The repository's .gitignore is respected, so build output left by the authors stays
+    out of the branch. The working copy started as a fresh clone, so whatever is ignored
+    now came from the verified sources; those paths are reported as `ignored` rather
+    than dropped silently, in case a rule matches a real source file."""
     validate_selection(repository['full_name'], branch)
     if not (target / '.git').is_dir():
         raise CheckoutError('The repository checkout is unavailable')
     await _git('checkout', '--quiet', '-B', branch, cwd=target)
     await _git('add', '--all', cwd=target)
+    # Ignored directories are listed once, not file by file.
+    ignored = [line[3:] for line in (await _git(
+        'status', '--porcelain', '--ignored', cwd=target)).splitlines()
+        if line.startswith('!! ')]
     if await _git('status', '--porcelain', cwd=target):
         await _git('-c', f'user.name={author[0]}', '-c', f'user.email={author[1]}',
                    'commit', '--quiet', '--no-verify', '-m', message, cwd=target)
     commit = await _git('rev-parse', 'HEAD', cwd=target)
     await _git('push', '--quiet', 'origin', f'HEAD:refs/heads/{branch}', cwd=target, token=token)
     return {'branch': branch, 'commit': commit,
-            'url': f'{repository["html_url"]}/tree/{branch}'}
+            'url': f'{repository["html_url"]}/tree/{branch}',
+            'ignored': ignored[:LISTED_IGNORED], 'ignored_count': len(ignored)}

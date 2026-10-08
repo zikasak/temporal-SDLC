@@ -202,6 +202,11 @@ function VerificationResults({ session, retrying, disabled, onRetry }: {
           Pushed to <a href={session.publication.url} target="_blank" rel="noreferrer">{session.publication.branch}</a>
           {" "}at <code>{session.publication.commit.slice(0, 7)}</code>
         </p>}
+        {session.publication && session.publication.ignored_count > 0 && <p>
+          Not committed because the repository's .gitignore matches them ({session.publication.ignored_count}):
+          {" "}{session.publication.ignored.join(", ")}
+          {session.publication.ignored_count > session.publication.ignored.length && ", …"}
+        </p>}
         {session.publication_error && <div className="generation-failure">
           <p role="alert">{session.publication_error}</p>
           <button type="button" className="generate-button" disabled={disabled}

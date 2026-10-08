@@ -24,6 +24,9 @@ class RepositoryPublication(TypedDict):
     branch: str
     commit: str
     url: str
+    # Verified paths left out because the repository's .gitignore matches them (first few).
+    ignored: list[str]
+    ignored_count: int
 
 
 PublicationStatus = Literal['not_applicable', 'waiting', 'running', 'completed', 'skipped',

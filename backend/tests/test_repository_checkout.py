@@ -31,7 +31,7 @@ def remote(tmp_path, monkeypatch, repository_selection):
     git("init", "--quiet", "--bare", "--initial-branch", repository_selection["branch"], cwd=bare)
     seed = tmp_path / "seed"
     git("clone", "--quiet", str(bare), str(seed), cwd=tmp_path)
-    for name, text in {"README.md": "project", "src/main/Old.java": "obsolete",
+    for name, text in {"README.md": "project", ".gitignore": "build/\n", "src/main/Old.java": "obsolete",
                        "src/main/Kept.java": "kept", "src/test/UnitTest.java": "unit test",
                        "contract-tests/src/test/java/StaleTest.java": "stale"}.items():
         (seed / name).parent.mkdir(parents=True, exist_ok=True)
@@ -73,19 +73,26 @@ async def test_verified_sources_are_pushed_to_a_new_branch(tmp_path, remote, rep
     for name, text in {"implementation/service/src/main/Kept.java": "kept, extended",
                        "implementation/service/src/main/Orders.java": "new service",
                        "implementation/service/Dockerfile": "FROM scratch",
+                       "implementation/service/.gitignore": "build/\n",
+                       "implementation/service/build/classes/Orders.class": "compiled",
                        "tests/suite/src/test/java/OrdersTest.java": "contract test",
                        "tests/suite/pom.xml": "pom"}.items():
         (session / name).parent.mkdir(parents=True, exist_ok=True)
         (session / name).write_text(text)
+    (session / "implementation/service/mvnw").write_text("#!/bin/sh")
+    (session / "implementation/service/mvnw").chmod(0o755)
 
     published = await environment.run(activities.publish_repository, SESSION, repository_selection)
     assert published == {"branch": BRANCH, "commit": git("rev-parse", BRANCH, cwd=remote),
-                         "url": f"{repository_selection['html_url']}/tree/{BRANCH}"}
+                         "url": f"{repository_selection['html_url']}/tree/{BRANCH}",
+                         "ignored": ["build/"], "ignored_count": 1}
     files = set(git("ls-tree", "-r", "--name-only", BRANCH, cwd=remote).splitlines())
     # The author's tree replaces what it was shown (Old.java and README.md are gone, as
     # it removed them); the unit tests it never saw stay, and the suite replaces the
-    # repository's contract tests.
-    assert files == {"src/main/Kept.java", "src/main/Orders.java", "Dockerfile",
+    # repository's contract tests. Build output the repository ignores stays out of
+    # the branch and is reported instead.
+    assert git("ls-tree", BRANCH, "mvnw", cwd=remote).startswith("100755 ")
+    assert files == {"src/main/Kept.java", "src/main/Orders.java", "Dockerfile", "mvnw", ".gitignore",
                      "src/test/UnitTest.java", "contract-tests/pom.xml",
                      "contract-tests/src/test/java/OrdersTest.java"}
     assert git("show", f"{BRANCH}:src/main/Kept.java", cwd=remote) == "kept, extended"

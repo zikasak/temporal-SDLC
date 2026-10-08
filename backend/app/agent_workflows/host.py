@@ -40,6 +40,13 @@ class StageSpec:
     validate_output: Callable[[Path], None]
 
 
+def copy_file(source: Path, destination: Path) -> None:
+    """Copy contents and whether the file is executable (a build helper such as mvnw
+    must stay runnable), but no other permission or ownership bits."""
+    shutil.copyfile(source, destination)
+    destination.chmod(0o755 if source.stat().st_mode & 0o111 else 0o644)
+
+
 def copy_regular_files(source: Path, target: Path, *,
                        include: Callable[[Path], bool]) -> None:
     """Copy selected regular files, never symlinks or files under linked directories."""
@@ -53,7 +60,7 @@ def copy_regular_files(source: Path, target: Path, *,
         if item.is_file():
             destination = target / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(item, destination)
+            copy_file(item, destination)
 
 
 async def run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],

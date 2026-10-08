@@ -147,8 +147,11 @@ async def test_session_with_a_repository_is_implemented_inside_its_checkout(tmp_
                        'contract-tests/pom.xml': 'contract tests', '.git/config': 'origin'}.items():
         (checkout / name).parent.mkdir(parents=True, exist_ok=True)
         (checkout / name).write_text(text)
+    (checkout / 'mvnw').write_text('#!/bin/sh')
+    (checkout / 'mvnw').chmod(0o755)
     context = {'requirements': [], 'repository': {'full_name': 'octocat/project', 'branch': 'main'}}
     sent = {}
+    executable = {}
 
     async def docker(*args, **kwargs):
         if args[0] == 'inspect':
@@ -158,15 +161,22 @@ async def test_session_with_a_repository_is_implemented_inside_its_checkout(tmp_
             with tarfile.open(fileobj=kwargs['stdin']) as archive:
                 sent.update({item.name: archive.extractfile(item).read().decode()
                              for item in archive.getmembers() if item.isfile()})
+                executable['agent'] = archive.getmember('service/mvnw').mode & 0o111
+                assert not archive.getmember('service/pom.xml').mode & 0o111
         if args[0] == 'cp' and args[1].endswith(':/workspace/service/.'):
             (Path(args[2]) / 'Dockerfile').write_text('FROM scratch')
+            (Path(args[2]) / 'mvnw').write_text('#!/bin/sh')
+            (Path(args[2]) / 'mvnw').chmod(0o755)
         if args[0] == 'build' and '--iidfile' in args:
+            executable['build'] = (Path(args[-1]) / 'mvnw').stat().st_mode & 0o111
             Path(args[args.index('--iidfile') + 1]).write_text('sha256:' + 'c' * 64)
         return ''
 
     monkeypatch.setattr(docker_agents, 'docker', docker)
     await ActivityEnvironment().run(activities.implement_service, 'session', context)
     assert json.loads(sent.pop('input.json'))['repository'] == context['repository']
+    # A checked-in build helper stays runnable for the agent and the image build.
+    assert sent.pop('service/mvnw') == '#!/bin/sh' and executable['agent'] and executable['build']
     # The repository's own code, with the generated contract replacing its sources and
     # filling gaps only; never Git metadata or either kind of tests.
     assert sent == {'service/src/main/Api.java': 'generated contract',

@@ -15,7 +15,9 @@ export type RepositorySelection = Omit<Repository, "default_branch"> & {
 
 export type RepositoryCheckout = { commit: string };
 
-export type RepositoryPublication = { branch: string; commit: string; url: string };
+export type RepositoryPublication = {
+  branch: string; commit: string; url: string; ignored: string[]; ignored_count: number;
+};
 
 export type Connection = {
   configured: boolean;
@@ -54,7 +56,10 @@ export function repositoryPublication(value: unknown, repository: RepositorySele
       value.url !== `${repository.html_url}/tree/${value.branch}`) {
     throw new Error("The backend returned invalid repository publication metadata.");
   }
-  return { branch: value.branch, commit: value.commit, url: value.url };
+  const ignored = Array.isArray(value.ignored)
+    ? value.ignored.filter((item): item is string => typeof item === "string") : [];
+  return { branch: value.branch, commit: value.commit, url: value.url, ignored,
+    ignored_count: typeof value.ignored_count === "number" ? value.ignored_count : ignored.length };
 }
 
 export function connectionRecord(value: unknown): Connection {
