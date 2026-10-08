@@ -246,7 +246,8 @@ calls. Agent containers are removed on success, failure or cancellation.
 The API-design page offers **Retry server generation** and **Retry test generation**
 next to a failed stage. Wait for the current pipeline to finish before retrying.
 The corresponding API is `POST /api/api-design/sessions/{session_id}/generation/retry`
-with `{"stage": "server"}` or `{"stage": "tests"}`. Invalid or successful stages
+with `{"stage": "server"}`, `{"stage": "tests"}` or, after a failed push,
+`{"stage": "repository"}`. Invalid or successful stages
 cannot be restarted; attempts while generation is active return HTTP 409.
 
 A retry starts a fresh `ApiDesignWorkflow` run under the same session ID, preserving
@@ -256,6 +257,30 @@ branches if codegen itself failed. Test retries rerun only test generation/build
 Each retried child gets a run-specific ID. Verification resumes automatically once
 both images are available; repeated failures remain manually retryable. This is a
 fresh authoring attempt from the original inputs, not repair using failure logs.
+
+## Working in the repository
+
+A session's repository is checked out to `<GENERATED_CODE_DIR>/<session-id>/repository`
+before its first model turn (see [GitHub connector](github-connector.md#checkout-and-push)),
+and both authors work inside it. Containers still receive copies, never host mounts:
+
+- **Implementation.** `/workspace/service` is the checkout without Git metadata, tests,
+  build output or `contract-tests/`, with the generated server tree added: generated files
+  under `src/` (the API contract) replace the repository's, any other generated file only
+  fills a gap, so an existing `pom.xml` or `README.md` is kept. The published
+  `implementation/service` is therefore the whole repository tree as the author left it.
+- **Tests.** `/workspace/tests` starts from the template plus the repository's existing
+  `contract-tests/` sources, if any. The rest of the repository, including any
+  implementation in it, stays out of the test author's workspace.
+- **Repairs and diagnosis** continue from the published trees as before.
+
+The checkout itself is untouched until verification passes. Then the main worker makes the
+files the implementation author could see equal to `implementation/service` (files it
+removed are deleted; tests it never saw stay), replaces `contract-tests/` with
+`tests/suite`, commits and pushes the new `generated/…` branch.
+`ApiDesignWorkflow.get_state()` reports `publication_status` (`waiting`, `running`,
+`completed`, `skipped` when verification did not pass, `error`), `publication` and
+`publication_error`.
 
 ## Add a future stage
 

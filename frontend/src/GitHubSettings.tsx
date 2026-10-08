@@ -86,7 +86,7 @@ export default function GitHubSettings() {
         <input id="github-token" type="password" value={token} autoComplete="off" spellCheck={false} maxLength={512}
           aria-describedby="github-token-help" disabled={loading || Boolean(busy) || !connection?.encryption_ready}
           onChange={(event) => setToken(event.target.value)} />
-        <p id="github-token-help" className="field-hint">Use a fine-grained token limited to the repositories you need, with Contents read permission. Organization approval or SSO may also be required. The saved token is encrypted and never returned to this browser.</p>
+        <p id="github-token-help" className="field-hint">Use a fine-grained token limited to the repositories you need, with Contents read and write permission: sessions push their verified code to a new branch. Organization approval or SSO may also be required. The saved token is encrypted and never returned to this browser.</p>
         <a className="github-token-link" href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noreferrer">Create a fine-grained token on GitHub</a>
         <button type="submit" className="run-button" disabled={loading || Boolean(busy) || !token.trim() || !connection?.encryption_ready}>
           {busy === "connect" ? "Connecting…" : connection?.configured ? "Replace token" : "Connect GitHub"}

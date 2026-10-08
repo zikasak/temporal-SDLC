@@ -41,6 +41,14 @@ The outer worker builds the test runner image and independently compiles the sui
 Only finish when meaningful tests, successful compilation and README are complete.
 """
 
+REPOSITORY_PROMPT = """
+/workspace/tests is the contract-tests directory of the project's Git repository, named by
+the `repository` entry of the input. Every file you read or change is inside it, and it is
+pushed to a new branch of the repository once the service passes verification. It may
+already hold tests from an earlier version of the contract: keep those the supplied
+contract supports and correct or remove the rest.
+"""
+
 REPAIR_PROMPT = """
 This is a repair run. /workspace/tests already holds your previous suite. It compiled, but
 some tests failed against the running service and a reviewer who compared them with the
@@ -62,8 +70,10 @@ def validate_completion(root: Path) -> None:
 
 def main() -> None:
     context = Path('/workspace/input.json').read_text()
+    inputs = json.loads(context)
     run_agent(AgentProfile(
-        root=ROOT, prompt=PROMPT + (REPAIR_PROMPT if json.loads(context).get('repair') else ''),
+        root=ROOT, prompt=(PROMPT + (REPOSITORY_PROMPT if inputs.get('repository') else '')
+                           + (REPAIR_PROMPT if inputs.get('repair') else '')),
         initial_messages=[context,
                           *(['OpenAPI contract:\n' + OPENAPI.read_text()]
                             if OPENAPI.is_file() else [])],

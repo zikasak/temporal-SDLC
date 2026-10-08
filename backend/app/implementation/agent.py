@@ -23,6 +23,15 @@ You have no Docker daemon; the outer worker will build your Dockerfile.
 Only finish once implementation, compilation and Dockerfile are complete.
 """
 
+REPOSITORY_PROMPT = """
+/workspace/service is a checkout of the project's Git repository, named by the `repository`
+entry of the input, with the generated interfaces and models added under src/. Every file
+you read or change is inside that checkout, and it is pushed to a new branch of the
+repository once the service passes verification. Read the existing code before writing:
+follow its structure and conventions and extend what is already there instead of
+duplicating it. Do not remove files that are unrelated to this service.
+"""
+
 REPAIR_PROMPT = """
 This is a repair run. /workspace/service already holds your previous implementation. It
 compiled, but independently written HTTP contract tests failed against the running service
@@ -41,8 +50,10 @@ def validate_completion(root: Path) -> None:
 
 def main() -> None:
     context = Path('/workspace/input.json').read_text()
+    inputs = json.loads(context)
     run_agent(AgentProfile(
-        root=ROOT, prompt=PROMPT + (REPAIR_PROMPT if json.loads(context).get('repair') else ''),
+        root=ROOT, prompt=(PROMPT + (REPOSITORY_PROMPT if inputs.get('repository') else '')
+                           + (REPAIR_PROMPT if inputs.get('repair') else '')),
         initial_messages=[context],
         max_turns_env='IMPLEMENTATION_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Implementation completed',

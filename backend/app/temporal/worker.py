@@ -13,8 +13,10 @@ with workflow.unsafe.imports_passed_through():
     from app.documents import ensure_document_schema
     from app.temporal.activities import (
         api_design_turn,
+        checkout_repository,
         greet,
         parse_document,
+        publish_repository,
         requirements_turn,
         send_llm_message,
         write_openapi_document,
@@ -45,6 +47,7 @@ async def main():
             greet, parse_document, send_llm_message,
             requirements_turn, write_requirements_document,
             api_design_turn, write_openapi_document,
+            checkout_repository, publish_repository,
         ],
     )
     logger.info("Worker started on task queue %s at %s", TASK_QUEUE, TEMPORAL_ADDRESS)

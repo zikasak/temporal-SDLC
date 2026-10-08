@@ -2,11 +2,13 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, NotRequired, TypedDict
 
 from app.conversations.models import ConversationMessage, ForkOrigin
-from app.github.models import RepositorySelection
+from app.github.models import RepositoryCheckout, RepositorySelection
 
 Category = Literal["functional", "non_functional", "technical"]
 Priority = Literal["must", "should", "could"]
-SessionStatus = Literal["interviewing", "turn_running", "finalizing", "completed", "failed"]
+# A session is `preparing` while its repository is checked out, before any model turn.
+SessionStatus = Literal["preparing", "interviewing", "turn_running", "finalizing", "completed",
+                        "failed"]
 
 CATEGORY_PREFIXES: dict[str, str] = {
     "functional": "FR",
@@ -36,3 +38,5 @@ class RequirementsState:
     error: str | None = None
     forked_from: ForkOrigin | None = None
     repository: RepositorySelection | None = None
+    # Set once the repository is on the worker's disk; forks check out their own.
+    checkout: RepositoryCheckout | None = None

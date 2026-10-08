@@ -4,9 +4,9 @@ This page starts a Temporal workflow for each message, returns its workflow ID i
 
 ## GitHub connection and session repositories
 
-The **GitHub** tab configures one shared personal access token, encrypted in PostgreSQL using a stable backend `GITHUB_TOKEN_ENCRYPTION_KEY`. New Chat and Requirements sessions can optionally choose an accessible repository and branch. Replies, retries, forks, and API-design sessions derived from Requirements inherit that fixed selection. Sessions without repositories still work.
+The **GitHub** tab configures one shared personal access token, encrypted in PostgreSQL using a stable backend `GITHUB_TOKEN_ENCRYPTION_KEY`. A new Requirements session must choose an accessible repository and branch; Chat can optionally choose one. Replies, retries, forks, and API-design sessions derived from Requirements inherit that fixed selection.
 
-This is configuration/metadata only: agents do not clone, read, edit, or push repository code yet. The connection is shared by every signed-in user. See [GitHub setup, permissions, security, and API details](../docs/github-connector.md).
+Requirements and API-design sessions check the branch out before the LLM starts, keep all LLM file access inside that checkout, and push the verified service and tests to a new `generated/…` branch; the token therefore needs Contents read and write access. Chat only records its selection. The connection is shared by every signed-in user. See [GitHub setup, permissions, security, and API details](../docs/github-connector.md).
 
 ## Sign-in
 

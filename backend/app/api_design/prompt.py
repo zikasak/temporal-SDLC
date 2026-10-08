@@ -44,10 +44,10 @@ DESIGNER_GUIDANCE = (
 )
 
 
-def api_turn_messages(state: ApiDesignState) -> list[BaseMessage]:
+def api_turn_messages(state: ApiDesignState, extra_guidance: str = "") -> list[BaseMessage]:
     problems = api_problems(state.api)
     guidance = (
-        f"{DESIGNER_GUIDANCE}\n\n<requirements_document>\n{state.requirements_document}"
+        f"{DESIGNER_GUIDANCE}{extra_guidance}\n\n<requirements_document>\n{state.requirements_document}"
         f"\n</requirements_document>\n\nCurrent API model: "
         f"{json.dumps(state.api, ensure_ascii=False)}\nOpen problems: "
         f"{json.dumps(problems, ensure_ascii=False)}"

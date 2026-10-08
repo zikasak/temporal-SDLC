@@ -18,7 +18,10 @@ logger = logging.getLogger(__name__)
 async def start_session(
     state: RequirementsState | None = None, *, repository: RepositorySelection | None = None,
 ) -> str:
-    if state is None and repository is not None:
+    """Start a new interview in `repository`, or a prepared `state` such as a fork."""
+    if state is None:
+        if repository is None:
+            raise ValueError("A requirements session needs a repository.")
         state = RequirementsState(
             messages=[{"role": "assistant", "content": OPENING_MESSAGE}], repository=repository,
         )

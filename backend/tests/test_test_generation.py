@@ -163,3 +163,40 @@ async def test_repair_continues_from_the_published_suite_with_the_trusted_runner
     assert sent['tests/run-tests.sh'] == (activities.TEMPLATE / 'run-tests.sh').read_text()
     assert json.loads(sent['input.json'])['repair'] == context['repair']
     assert (Path(result['path']) / 'src/test/java/OrdersTest.java').read_text() == 'repaired test'
+
+
+async def test_repository_session_continues_only_the_repositorys_contract_tests(tmp_path, monkeypatch):
+    monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
+    checkout = tmp_path / 'session/repository'
+    for name, text in {'contract-tests/src/test/java/OrdersTest.java': 'existing contract test',
+                       'contract-tests/run-tests.sh': 'exit 0 # from the repository',
+                       'src/main/Orders.java': 'implementation'}.items():
+        (checkout / name).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / name).write_text(text)
+    context = {'requirements': [], 'api_design': empty_api(),
+               'repository': {'full_name': 'octocat/project', 'branch': 'main'}}
+    sent = {}
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': 0})
+        if args[0] == 'cp' and args[1] == '-a':
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.update({item.name: archive.extractfile(item).read().decode()
+                             for item in archive.getmembers() if item.isfile()})
+        if args[0] == 'cp' and args[1].endswith(':/workspace/tests/.'):
+            tests = Path(args[2]) / 'src/test/java'
+            tests.mkdir(parents=True)
+            (tests / 'OrdersTest.java').write_text('test')
+            (Path(args[2]) / 'pom.xml').write_text('pom')
+        if args[0] == 'build' and '--iidfile' in args:
+            Path(args[args.index('--iidfile') + 1]).write_text('sha256:' + 'd' * 64)
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    await ActivityEnvironment().run(activities.generate_service_tests, 'session', context)
+    assert sent['tests/src/test/java/OrdersTest.java'] == 'existing contract test'
+    assert sent['tests/run-tests.sh'] == (activities.TEMPLATE / 'run-tests.sh').read_text()
+    assert json.loads(sent['input.json'])['repository'] == context['repository']
+    # The implementation in the same repository stays out of the test author's reach.
+    assert not any('Orders.java' in name for name in sent)

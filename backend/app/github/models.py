@@ -10,3 +10,21 @@ class RepositorySelection(TypedDict):
     html_url: str
     private: bool
     branch: str
+
+
+class RepositoryCheckout(TypedDict):
+    """The commit of the selected branch a session works from."""
+
+    commit: str
+
+
+class RepositoryPublication(TypedDict):
+    """The new branch a session's verified sources were pushed to."""
+
+    branch: str
+    commit: str
+    url: str
+
+
+PublicationStatus = Literal['not_applicable', 'waiting', 'running', 'completed', 'skipped',
+                            'error']

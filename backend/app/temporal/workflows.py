@@ -20,8 +20,10 @@ with workflow.unsafe.imports_passed_through():
     from app.requirements.prompt import OPENING_MESSAGE
     from app.temporal.activities import (
         api_design_turn,
+        checkout_repository,
         greet,
         parse_document,
+        publish_repository,
         requirements_turn,
         send_llm_message,
         write_openapi_document,
@@ -33,6 +35,39 @@ MAX_TRANSCRIPT_BYTES = 64 * 1024
 MAX_MESSAGE_CHARS = 10000
 # Each round is a diagnosis, a repair of one side and a new verification.
 MAX_REPAIR_ROUNDS = 5
+OPEN_STATUSES = ("interviewing", "turn_running")
+
+
+def _await_checkout(state: RequirementsState | ApiDesignState) -> str:
+    """Hold a new session in `preparing` until its repository is checked out, so no
+    message reaches the model first. Returns the status to continue with."""
+    status = state.status
+    if state.repository and not state.checkout and status in OPEN_STATUSES:
+        state.status = "preparing"
+    return status
+
+
+async def _check_out(state: RequirementsState | ApiDesignState, resume_status: str) -> bool:
+    """Check out the repository of a `preparing` session; False when it cannot go on."""
+    if state.status != "preparing":
+        return True
+    # Histories from before checkouts existed replay without one.
+    if workflow.patched("repository-checkout"):
+        try:
+            state.checkout = await workflow.execute_activity(
+                checkout_repository,
+                args=[workflow.info().workflow_id, state.repository],
+                start_to_close_timeout=timedelta(minutes=10),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except ActivityError as exc:
+            workflow.logger.warning("Repository checkout failed: %s", exc.cause or exc)
+            state.status = "failed"
+            state.error = ("The repository could not be checked out. Check the GitHub "
+                           "connection and start a new session.")
+            return False
+    state.status = resume_status
+    return True
 
 
 @workflow.defn
@@ -85,13 +120,15 @@ class RequirementsWorkflow:
         # A session forked after a user message starts by answering it.
         if self.state.messages[-1]["role"] == "user":
             self.state.status = "turn_running"
+        self._resume_status = _await_checkout(self.state)
         self._updates = 0
         # Validators can all pass in one workflow task, so turns queue here.
         self._turn_lock = asyncio.Lock()
 
     @workflow.run
     async def run(self, state: RequirementsState | None = None) -> dict[str, Any] | None:
-        if self.state.messages[-1]["role"] == "user":
+        ready = await _check_out(self.state, self._resume_status)
+        if ready and self.state.messages[-1]["role"] == "user":
             async with self._turn_lock:
                 await self._turn()
         while self.state.status not in {"completed", "failed"}:
@@ -241,6 +278,7 @@ class ApiDesignWorkflow:
             not self.state.messages or self.state.messages[-1]["role"] == "user"
         ):
             self.state.status = "turn_running"
+        self._resume_status = _await_checkout(self.state)
         self._updates = 0
         self._turn_lock = asyncio.Lock()
 
@@ -248,15 +286,17 @@ class ApiDesignWorkflow:
     async def run(self, state: ApiDesignState) -> dict[str, Any] | None:
         if self.state.generation_retry_stage:
             await self._retry_generation()
+            await self._publish()
             return self.state.document
-        if not self.state.messages:
+        ready = await _check_out(self.state, self._resume_status)
+        if ready and not self.state.messages:
             async with self._turn_lock:
                 if not await self._turn():
                     self.state.messages.append(
                         {"role": "assistant", "content": OPENING_FALLBACK}
                     )
                     self.state.error = None
-        elif self.state.messages[-1]["role"] == "user":
+        elif ready and self.state.messages[-1]["role"] == "user":
             async with self._turn_lock:
                 await self._turn()
         while self.state.status not in {"completed", "failed"}:
@@ -278,7 +318,10 @@ class ApiDesignWorkflow:
                 workflow.continue_as_new(self.state)
         await workflow.wait_condition(workflow.all_handlers_finished)
         if self.state.status == "completed" and self.state.document:
+            if self.state.checkout:
+                self.state.publication_status = 'waiting'
             await self._generate_code()
+            await self._publish()
         return self.state.document
 
     @workflow.query
@@ -435,6 +478,9 @@ class ApiDesignWorkflow:
 
     async def _retry_generation(self) -> None:
         session_id = workflow.info().workflow_id
+        if self.state.generation_retry_stage == 'repository':
+            # Generation and verification already succeeded; only the push is repeated.
+            return
         if self.state.generation_retry_stage == 'server' and not self.state.code:
             # A failed codegen never started either authoring branch.
             await self._generate_code()
@@ -526,7 +572,42 @@ class ApiDesignWorkflow:
         }
 
     def _stage_context(self, repair: dict[str, Any] | None) -> dict[str, Any]:
-        return {**self._coding_context(), 'repair': repair} if repair else self._coding_context()
+        context = self._coding_context()
+        if self.state.checkout:
+            # The authors then work inside the session's checkout of this repository.
+            context['repository'] = self.state.repository
+        if repair:
+            context['repair'] = repair
+        return context
+
+    async def _publish(self) -> None:
+        """Push the sources that passed verification to a new branch of the repository."""
+        if not self.state.checkout:
+            return
+        if not (self.state.verification_status == 'completed' and self.state.verification
+                and self.state.verification['status'] == 'passed'):
+            self.state.publication_status = 'skipped'
+            return
+        self.state.publication_status = 'running'
+        self.state.publication_error = None
+        try:
+            self.state.publication = await workflow.execute_activity(
+                publish_repository,
+                args=[workflow.info().workflow_id, self.state.repository],
+                start_to_close_timeout=timedelta(minutes=10),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except ActivityError as exc:
+            workflow.logger.warning('Repository push failed: %s', exc.cause or exc)
+            reason = str(getattr(exc.cause, 'message', '') or '')[-500:]
+            self.state.publication_error = (
+                'The verified sources could not be pushed to the repository.'
+                + (f' {reason}' if reason else ''))
+            self.state.publication_status = 'error'
+        else:
+            workflow.logger.info('Verified sources pushed to %s',
+                                 self.state.publication['branch'])
+            self.state.publication_status = 'completed'
 
     async def _implement_service(self, session_id: str,
                                  repair: dict[str, Any] | None = None) -> None:
