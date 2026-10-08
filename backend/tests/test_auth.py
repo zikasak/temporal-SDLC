@@ -13,22 +13,41 @@ from app.auth import limits, storage, tokens
 from app.auth.passwords import hash_password
 
 PASSWORD = "correct horse battery"
-PUBLIC = {("POST", "/auth/login"), ("POST", "/auth/logout")}
+PUBLIC = {("POST", "/auth/login"), ("POST", "/auth/logout"), ("GET", "/auth/registration"),
+          ("POST", "/auth/register")}
 
 
 @pytest.fixture
 def http(monkeypatch):
-    users = {"alice@example.com": {"id": 7, "login": "alice@example.com",
-                                   "password_hash": hash_password(PASSWORD)}}
-
-    async def get_user(login):
-        return users.get(login)
-
-    monkeypatch.setattr(storage, "get_user", get_user)
+    use_accounts(monkeypatch, {"alice@example.com": {
+        "id": 7, "login": "alice@example.com", "password_hash": hash_password(PASSWORD),
+        "created_at": "2026-01-01T00:00:00Z"}})
     monkeypatch.setattr(tokens, "AUTH_JWT_SECRET", "s" * 32)
     monkeypatch.setattr(auth_routes, "login_attempts", limits.AttemptLimiter(10))
     # No lifespan: these requests never reach PostgreSQL or Temporal.
     return TestClient(app)
+
+
+def use_accounts(monkeypatch, users):
+    """Replace the accounts table with `users`, keyed by login."""
+    async def get_user(login):
+        return users.get(login)
+
+    async def first_user_id():
+        return min((user["id"] for user in users.values()), default=None)
+
+    async def create_user(login, password_hash, *, only_first=False):
+        if login in users or (only_first and users):
+            return None
+        users[login] = {"id": 100 + len(users), "login": login, "password_hash": password_hash,
+                        "created_at": "2026-01-02T00:00:00Z"}
+        return users[login]
+
+    async def list_users():
+        return sorted(users.values(), key=lambda user: user["login"])
+
+    for function in (get_user, first_user_id, create_user, list_users):
+        monkeypatch.setattr(storage, function.__name__, function)
 
 
 def sign_in(http, login="alice@example.com", password=PASSWORD):
@@ -124,3 +143,48 @@ async def test_a_burst_of_sign_ins_is_shed_instead_of_queued_without_bound(http,
 def test_passwords_are_stored_only_as_salted_hashes():
     first, second = hash_password(PASSWORD), hash_password(PASSWORD)
     assert PASSWORD not in first and first != second
+
+
+def test_the_first_account_registers_itself_and_then_registration_closes(http, monkeypatch):
+    use_accounts(monkeypatch, {})
+    assert http.get("/auth/registration").json() == {"open": True}
+    weak = http.post("/auth/register", json={"login": "bob@example.com", "password": "short"})
+    assert weak.status_code == 422 and "short" not in weak.text
+    assert http.get("/auth/registration").json() == {"open": True}
+
+    first = http.post("/auth/register", json={"login": " Bob@Example.com", "password": PASSWORD})
+    assert first.status_code == 201
+    assert first.json()["login"] == "bob@example.com" and first.json()["admin"] is True
+    assert http.get("/auth/me").json()["admin"] is True
+
+    http.cookies.clear()
+    assert http.get("/auth/registration").json() == {"open": False}
+    late = http.post("/auth/register", json={"login": "eve@example.com", "password": PASSWORD})
+    assert late.status_code == 403
+    assert sign_in(http, login="eve@example.com").status_code == 401
+    assert sign_in(http, login="bob@example.com").json()["admin"] is True
+
+
+def test_only_the_first_user_registers_the_others(http):
+    carol = {"login": "Carol@Example.com", "password": "carol's own password"}
+    assert sign_in(http).json()["admin"] is True
+    created = http.post("/auth/users", json=carol)
+    assert created.status_code == 201 and created.json()["login"] == "carol@example.com"
+    assert PASSWORD not in created.text and "password_hash" not in created.text
+    assert http.post("/auth/users", json=carol).status_code == 409
+    assert http.post("/auth/users", json={**carol, "login": "no spaces"}).status_code == 422
+    assert [user["login"] for user in http.get("/auth/users").json()] == [
+        "alice@example.com", "carol@example.com"]
+
+    http.cookies.clear()
+    signed_in = sign_in(http, login="carol@example.com", password=carol["password"])
+    assert signed_in.json()["admin"] is False
+    dave = {"login": "dave@example.com", "password": PASSWORD}
+    assert http.post("/auth/users", json=dave).status_code == 403
+    assert http.get("/auth/users").status_code == 403
+    # A token is not enough on its own: the claim is checked against the accounts.
+    forged = jwt.encode({"sub": "101", "login": "carol@example.com", "admin": True,
+                         "exp": 4102444800}, "s" * 32, algorithm="HS256")
+    http.cookies.clear()
+    assert http.post("/auth/users", json=dave,
+                     headers={"Authorization": f"Bearer {forged}"}).status_code == 403

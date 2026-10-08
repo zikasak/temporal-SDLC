@@ -42,6 +42,32 @@ async def get_user(login: str) -> dict[str, Any] | None:
         return await cursor.fetchone()
 
 
+async def first_user_id() -> int | None:
+    """The earliest account still present, which registers the others; None without users."""
+    async with await connect() as conn:
+        cursor = await conn.execute("SELECT id FROM app.users ORDER BY id LIMIT 1")
+        row = await cursor.fetchone()
+        return row["id"] if row else None
+
+
+async def create_user(login: str, password_hash: str, *,
+                      only_first: bool = False) -> dict[str, Any] | None:
+    """Create the user. None when the login is taken or, with only_first, when an account
+    already exists."""
+    async with await connect() as conn:
+        if only_first:
+            # Held until commit: concurrent first registrations cannot both see no users.
+            await conn.execute("LOCK TABLE app.users IN SHARE ROW EXCLUSIVE MODE")
+            if await (await conn.execute("SELECT 1 FROM app.users LIMIT 1")).fetchone():
+                return None
+        cursor = await conn.execute("""
+            INSERT INTO app.users (login, password_hash) VALUES (%s, %s)
+            ON CONFLICT (login) DO NOTHING
+            RETURNING *
+        """, (login, password_hash))
+        return await cursor.fetchone()
+
+
 async def save_user(login: str, password_hash: str) -> bool:
     """Create the user or replace their password; True when the user is new."""
     async with await connect() as conn:
@@ -62,5 +88,5 @@ async def remove_user(login: str) -> bool:
 
 async def list_users() -> list[dict[str, Any]]:
     async with await connect() as conn:
-        cursor = await conn.execute("SELECT login, created_at FROM app.users ORDER BY login")
+        cursor = await conn.execute("SELECT id, login, created_at FROM app.users ORDER BY login")
         return await cursor.fetchall()
