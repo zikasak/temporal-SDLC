@@ -3,10 +3,13 @@ import Markdown from "react-markdown";
 import { errorMessage, failure, readBody } from "./api";
 import ForkButton from "./ForkButton";
 import { RepositorySummary } from "./RepositoryPicker";
-import { repositorySelection, type RepositorySelection } from "./github";
+import {
+  repositoryCheckout, repositoryPublication, repositorySelection,
+  type RepositoryCheckout, type RepositoryPublication, type RepositorySelection,
+} from "./github";
 import { markdownComponents, remarkPlugins } from "./markdown";
 
-type SessionStatus = "interviewing" | "turn_running" | "finalizing" | "completed" | "failed";
+type SessionStatus = "preparing" | "interviewing" | "turn_running" | "finalizing" | "completed" | "failed";
 
 type Requirement = {
   id: string;
@@ -109,7 +112,11 @@ function imageArtifact(value: unknown): ImageArtifact | null {
   return isObject(value) && typeof value.image_id === "string" ? { image_id: value.image_id } : null;
 }
 
-type GenerationStage = "server" | "tests";
+type GenerationStage = "server" | "tests" | "repository";
+type PublicationStatus = "not_applicable" | "waiting" | "running" | "completed" | "skipped" | "error";
+const publicationStatuses: PublicationStatus[] = [
+  "not_applicable", "waiting", "running", "completed", "skipped", "error",
+];
 
 function VerificationResults({ session, retrying, disabled, onRetry }: {
   session: Session;
@@ -186,6 +193,28 @@ function VerificationResults({ session, retrying, disabled, onRetry }: {
           {result.runner_log && <><h4>Test runner</h4><pre>{result.runner_log}</pre></>}
         </details>}
       </>}
+      {session.publication_status !== "not_applicable" && <>
+        <h3>Repository branch</h3>
+        {session.publication_status === "waiting" && <p>Verified sources are pushed to a new branch once the tests pass.</p>}
+        {session.publication_status === "running" && <p role="status">Pushing the verified sources to a new branch…</p>}
+        {session.publication_status === "skipped" && <p>Nothing was pushed because verification did not pass.</p>}
+        {session.publication && <p className="verification-outcome verification-passed" role="status">
+          Pushed to <a href={session.publication.url} target="_blank" rel="noreferrer">{session.publication.branch}</a>
+          {" "}at <code>{session.publication.commit.slice(0, 7)}</code>
+        </p>}
+        {session.publication && session.publication.ignored_count > 0 && <p>
+          Not committed because the repository's .gitignore matches them ({session.publication.ignored_count}):
+          {" "}{session.publication.ignored.join(", ")}
+          {session.publication.ignored_count > session.publication.ignored.length && ", …"}
+        </p>}
+        {session.publication_error && <div className="generation-failure">
+          <p role="alert">{session.publication_error}</p>
+          <button type="button" className="generate-button" disabled={disabled}
+            onClick={() => onRetry("repository")}>
+            {retrying === "repository" ? "Pushing again…" : "Retry push"}
+          </button>
+        </div>}
+      </>}
     </section>
   );
 }
@@ -212,17 +241,23 @@ type Session = {
   repairs: RepairRound[];
   forked_from: { session_id: string; message_index: number } | null;
   repository: RepositorySelection | null;
+  checkout: RepositoryCheckout | null;
+  publication: RepositoryPublication | null;
+  publication_error: string | null;
+  publication_status: PublicationStatus;
 };
 
 const sessionStatuses: SessionStatus[] = [
+  "preparing",
   "interviewing",
   "turn_running",
   "finalizing",
   "completed",
   "failed",
 ];
-const pendingStatuses: SessionStatus[] = ["turn_running", "finalizing"];
+const pendingStatuses: SessionStatus[] = ["preparing", "turn_running", "finalizing"];
 const statusLabels: Record<SessionStatus, string> = {
+  preparing: "Checking out repository",
   interviewing: "Discussing",
   turn_running: "Thinking",
   finalizing: "Writing OpenAPI",
@@ -278,9 +313,15 @@ function sessionRecord(value: unknown): Session {
     isObject(value.document) && typeof value.document.document_id === "string"
       ? (value.document as OpenApiDocument)
       : null;
+  const repository = repositorySelection(value.repository);
   return {
     session_id: value.session_id,
-    repository: repositorySelection(value.repository),
+    repository,
+    checkout: repositoryCheckout(value.checkout),
+    publication: repositoryPublication(value.publication, repository),
+    publication_error: typeof value.publication_error === "string" ? value.publication_error : null,
+    publication_status: publicationStatuses.includes(value.publication_status as PublicationStatus)
+      ? value.publication_status as PublicationStatus : "not_applicable",
     source_session_id:
       typeof value.source_session_id === "string" ? value.source_session_id : "",
     status: value.status as SessionStatus,
@@ -325,7 +366,8 @@ function codePending(session: Session) {
 
 function pipelinePending(session: Session) {
   return codePending(session) ||
-    ["waiting", "running", "diagnosing", "repairing"].includes(session.verification_status);
+    ["waiting", "running", "diagnosing", "repairing"].includes(session.verification_status) ||
+    ["waiting", "running"].includes(session.publication_status);
 }
 
 function typeLabel(type: string | null, array: boolean) {
@@ -470,15 +512,20 @@ export default function ApiDesign() {
         ...session,
         ...(stage === "server"
           ? { code_error: null, implementation: null, implementation_error: null }
-          : { tests: null, tests_error: null }),
-        verification: null,
-        verification_error: null,
-        verification_status: "waiting",
-        repairs: [],
+          : stage === "tests" ? { tests: null, tests_error: null } : {}),
+        // A repeated push keeps the verification it publishes.
+        ...(stage === "repository" ? {} : {
+          verification: null,
+          verification_error: null,
+          verification_status: "waiting" as const,
+          repairs: [],
+        }),
+        ...(session.checkout ? { publication_error: null, publication_status: "waiting" as const } : {}),
       });
       setRefreshKey((value) => value + 1);
     } catch (caught) {
-      setError(failure(caught, `Could not restart ${stage === "server" ? "server" : "test"} generation.`));
+      setError(failure(caught, stage === "repository" ? "Could not retry the push."
+        : `Could not restart ${stage === "server" ? "server" : "test"} generation.`));
     } finally {
       setSubmitting(false);
       setRetryingGeneration(null);
@@ -675,7 +722,7 @@ export default function ApiDesign() {
             </span>
           </div>
 
-          <RepositorySummary repository={session?.repository ?? null} />
+          <RepositorySummary repository={session?.repository ?? null} checkout={session?.checkout} />
 
           {sessionId && (
             <p className="request-id">
@@ -734,7 +781,9 @@ export default function ApiDesign() {
                 <p>
                   {session.status === "finalizing"
                     ? "Writing the OpenAPI document…"
-                    : session.messages.length === 0
+                    : session.status === "preparing"
+                      ? "Checking out the repository…"
+                      : session.messages.length === 0
                       ? "Reading the requirements and drafting the API…"
                       : "Waiting for the designer…"}
                 </p>

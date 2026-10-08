@@ -184,10 +184,10 @@ def test_parented_chat_cannot_override_or_clear_the_repository(http, github_http
     assert not github_http[1]
 
 
-def test_empty_body_requirements_creation_remains_supported(http, monkeypatch):
+@pytest.mark.parametrize("body", [None, {}, {"repository": None}])
+def test_requirements_creation_requires_a_repository(http, monkeypatch, body):
     async def start(*, repository=None):
-        assert repository is None
-        return "requirements-session-" + "0" * 32
+        pytest.fail("A session must not start without a repository")
 
     monkeypatch.setattr(requirements, "start_session", start)
-    assert http.post("/requirements/sessions").status_code == 201
+    assert http.post("/requirements/sessions", json=body).status_code == 422

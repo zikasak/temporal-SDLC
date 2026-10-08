@@ -132,3 +132,60 @@ async def test_repair_continues_from_the_published_service(tmp_path, monkeypatch
     assert 'service/Api.java' not in sent
     assert json.loads(sent['input.json'])['repair'] == repair
     assert (Path(result['path']) / 'Service.java').read_text() == 'repaired implementation'
+
+
+async def test_session_with_a_repository_is_implemented_inside_its_checkout(tmp_path, monkeypatch):
+    monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
+    generated = tmp_path / 'session/server'
+    (generated / 'src/main').mkdir(parents=True)
+    (generated / 'src/main/Api.java').write_text('generated contract')
+    (generated / 'pom.xml').write_text('generated pom')
+    (generated / 'README.md').write_text('generated readme')
+    checkout = tmp_path / 'session/repository'
+    for name, text in {'src/main/Api.java': 'outdated contract', 'src/main/Orders.java': 'existing code',
+                       'pom.xml': 'project pom', 'src/test/OrdersTest.java': 'project tests',
+                       'contract-tests/pom.xml': 'contract tests', '.git/config': 'origin'}.items():
+        (checkout / name).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / name).write_text(text)
+    (checkout / 'mvnw').write_text('#!/bin/sh')
+    (checkout / 'mvnw').chmod(0o755)
+    context = {'requirements': [], 'repository': {'full_name': 'octocat/project', 'branch': 'main'}}
+    sent = {}
+    executable = {}
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': 0})
+        if args[0] == 'cp' and args[1] == '-a':
+            import tarfile
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.update({item.name: archive.extractfile(item).read().decode()
+                             for item in archive.getmembers() if item.isfile()})
+                executable['agent'] = archive.getmember('service/mvnw').mode & 0o111
+                assert not archive.getmember('service/pom.xml').mode & 0o111
+        if args[0] == 'cp' and args[1].endswith(':/workspace/service/.'):
+            (Path(args[2]) / 'Dockerfile').write_text('FROM scratch')
+            (Path(args[2]) / 'mvnw').write_text('#!/bin/sh')
+            (Path(args[2]) / 'mvnw').chmod(0o755)
+        if args[0] == 'build' and '--iidfile' in args:
+            executable['build'] = (Path(args[-1]) / 'mvnw').stat().st_mode & 0o111
+            Path(args[args.index('--iidfile') + 1]).write_text('sha256:' + 'c' * 64)
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    await ActivityEnvironment().run(activities.implement_service, 'session', context)
+    assert json.loads(sent.pop('input.json'))['repository'] == context['repository']
+    # A checked-in build helper stays runnable for the agent and the image build.
+    assert sent.pop('service/mvnw') == '#!/bin/sh' and executable['agent'] and executable['build']
+    # The repository's own code, with the generated contract replacing its sources and
+    # filling gaps only; never Git metadata or either kind of tests.
+    assert sent == {'service/src/main/Api.java': 'generated contract',
+                    'service/src/main/Orders.java': 'existing code',
+                    'service/pom.xml': 'project pom', 'service/README.md': 'generated readme'}
+    # The checkout itself changes only when verified sources are pushed.
+    assert (checkout / 'src/main/Api.java').read_text() == 'outdated contract'
+
+    import shutil
+    shutil.rmtree(checkout)
+    with pytest.raises(ApplicationError, match='repository checkout is unavailable'):
+        await ActivityEnvironment().run(activities.implement_service, 'session', context)

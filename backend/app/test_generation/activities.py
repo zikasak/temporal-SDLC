@@ -12,6 +12,7 @@ from app.agent_workflows.host import StageInputs, StageSpec, copy_regular_files,
 from app.api_design.openapi import render_openapi
 from app.config import GENERATED_CODE_DIR
 from app.docker_agents import default_agent_image
+from app.github.checkout import CHECKOUT_DIR, TESTS_DIR
 from app.requirements.document import without_repeated_tables
 
 TEMPLATE = Path(__file__).parent / 'template'
@@ -45,6 +46,15 @@ def prepare_inputs(session_dir: Path, context: dict[str, Any]) -> StageInputs:
             raise ApplicationError('Generated tests are unavailable', non_retryable=True)
         contracts['repair'] = repair
 
+    # The author of a session with a repository continues that repository's contract
+    # tests; the rest of the checkout stays out of its workspace.
+    repository = context.get('repository')
+    checkout = session_dir / CHECKOUT_DIR
+    if repository:
+        if not checkout.is_dir():
+            raise ApplicationError('The repository checkout is unavailable', non_retryable=True)
+        contracts['repository'] = repository
+
     openapi = render_openapi(api_design)
     index, files = on_demand_contracts({**contracts, 'api_design': api_design},
                                        len(json.dumps(contracts)) + len(openapi)) or (contracts, {})
@@ -54,6 +64,8 @@ def prepare_inputs(session_dir: Path, context: dict[str, Any]) -> StageInputs:
         if repair:
             # A repair continues from the published suite; runner files stay the template's.
             copy_test_suite(previous, workspace / 'tests')
+        elif repository and (checkout / TESTS_DIR).is_dir():
+            copy_test_suite(checkout / TESTS_DIR, workspace / 'tests')
         if files:
             write_contracts(workspace, files)
         else:

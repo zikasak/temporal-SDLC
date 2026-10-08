@@ -26,7 +26,7 @@ class StartBody(BaseModel):
 
 
 class RetryGenerationBody(BaseModel):
-    stage: Literal['server', 'tests']
+    stage: Literal['server', 'tests', 'repository']
 
 
 def _check_session_id(session_id: str) -> None:

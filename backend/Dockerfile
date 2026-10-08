@@ -12,6 +12,9 @@ ENV PATH="/opt/java/openjdk/bin:${PATH}"
 # DOCKER_HOST; no daemon runs in this image.
 COPY --from=docker /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker /usr/local/libexec/docker/cli-plugins/docker-buildx /usr/local/libexec/docker/cli-plugins/docker-buildx
+# The main worker clones session repositories and pushes their generated branches.
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

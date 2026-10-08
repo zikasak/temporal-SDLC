@@ -2,7 +2,9 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, NotRequired, TypedDict
 
 from app.conversations.models import ConversationMessage, ForkOrigin
-from app.github.models import RepositorySelection
+from app.github.models import (
+    PublicationStatus, RepositoryCheckout, RepositoryPublication, RepositorySelection,
+)
 from app.diagnosis.models import RepairRound
 from app.requirements.models import Requirement, SessionStatus
 from app.verification.models import VerificationResult, VerificationStatus
@@ -104,6 +106,12 @@ class ApiDesignState:
     repairs: list[RepairRound] = field(default_factory=list)
     forked_from: ForkOrigin | None = None
     # Manual generation retries start a new run under the same session ID.
-    generation_retry_stage: Literal['server', 'tests'] | None = None
+    generation_retry_stage: Literal['server', 'tests', 'repository'] | None = None
     previous_run_id: str | None = None
     repository: RepositorySelection | None = None
+    # Set once the repository is on the worker's disk; forks check out their own.
+    checkout: RepositoryCheckout | None = None
+    # The new branch holding the sources that passed verification.
+    publication: RepositoryPublication | None = None
+    publication_error: str | None = None
+    publication_status: PublicationStatus = 'not_applicable'

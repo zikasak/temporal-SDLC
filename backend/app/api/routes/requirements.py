@@ -21,7 +21,8 @@ SESSION_ID_PATTERN = re.compile(r"requirements-session-[0-9a-f]{32}")
 
 
 class CreateBody(BaseModel):
-    repository: RepositoryInput | None = None
+    # Every session works in a repository; derived sessions inherit this one.
+    repository: RepositoryInput
 
 
 class MessageBody(BaseModel):
@@ -47,11 +48,11 @@ def _check_session_id(session_id: str) -> None:
 
 
 @router.post("", status_code=201)
-async def create_session(body: CreateBody | None = None):
+async def create_session(body: CreateBody):
     try:
         repository = await resolve_repository_selection(
             body.repository.full_name, body.repository.branch,
-        ) if body and body.repository else None
+        )
         session_id = await start_session(repository=repository)
     except Exception as exc:
         raise http_error(exc) from exc

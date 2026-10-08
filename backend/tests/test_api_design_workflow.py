@@ -71,10 +71,32 @@ class FakeActivities:
         self.diagnosed: list[dict[str, Any]] = []
         self.fail_diagnosis = False
         self.repairs: list[tuple[str, dict[str, Any]]] = []
+        # What had already run when each repository was checked out.
+        self.checkouts: list[tuple[str, bool]] = []
+        self.turns = 0
+        self.fail_checkout = False
+        self.published: list[tuple[str, str]] = []
+        self.fail_publication = False
+
+    @activity.defn(name="checkout_repository")
+    async def checkout_repository(self, session_id: str, repository: dict[str, Any]) -> dict[str, Any]:
+        if self.fail_checkout:
+            raise ApplicationError("clone rejected", non_retryable=True)
+        self.checkouts.append((repository["full_name"], self.turns > 0))
+        return {"commit": "1" * 40}
+
+    @activity.defn(name="publish_repository")
+    async def publish_repository(self, session_id: str, repository: dict[str, Any]) -> dict[str, Any]:
+        if self.fail_publication:
+            raise ApplicationError("remote: Permission denied", non_retryable=True)
+        self.published.append((session_id, repository["full_name"]))
+        return {"branch": "generated/abc", "commit": "2" * 40,
+                "url": repository["html_url"] + "/tree/generated/abc"}
 
     @activity.defn(name="api_design_turn")
     async def api_design_turn(self, state: ApiDesignState) -> dict[str, Any]:
         await self.release_turn.wait()
+        self.turns += 1
         api = dict(state.api)
         if not state.messages:
             if self.fail_draft:
@@ -170,7 +192,8 @@ async def worker(env):
     activities = FakeActivities()
     async with Worker(
         env.client, task_queue=TASK_QUEUE, workflows=[ApiDesignWorkflow],
-        activities=[activities.api_design_turn, activities.write_openapi_document],
+        activities=[activities.api_design_turn, activities.write_openapi_document,
+                    activities.checkout_repository, activities.publish_repository],
     ), Worker(
         # The fake lives in this module, whose imports the sandbox would reject.
         env.client, task_queue=CODEGEN_TASK_QUEUE, workflows=[FakeCodegenWorkflow],
@@ -221,6 +244,11 @@ async def test_new_api_design_inherits_the_requirements_repository(env, worker, 
     monkeypatch.setattr(service, "get_generated_document", document)
     monkeypatch.setattr(service, "connect_temporal", connect)
     monkeypatch.setattr(service, "TASK_QUEUE", TASK_QUEUE)
+    if not linked:
+        # Only chat may run without a repository.
+        with pytest.raises(sessions.SessionBusy, match="no repository"):
+            await service.start_session("requirements-session-" + "0" * 32)
+        return
     handle = env.client.get_workflow_handle(await service.start_session("requirements-session-" + "0" * 32))
     try:
         state = await wait_for_status(handle, "interviewing")
@@ -228,6 +256,82 @@ async def test_new_api_design_inherits_the_requirements_repository(env, worker, 
         assert (await service.get_session(handle.id))["repository"] == selected
     finally:
         await handle.terminate()
+
+
+async def test_repository_is_checked_out_first_and_pushed_once_verified(env, worker, monkeypatch, repository_selection):
+    worker.release_turn.clear()
+    handle = await start(env, repository_selection)
+    # Nothing reaches the model, and no message is accepted, before the checkout.
+    assert (await handle.query(ApiDesignWorkflow.get_state)).status in {"preparing", "turn_running"}
+    worker.release_turn.set()
+    await wait_for_status(handle, "interviewing")
+    assert worker.checkouts == [(repository_selection["full_name"], False)]
+    await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
+    worker.fail_publication = True
+    await handle.execute_update(ApiDesignWorkflow.finalize)
+    assert await handle.result() == DOCUMENT
+    state = await handle.query(ApiDesignWorkflow.get_state)
+    # Both authors are told to work in the repository the session checked out.
+    assert state.implementation["context"]["repository"] == repository_selection
+    assert state.tests["context"]["repository"] == repository_selection
+    assert state.verification["status"] == "passed"
+    assert state.publication is None and state.publication_status == "error"
+    assert "Permission denied" in state.publication_error
+
+    async def connect():
+        return env.client
+
+    # A rejected push is repeated on its own: nothing is generated or verified again.
+    monkeypatch.setattr(service, "connect_temporal", connect)
+    worker.fail_publication = False
+    await service.retry_generation(handle.id, "repository")
+    retry = env.client.get_workflow_handle(handle.id)
+    assert await retry.result() == DOCUMENT
+    state = await retry.query(ApiDesignWorkflow.get_state)
+    assert state.publication["branch"] == "generated/abc" and state.publication_error is None
+    assert state.publication_status == "completed" and state.verification["status"] == "passed"
+    assert worker.published == [(handle.id, repository_selection["full_name"])]
+    assert len(worker.verified_images) == 1 and len(worker.checkouts) == 1
+    with pytest.raises(sessions.SessionBusy):
+        await service.retry_generation(handle.id, "repository")
+
+
+async def test_unverified_sources_are_not_pushed(env, worker, repository_selection):
+    worker.verification_result = "error"
+    handle = await start(env, repository_selection)
+    await wait_for_status(handle, "interviewing")
+    await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
+    await handle.execute_update(ApiDesignWorkflow.finalize)
+    assert await handle.result() == DOCUMENT
+    state = await handle.query(ApiDesignWorkflow.get_state)
+    assert state.publication_status == "skipped" and not worker.published
+
+
+async def test_pre_checkout_history_replays_without_checkout_or_push(env, worker, monkeypatch, repository_selection):
+    """A session that selected a repository before checkouts existed keeps its history."""
+    patched = workflow.patched
+    with monkeypatch.context() as legacy:
+        legacy.setattr(workflow, 'patched', lambda name: False if name == 'repository-checkout' else patched(name))
+        handle = await start(env, repository_selection)
+        await wait_for_status(handle, "interviewing")
+        await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
+        await handle.execute_update(ApiDesignWorkflow.finalize)
+        assert await handle.result() == DOCUMENT
+        state = await handle.query(ApiDesignWorkflow.get_state)
+        assert state.verification['status'] == 'passed' and state.publication_status == 'not_applicable'
+        assert not worker.checkouts and not worker.published
+        assert 'repository' not in state.implementation['context']
+        history = await handle.fetch_history()
+    await Replayer(workflows=[ApiDesignWorkflow]).replay_workflow(history)
+
+
+async def test_session_fails_without_a_model_turn_when_checkout_fails(env, worker, repository_selection):
+    worker.fail_checkout = True
+    handle = await start(env, repository_selection)
+    assert await handle.result() is None
+    state = await handle.query(ApiDesignWorkflow.get_state)
+    assert state.status == "failed" and "could not be checked out" in state.error
+    assert worker.turns == 0 and state.messages == []
 
 
 async def wait_for_status(handle, status: str) -> ApiDesignState:
@@ -479,7 +583,7 @@ async def test_failed_coding_branches_preserve_other_artifacts(env, worker, fail
     monkeypatch.setattr(service, 'TASK_QUEUE', TASK_QUEUE)
     fork = env.client.get_workflow_handle(await service.fork_session(handle.id, 0))
     try:
-        fork_state = await fork.query(ApiDesignWorkflow.get_state)
+        fork_state = await wait_for_status(fork, 'interviewing')
         assert fork_state.api['endpoints'] == []
         assert fork_state.repository == repository_selection
     finally:
@@ -678,7 +782,8 @@ async def test_fork_keeps_api_as_it_was_at_the_message(env, worker, monkeypatch,
     # draft, /bookings, Recorded.
 
     fork = env.client.get_workflow_handle(await service.fork_session(source.id, 0))
-    state = await fork.query(ApiDesignWorkflow.get_state)
+    # A fork checks out its own copy of the repository first.
+    state = await wait_for_status(fork, "interviewing")
     assert [item["path"] for item in state.api["endpoints"]] == ["/rooms"]
     assert state.requirements_document == "# Requirements"
     assert state.forked_from == {"session_id": source.id, "message_index": 0}
@@ -691,7 +796,7 @@ async def test_fork_keeps_api_as_it_was_at_the_message(env, worker, monkeypatch,
     assert [item["path"] for item in state.api["endpoints"]] == ["/rooms", "/bookings"]
     assert state.repository == repository_selection
     nested = env.client.get_workflow_handle(await service.fork_session(fork.id, 0))
-    assert (await nested.query(ApiDesignWorkflow.get_state)).repository == repository_selection
+    assert (await wait_for_status(nested, "interviewing")).repository == repository_selection
     await nested.terminate()
     for handle in (source, fork, regenerated):
         await handle.terminate()

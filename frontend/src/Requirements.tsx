@@ -3,10 +3,10 @@ import Markdown from "react-markdown";
 import { errorMessage, failure, readBody } from "./api";
 import ForkButton from "./ForkButton";
 import RepositoryPicker, { RepositorySummary } from "./RepositoryPicker";
-import { repositorySelection, selectionInput, type RepositorySelection } from "./github";
+import { repositoryCheckout, repositorySelection, selectionInput, type RepositoryCheckout, type RepositorySelection } from "./github";
 import { markdownComponents, remarkPlugins } from "./markdown";
 
-type SessionStatus = "interviewing" | "turn_running" | "finalizing" | "completed" | "failed";
+type SessionStatus = "preparing" | "interviewing" | "turn_running" | "finalizing" | "completed" | "failed";
 type Category = "functional" | "non_functional" | "technical";
 
 type Requirement = {
@@ -34,22 +34,25 @@ type Session = {
   error: string | null;
   forked_from: { session_id: string; message_index: number } | null;
   repository: RepositorySelection | null;
+  checkout: RepositoryCheckout | null;
 };
 
 const sessionStatuses: SessionStatus[] = [
+  "preparing",
   "interviewing",
   "turn_running",
   "finalizing",
   "completed",
   "failed",
 ];
-const pendingStatuses: SessionStatus[] = ["turn_running", "finalizing"];
+const pendingStatuses: SessionStatus[] = ["preparing", "turn_running", "finalizing"];
 const categories: [Category, string][] = [
   ["functional", "Functional"],
   ["non_functional", "Non-functional"],
   ["technical", "Technical"],
 ];
 const statusLabels: Record<SessionStatus, string> = {
+  preparing: "Checking out repository",
   interviewing: "Interviewing",
   turn_running: "Thinking",
   finalizing: "Writing document",
@@ -118,6 +121,7 @@ function sessionRecord(value: unknown): Session {
     error: "error" in value && typeof value.error === "string" ? value.error : null,
     forked_from: forkOrigin(value),
     repository: repositorySelection("repository" in value ? value.repository : null),
+    checkout: repositoryCheckout("checkout" in value ? value.checkout : null),
   };
 }
 
@@ -200,12 +204,12 @@ export default function Requirements() {
   }
 
   async function startSession() {
-    if (repositoryChoice && !repositoryChoice.branch) return;
+    if (!repositoryChoice?.branch) return;
     setSubmitting(true);
     setError("");
     setSession(null);
     try {
-      const body = await post("", repositoryChoice ? { repository: selectionInput(repositoryChoice) } : undefined);
+      const body = await post("", { repository: selectionInput(repositoryChoice) });
       if (
         typeof body !== "object" ||
         body === null ||
@@ -379,12 +383,12 @@ export default function Requirements() {
             </form>
           ) : (
             <>
-              {!sessionId && <RepositoryPicker value={repositoryChoice} onChange={setRepositoryChoice} disabled={submitting} />}
+              {!sessionId && <RepositoryPicker value={repositoryChoice} onChange={setRepositoryChoice} disabled={submitting} required />}
               <button
                 className="run-button"
                 type="button"
                 onClick={startSession}
-                disabled={submitting || Boolean(repositoryChoice && !repositoryChoice.branch)}
+                disabled={submitting || !repositoryChoice?.branch}
               >
                 <span>{submitting ? "Starting" : "Start a session"}</span>
                 {submitting && <span className="spinner" aria-hidden="true" />}
@@ -441,7 +445,8 @@ export default function Requirements() {
             </span>
           </div>
 
-          <RepositorySummary repository={session?.repository ?? (submitting && !session ? repositoryChoice : null)} />
+          <RepositorySummary repository={session?.repository ?? (submitting && !session ? repositoryChoice : null)}
+            checkout={session?.checkout} />
 
           {sessionId && (
             <p className="request-id">
@@ -500,7 +505,9 @@ export default function Requirements() {
                 <p>
                   {session.status === "finalizing"
                     ? "Writing the requirements document…"
-                    : "Waiting for the analyst…"}
+                    : session.status === "preparing"
+                      ? "Checking out the repository…"
+                      : "Waiting for the analyst…"}
                 </p>
               </div>
             )}

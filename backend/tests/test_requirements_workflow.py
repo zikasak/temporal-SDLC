@@ -27,6 +27,12 @@ class FakeActivities:
         self.release_turn.set()
         self.documents: list[str] = []
         self.fail_turn = False
+        self.checkouts: list[str] = []
+
+    @activity.defn(name="checkout_repository")
+    async def checkout_repository(self, session_id: str, repository: dict[str, Any]) -> dict[str, Any]:
+        self.checkouts.append(session_id)
+        return {"commit": "1" * 40}
 
     @activity.defn(name="requirements_turn")
     async def requirements_turn(
@@ -64,7 +70,8 @@ async def worker(env):
     activities = FakeActivities()
     async with Worker(
         env.client, task_queue=TASK_QUEUE, workflows=[RequirementsWorkflow],
-        activities=[activities.requirements_turn, activities.write_requirements_document],
+        activities=[activities.requirements_turn, activities.write_requirements_document,
+                    activities.checkout_repository],
     ):
         yield activities
 
@@ -184,17 +191,21 @@ def titles(state: RequirementsState) -> list[str]:
 
 async def test_fork_keeps_requirements_as_they_were_at_the_message(env, worker, temporal, repository_selection):
     source = env.client.get_workflow_handle(await service.start_session(repository=repository_selection))
-    assert (await source.query(RequirementsWorkflow.get_state)).repository == repository_selection
+    # No message is accepted until the repository is checked out.
+    assert (await wait_for_status(source, "interviewing")).repository == repository_selection
     await source.execute_update(RequirementsWorkflow.send_message, "A")
     await source.execute_update(RequirementsWorkflow.send_message, "B")
     # opening, A, Question 1?, B, Question 2?
 
     fork = env.client.get_workflow_handle(await service.fork_session(source.id, 2))
-    state = await fork.query(RequirementsWorkflow.get_state)
+    state = await wait_for_status(fork, "interviewing")
     assert [item["content"] for item in state.messages][1:] == ["A", "Question 1?"]
-    assert titles(state) == ["A"] and state.status == "interviewing"
+    assert titles(state) == ["A"]
     assert state.forked_from == {"session_id": source.id, "message_index": 2}
     assert (await service.get_session(fork.id))["repository"] == repository_selection
+    # Every session, forks included, works in its own checkout.
+    assert worker.checkouts == [source.id, fork.id]
+    assert state.checkout == {"commit": "1" * 40}
 
     # Forking after a user message answers it again.
     regenerated = env.client.get_workflow_handle(await service.fork_session(source.id, 3))
@@ -208,7 +219,7 @@ async def test_fork_keeps_requirements_as_they_were_at_the_message(env, worker, 
     assert titles(state) == ["A", "C"]
     for index, expected in [(0, []), (2, ["A"]), (4, ["A", "C"])]:
         nested = env.client.get_workflow_handle(await service.fork_session(fork.id, index))
-        nested_state = await nested.query(RequirementsWorkflow.get_state)
+        nested_state = await wait_for_status(nested, "interviewing")
         assert titles(nested_state) == expected
         assert nested_state.repository == repository_selection
         await nested.terminate()

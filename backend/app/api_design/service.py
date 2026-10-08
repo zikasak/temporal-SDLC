@@ -25,6 +25,9 @@ async def start_session(requirements_session_id: str) -> str:
     source = await requirements_service.get_state(requirements_session_id)
     if source.status != "completed" or not source.document:
         raise SessionBusy("Generate the requirements document before designing the API.")
+    if not source.repository:
+        raise SessionBusy("This requirements session has no repository. Start a new "
+                          "requirements session and choose one.")
     try:
         document = await get_generated_document(
             source.document["document_id"], requirements_session_id
@@ -98,10 +101,11 @@ async def finalize_session(session_id: str) -> None:
     logger.info("Finalizing API design session %s", session_id)
 
 
-async def retry_generation(session_id: str, stage: Literal['server', 'tests']) -> None:
+async def retry_generation(session_id: str,
+                           stage: Literal['server', 'tests', 'repository']) -> None:
     """Restart a failed stage, retaining the design and successful build artifacts."""
-    if stage not in {'server', 'tests'}:
-        raise SessionBusy('Choose server or tests generation to retry.')
+    if stage not in {'server', 'tests', 'repository'}:
+        raise SessionBusy('Choose server generation, tests generation or the push to retry.')
     client = await connect_temporal()
     handle = client.get_workflow_handle(session_id)
     description = await handle.describe()
@@ -111,22 +115,28 @@ async def retry_generation(session_id: str, stage: Literal['server', 'tests']) -
     state = await client.get_workflow_handle(session_id, run_id=description.run_id).query(
         'get_state', result_type=ApiDesignState,
     )
-    failed = (state.code_error or state.implementation_error) if stage == 'server' else state.tests_error
+    failed = {'server': state.code_error or state.implementation_error,
+              'tests': state.tests_error, 'repository': state.publication_error}[stage]
     if state.status != 'completed' or not state.document or not failed:
         raise SessionBusy('Only failed generation can be retried.')
     if stage == 'tests' and not state.code:
         raise SessionBusy('Retry server generation first.')
     state.generation_retry_stage = stage
     state.previous_run_id = description.run_id
-    state.verification = None
-    state.verification_error = None
-    state.verification_status = 'waiting'
-    state.repairs = []
+    if state.checkout:
+        state.publication_error = None
+        state.publication_status = 'waiting'
+    if stage != 'repository':
+        # A repeated push keeps the verification it publishes.
+        state.verification = None
+        state.verification_error = None
+        state.verification_status = 'waiting'
+        state.repairs = []
     if stage == 'server':
         state.code_error = None
         state.implementation = None
         state.implementation_error = None
-    else:
+    elif stage == 'tests':
         state.tests = None
         state.tests_error = None
     try:

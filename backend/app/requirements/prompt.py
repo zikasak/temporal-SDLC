@@ -55,11 +55,11 @@ def _conversation(messages: list[ConversationMessage]) -> list[BaseMessage]:
 
 
 def interview_messages(
-    messages: list[ConversationMessage], requirements: list[Requirement]
+    messages: list[ConversationMessage], requirements: list[Requirement],
+    extra_guidance: str = "",
 ) -> list[BaseMessage]:
-    guidance = INTERVIEWER_GUIDANCE + "\nRequirements recorded so far: " + json.dumps(
-        requirements, ensure_ascii=False
-    )
+    guidance = (INTERVIEWER_GUIDANCE + extra_guidance + "\nRequirements recorded so far: "
+                + json.dumps(requirements, ensure_ascii=False))
     return [SystemMessage(content=guidance), *_conversation(messages)]
 
 

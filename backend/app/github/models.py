@@ -10,3 +10,24 @@ class RepositorySelection(TypedDict):
     html_url: str
     private: bool
     branch: str
+
+
+class RepositoryCheckout(TypedDict):
+    """The commit of the selected branch a session works from."""
+
+    commit: str
+
+
+class RepositoryPublication(TypedDict):
+    """The new branch a session's verified sources were pushed to."""
+
+    branch: str
+    commit: str
+    url: str
+    # Verified paths left out because the repository's .gitignore matches them (first few).
+    ignored: list[str]
+    ignored_count: int
+
+
+PublicationStatus = Literal['not_applicable', 'waiting', 'running', 'completed', 'skipped',
+                            'error']

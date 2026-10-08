@@ -13,6 +13,12 @@ export type RepositorySelection = Omit<Repository, "default_branch"> & {
   branch: string;
 };
 
+export type RepositoryCheckout = { commit: string };
+
+export type RepositoryPublication = {
+  branch: string; commit: string; url: string; ignored: string[]; ignored_count: number;
+};
+
 export type Connection = {
   configured: boolean;
   encryption_ready: boolean;
@@ -37,6 +43,23 @@ export function repositorySelection(value: unknown): RepositorySelection | null 
     throw new Error("The backend returned invalid repository metadata.");
   }
   return value as RepositorySelection;
+}
+
+export function repositoryCheckout(value: unknown): RepositoryCheckout | null {
+  return object(value) && typeof value.commit === "string" ? { commit: value.commit } : null;
+}
+
+export function repositoryPublication(value: unknown, repository: RepositorySelection | null): RepositoryPublication | null {
+  if (!object(value) || !repository) return null;
+  // Only ever link to the session's own repository.
+  if (typeof value.branch !== "string" || typeof value.commit !== "string" ||
+      value.url !== `${repository.html_url}/tree/${value.branch}`) {
+    throw new Error("The backend returned invalid repository publication metadata.");
+  }
+  const ignored = Array.isArray(value.ignored)
+    ? value.ignored.filter((item): item is string => typeof item === "string") : [];
+  return { branch: value.branch, commit: value.commit, url: value.url, ignored,
+    ignored_count: typeof value.ignored_count === "number" ? value.ignored_count : ignored.length };
 }
 
 export function connectionRecord(value: unknown): Connection {
