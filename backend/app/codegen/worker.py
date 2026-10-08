@@ -7,7 +7,7 @@ from temporalio.worker import Worker
 
 from app.config import CODEGEN_TASK_QUEUE, TEMPORAL_ADDRESS
 from app.logging_setup import configure_logging
-from app.tracing import shutdown_tracing
+from app.temporal.lifecycle import run_worker
 
 with workflow.unsafe.imports_passed_through():
     from app.codegen.activities import generate_server_code
@@ -28,10 +28,7 @@ async def main():
     )
     logger.info("Codegen worker started on task queue %s at %s",
                 CODEGEN_TASK_QUEUE, TEMPORAL_ADDRESS)
-    try:
-        await worker.run()
-    finally:
-        await asyncio.to_thread(shutdown_tracing)
+    await run_worker(worker)
 
 if __name__ == "__main__":
     asyncio.run(main())
