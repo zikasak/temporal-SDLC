@@ -11,6 +11,9 @@ import pytest
 # Set before application imports/.env loading. Tracing transport tests opt in
 # explicitly in isolated child processes with disposable local credentials.
 os.environ['LANGFUSE_TRACING_ENABLED'] = 'false'
+# A developer's harness would route scripted agents to the real Pi or Claude CLI; tests
+# of those harnesses select them explicitly.
+os.environ['LLM_HARNESS'] = ''
 
 # Stands in for the Claude Code CLI behind the real Claude Agent SDK: answers the SDK's
 # control requests, lists the tools the SDK serves, records what the turn was given and
