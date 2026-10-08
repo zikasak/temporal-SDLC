@@ -7,6 +7,9 @@
 # daemon does not listen on TCP, so the containers it runs cannot reach its API. The
 # server needs the Sysbox runtime (https://github.com/nestybox/sysbox) installed.
 #
+# Sign-in is required. Coolify generates the token-signing secret; create users from the
+# `api` container's terminal: python -m app.auth.users add you@example.com
+#
 # Set in Coolify: the LLM provider variables for the chosen LLM_HARNESS,
 # GITHUB_TOKEN_ENCRYPTION_KEY and GITHUB_ALLOWED_ORIGINS (the public origin, such as
 # https://app.example.com). LLM_HARNESS=pi is not supported here: its credential files
@@ -31,6 +34,11 @@ x-app: &app
     CONTRACT_EMBED_CHARS: ${CONTRACT_EMBED_CHARS:-32000}
     GITHUB_TOKEN_ENCRYPTION_KEY: ${GITHUB_TOKEN_ENCRYPTION_KEY:-}
     GITHUB_ALLOWED_ORIGINS: ${GITHUB_ALLOWED_ORIGINS:-}
+    AUTH_JWT_SECRET: ${SERVICE_PASSWORD_64_JWT}
+    AUTH_TOKEN_TTL_HOURS: ${AUTH_TOKEN_TTL_HOURS:-12}
+    AUTH_LOGIN_ATTEMPTS_PER_MINUTE: ${AUTH_LOGIN_ATTEMPTS_PER_MINUTE:-10}
+    # Coolify's proxy and the frontend's nginx. Add one per further proxy or CDN in front.
+    AUTH_TRUSTED_PROXY_HOPS: ${AUTH_TRUSTED_PROXY_HOPS:-2}
     LANGFUSE_TRACING_ENABLED: ${LANGFUSE_TRACING_ENABLED:-false}
     LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
     LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}

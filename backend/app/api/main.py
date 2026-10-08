@@ -4,9 +4,12 @@ import time
 from contextlib import asynccontextmanager, suppress
 
 import psycopg
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 
-from app.api.routes import api_design, github, hello, llm_requests, requirements, workflows
+from app.api.routes import (
+    api_design, auth, github, hello, llm_requests, requirements, workflows,
+)
+from app.auth.storage import ensure_schema as ensure_auth_schema
 from app.documents import cleanup_expired_documents, ensure_document_schema
 from app.logging_setup import configure_logging
 from app.github.storage import ensure_schema as ensure_github_schema
@@ -28,6 +31,7 @@ async def _cleanup_loop() -> None:
 async def lifespan(_: FastAPI):
     await ensure_document_schema()
     await ensure_github_schema()
+    await ensure_auth_schema()
     cleanup_task = asyncio.create_task(_cleanup_loop())
     logger.info("API started")
     try:
@@ -40,12 +44,10 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-app.include_router(hello.router)
-app.include_router(llm_requests.router)
-app.include_router(requirements.router)
-app.include_router(api_design.router)
-app.include_router(workflows.router)
-app.include_router(github.router)
+app.include_router(auth.router)
+# Everything else requires a signed-in user.
+for route_module in (hello, llm_requests, requirements, api_design, workflows, github):
+    app.include_router(route_module.router, dependencies=[Depends(auth.require_user)])
 
 
 @app.middleware("http")

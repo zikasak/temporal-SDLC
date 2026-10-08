@@ -1,4 +1,4 @@
-"""Shared GitHub connection API for trusted local/internal deployments."""
+"""Shared GitHub connection API: one connection for every signed-in user."""
 
 import json
 

@@ -9,6 +9,7 @@ claude-agent-sdk==0.2.164
 fastapi
 httpx
 cryptography
+pyjwt
 uvicorn
 psycopg[binary]
 python-multipart
