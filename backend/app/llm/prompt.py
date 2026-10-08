@@ -14,6 +14,7 @@ def model_messages(
     generated_documents: list[dict[str, object]] | None = None,
     inline_texts: dict[str, str] | None = None,
     remembered_passages: list[dict[str, object]] | None = None,
+    extra_guidance: str = "",
 ) -> tuple[list[BaseMessage], set[str]]:
     inline_texts = inline_texts or {}
     prompt: list[BaseMessage] = []
@@ -54,7 +55,7 @@ def model_messages(
         "have checked the whole document; if it is not there, say so. "
         "Model-created documents can be edited or deleted only within this conversation. "
         "After a document tool call, briefly report its result to the user."
-    )
+    ) + extra_guidance
     if generated_documents:
         inventory = [
             {"uri": f"document://{item['document_id']}",

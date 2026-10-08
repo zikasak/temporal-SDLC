@@ -5,10 +5,12 @@ from pathlib import Path
 
 import httpx
 import pytest
+from langchain_core.messages import AIMessage
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from app.github import checkout, storage
+from app.llm import graph
 from app.temporal import activities
 
 TOKEN = "ghs_SECRET_SENTINEL"
@@ -141,3 +143,51 @@ async def test_only_a_token_failure_an_operator_must_fix_stops_the_retries(
     with pytest.raises(ApplicationError, match=message) as raised:
         await ActivityEnvironment().run(activities.checkout_repository, SESSION, repository_selection)
     assert raised.value.non_retryable is final
+
+
+async def test_chat_reads_the_checked_out_repository(remote, monkeypatch, repository_selection):
+    class Model:
+        def __init__(self):
+            self.replies = iter([AIMessage(content="Done")])
+
+        def bind_tools(self, tools):
+            self.tools = {item.name for item in tools}
+            return self
+
+        async def ainvoke(self, messages, config=None):
+            self.messages = list(messages)
+            return next(self.replies)
+
+    async def nothing(*args):
+        return []
+
+    model = Model()
+    monkeypatch.setattr(graph, "get_model", lambda: model)
+    monkeypatch.setattr(activities, "list_generated_documents", nothing)
+    monkeypatch.setattr(activities, "list_session_passages", nothing)
+    session = "llm-request-" + "b" * 32
+    question = [{"role": "user", "content": "Tell me about the project"}]
+    environment = ActivityEnvironment()
+
+    # Without a working copy the model is told so instead of being handed file tools.
+    assert await environment.run(
+        activities.send_llm_message, question, session, repository_selection) == "Done"
+    assert not model.tools & {"list_files", "search_files", "read_file"}
+    assert "could not be checked out" in model.messages[0].content
+
+    await environment.run(activities.checkout_repository, session, repository_selection)
+    model.replies = iter([
+        AIMessage(content="", tool_calls=[
+            {"name": "read_file", "args": {"path": "README.md"}, "id": "readme"}]),
+        AIMessage(content="It is a project"),
+    ])
+    assert await environment.run(
+        activities.send_llm_message, question, session, repository_selection) == "It is a project"
+    assert {"list_files", "search_files", "read_file"} <= model.tools
+    assert not model.tools & {"write_file", "run_command"}
+    assert repository_selection["full_name"] in model.messages[0].content
+    assert "project" in model.messages[-1].content
+    # A conversation started without a repository is not given another session's files.
+    model.replies = iter([AIMessage(content="No repository")])
+    await environment.run(activities.send_llm_message, question, session)
+    assert not model.tools & {"list_files", "search_files", "read_file"}
