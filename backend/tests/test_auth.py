@@ -1,11 +1,15 @@
 """Sign-in and the API-wide authentication requirement, through the real application."""
 
+import asyncio
+
 import jwt
 import pytest
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from app.api.main import app
-from app.auth import storage, tokens
+from app.api.routes import auth as auth_routes
+from app.auth import limits, storage, tokens
 from app.auth.passwords import hash_password
 
 PASSWORD = "correct horse battery"
@@ -22,6 +26,7 @@ def http(monkeypatch):
 
     monkeypatch.setattr(storage, "get_user", get_user)
     monkeypatch.setattr(tokens, "AUTH_JWT_SECRET", "s" * 32)
+    monkeypatch.setattr(auth_routes, "login_attempts", limits.AttemptLimiter(10))
     # No lifespan: these requests never reach PostgreSQL or Temporal.
     return TestClient(app)
 
@@ -85,6 +90,35 @@ def test_without_a_signing_secret_nothing_is_served(http, monkeypatch):
     monkeypatch.setattr(tokens, "AUTH_JWT_SECRET", "")
     assert sign_in(http).status_code == 503
     assert http.get("/workflows", headers={"Authorization": "Bearer x"}).status_code == 503
+
+
+def test_sign_in_attempts_are_limited_per_client_behind_trusted_proxies(http, monkeypatch):
+    monkeypatch.setattr(auth_routes, "AUTH_TRUSTED_PROXY_HOPS", 1)
+
+    def attempt(forwarded, password="incorrect horse"):
+        return http.post("/auth/login", json={"login": "alice@example.com", "password": password},
+                         headers={"X-Forwarded-For": forwarded})
+
+    assert {attempt("203.0.113.5").status_code for _ in range(10)} == {401}
+    # Even the right password waits, and a forged leading hop does not buy a new allowance.
+    limited = attempt("198.51.100.1, 203.0.113.5", PASSWORD)
+    assert limited.status_code == 429
+    assert 0 < int(limited.headers["retry-after"]) <= 60
+    assert attempt("203.0.113.6", PASSWORD).status_code == 200
+
+
+async def test_a_burst_of_sign_ins_is_shed_instead_of_queued_without_bound(http, monkeypatch):
+    monkeypatch.setattr(auth_routes, "login_attempts", limits.AttemptLimiter(1000))
+    monkeypatch.setattr(limits, "MAX_WAITING", 2)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        body = {"login": "alice@example.com", "password": "incorrect horse"}
+        burst = await asyncio.gather(*(client.post("/auth/login", json=body) for _ in range(12)))
+        statuses = [response.status_code for response in burst]
+        assert set(statuses) == {401, 503} and statuses.count(401) >= 4
+        assert all("retry-after" in response.headers for response in burst
+                   if response.status_code == 503)
+        recovered = await client.post("/auth/login", json={**body, "password": PASSWORD})
+        assert recovered.status_code == 200
 
 
 def test_passwords_are_stored_only_as_salted_hashes():

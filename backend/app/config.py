@@ -77,3 +77,8 @@ GITHUB_ALLOWED_ORIGINS = frozenset(
 # Changing it signs everyone out.
 AUTH_JWT_SECRET = os.getenv("AUTH_JWT_SECRET", "")
 AUTH_TOKEN_TTL_HOURS = float(os.getenv("AUTH_TOKEN_TTL_HOURS", "12"))
+# Sign-in attempts allowed per client address per minute, successful or not.
+AUTH_LOGIN_ATTEMPTS_PER_MINUTE = int(os.getenv("AUTH_LOGIN_ATTEMPTS_PER_MINUTE", "10"))
+# Reverse proxies between the client and the API that append to X-Forwarded-For. With 0
+# the header is ignored and the connecting address is the client.
+AUTH_TRUSTED_PROXY_HOPS = int(os.getenv("AUTH_TRUSTED_PROXY_HOPS", "0"))

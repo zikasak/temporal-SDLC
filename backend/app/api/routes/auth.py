@@ -1,4 +1,3 @@
-import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -6,7 +5,9 @@ from pydantic import BaseModel
 
 from app.api.errors import http_error
 from app.auth import storage
-from app.auth.passwords import MAX_PASSWORD_LENGTH, UNKNOWN_USER_HASH, verify_password
+from app.auth.limits import AttemptLimiter, SignInBusy, check_password
+from app.auth.passwords import MAX_PASSWORD_LENGTH, UNKNOWN_USER_HASH
+from app.config import AUTH_LOGIN_ATTEMPTS_PER_MINUTE, AUTH_TRUSTED_PROXY_HOPS
 from app.auth.tokens import AuthNotConfigured, InvalidToken, issue_token, read_token
 
 logger = logging.getLogger(__name__)
@@ -14,6 +15,7 @@ router = APIRouter(prefix="/auth")
 # The browser keeps the token here, out of reach of page scripts, so that plain download
 # links are authenticated too. API clients send it as a bearer token instead.
 COOKIE = "access_token"
+login_attempts = AttemptLimiter(AUTH_LOGIN_ATTEMPTS_PER_MINUTE)
 
 
 class Credentials(BaseModel):
@@ -37,25 +39,42 @@ def require_user(request: Request) -> dict:
                             headers={"WWW-Authenticate": "Bearer"}) from None
 
 
+def _client_address(request: Request) -> str:
+    # Each trusted proxy appends the address it saw; anything further left is the
+    # caller's own claim.
+    chain = [hop.strip() for hop in request.headers.get("x-forwarded-for", "").split(",")
+             if hop.strip()] if AUTH_TRUSTED_PROXY_HOPS else []
+    chain.append(request.client.host if request.client else "unknown")
+    return chain[max(len(chain) - 1 - AUTH_TRUSTED_PROXY_HOPS, 0)]
+
+
 def _profile(user: dict) -> dict:
     return {"login": user["login"], "expires_at": user["expires_at"]}
 
 
 @router.post("/login")
 async def login(body: Credentials, request: Request, response: Response):
+    # Before any database or hashing work is spent on the caller.
+    wait = login_attempts.retry_after(_client_address(request))
+    if wait is not None:
+        raise HTTPException(429, f"Too many sign-in attempts. Try again in {wait} seconds.",
+                            headers={"Retry-After": str(wait)})
     try:
         try:
             user = await storage.get_user(storage.normalize_login(body.login))
         except storage.InvalidLogin:
             user = None
-        known = len(body.password) <= MAX_PASSWORD_LENGTH and await asyncio.to_thread(
-            verify_password, body.password, user["password_hash"] if user else UNKNOWN_USER_HASH)
+        known = len(body.password) <= MAX_PASSWORD_LENGTH and await check_password(
+            body.password, user["password_hash"] if user else UNKNOWN_USER_HASH)
         if not user or not known:
             logger.warning("Failed sign-in attempt")
             raise HTTPException(401, "Incorrect login or password.")
         token, expires = issue_token(user)
     except HTTPException:
         raise
+    except SignInBusy:
+        raise HTTPException(503, "Sign-in is busy. Try again in a moment.",
+                            headers={"Retry-After": "2"}) from None
     except AuthNotConfigured as exc:
         raise HTTPException(503, str(exc)) from None
     except Exception as exc:
