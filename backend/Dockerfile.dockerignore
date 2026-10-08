@@ -1,0 +1,10 @@
+# Build context of the application image (Dockerfile). Keep .dockerignore itself in the
+# image: agent image builds read it from /app.
+.env
+.env.*
+env/
+data/
+tests/
+tools/*.jar
+.pytest_cache/
+**/__pycache__/
