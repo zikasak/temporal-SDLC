@@ -10,7 +10,11 @@ This is configuration/metadata only: agents do not clone, read, edit, or push re
 
 ## Sign-in
 
-Every API route except `POST /auth/login` and `POST /auth/logout` requires a signed-in user. There is no public sign-up; create users from `backend/` (a login is an email address or a username, case-insensitive):
+Every API route except `POST /auth/login`, `POST /auth/logout`, `GET /auth/registration` and `POST /auth/register` requires a signed-in user. A login is an email address or a username, case-insensitive.
+
+While there are no accounts, the sign-in page offers to create the first one (`POST /auth/register`, which also signs it in). Registration then closes: only the first user, the earliest account still present, registers the others, on the Users page (`GET` and `POST /auth/users`). `GET /auth/registration` reports whether the first account is still to be created. Create the first account before exposing a new deployment, since whoever reaches it first can take it.
+
+Accounts can also be created, reset and removed from `backend/`:
 
 ```sh
 env/bin/python -m app.auth.users add you@example.com   # prompts for the password; also resets one
@@ -20,7 +24,7 @@ env/bin/python -m app.auth.users remove you@example.com
 
 Set `AUTH_JWT_SECRET` (at least 32 random characters) in `backend/.env` first; without it the API answers 503. Passwords are stored only as salted scrypt hashes in `app.users`.
 
-`POST /auth/login` accepts `{"login":"you@example.com","password":"..."}` and returns a JWT (HS256, valid for `AUTH_TOKEN_TTL_HOURS`, default 12) as `access_token` and as an `HttpOnly`, `SameSite=Strict` cookie. The browser uses the cookie; other clients send `Authorization: Bearer <token>`. `GET /auth/me` returns the signed-in login and the token's expiry. Tokens are stateless: signing out clears the cookie, and removing a user or changing a password does not revoke tokens already issued. Change `AUTH_JWT_SECRET` to sign everyone out. Sign-in is limited to `AUTH_LOGIN_ATTEMPTS_PER_MINUTE` (default 10) per client address, answering 429 beyond that, and password checks run two at a time with a short queue, answering 503 when it is full. Behind reverse proxies set `AUTH_TRUSTED_PROXY_HOPS` to their number so the limit applies to the real client address; the limits are per API process. All signed-in users share the same sessions and data; there are no roles.
+`POST /auth/login` accepts `{"login":"you@example.com","password":"..."}` and returns a JWT (HS256, valid for `AUTH_TOKEN_TTL_HOURS`, default 12) as `access_token` and as an `HttpOnly`, `SameSite=Strict` cookie. The browser uses the cookie; other clients send `Authorization: Bearer <token>`. `GET /auth/me` returns the signed-in login, the token's expiry and `admin`, true for the first user. Tokens are stateless: signing out clears the cookie, and removing a user or changing a password does not revoke tokens already issued. Change `AUTH_JWT_SECRET` to sign everyone out. Sign-in is limited to `AUTH_LOGIN_ATTEMPTS_PER_MINUTE` (default 10) per client address, answering 429 beyond that, and password checks run two at a time with a short queue, answering 503 when it is full. Behind reverse proxies set `AUTH_TRUSTED_PROXY_HOPS` to their number so the limit applies to the real client address; the limits are per API process. All signed-in users share the same sessions and data; registering accounts is the only thing reserved for the first user.
 
 ## Start locally
 

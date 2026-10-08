@@ -1,4 +1,4 @@
-"""Bounds what unauthenticated sign-in attempts can cost the API."""
+"""Bounds what sign-in and registration attempts can cost the API."""
 
 import asyncio
 import math
@@ -6,7 +6,7 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
-from app.auth.passwords import verify_password
+from app.auth.passwords import hash_password, verify_password
 
 # A derivation holds about 32 MiB and a core while it runs. Its own small pool keeps
 # sign-in bursts out of the default executor that other routes use.
@@ -22,13 +22,21 @@ class SignInBusy(Exception):
 
 async def check_password(password: str, stored: str) -> bool:
     """verify_password off the event loop; SignInBusy instead of an unbounded queue."""
+    return await _derive(verify_password, password, stored)
+
+
+async def new_password_hash(password: str) -> str:
+    """hash_password under the same bound as check_password."""
+    return await _derive(hash_password, password)
+
+
+async def _derive(function, *args):
     global _pending
     if _pending >= _CONCURRENT + MAX_WAITING:
         raise SignInBusy
     _pending += 1
     try:
-        return await asyncio.get_running_loop().run_in_executor(
-            _executor, verify_password, password, stored)
+        return await asyncio.get_running_loop().run_in_executor(_executor, function, *args)
     finally:
         _pending -= 1
 

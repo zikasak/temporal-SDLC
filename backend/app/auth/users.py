@@ -1,4 +1,5 @@
-"""Manage user accounts: there is no public sign-up.
+"""Manage user accounts from the host. The first account can also be registered in the
+browser, and its owner registers the others there; this resets and removes them.
 
     python -m app.auth.users add alice@example.com   # also resets an existing password
     python -m app.auth.users remove alice@example.com
