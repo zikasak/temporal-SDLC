@@ -169,7 +169,8 @@ async def installation_token(app_token: str, installation_id: int) -> str:
     except GitHubError as exc:
         raise _removed(exc) from None
     token = data.get("token") if isinstance(data, dict) else None
-    if (not isinstance(token, str) or not 1 <= len(token) <= 512
+    # Opaque, of no fixed length; it only has to be safe in a header.
+    if (not isinstance(token, str) or not token
             or any(not 33 <= ord(char) <= 126 for char in token)):
         raise _invalid_response()
     return token

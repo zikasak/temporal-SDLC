@@ -94,6 +94,14 @@ def test_upstream_failures_are_actionable_and_do_not_echo_credentials(http, gith
         assert int(response.headers["retry-after"]) > 0
 
 
+def test_an_installation_token_of_any_length_is_used_as_given(http, github_http):
+    token = "ghs_" + "a1B2_" * 200
+    github_http[0][TOKEN_PATH] = httpx.Response(201, json={"token": token})
+    github_http[0]["/installation/repositories"] = httpx.Response(200, json={"repositories": [REPO]})
+    assert http.get("/connectors/github/repositories").status_code == 200
+    assert github_http[1][-1].headers["authorization"] == f"Bearer {token}"
+
+
 @pytest.mark.parametrize("upstream,expected", [
     (httpx.Response(401), 401),
     (httpx.Response(404), 409),  # The installation was removed.

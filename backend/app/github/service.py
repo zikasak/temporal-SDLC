@@ -72,8 +72,9 @@ async def check_connection() -> dict:
         except GitHubError as exc:
             if exc.status_code != 409:
                 raise
-    # Not installed when it was saved, or installed again since.
-    installation = installation or await _choose_installation(app_token, None)
+    # Not installed when it was saved, or installed again since: on the same account
+    # only, so that a check never moves the connection to other repositories.
+    installation = installation or await _choose_installation(app_token, row["account"])
     token = await client.installation_token(app_token, installation["id"])
     bot_user_id = row["bot_user_id"] or await client.get_bot_user_id(token, app["slug"])
     return await storage.mark_validated(row, {

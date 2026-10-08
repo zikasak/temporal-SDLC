@@ -142,6 +142,13 @@ async def test_an_app_created_from_the_manifest_is_saved_and_connected_once_inst
         responses["/app/installations/100/access_tokens"] = httpx.Response(201, json={"token": TOKEN})
         again = await http.post("/connectors/github/connection/check", json={})
         assert again.status_code == 200 and again.json()["installation"]["id"] == 100
+
+        # Gone from that account but installed on another: the check does not move there.
+        responses["/app/installations/100"] = httpx.Response(404)
+        installations[0] = {"id": 101, "account": {"login": "acme"}}
+        moved = await http.post("/connectors/github/connection/check", json={})
+        assert moved.status_code == 404 and "not installed on octocat" in moved.text
+        assert (await http.get("/connectors/github/connection")).json() == again.json()
     assert all(request.url.host == "api.github.com" for request in requests)
 
 
