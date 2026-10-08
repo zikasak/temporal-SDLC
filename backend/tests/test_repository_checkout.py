@@ -1,18 +1,18 @@
 """Checkout and publication against a real Git remote on disk; only GitHub is replaced."""
 
 import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 import pytest
-from cryptography.fernet import Fernet
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from app.github import checkout, storage
 from app.temporal import activities
 
-TOKEN = "github_pat_SECRET_SENTINEL"
+TOKEN = "ghs_SECRET_SENTINEL"
+TOKEN_PATH = "/app/installations/99/access_tokens"
 SESSION = "api-design-session-" + "a" * 32
 BRANCH = "generated/" + "a" * 12
 
@@ -24,7 +24,7 @@ def git(*args, cwd):
 
 
 @pytest.fixture
-def remote(tmp_path, monkeypatch, repository_selection):
+def remote(tmp_path, monkeypatch, repository_selection, github_connection):
     """A bare repository standing in for github.com, and a saved connection."""
     bare = tmp_path / "remote" / (repository_selection["full_name"] + ".git")
     bare.mkdir(parents=True)
@@ -40,15 +40,7 @@ def remote(tmp_path, monkeypatch, repository_selection):
     git("commit", "--quiet", "-m", "Initial", cwd=seed)
     git("push", "--quiet", "origin", "HEAD:refs/heads/" + repository_selection["branch"], cwd=seed)
 
-    key = Fernet.generate_key()
-    row = {"encrypted_token": Fernet(key).encrypt(TOKEN.encode()), "user_id": 7,
-           "login": "octocat", "validated_at": datetime(2026, 1, 1, tzinfo=timezone.utc)}
-
-    async def get_connection():
-        return row
-
-    monkeypatch.setattr(storage, "GITHUB_TOKEN_ENCRYPTION_KEY", key.decode())
-    monkeypatch.setattr(storage, "get_connection", get_connection)
+    github_connection(TOKEN)
     monkeypatch.setattr(checkout, "GITHUB_URL", f"file://{tmp_path / 'remote'}/")
     monkeypatch.setattr(activities, "GENERATED_CODE_DIR", tmp_path / "generated")
     return bare
@@ -98,7 +90,7 @@ async def test_verified_sources_are_pushed_to_a_new_branch(tmp_path, remote, rep
     assert git("show", f"{BRANCH}:src/main/Kept.java", cwd=remote) == "kept, extended"
     assert git("rev-parse", f"{BRANCH}~1", cwd=remote) == base
     assert git("log", "-1", "--format=%an <%ae>", BRANCH, cwd=remote) == (
-        "octocat <7+octocat@users.noreply.github.com>")
+        "my-app[bot] <77+my-app[bot]@users.noreply.github.com>")
     # The selected branch is never written to, and the token is not left on disk.
     assert git("rev-parse", repository_selection["branch"], cwd=remote) == base
     assert TOKEN not in (session / "repository/.git/config").read_text()
@@ -136,3 +128,16 @@ async def test_missing_connection_fails_the_checkout_without_retries(remote, mon
     with pytest.raises(ApplicationError, match="Connect GitHub") as raised:
         await ActivityEnvironment().run(activities.checkout_repository, SESSION, repository_selection)
     assert raised.value.non_retryable
+
+
+@pytest.mark.parametrize("upstream,message,final", [
+    (httpx.Response(404), "no longer installed", True),
+    (httpx.Response(401), "rejected the app credentials", True),
+    (httpx.ConnectError("unreachable"), "Could not reach GitHub", False),
+])
+async def test_only_a_token_failure_an_operator_must_fix_stops_the_retries(
+        remote, github_http, repository_selection, upstream, message, final):
+    github_http[0][TOKEN_PATH] = upstream
+    with pytest.raises(ApplicationError, match=message) as raised:
+        await ActivityEnvironment().run(activities.checkout_repository, SESSION, repository_selection)
+    assert raised.value.non_retryable is final

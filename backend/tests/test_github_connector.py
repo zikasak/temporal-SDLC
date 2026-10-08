@@ -1,31 +1,26 @@
 """Public connector/creation contracts against controlled GitHub HTTP responses."""
 
-from datetime import datetime, timezone
-
 import httpx
+import jwt
 import pytest
-from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.routes import github, llm_requests, requirements
 from app.github import storage
 
-TOKEN = "github_pat_SECRET_SENTINEL"
+TOKEN = "ghs_SECRET_SENTINEL"
+TOKEN_PATH = "/app/installations/99/access_tokens"
+# Never parsed: these submissions are rejected first.
+PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\nKEY_SENTINEL\n-----END RSA PRIVATE KEY-----\n"
+CREDENTIALS = {"app_id": 123, "private_key": PRIVATE_KEY}
 REPO = {"id": 42, "full_name": "octocat/private-project", "private": True, "default_branch": "main"}
 
 
 @pytest.fixture
-def http(monkeypatch):
-    key = Fernet.generate_key()
-    monkeypatch.setattr(storage, "GITHUB_TOKEN_ENCRYPTION_KEY", key.decode())
-    row = {"encrypted_token": Fernet(key).encrypt(TOKEN.encode()), "user_id": 7,
-           "login": "octocat", "validated_at": datetime(2026, 1, 1, tzinfo=timezone.utc)}
-
-    async def get_connection():
-        return row
-
-    monkeypatch.setattr(storage, "get_connection", get_connection)
+def http(github_connection):
+    github_connection(TOKEN)
     app = FastAPI()
     app.include_router(github.router)
     app.include_router(llm_requests.router)
@@ -37,17 +32,18 @@ def test_status_is_stored_metadata_not_a_credential_or_live_check(http, github_h
     response = http.get("/connectors/github/connection")
     assert response.status_code == 200
     assert response.json() == {"configured": True, "encryption_ready": True,
-                               "account": {"id": 7, "login": "octocat"},
+                               "app": {"id": 123, "slug": "my-app"},
+                               "installation": {"id": 99, "account": "octocat"},
                                "validated_at": "2026-01-01T00:00:00+00:00"}
-    assert "encrypted_token" not in response.text
+    assert "encrypted_private_key" not in response.text
     assert TOKEN not in response.text + caplog.text
     assert not github_http[1]
 
 
-def test_repository_and_branch_pagination_never_follows_foreign_links(http, github_http):
+def test_repository_and_branch_pagination_never_follows_foreign_links(http, github_http, app_private_key):
     responses, requests = github_http
-    responses["/user/repos"] = lambda request: httpx.Response(
-        200, json=[REPO] if request.url.params["page"] == "1" else [],
+    responses["/installation/repositories"] = lambda request: httpx.Response(
+        200, json={"total_count": 1, "repositories": [REPO] if request.url.params["page"] == "1" else []},
         headers={"Link": '<https://attacker.invalid/leak>; rel="next"'} if request.url.params["page"] == "1" else {},
     )
     first = http.get("/connectors/github/repositories").json()
@@ -61,8 +57,17 @@ def test_repository_and_branch_pagination_never_follows_foreign_links(http, gith
     branches = http.get("/connectors/github/repositories/octocat/private-project/branches").json()
     assert branches == {"branches": ["feature/one"], "next_page": 2}
     assert all(request.url.host == "api.github.com" for request in requests)
-    assert all(request.headers["authorization"] == f"Bearer {TOKEN}" for request in requests)
-    assert all(request.url.params["per_page"] == "50" for request in requests)
+    # Each operation mints its own installation token, as the app, and acts with it.
+    minted = [request for request in requests if request.url.path == TOKEN_PATH]
+    used = [request for request in requests if request.url.path != TOKEN_PATH]
+    public_key = load_pem_private_key(app_private_key.encode(), None).public_key()
+    assert len(minted) == len(used) == 3
+    for request in minted:
+        claims = jwt.decode(request.headers["authorization"].removeprefix("Bearer "), public_key,
+                            algorithms=["RS256"], issuer="123")
+        assert request.method == "POST" and claims["exp"] - claims["iat"] <= 600
+    assert all(request.headers["authorization"] == f"Bearer {TOKEN}" for request in used)
+    assert all(request.url.params["per_page"] == "50" for request in used)
     assert http.get("/connectors/github/repositories?page=0").status_code == 422
 
 
@@ -75,42 +80,63 @@ def test_repository_and_branch_pagination_never_follows_foreign_links(http, gith
     (httpx.Response(500, text=TOKEN), 502),
     (httpx.Response(302, headers={"location": "https://attacker.invalid"}, text=TOKEN), 502),
     (httpx.Response(200, text=TOKEN), 502),
-    (httpx.Response(200, json=[{"id": TOKEN}]), 502),
+    (httpx.Response(200, json={"repositories": [{"id": TOKEN}]}), 502),
     (httpx.ReadTimeout(TOKEN), 503),
 ])
 def test_upstream_failures_are_actionable_and_do_not_echo_credentials(http, github_http, caplog, upstream, expected):
-    github_http[0]["/user/repos"] = upstream
+    github_http[0]["/installation/repositories"] = upstream
     response = http.get("/connectors/github/repositories")
     assert response.status_code == expected
     assert isinstance(response.json()["detail"], str)
     assert TOKEN not in response.text + caplog.text
-    assert len(github_http[1]) == 1
+    assert len(github_http[1]) == 2
     if expected == 429:
         assert int(response.headers["retry-after"]) > 0
 
 
+@pytest.mark.parametrize("upstream,expected", [
+    (httpx.Response(401), 401),
+    (httpx.Response(404), 409),  # The installation was removed.
+    (httpx.Response(201, json={"token": "not a\ntoken"}), 502),
+    (httpx.ConnectError(TOKEN), 503),
+])
+def test_repositories_are_not_requested_without_an_installation_token(http, github_http, upstream, expected):
+    github_http[0][TOKEN_PATH] = upstream
+    response = http.get("/connectors/github/repositories")
+    assert response.status_code == expected
+    assert [request.url.path for request in github_http[1]] == [TOKEN_PATH]
+
+
 @pytest.mark.parametrize("method,path,headers,body,expected", [
-    ("PUT", "/connection", {"Origin": "https://attacker.invalid"}, {"token": TOKEN}, 403),
+    ("PUT", "/connection", {"Origin": "https://attacker.invalid"}, CREDENTIALS, 403),
     ("POST", "/connection/check", {"Origin": "null"}, {}, 403),
+    ("POST", "/connection/manifest", {"Origin": "https://attacker.invalid"}, {"code": "v1.code"}, 403),
+    ("POST", "/connection/manifest", {}, {"code": "../../app"}, 422),
+    ("POST", "/connection/manifest", {}, {"code": "v1.code", "extra": 1}, 422),
     ("DELETE", "/connection", {"Origin": "https://attacker.invalid"}, {}, 403),
-    ("PUT", "/connection", {}, {"token": TOKEN + " "}, 422),
-    ("PUT", "/connection", {}, {"token": [TOKEN]}, 422),
-    ("PUT", "/connection", {}, {"token": TOKEN, "extra": TOKEN}, 422),
+    ("PUT", "/connection", {}, {"private_key": PRIVATE_KEY}, 422),
+    ("PUT", "/connection", {}, {**CREDENTIALS, "app_id": "123"}, 422),
+    ("PUT", "/connection", {}, {**CREDENTIALS, "private_key": [PRIVATE_KEY]}, 422),
+    ("PUT", "/connection", {}, {**CREDENTIALS, "private_key": PRIVATE_KEY + "\x00"}, 422),
+    ("PUT", "/connection", {}, {**CREDENTIALS, "account": "octocat/../x"}, 422),
+    ("PUT", "/connection", {}, {**CREDENTIALS, "extra": PRIVATE_KEY}, 422),
+    # Well-formed input whose key is not one.
+    ("PUT", "/connection", {}, CREDENTIALS, 422),
 ])
 def test_connector_mutations_reject_unsafe_origins_and_redact_bad_input(http, github_http, caplog, method, path, headers, body, expected):
     response = http.request(method, "/connectors/github" + path, headers=headers, json=body)
     assert response.status_code == expected
-    assert TOKEN not in response.text + caplog.text
+    assert "KEY_SENTINEL" not in response.text + caplog.text
     assert not github_http[1]
 
 
 def test_bad_media_json_and_key_configuration_are_safe(http, github_http, monkeypatch):
-    assert http.put("/connectors/github/connection", data={"token": TOKEN}).status_code == 415
-    response = http.put("/connectors/github/connection", content='{"token":"' + TOKEN,
+    assert http.put("/connectors/github/connection", data={"private_key": PRIVATE_KEY}).status_code == 415
+    response = http.put("/connectors/github/connection", content='{"private_key":"KEY_SENTINEL',
                         headers={"Content-Type": "application/json"})
-    assert response.status_code == 422 and TOKEN not in response.text
+    assert response.status_code == 422 and "KEY_SENTINEL" not in response.text
     monkeypatch.setattr(storage, "GITHUB_TOKEN_ENCRYPTION_KEY", "")
-    response = http.put("/connectors/github/connection", json={"token": TOKEN}, headers={"Origin": "http://localhost:5173"})
+    response = http.put("/connectors/github/connection", json=CREDENTIALS, headers={"Origin": "http://localhost:5173"})
     assert response.status_code == 503 and "GITHUB_TOKEN_ENCRYPTION_KEY" in response.text
     assert not github_http[1]
 

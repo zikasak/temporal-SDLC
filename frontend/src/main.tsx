@@ -7,6 +7,7 @@ import GitHubSettings from "./GitHubSettings";
 import Login, { userRecord, type User } from "./Login";
 import Users from "./Users";
 import { errorMessage, failure, readBody } from "./api";
+import { APP_RETURN_PATH } from "./github";
 import "./styles.css";
 import React, { useEffect, useState } from "react";
 
@@ -23,6 +24,7 @@ const modes: [Mode, string][] = [
 ];
 
 function modeFromUrl(): Mode {
+  if (window.location.pathname === APP_RETURN_PATH) return "github";
   const mode = new URLSearchParams(window.location.search).get("mode");
   return modes.find(([item]) => item === mode)?.[0] ?? "chat";
 }

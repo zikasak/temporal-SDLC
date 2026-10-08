@@ -27,6 +27,7 @@ from app.documents import (
     read_document_text,
 )
 from app.github import checkout as repository_checkout
+from app.github import service as github_service
 from app.github import storage as github_storage
 from app.github.errors import GitHubError
 from app.github.models import RepositoryCheckout, RepositoryPublication, RepositorySelection
@@ -81,12 +82,20 @@ def _repository_tools() -> list[BaseTool]:
 
 
 async def _github_token() -> tuple[str, dict[str, Any]]:
+    """A fresh installation token and the saved connection it belongs to."""
     try:
         connection = await github_storage.get_connection()
-        return github_storage.decrypt_token(connection), connection
+        github_storage.decrypt_private_key(connection)
     except GitHubError as exc:
         # A missing connection or key needs an operator, not another attempt.
         raise ApplicationError(str(exc), non_retryable=True) from exc
+    try:
+        return await github_service.installation_token(connection), connection
+    except GitHubError as exc:
+        # Neither do rejected credentials or a removed installation; an unreachable or
+        # rate-limiting GitHub may recover.
+        raise ApplicationError(
+            str(exc), non_retryable=exc.status_code in (401, 403, 409, 422)) from exc
 
 
 @activity.defn
@@ -119,7 +128,7 @@ async def publish_repository(
         raise ApplicationError("The verified sources or the repository checkout are unavailable.",
                                non_retryable=True)
     token, connection = await _github_token()
-    login = connection["login"]
+    bot = f"{connection['app_slug']}[bot]"
     try:
         await asyncio.to_thread(repository_checkout.replace_files, service, target, is_service_file)
         await asyncio.to_thread(repository_checkout.replace_files, suite,
@@ -129,7 +138,7 @@ async def publish_repository(
             branch=repository_checkout.publication_branch(session_id),
             message=("Add generated service and contract tests\n\n"
                      f"Generated from {repository['branch']} by session {session_id}."),
-            author=(login, f"{connection['user_id']}+{login}@users.noreply.github.com"),
+            author=(bot, f"{connection['bot_user_id']}+{bot}@users.noreply.github.com"),
         )
     except (repository_checkout.CheckoutError, GitHubError) as exc:
         activity.logger.warning("Could not push %s: %s", repository["full_name"], exc)

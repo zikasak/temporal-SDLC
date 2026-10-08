@@ -1585,6 +1585,20 @@ h2 {
   cursor: not-allowed;
 }
 
+.github-existing-app {
+  padding-top: 18px;
+}
+
+.github-existing-app summary {
+  color: var(--muted);
+  font-size: 0.87rem;
+  cursor: pointer;
+}
+
+.github-existing-app .github-token-form {
+  margin-top: 14px;
+}
+
 .github-token-link,
 .connector-error a,
 .repository-summary a {
