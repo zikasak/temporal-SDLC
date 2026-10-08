@@ -157,6 +157,7 @@ services:
   temporal-schema:
     image: temporalio/admin-tools:1.31.0
     exclude_from_hc: true
+    restart: on-failure
     depends_on:
       postgres:
         condition: service_healthy
