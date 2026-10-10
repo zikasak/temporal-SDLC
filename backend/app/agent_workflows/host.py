@@ -14,6 +14,7 @@ from typing import Any
 from temporalio.exceptions import ApplicationError
 
 from app import docker_agents
+from app.languages import Language, UnsupportedLanguage, get_language
 from app.tracing import trace_operation
 from app.temporal.tracing import activity_metadata
 
@@ -38,6 +39,24 @@ class StageSpec:
     prepare_inputs: Callable[[Path, dict[str, Any]], StageInputs]
     sanitize_output: Callable[[Path, Path], None]
     validate_output: Callable[[Path], None]
+
+
+# The language's authoring instructions, placed beside the agent's project.
+LANGUAGE_FILENAME = 'language.json'
+
+
+def session_language(name: str | None) -> Language:
+    """The registered language of a session, or a failure no retry can fix."""
+    try:
+        return get_language(name)
+    except UnsupportedLanguage as exc:
+        raise ApplicationError(str(exc), non_retryable=True) from exc
+
+
+def write_language(workspace: Path, language: Language, **details: str) -> None:
+    """Tell the container's agent what the session's language requires of it."""
+    (workspace / LANGUAGE_FILENAME).write_text(json.dumps({
+        'name': language.name, 'build_dirs': list(language.build_dirs), **details}))
 
 
 def copy_file(source: Path, destination: Path) -> None:

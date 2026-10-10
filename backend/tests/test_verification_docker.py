@@ -1,4 +1,4 @@
-"""Opt-in end-to-end verification of real images, networking and Surefire reports.
+"""Opt-in end-to-end verification of real images, networking and test reports.
 
 Run: RUN_DOCKER_VERIFICATION_TESTS=1 python -m pytest tests/test_verification_docker.py -q
 Requires Docker and outbound access to fetch base images/Maven dependencies.
@@ -13,8 +13,10 @@ import pytest
 from temporalio.testing import ActivityEnvironment
 
 from app import docker_agents
-from app.test_generation.activities import TEMPLATE
+from app.languages import get_language
 from app.verification import activities
+
+TEMPLATE = get_language('java').test_suite.template
 
 pytestmark = pytest.mark.skipif(
     os.getenv('RUN_DOCKER_VERIFICATION_TESTS') != '1', reason='real Docker tests are opt-in',
@@ -96,7 +98,7 @@ async def test_real_service_and_test_runner(images, tmp_path, monkeypatch, mode,
     monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
     session_id = f'docker-verification-{uuid.uuid4().hex}'
     result = await ActivityEnvironment().run(
-        activities.verify_service, session_id, images[mode], images[f'runner-{expected}'],
+        activities.verify_service, session_id, images[mode], images[f'runner-{expected}'], 'java',
     )
     assert result['status'] == status, result
     assert json.loads((tmp_path / session_id / 'verification/result.json').read_text()) == result

@@ -10,7 +10,7 @@ from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from app.api_design.models import ApiDesignState
-from app.api_design.openapi import api_problems
+from app.api_design.openapi import design_problems
 from app.config import TASK_QUEUE
 from app.documents import DocumentNotFound, get_generated_document
 from app.requirements import service as requirements_service
@@ -78,6 +78,8 @@ async def fork_session(session_id: str, message_index: int) -> str:
         requirements_document=source.requirements_document,
         messages=messages,
         api=api,
+        # The choice is kept even when the fork point precedes it; the user can change it.
+        language=source.language,
         repository=source.repository,
         forked_from={"session_id": session_id, "message_index": message_index},
     ))
@@ -121,6 +123,10 @@ async def retry_generation(session_id: str,
         raise SessionBusy('Only failed generation can be retried.')
     if stage == 'tests' and not state.code:
         raise SessionBusy('Retry server generation first.')
+    if not state.language:
+        # A completed session takes no messages, so only a fork can choose one.
+        raise SessionBusy('No implementation language was chosen for this session. '
+                          'Fork it from a message and choose a language there.')
     state.generation_retry_stage = stage
     state.previous_run_id = description.run_id
     if state.checkout:
@@ -163,4 +169,4 @@ async def get_session(session_id: str) -> dict[str, Any]:
     del session["requirements_document"]
     del session['generation_retry_stage']
     del session['previous_run_id']
-    return {"session_id": session_id, **session, "problems": api_problems(state.api)}
+    return {"session_id": session_id, **session, "problems": design_problems(state.api, state.language)}

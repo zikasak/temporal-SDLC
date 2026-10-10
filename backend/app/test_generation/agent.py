@@ -1,5 +1,6 @@
 """Container-only test author. Its filesystem contains contracts and tests only."""
 import json
+from functools import partial
 from pathlib import Path
 
 from app.agent_workflows.runtime import AgentProfile, run_agent
@@ -9,12 +10,15 @@ OPENAPI = Path('/workspace/openapi.yaml')
 # Supplied instead of the embedded OpenAPI contract when the contracts are too large.
 CONTRACTS = Path('/workspace/contracts')
 
-PROMPT = """Write a standalone Maven/JUnit 5 HTTP test suite in /workspace/tests
+# The language's authoring instructions and test layout, written by the host.
+LANGUAGE = Path('/workspace/language.json')
+
+PROMPT = """Write a standalone HTTP test suite in /workspace/tests
 for the service described by the supplied requirements and OpenAPI contract.
 The implementation is being written independently in another container. Its source,
 image and logs are unavailable. Derive all expected behavior from the contract.
-Use Java 21 java.net.http.HttpClient, JUnit assertions and Jackson for JSON as needed.
-Write test classes named *Test.java under src/test/java. Read SERVICE_BASE_URL from
+{instructions}
+Read SERVICE_BASE_URL from
 the environment and fail clearly if it is missing or the service cannot be reached.
 Use bounded HTTP connection and request timeouts. Never import implementation classes,
 create production sources, implement the service, or mock the behavior being tested.
@@ -35,10 +39,9 @@ must come from environment variables; never put secrets in files.
 Create files with write_file and change existing files with edit_file, not by
 rewriting them. Locate code with list_files and search_files, read only the relevant
 line ranges with read_file, and use shell to adjust and build test dependencies.
-Compile with mvn -B -DskipTests -Dmaven.test.skip=false test-compile and fix failures.
 The service is not available during authoring; do not execute service tests here.
 The outer worker builds the test runner image and independently compiles the suite.
-Only finish when meaningful tests, successful compilation and README are complete.
+Only finish when meaningful tests, a successful build and README are complete.
 """
 
 REPOSITORY_PROMPT = """
@@ -63,24 +66,28 @@ them, follow the contract. The implementation stays unavailable.
 """
 
 
-def validate_completion(root: Path) -> None:
-    if not any((root / 'src/test/java').rglob('*Test.java')):
-        raise RuntimeError('Agent finished without test classes')
+def validate_completion(test_glob: str, root: Path) -> None:
+    if not any(root.glob(test_glob)):
+        raise RuntimeError('Agent finished without test files')
 
 
 def main() -> None:
     context = Path('/workspace/input.json').read_text()
     inputs = json.loads(context)
+    language = json.loads(LANGUAGE.read_text())
     run_agent(AgentProfile(
-        root=ROOT, prompt=(PROMPT + (REPOSITORY_PROMPT if inputs.get('repository') else '')
+        root=ROOT, prompt=(PROMPT.format(instructions=language['instructions'])
+                           + (REPOSITORY_PROMPT if inputs.get('repository') else '')
                            + (REPAIR_PROMPT if inputs.get('repair') else '')),
         initial_messages=[context,
                           *(['OpenAPI contract:\n' + OPENAPI.read_text()]
                             if OPENAPI.is_file() else [])],
-        max_turns_env='TEST_GENERATION_MAX_TURNS', validate_completion=validate_completion,
+        max_turns_env='TEST_GENERATION_MAX_TURNS',
+        validate_completion=partial(validate_completion, language['test_glob']),
         completion_message='Test generation completed',
         exhaustion_message='Test generation exceeded the tool-turn limit',
         contracts=CONTRACTS if CONTRACTS.is_dir() else None,
+        build_dirs=language['build_dirs'],
     ))
 
 

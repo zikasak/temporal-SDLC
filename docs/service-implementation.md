@@ -45,7 +45,8 @@ Run each command in a separate terminal/process. `backend/tools/dev_stack.py` la
 all six workers, and `.zed/debug.json` includes individual worker launch profiles.
 Both coding workers need the Docker CLI, a running Docker daemon and writable
 `GENERATED_CODE_DIR`. The implementation worker also needs access to codegen's server
-tree. The test worker uses only contract inputs and its own static Maven template.
+tree. The test worker uses only contract inputs and the static test-suite template of the
+session's language (`backend/app/languages/<language>/test_suite`; today Java's Maven template).
 The verification worker also needs Docker and writable `GENERATED_CODE_DIR`, and must
 use the same Docker daemon as both authoring workers: images are local immutable IDs,
 not registry tags. `TEMPORAL_VERIFICATION_TASK_QUEUE` defaults to `verification`.
@@ -211,7 +212,8 @@ fields are discarded. History compaction and on-demand contracts work as for the
 implementation agent; on demand, the OpenAPI document is `/workspace/contracts/openapi.yaml`
 and is no longer embedded.
 
-`/workspace/tests` starts from a static Maven/JUnit 5 template. No generated server
+`/workspace/tests` starts from the session language's static template (Java: Maven/JUnit 5),
+and `/workspace/language.json` carries that language's authoring instructions. No generated server
 sources, implementation sources, implementation image, logs, or test stubs are copied
 into this container. Neither coding container has a Docker socket or host mounts (other
 than the Pi credential files under `LLM_HARNESS=pi`), and

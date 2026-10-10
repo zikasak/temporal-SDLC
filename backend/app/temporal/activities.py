@@ -1,6 +1,7 @@
 import asyncio
 import re
 import time
+from functools import partial
 from typing import Any
 
 import psycopg
@@ -9,6 +10,7 @@ from langgraph.errors import GraphRecursionError
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from app.agent_workflows.host import session_language
 from app.api_design.models import ApiDesignState, ApiModel
 from app.api_design.openapi import DOCUMENT_FILENAME as OPENAPI_FILENAME
 from app.api_design.openapi import api_problems, render_openapi
@@ -121,9 +123,10 @@ async def checkout_repository(
 @activity.defn
 @trace_activity('publish-repository', feature='repository', input_parameter='repository')
 async def publish_repository(
-    session_id: str, repository: RepositorySelection
+    session_id: str, repository: RepositorySelection, language: str,
 ) -> RepositoryPublication:
     """Commit the verified service and its contract tests to a new branch and push it."""
+    service_files = partial(is_service_file, session_language(language))
     target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
     service = target.parent / 'implementation/service'
     suite = target.parent / 'tests/suite'
@@ -133,7 +136,7 @@ async def publish_repository(
     token, connection = await _github_token()
     bot = f"{connection['app_slug']}[bot]"
     try:
-        await asyncio.to_thread(repository_checkout.replace_files, service, target, is_service_file)
+        await asyncio.to_thread(repository_checkout.replace_files, service, target, service_files)
         await asyncio.to_thread(repository_checkout.replace_files, suite,
                                 target / repository_checkout.TESTS_DIR, lambda relative: True)
         result = await repository_checkout.push(
@@ -303,7 +306,7 @@ async def write_requirements_document(
 @trace_activity('design-api', feature='api-design', as_type='agent')
 async def api_design_turn(state: ApiDesignState) -> dict[str, Any]:
     ctx = api_design_tools.ApiDesignContext.from_model(
-        state.api, {item["id"] for item in state.requirements}
+        state.api, {item["id"] for item in state.requirements}, state.language
     )
     repository = _repository_tools()
     started = time.perf_counter()
@@ -327,13 +330,13 @@ async def api_design_turn(state: ApiDesignState) -> dict[str, Any]:
                          time.perf_counter() - started, len(updated["endpoints"]),
                          len(updated["schemas"]))
     if not reply:
-        if updated == state.api:
+        if updated == state.api and ctx.language == state.language:
             activity.logger.warning("API design turn returned no text and no changes")
             raise ApplicationError("The model returned no text", non_retryable=True)
         reply = (f"I've updated the API: it has {len(updated['endpoints'])} endpoints and "
                  f"{len(updated['schemas'])} schemas so far. Review them below and tell me "
                  "what to change or what else to cover.")
-    return {"reply": reply, "api": updated}
+    return {"reply": reply, "api": updated, "language": ctx.language}
 
 
 @activity.defn

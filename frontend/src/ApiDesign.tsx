@@ -226,6 +226,7 @@ type Session = {
   messages: { role: "user" | "assistant"; content: string }[];
   requirements: Requirement[];
   api: ApiModel;
+  language: string | null;
   problems: string[];
   document: OpenApiDocument | null;
   error: string | null;
@@ -328,6 +329,7 @@ function sessionRecord(value: unknown): Session {
     messages: value.messages as Session["messages"],
     requirements: value.requirements as Requirement[],
     api: value.api as ApiModel,
+    language: typeof value.language === "string" ? value.language : null,
     problems: value.problems.filter((item): item is string => typeof item === "string"),
     document,
     error: typeof value.error === "string" ? value.error : null,
@@ -804,12 +806,13 @@ export default function ApiDesign() {
                   </li>
                 </ul>
                 <h3>Server code</h3>
-                {codePending(session) && <p>Generating Spring server interfaces…</p>}
+                {codePending(session) && <p>Generating {session.language ?? ""} server code…</p>}
                 {session.code && (
                   <ul>
                     <li>
                       <code>{session.code.server.path}</code>
                       <span>{session.code.server.files} files</span>
+                      {session.language && <span>{session.language}</span>}
                     </li>
                   </ul>
                 )}

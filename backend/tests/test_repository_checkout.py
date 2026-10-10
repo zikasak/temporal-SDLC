@@ -63,7 +63,8 @@ async def test_verified_sources_are_pushed_to_a_new_branch(tmp_path, remote, rep
     (session / "repository/marker").unlink()
 
     with pytest.raises(ApplicationError, match="unavailable"):
-        await environment.run(activities.publish_repository, SESSION, repository_selection)
+        await environment.run(activities.publish_repository, SESSION, repository_selection,
+                              'java')
     for name, text in {"implementation/service/src/main/Kept.java": "kept, extended",
                        "implementation/service/src/main/Orders.java": "new service",
                        "implementation/service/Dockerfile": "FROM scratch",
@@ -76,7 +77,8 @@ async def test_verified_sources_are_pushed_to_a_new_branch(tmp_path, remote, rep
     (session / "implementation/service/mvnw").write_text("#!/bin/sh")
     (session / "implementation/service/mvnw").chmod(0o755)
 
-    published = await environment.run(activities.publish_repository, SESSION, repository_selection)
+    published = await environment.run(activities.publish_repository, SESSION, repository_selection,
+                              'java')
     assert published == {"branch": BRANCH, "commit": git("rev-parse", BRANCH, cwd=remote),
                          "url": f"{repository_selection['html_url']}/tree/{BRANCH}",
                          "ignored": ["build/"], "ignored_count": 1}
@@ -98,7 +100,8 @@ async def test_verified_sources_are_pushed_to_a_new_branch(tmp_path, remote, rep
     assert TOKEN not in (session / "repository/.git/config").read_text()
 
     # Repeating a push that already happened succeeds without another commit.
-    assert await environment.run(activities.publish_repository, SESSION, repository_selection) == published
+    assert await environment.run(activities.publish_repository, SESSION, repository_selection,
+                              'java') == published
 
 
 async def test_a_diverged_remote_branch_is_reported_not_overwritten(tmp_path, remote, repository_selection):
@@ -117,7 +120,8 @@ async def test_a_diverged_remote_branch_is_reported_not_overwritten(tmp_path, re
     theirs = git("rev-parse", BRANCH, cwd=remote)
 
     with pytest.raises(ApplicationError, match="git push failed") as raised:
-        await environment.run(activities.publish_repository, SESSION, repository_selection)
+        await environment.run(activities.publish_repository, SESSION, repository_selection,
+                              'java')
     assert TOKEN not in str(raised.value)
     assert git("rev-parse", BRANCH, cwd=remote) == theirs
 

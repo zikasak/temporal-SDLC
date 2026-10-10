@@ -66,7 +66,7 @@ def fake_docker(monkeypatch, verdict, sent: dict):
 async def test_diagnosis_reviews_both_sides_and_publishes_a_bounded_verdict(session, monkeypatch):
     sent: dict = {}
     fake_docker(monkeypatch, {**VERDICT, 'summary': 's' * 5000, 'extra': 'ignored'}, sent)
-    context = {'requirements': [], 'requirements_document': '# Requirements',
+    context = {'requirements': [], 'requirements_document': '# Requirements', 'language': 'java',
                'api_design': empty_api(), 'verification': failed_verification(session)}
     result = await ActivityEnvironment().run(activities.diagnose_failure, 'session', context)
     assert result == {'session_id': 'session', 'target': 'tests', 'summary': 's' * 1000,
@@ -74,6 +74,8 @@ async def test_diagnosis_reviews_both_sides_and_publishes_a_bounded_verdict(sess
     assert json.loads((session / 'diagnosis/verdict.json').read_text()) == result
     removed = sent.pop('removed')
     payload = json.loads(sent.pop('input.json'))
+    assert json.loads(sent.pop('language.json')) == {
+        'name': 'java', 'build_dirs': ['target'], 'label': 'Java (Spring Boot)', 'report_pattern': 'TEST-*.xml'}
     # The reviewer gets both source trees and this run's evidence, and nothing else.
     assert sent == {'review/service/src/main/java/Orders.java': 'IMPLEMENTATION SOURCE',
                     'review/tests/src/test/java/OrdersTest.java': 'TEST SOURCE',
@@ -92,7 +94,7 @@ async def test_diagnosis_reviews_both_sides_and_publishes_a_bounded_verdict(sess
 async def test_unusable_verdicts_never_select_a_repair(session, monkeypatch, verdict):
     sent: dict = {}
     fake_docker(monkeypatch, verdict, sent)
-    context = {'api_design': empty_api(), 'verification': failed_verification(session)}
+    context = {'api_design': empty_api(), 'language': 'java', 'verification': failed_verification(session)}
     with pytest.raises(RuntimeError, match='[Vv]erdict'):
         await ActivityEnvironment().run(activities.diagnose_failure, 'session', context)
     assert not (session / 'diagnosis/verdict.json').exists()
@@ -107,7 +109,7 @@ async def test_diagnosis_requires_this_sessions_failed_run(session, monkeypatch,
     sent: dict = {}
     fake_docker(monkeypatch, VERDICT, sent)
     (session.parent / 'other-session/verification' / RUN).mkdir(parents=True)
-    context = {'api_design': empty_api(), 'verification': failed_verification(session, **changes)}
+    context = {'api_design': empty_api(), 'language': 'java', 'verification': failed_verification(session, **changes)}
     if changes.get('path', '').startswith('../'):
         # Only the run name is honoured, so a foreign path resolves inside this session.
         await ActivityEnvironment().run(activities.diagnose_failure, 'session', context)
