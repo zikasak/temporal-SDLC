@@ -2,12 +2,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, NotRequired, TypedDict
 
 from app.conversations.models import ConversationMessage, ForkOrigin
-from app.github.models import (
-    PublicationStatus, RepositoryCheckout, RepositoryPublication, RepositorySelection,
-)
-from app.diagnosis.models import RepairRound
+from app.github.models import RepositoryCheckout, RepositorySelection
 from app.requirements.models import Requirement, SessionStatus
-from app.verification.models import VerificationResult, VerificationStatus
 
 HttpMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
 ParameterLocation = Literal["path", "query", "header"]
@@ -94,26 +90,7 @@ class ApiDesignState:
     status: SessionStatus = "interviewing"
     document: dict[str, Any] | None = None
     error: str | None = None
-    # Where CodegenWorkflow wrote the generated code, once it has run.
-    code: dict[str, Any] | None = None
-    code_error: str | None = None
-    implementation: dict[str, Any] | None = None
-    implementation_error: str | None = None
-    tests: dict[str, Any] | None = None
-    tests_error: str | None = None
-    verification: VerificationResult | None = None
-    verification_error: str | None = None
-    verification_status: VerificationStatus = 'not_applicable'
-    # One entry per diagnosed verification failure: which side was sent back for repair.
-    repairs: list[RepairRound] = field(default_factory=list)
     forked_from: ForkOrigin | None = None
-    # Manual generation retries start a new run under the same session ID.
-    generation_retry_stage: Literal['server', 'tests', 'repository'] | None = None
-    previous_run_id: str | None = None
     repository: RepositorySelection | None = None
     # Set once the repository is on the worker's disk; forks check out their own.
     checkout: RepositoryCheckout | None = None
-    # The new branch holding the sources that passed verification.
-    publication: RepositoryPublication | None = None
-    publication_error: str | None = None
-    publication_status: PublicationStatus = 'not_applicable'

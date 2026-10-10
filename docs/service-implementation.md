@@ -2,12 +2,17 @@
 
 The pipeline is API design → code generation → parallel implementation and test generation
 → verification against the running service.
-New API-design sessions automatically start `ImplementationWorkflow` and
-`TestGenerationWorkflow` on separate task queues after successful code generation.
+Everything after the design is one `DeliveryWorkflow` (`backend/app/delivery/`), named
+`delivery-<session-id>`. A finished API-design session starts it with a `TaskSpec`: the
+requirements, API model, OpenAPI document, language and repository the session agreed on.
+The delivery keeps each stage's result or error in its own `DeliveryProgress`, which the
+session GET endpoint merges into the session it reports. The design session stays open
+until its delivery ends.
+After successful code generation the delivery starts `ImplementationWorkflow` and
+`TestGenerationWorkflow` on separate task queues.
 Both children start before either is awaited to completion. Each result becomes
-available independently; failure in one branch does not cancel the other. Replay
-patches preserve the original behavior of existing histories. `VerificationWorkflow`
-starts only after both authoring children succeed. Failed assertions are completed test
+available independently; failure in one branch does not cancel the other.
+`VerificationWorkflow` starts only after both authoring children succeed. Failed assertions are completed test
 results, not workflow failures; failed builds skip verification. Failed tests start the
 [repair loop](#automatic-repair-of-failed-tests): `DiagnosisWorkflow` decides whether the
 implementation or the tests are wrong, that side's own workflow corrects it, and
@@ -197,7 +202,7 @@ Only a successful build publishes:
 - `<GENERATED_CODE_DIR>/<session-id>/implementation/agent.log`: bounded, API-key-redacted
   agent output, captured before container removal, including failed runs.
 
-The same result is available through `ApiDesignWorkflow.get_state().implementation`.
+The same result is available through `DeliveryWorkflow.get_state().progress.implementation`.
 Failures set `implementation_error`.
 
 ## Independent test generation
@@ -237,7 +242,7 @@ and `.dockerignore`. Building the runner independently compiles the suite with
 - `<GENERATED_CODE_DIR>/<session-id>/tests/agent.log`: bounded, API-key-redacted agent
   output, including failed runs.
 
-The result is available through `ApiDesignWorkflow.get_state().tests` and the existing
+The result is available through `DeliveryWorkflow.get_state().progress.tests` and the existing
 session GET endpoint. Failures set `tests_error`. Requirements, API documents, codegen
 output and the successful sibling result remain available. Both activities heartbeat,
 have bounded execution times and disable automatic retries to avoid repeated model
@@ -252,8 +257,8 @@ with `{"stage": "server"}`, `{"stage": "tests"}` or, after a failed push,
 `{"stage": "repository"}`. Invalid or successful stages
 cannot be restarted; attempts while generation is active return HTTP 409.
 
-A retry starts a fresh `ApiDesignWorkflow` run under the same session ID, preserving
-its conversation, requirements, OpenAPI document and successful sibling artifacts.
+A retry starts a fresh `DeliveryWorkflow` run under the same delivery ID, preserving
+its task and successful sibling artifacts. The design session itself is never restarted.
 Server retries rerun implementation/build, or codegen followed by both authoring
 branches if codegen itself failed. Test retries rerun only test generation/build.
 Each retried child gets a run-specific ID. Verification resumes automatically once
@@ -280,7 +285,7 @@ The checkout itself is untouched until verification passes. Then the main worker
 files the implementation author could see equal to `implementation/service` (files it
 removed are deleted; tests it never saw stay), replaces `contract-tests/` with
 `tests/suite`, commits and pushes the new `generated/…` branch.
-`ApiDesignWorkflow.get_state()` reports `publication_status` (`waiting`, `running`,
+`DeliveryWorkflow.get_state().progress` reports `publication_status` (`waiting`, `running`,
 `completed`, `skipped` when verification did not pass, `error`), `publication` and
 `publication_error`.
 
@@ -369,16 +374,15 @@ XML DTD/entity declarations. Counts come from testcases, not duplicate suite cou
 
 Artifacts live in `<GENERATED_CODE_DIR>/<session-id>/verification/<run-id>/` (`reports/`,
 container logs and `result.json`). The latest summary is atomically published as
-`verification/result.json` and exposed as `ApiDesignWorkflow.get_state().verification`
+`verification/result.json` and exposed as `DeliveryWorkflow.get_state().progress.verification`
 and through the existing session GET endpoint. `verification_status` distinguishes
-waiting, running, completed, skipped, error and legacy not-applicable sessions;
+waiting, running, completed, skipped, error and not-applicable (nothing to deliver yet) sessions;
 `verification_error` records unexpected child-workflow failures. Returned test results
 (including assertion failures/infrastructure errors) are completed verification steps.
 The parent still returns its OpenAPI document and retains all successful build artifacts.
 
 The API-design page keeps polling through verification, shows pass/fail/error counts,
-failed-test details and expandable container logs. Older histories replay without the
-new child and are not retroactively verified.
+failed-test details and expandable container logs.
 
 ## Automatic repair of failed tests
 
@@ -402,7 +406,7 @@ verification passes. Each round is:
    image as usual. Source isolation is kept: neither author receives the other's sources.
 3. **Verification** of the current images.
 
-`ApiDesignWorkflow.get_state().repairs` lists each round's `attempt`, `target` and
+`DeliveryWorkflow.get_state().progress.repairs` lists each round's `attempt`, `target` and
 `summary`, and the page shows them. The loop stops when verification passes, or without
 passing when:
 
@@ -410,11 +414,8 @@ passing when:
 - diagnosis fails (`verification_error` is set);
 - the repair stage fails: the previous image stays published, the stage's error is
   recorded and the existing manual retry for that stage is offered;
-- `MAX_REPAIR_ROUNDS` (5, in `app/temporal/workflows.py`) rounds did not produce a pass
+- `MAX_REPAIR_ROUNDS` (5, in `app/delivery/workflows.py`) rounds did not produce a pass
   (`verification_error` is set and the last failed result is kept).
-
-Histories from before the `verification-repair-loop` patch end with their first
-verification, as before.
 
 To exercise real Docker networking, the trusted runner and Surefire collection without
 an LLM, run from `backend`:

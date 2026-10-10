@@ -68,9 +68,6 @@ async def _turn_history(
                         completed.result.payloads, [dict]
                     )
                     results.append(result)
-        # Manual generation restarts retain the transcript, but its original
-        # turn results still live in the previous run's history.
-        previous_run_id = previous_run_id or getattr(first_input, 'previous_run_id', None)
         runs.append(results)
         if not previous_run_id:
             return first_input, [item for run in reversed(runs) for item in run]
