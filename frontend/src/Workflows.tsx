@@ -5,6 +5,7 @@ type WorkflowType =
   | "LLMRequestWorkflow"
   | "RequirementsWorkflow"
   | "ApiDesignWorkflow"
+  | "DeliveryWorkflow"
   | "CodegenWorkflow"
   | "SayHelloWorkflow";
 
@@ -28,6 +29,7 @@ const workflowTypes: [WorkflowType, string][] = [
   ["LLMRequestWorkflow", "Chat"],
   ["RequirementsWorkflow", "Requirements"],
   ["ApiDesignWorkflow", "API design"],
+  ["DeliveryWorkflow", "Delivery"],
   ["CodegenWorkflow", "Code generation"],
   ["SayHelloWorkflow", "Hello"],
 ];
@@ -87,6 +89,11 @@ function pageRecord(value: unknown): Page {
   };
 }
 
+/** A delivery is named after the session whose task it builds. */
+function sessionOfDelivery(workflowId: string) {
+  return workflowId.replace(/^delivery-/, "");
+}
+
 /** The screen that shows this workflow, if there is one. */
 function workflowLink(item: WorkflowExecution) {
   const id = encodeURIComponent(item.workflow_id);
@@ -97,9 +104,11 @@ function workflowLink(item: WorkflowExecution) {
       return `?mode=requirements&session_id=${id}`;
     case "ApiDesignWorkflow":
       return `?mode=api-design&session_id=${id}`;
+    case "DeliveryWorkflow":
+      return `?mode=api-design&session_id=${encodeURIComponent(sessionOfDelivery(item.workflow_id))}`;
     case "CodegenWorkflow":
       return item.parent_workflow_id
-        ? `?mode=api-design&session_id=${encodeURIComponent(item.parent_workflow_id)}`
+        ? `?mode=api-design&session_id=${encodeURIComponent(sessionOfDelivery(item.parent_workflow_id))}`
         : null;
     default:
       return null;

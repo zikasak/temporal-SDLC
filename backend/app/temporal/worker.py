@@ -10,6 +10,7 @@ from app.logging_setup import configure_logging
 from app.temporal.lifecycle import run_worker
 
 with workflow.unsafe.imports_passed_through():
+    from app.delivery.workflows import DeliveryWorkflow
     from app.documents import ensure_document_schema
     from app.temporal.activities import (
         api_design_turn,
@@ -42,6 +43,7 @@ async def main():
         task_queue=TASK_QUEUE,
         workflows=[
             SayHelloWorkflow, LLMRequestWorkflow, RequirementsWorkflow, ApiDesignWorkflow,
+            DeliveryWorkflow,
         ],
         activities=[
             greet, parse_document, send_llm_message,

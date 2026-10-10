@@ -3,15 +3,13 @@
 import dataclasses
 import logging
 import uuid
-from typing import Any, Literal
-
-from temporalio.client import WorkflowExecutionStatus
-from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
-from temporalio.exceptions import WorkflowAlreadyStartedError
+from typing import Any
 
 from app.api_design.models import ApiDesignState
 from app.api_design.openapi import design_problems
 from app.config import TASK_QUEUE
+from app.delivery import service as delivery_service
+from app.delivery.models import DeliveryProgress, RetryStage
 from app.documents import DocumentNotFound, get_generated_document
 from app.requirements import service as requirements_service
 from app.requirements.document import render_requirements_markdown
@@ -103,57 +101,11 @@ async def finalize_session(session_id: str) -> None:
     logger.info("Finalizing API design session %s", session_id)
 
 
-async def retry_generation(session_id: str,
-                           stage: Literal['server', 'tests', 'repository']) -> None:
-    """Restart a failed stage, retaining the design and successful build artifacts."""
-    if stage not in {'server', 'tests', 'repository'}:
-        raise SessionBusy('Choose server generation, tests generation or the push to retry.')
-    client = await connect_temporal()
-    handle = client.get_workflow_handle(session_id)
-    description = await handle.describe()
-    if description.status != WorkflowExecutionStatus.COMPLETED:
-        raise SessionBusy('Wait for the current generation to finish before retrying.')
-    # Pin the query to the run we checked, rather than a concurrent restart.
-    state = await client.get_workflow_handle(session_id, run_id=description.run_id).query(
-        'get_state', result_type=ApiDesignState,
-    )
-    failed = {'server': state.code_error or state.implementation_error,
-              'tests': state.tests_error, 'repository': state.publication_error}[stage]
-    if state.status != 'completed' or not state.document or not failed:
+async def retry_generation(session_id: str, stage: RetryStage) -> None:
+    state = await get_state(session_id)
+    if state.status != 'completed' or not state.document:
         raise SessionBusy('Only failed generation can be retried.')
-    if stage == 'tests' and not state.code:
-        raise SessionBusy('Retry server generation first.')
-    if not state.language:
-        # A completed session takes no messages, so only a fork can choose one.
-        raise SessionBusy('No implementation language was chosen for this session. '
-                          'Fork it from a message and choose a language there.')
-    state.generation_retry_stage = stage
-    state.previous_run_id = description.run_id
-    if state.checkout:
-        state.publication_error = None
-        state.publication_status = 'waiting'
-    if stage != 'repository':
-        # A repeated push keeps the verification it publishes.
-        state.verification = None
-        state.verification_error = None
-        state.verification_status = 'waiting'
-        state.repairs = []
-    if stage == 'server':
-        state.code_error = None
-        state.implementation = None
-        state.implementation_error = None
-    elif stage == 'tests':
-        state.tests = None
-        state.tests_error = None
-    try:
-        await client.start_workflow(
-            'ApiDesignWorkflow', state, id=session_id, task_queue=description.task_queue,
-            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
-            id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
-        )
-    except WorkflowAlreadyStartedError as exc:
-        raise SessionBusy('Generation is already running for this session.') from exc
-    logger.info('Restarted %s generation in API design session %s', stage, session_id)
+    await delivery_service.retry(session_id, stage)
 
 
 async def get_state(session_id: str) -> ApiDesignState:
@@ -167,6 +119,10 @@ async def get_session(session_id: str) -> dict[str, Any]:
     session = dataclasses.asdict(state)
     # Polled every few seconds; the requirement list is enough for the page.
     del session["requirements_document"]
-    del session['generation_retry_stage']
-    del session['previous_run_id']
-    return {"session_id": session_id, **session, "problems": design_problems(state.api, state.language)}
+    # The pipeline's results belong to the delivery a finished design starts.
+    progress = DeliveryProgress()
+    if state.status == 'completed' and state.document:
+        progress = (await delivery_service.get_progress(session_id)
+                    or DeliveryProgress(verification_status='waiting'))
+    return {"session_id": session_id, **session, **dataclasses.asdict(progress),
+            "problems": design_problems(state.api, state.language)}

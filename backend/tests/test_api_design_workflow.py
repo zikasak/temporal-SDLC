@@ -20,6 +20,9 @@ from app.config import (
     CODEGEN_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, IMPLEMENTATION_TASK_QUEUE,
     TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
 )
+from app.delivery import service as delivery_service
+from app.delivery.models import DeliveryProgress, delivery_id
+from app.delivery.workflows import DeliveryWorkflow
 from app.diagnosis.workflows import DiagnosisWorkflow
 from app.implementation.workflows import ImplementationWorkflow
 from app.temporal import sessions
@@ -200,7 +203,7 @@ async def env():
 async def worker(env):
     activities = FakeActivities()
     async with Worker(
-        env.client, task_queue=TASK_QUEUE, workflows=[ApiDesignWorkflow],
+        env.client, task_queue=TASK_QUEUE, workflows=[ApiDesignWorkflow, DeliveryWorkflow],
         activities=[activities.api_design_turn, activities.write_openapi_document,
                     activities.checkout_repository, activities.publish_repository],
     ), Worker(
@@ -269,7 +272,7 @@ async def test_new_api_design_inherits_the_requirements_repository(env, worker, 
         await handle.terminate()
 
 
-async def test_repository_is_checked_out_first_and_pushed_once_verified(env, worker, monkeypatch, repository_selection):
+async def test_repository_is_checked_out_first_and_pushed_once_verified(env, worker, connected, repository_selection):
     worker.release_turn.clear()
     handle = await start(env, repository_selection)
     # Nothing reaches the model, and no message is accepted, before the checkout.
@@ -280,8 +283,7 @@ async def test_repository_is_checked_out_first_and_pushed_once_verified(env, wor
     await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
     worker.fail_publication = True
     await handle.execute_update(ApiDesignWorkflow.finalize)
-    assert await handle.result() == DOCUMENT
-    state = await handle.query(ApiDesignWorkflow.get_state)
+    state = await delivered(env, handle)
     # Both authors are told to work in the repository the session checked out.
     assert state.implementation["context"]["repository"] == repository_selection
     assert state.tests["context"]["repository"] == repository_selection
@@ -289,16 +291,10 @@ async def test_repository_is_checked_out_first_and_pushed_once_verified(env, wor
     assert state.publication is None and state.publication_status == "error"
     assert "Permission denied" in state.publication_error
 
-    async def connect():
-        return env.client
-
     # A rejected push is repeated on its own: nothing is generated or verified again.
-    monkeypatch.setattr(service, "connect_temporal", connect)
     worker.fail_publication = False
     await service.retry_generation(handle.id, "repository")
-    retry = env.client.get_workflow_handle(handle.id)
-    assert await retry.result() == DOCUMENT
-    state = await retry.query(ApiDesignWorkflow.get_state)
+    state = await delivered(env, handle)
     assert state.publication["branch"] == "generated/abc" and state.publication_error is None
     assert state.publication_status == "completed" and state.verification["status"] == "passed"
     assert worker.published == [(handle.id, repository_selection["full_name"])]
@@ -313,8 +309,7 @@ async def test_unverified_sources_are_not_pushed(env, worker, repository_selecti
     await wait_for_status(handle, "interviewing")
     await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
     await handle.execute_update(ApiDesignWorkflow.finalize)
-    assert await handle.result() == DOCUMENT
-    state = await handle.query(ApiDesignWorkflow.get_state)
+    state = await delivered(env, handle)
     assert state.publication_status == "skipped" and not worker.published
 
 
@@ -327,8 +322,7 @@ async def test_pre_checkout_history_replays_without_checkout_or_push(env, worker
         await wait_for_status(handle, "interviewing")
         await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
         await handle.execute_update(ApiDesignWorkflow.finalize)
-        assert await handle.result() == DOCUMENT
-        state = await handle.query(ApiDesignWorkflow.get_state)
+        state = await delivered(env, handle)
         assert state.verification['status'] == 'passed' and state.publication_status == 'not_applicable'
         assert not worker.checkouts and not worker.published
         assert 'repository' not in state.implementation['context']
@@ -343,6 +337,31 @@ async def test_session_fails_without_a_model_turn_when_checkout_fails(env, worke
     state = await handle.query(ApiDesignWorkflow.get_state)
     assert state.status == "failed" and "could not be checked out" in state.error
     assert worker.turns == 0 and state.messages == []
+
+
+def delivery(env, handle) -> Any:
+    """The session's delivery; without a run it follows the latest manual retry."""
+    return env.client.get_workflow_handle(delivery_id(handle.id), result_type=DeliveryProgress)
+
+
+async def delivered(env, handle) -> DeliveryProgress:
+    assert await handle.result() == DOCUMENT
+    return await delivery(env, handle).result()
+
+
+async def progress(env, handle) -> DeliveryProgress:
+    return (await delivery(env, handle).query(DeliveryWorkflow.get_state)).progress
+
+
+@pytest.fixture
+def connected(env, monkeypatch):
+    """Point the session services at the test server."""
+    async def connect():
+        return env.client
+
+    for module in (service, delivery_service, sessions):
+        monkeypatch.setattr(module, "connect_temporal", connect)
+    monkeypatch.setattr(service, "TASK_QUEUE", TASK_QUEUE)
 
 
 async def wait_for_status(handle, status: str) -> ApiDesignState:
@@ -375,16 +394,16 @@ async def test_draft_discuss_and_finalize(env, worker):
 
 
 @pytest.mark.parametrize('verification', ['passed', 'error', 'child_error'])
-async def test_finalize_writes_document(env, worker, verification, monkeypatch):
+async def test_finalize_writes_document_and_delivers_it(env, worker, verification, connected):
     worker.verification_result = verification
     handle = await start(env)
     await wait_for_status(handle, "interviewing")
     await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
     await handle.execute_update(ApiDesignWorkflow.finalize)
-    assert await handle.result() == DOCUMENT
+    state = await delivered(env, handle)
     assert worker.documents == [handle.id]
-    state = await handle.query(ApiDesignWorkflow.get_state)
-    assert state.status == "completed" and state.document == DOCUMENT
+    design = await handle.query(ApiDesignWorkflow.get_state)
+    assert design.status == "completed" and design.document == DOCUMENT
     assert state.code == CODE and state.code_error is None
     assert state.implementation["image_id"] == "sha256:" + "a" * 64
     assert state.implementation["context"]["requirements_document"] == "# Requirements"
@@ -392,7 +411,7 @@ async def test_finalize_writes_document(env, worker, verification, monkeypatch):
     assert state.tests["image_id"] == "sha256:" + "b" * 64
     assert state.tests_error is None
     assert state.tests["context"] == {
-        "requirements": [], "requirements_document": "# Requirements", "api_design": state.api,
+        "requirements": [], "requirements_document": "# Requirements", "api_design": design.api,
         "language": "java",
     }
     assert worker.verification_images == ('sha256:' + 'a' * 64, 'sha256:' + 'b' * 64)
@@ -405,30 +424,27 @@ async def test_finalize_writes_document(env, worker, verification, monkeypatch):
         assert state.verification_status == 'completed'
         assert state.verification_error is None
 
-    async def connect():
-        return env.client
-
-    monkeypatch.setattr(service, 'connect_temporal', connect)
+    # The session API reports the design and its delivery as one session.
     response = await service.get_session(handle.id)
+    assert response['status'] == 'completed' and response['code'] == CODE
     assert response['verification'] == state.verification
     assert response['verification_status'] == state.verification_status
     assert response['verification_error'] == state.verification_error
 
 
-async def finalized(env) -> Any:
+async def finalized(env) -> DeliveryProgress:
+    """The outcome of delivering a one-endpoint design."""
     handle = await start(env)
     await wait_for_status(handle, 'interviewing')
     await handle.execute_update(ApiDesignWorkflow.send_message, '/rooms')
     await handle.execute_update(ApiDesignWorkflow.finalize)
-    assert await handle.result() == DOCUMENT
-    return handle
+    return await delivered(env, handle)
 
 
 async def test_failed_tests_send_the_diagnosed_side_back_until_verification_passes(env, worker):
     worker.verification_results = ['failed', 'failed', 'passed']
     worker.diagnoses = ['tests', 'implementation']
-    handle = await finalized(env)
-    state = await handle.query(ApiDesignWorkflow.get_state)
+    state = await finalized(env)
     assert state.verification['status'] == 'passed'
     assert state.verification_status == 'completed' and state.verification_error is None
     assert [(item['attempt'], item['target']) for item in state.repairs] == [
@@ -453,8 +469,7 @@ async def test_failed_tests_send_the_diagnosed_side_back_until_verification_pass
 
 async def test_repair_stops_after_the_round_limit_with_the_last_failure(env, worker):
     worker.verification_result = 'failed'
-    handle = await finalized(env)
-    state = await handle.query(ApiDesignWorkflow.get_state)
+    state = await finalized(env)
     assert len(state.repairs) == len(worker.repairs) == 5
     assert len(worker.verified_images) == 6
     assert state.verification['status'] == 'failed' and state.verification_status == 'completed'
@@ -462,7 +477,7 @@ async def test_repair_stops_after_the_round_limit_with_the_last_failure(env, wor
 
 
 @pytest.mark.parametrize('broken', ['diagnosis', 'implementation'])
-async def test_failed_diagnosis_or_repair_keeps_the_published_images(env, worker, broken, monkeypatch):
+async def test_failed_diagnosis_or_repair_keeps_the_published_images(env, worker, broken, connected):
     worker.verification_results = ['failed', 'passed']
     worker.fail_diagnosis = broken == 'diagnosis'
     worker.release_verification.clear()
@@ -474,8 +489,7 @@ async def test_failed_diagnosis_or_repair_keeps_the_published_images(env, worker
     # The first build succeeded; only the repair of it fails.
     worker.fail_implementation = broken == 'implementation'
     worker.release_verification.set()
-    assert await handle.result() == DOCUMENT
-    state = await handle.query(ApiDesignWorkflow.get_state)
+    state = await delivered(env, handle)
     assert len(worker.verified_images) == 1 and not worker.repairs
     assert state.verification['status'] == 'failed' and state.verification_status == 'completed'
     assert state.implementation['image_id'] == 'sha256:' + 'a' * 64
@@ -485,45 +499,24 @@ async def test_failed_diagnosis_or_repair_keeps_the_published_images(env, worker
         return
     assert state.implementation_error == 'The service could not be implemented or built.'
 
-    async def connect():
-        return env.client
-
     # The failed repair is recoverable through the existing manual retry, which
     # rebuilds the service and resumes verification with a clean repair history.
-    monkeypatch.setattr(service, 'connect_temporal', connect)
     worker.fail_implementation = False
     await service.retry_generation(handle.id, 'server')
-    retry = env.client.get_workflow_handle(handle.id)
-    assert await retry.result() == DOCUMENT
-    state = await retry.query(ApiDesignWorkflow.get_state)
+    state = await delivered(env, handle)
     assert state.verification['status'] == 'passed' and state.repairs == []
 
 
-async def test_pre_repair_history_replays_without_diagnosis(env, worker, monkeypatch):
-    """A history that ended on failed tests must not schedule a diagnosis on replay."""
-    worker.verification_result = 'failed'
-    patched = workflow.patched
-    with monkeypatch.context() as legacy:
-        legacy.setattr(workflow, 'patched', lambda name: False if name == 'verification-repair-loop' else patched(name))
-        handle = await finalized(env)
-        state = await handle.query(ApiDesignWorkflow.get_state)
-        assert state.verification['status'] == 'failed' and state.verification_error is None
-        assert not worker.diagnosed
-        history = await handle.fetch_history()
-    await Replayer(workflows=[ApiDesignWorkflow]).replay_workflow(history)
-
-
 @pytest.mark.parametrize('failed', [{'implementation'}, {'tests'}, {'implementation', 'tests'}])
-async def test_failed_coding_branches_preserve_other_artifacts(env, worker, failed, monkeypatch, repository_selection):
+async def test_failed_coding_branches_preserve_other_artifacts(env, worker, failed, connected, repository_selection):
     worker.fail_implementation = 'implementation' in failed
     worker.fail_tests = 'tests' in failed
     handle = await start(env, repository_selection)
     await wait_for_status(handle, "interviewing")
     await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
     await handle.execute_update(ApiDesignWorkflow.finalize)
-    assert await handle.result() == DOCUMENT
-    state = await handle.query(ApiDesignWorkflow.get_state)
-    assert state.code == CODE and state.document == DOCUMENT
+    state = await delivered(env, handle)
+    assert state.code == CODE
     assert state.verification_status == 'skipped' and state.verification is None
     assert not worker.verification_started.is_set()
     if 'implementation' in failed:
@@ -539,12 +532,8 @@ async def test_failed_coding_branches_preserve_other_artifacts(env, worker, fail
         assert state.tests["image_id"] == "sha256:" + "b" * 64
         assert state.tests_error is None
 
-    async def connect():
-        return env.client
-
-    monkeypatch.setattr(service, 'connect_temporal', connect)
-    # A fresh run retries only the requested failed stage, without redrafting
-    # the API or regenerating successful siblings.
+    # A fresh delivery run retries only the requested failed stage, without
+    # regenerating successful siblings.
     for branch in sorted(failed):
         getattr(worker, f'{branch}_started').clear()
         sibling = 'tests' if branch == 'implementation' else 'implementation'
@@ -556,9 +545,7 @@ async def test_failed_coding_branches_preserve_other_artifacts(env, worker, fail
                 await service.retry_generation(handle.id, 'tests' if sibling == 'tests' else 'server')
         # Another failure must remain retryable, including across closed runs.
         await service.retry_generation(handle.id, stage)
-        unsuccessful = env.client.get_workflow_handle(handle.id)
-        assert await unsuccessful.result() == DOCUMENT
-        still_failed = await unsuccessful.query(ApiDesignWorkflow.get_state)
+        still_failed = await delivered(env, handle)
         assert getattr(still_failed, f'{branch}_error')
         assert still_failed.verification_status == 'skipped'
         assert not getattr(worker, f'{sibling}_started').is_set()
@@ -572,7 +559,6 @@ async def test_failed_coding_branches_preserve_other_artifacts(env, worker, fail
         )
         assert sum(result is None for result in attempts) == 1
         assert sum(isinstance(result, sessions.SessionBusy) for result in attempts) == 1
-        retry = env.client.get_workflow_handle(handle.id)
         await asyncio.wait_for(getattr(worker, f'{branch}_started').wait(), timeout=10)
         with pytest.raises(sessions.SessionBusy):
             await service.retry_generation(handle.id, stage)
@@ -580,33 +566,19 @@ async def test_failed_coding_branches_preserve_other_artifacts(env, worker, fail
         assert pending[f'{branch}_error'] is None
         assert pending['verification_status'] == 'waiting'
         getattr(worker, f'release_{branch}').set()
-        assert await retry.result() == DOCUMENT
-        state = await retry.query(ApiDesignWorkflow.get_state)
+        state = await delivered(env, handle)
         assert getattr(state, branch)['image_id']
         assert getattr(state, f'{branch}_error') is None
         assert not getattr(worker, f'{sibling}_started').is_set()
-        assert state.document == DOCUMENT and state.code == CODE
-        assert state.repository == repository_selection
+        assert state.code == CODE
+        # The retried stage still works in the session's repository.
+        assert getattr(state, branch)['context']['repository'] == repository_selection
         assert worker.documents == [handle.id]
     assert state.verification_status == 'completed'
     assert worker.verification_started.is_set()
-    # Forking an earlier answer must still use the pre-retry design history.
-    monkeypatch.setattr(sessions, 'connect_temporal', connect)
-    monkeypatch.setattr(service, 'TASK_QUEUE', TASK_QUEUE)
-    fork = env.client.get_workflow_handle(await service.fork_session(handle.id, 0))
-    try:
-        fork_state = await wait_for_status(fork, 'interviewing')
-        assert fork_state.api['endpoints'] == []
-        assert fork_state.repository == repository_selection
-    finally:
-        await fork.terminate()
 
 
-async def test_generation_retry_http_validation(env, worker, monkeypatch):
-    async def connect():
-        return env.client
-
-    monkeypatch.setattr(service, 'connect_temporal', connect)
+async def test_generation_retry_http_validation(env, worker, connected):
     app = FastAPI()
     app.include_router(router, prefix='/api')
     handle = await start(env)
@@ -640,7 +612,7 @@ async def test_implementation_and_tests_start_before_either_finishes(env, worker
         await asyncio.wait_for(asyncio.gather(
             worker.implementation_started.wait(), worker.tests_started.wait(),
         ), timeout=10)
-        state = await handle.query(ApiDesignWorkflow.get_state)
+        state = await progress(env, handle)
         assert state.implementation is None and state.tests is None
         assert state.verification_status == 'waiting'
         assert not worker.verification_started.is_set()
@@ -648,7 +620,7 @@ async def test_implementation_and_tests_start_before_either_finishes(env, worker
         # verification must not start until the second one succeeds.
         getattr(worker, f'release_{first}').set()
         for _ in range(100):
-            state = await handle.query(ApiDesignWorkflow.get_state)
+            state = await progress(env, handle)
             if getattr(state, first) is not None:
                 break
             await asyncio.sleep(0.05)
@@ -657,57 +629,32 @@ async def test_implementation_and_tests_start_before_either_finishes(env, worker
         worker.release_implementation.set()
         worker.release_tests.set()
         await asyncio.wait_for(worker.verification_started.wait(), timeout=10)
-        state = await handle.query(ApiDesignWorkflow.get_state)
-        assert state.verification_status == 'running'
+        assert (await progress(env, handle)).verification_status == 'running'
     finally:
         worker.release_implementation.set()
         worker.release_tests.set()
         worker.release_verification.set()
-        await handle.result()
+        await delivered(env, handle)
 
 
-async def test_pre_verification_history_replays_without_new_child(env, worker, monkeypatch):
-    """A history with the old command sequence must not schedule verification on replay."""
-    patched = workflow.patched
-    with monkeypatch.context() as legacy:
-        legacy.setattr(workflow, 'patched', lambda name: False if name == 'verification-child-workflow' else patched(name))
-        handle = await start(env)
-        await wait_for_status(handle, 'interviewing')
-        await handle.execute_update(ApiDesignWorkflow.send_message, '/rooms')
-        await handle.execute_update(ApiDesignWorkflow.finalize)
-        assert await handle.result() == DOCUMENT
-        state = await handle.query(ApiDesignWorkflow.get_state)
-        assert state.verification_status == 'not_applicable'
-        assert not worker.verification_started.is_set()
-        history = await handle.fetch_history()
-    await Replayer(workflows=[ApiDesignWorkflow]).replay_workflow(history)
-
-
-async def test_failed_code_generation_keeps_session_completed(env, worker, monkeypatch):
+async def test_failed_code_generation_can_be_retried(env, worker, connected):
     FakeCodegenWorkflow.fail = True
     handle = await start(env)
     await wait_for_status(handle, "interviewing")
     await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
     await handle.execute_update(ApiDesignWorkflow.finalize)
-    assert await handle.result() == DOCUMENT
-    state = await handle.query(ApiDesignWorkflow.get_state)
-    assert state.status == "completed" and state.code is None
+    state = await delivered(env, handle)
+    assert state.code is None
     assert state.code_error == "The server code could not be generated."
     assert not worker.implementation_started.is_set() and not worker.tests_started.is_set()
     assert state.verification_status == 'skipped'
     assert not worker.verification_started.is_set()
 
-    async def connect():
-        return env.client
-
-    monkeypatch.setattr(service, 'connect_temporal', connect)
     with pytest.raises(sessions.SessionBusy):
         await service.retry_generation(handle.id, 'tests')
     FakeCodegenWorkflow.fail = False
     await service.retry_generation(handle.id, 'server')
-    retry = env.client.get_workflow_handle(handle.id)
-    assert await retry.result() == DOCUMENT
-    state = await retry.query(ApiDesignWorkflow.get_state)
+    state = await delivered(env, handle)
     assert state.code == CODE and state.code_error is None
     assert state.implementation and state.tests
     assert state.verification_status == 'completed'
@@ -767,7 +714,7 @@ async def test_idle_session_with_complete_api_finalizes(env, worker):
     await wait_for_status(handle, "interviewing")
     await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
     await env.sleep(timedelta(hours=25))
-    assert await handle.result() == DOCUMENT
+    assert (await delivered(env, handle)).code == CODE
 
 
 async def test_language_must_be_chosen_before_code_is_generated(env, worker):
@@ -781,34 +728,28 @@ async def test_language_must_be_chosen_before_code_is_generated(env, worker):
     worker.language = "java"
     await handle.execute_update(ApiDesignWorkflow.send_message, "/bookings")
     await handle.execute_update(ApiDesignWorkflow.finalize)
-    assert await handle.result() == DOCUMENT
-    state = await handle.query(ApiDesignWorkflow.get_state)
-    assert state.language == "java" and state.code == CODE
+    assert (await delivered(env, handle)).code == CODE
+    assert (await handle.query(ApiDesignWorkflow.get_state)).language == "java"
     assert FakeCodegenWorkflow.languages == ["java"]
     assert worker.verified_languages == ["java"]
 
 
-async def test_idle_session_without_a_language_keeps_the_document_only(env, worker, monkeypatch):
+async def test_idle_session_without_a_language_keeps_the_document_only(env, worker, connected):
     handle = await start(env, language=None)
     await wait_for_status(handle, "interviewing")
     await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
     await env.sleep(timedelta(hours=25))
-    assert await handle.result() == DOCUMENT
-    state = await handle.query(ApiDesignWorkflow.get_state)
+    state = await delivered(env, handle)
     assert state.code is None and FakeCodegenWorkflow.languages == []
     assert state.code_error == "No implementation language was chosen for this session."
     assert state.verification_status == 'skipped'
 
-    async def connect():
-        return env.client
-
     # Retrying cannot choose a language, so it is refused instead of restarting
     # a run that would only fail the same way.
-    monkeypatch.setattr(service, 'connect_temporal', connect)
+    first_run = (await delivery(env, handle).describe()).run_id
     with pytest.raises(sessions.SessionBusy, match="Fork it"):
         await service.retry_generation(handle.id, 'server')
-    description = await handle.describe()
-    assert description.run_id == handle.result_run_id
+    assert (await delivery(env, handle).describe()).run_id == first_run
 
 
 async def test_idle_session_with_problems_fails(env, worker):
@@ -821,13 +762,7 @@ async def test_idle_session_with_problems_fails(env, worker):
     assert state.status == "failed" and worker.documents == []
 
 
-async def test_fork_keeps_api_as_it_was_at_the_message(env, worker, monkeypatch, repository_selection):
-    async def connect():
-        return env.client
-
-    monkeypatch.setattr(service, "connect_temporal", connect)
-    monkeypatch.setattr(sessions, "connect_temporal", connect)
-    monkeypatch.setattr(service, "TASK_QUEUE", TASK_QUEUE)
+async def test_fork_keeps_api_as_it_was_at_the_message(env, worker, connected, repository_selection):
     worker.draft_endpoints = [endpoint("/rooms")]
     source = await start(env, repository_selection)
     await wait_for_status(source, "interviewing")

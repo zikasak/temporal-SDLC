@@ -11,11 +11,7 @@ with workflow.unsafe.imports_passed_through():
     from app.api_design.models import ApiDesignState
     from app.api_design.openapi import api_problems, design_problems
     from app.api_design.prompt import OPENING_FALLBACK
-    from app.config import (
-        CODEGEN_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, IMPLEMENTATION_TASK_QUEUE,
-        TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
-    )
-    from app.diagnosis.models import repair_request
+    from app.delivery.models import DeliveryState, TaskSpec, delivery_id
     from app.github.models import RepositorySelection
     from app.requirements.models import RequirementsState
     from app.requirements.prompt import OPENING_MESSAGE
@@ -24,7 +20,6 @@ with workflow.unsafe.imports_passed_through():
         checkout_repository,
         greet,
         parse_document,
-        publish_repository,
         requirements_turn,
         send_llm_message,
         write_openapi_document,
@@ -36,8 +31,6 @@ SESSION_IDLE_TIMEOUT = timedelta(hours=24)
 REPOSITORY_CHECKOUT_TIMEOUT = timedelta(minutes=10)
 MAX_TRANSCRIPT_BYTES = 64 * 1024
 MAX_MESSAGE_CHARS = 10000
-# Each round is a diagnosis, a repair of one side and a new verification.
-MAX_REPAIR_ROUNDS = 5
 OPEN_STATUSES = ("interviewing", "turn_running")
 
 
@@ -283,16 +276,15 @@ class RequirementsWorkflow:
 class ApiDesignWorkflow:
     """One API design discussion based on a finished requirements session: the
     model drafts the API first, each user message is an update, and the
-    finalize update renders the API model as an OpenAPI document."""
+    finalize update renders the API model as an OpenAPI document, which the
+    session then hands to a DeliveryWorkflow."""
 
     @workflow.init
     def __init__(self, state: ApiDesignState) -> None:
         self.state = state
         # A new session starts with the draft; one forked after a user message
         # starts by answering it.
-        if not self.state.generation_retry_stage and (
-            not self.state.messages or self.state.messages[-1]["role"] == "user"
-        ):
+        if not self.state.messages or self.state.messages[-1]["role"] == "user":
             self.state.status = "turn_running"
         self._resume_status = _await_checkout(self.state)
         self._updates = 0
@@ -300,10 +292,6 @@ class ApiDesignWorkflow:
 
     @workflow.run
     async def run(self, state: ApiDesignState) -> dict[str, Any] | None:
-        if self.state.generation_retry_stage:
-            await self._retry_generation()
-            await self._publish()
-            return self.state.document
         ready = await _check_out(self.state, self._resume_status)
         if ready and not self.state.messages:
             async with self._turn_lock:
@@ -334,10 +322,7 @@ class ApiDesignWorkflow:
                 workflow.continue_as_new(self.state)
         await workflow.wait_condition(workflow.all_handlers_finished)
         if self.state.status == "completed" and self.state.document:
-            if self.state.checkout:
-                self.state.publication_status = 'waiting'
-            await self._generate_code()
-            await self._publish()
+            await self._deliver()
         return self.state.document
 
     @workflow.query
@@ -441,227 +426,27 @@ class ApiDesignWorkflow:
         self.state.status = "completed"
         return True
 
-    async def _generate_code(self) -> None:
-        """Generate code, join the authoring branches, then verify their images."""
-        verification_enabled = workflow.patched('verification-child-workflow')
-        if verification_enabled:
-            self.state.verification_status = 'waiting'
-        # Sessions that finished before code generation existed must replay
-        # without the child workflow.
-        if not workflow.patched("codegen-child-workflow"):
-            self.state.code_error = "This session finished before code generation was added."
-            if verification_enabled:
-                self.state.verification_status = 'skipped'
-            return
-        if not self.state.language:
-            self.state.code_error = "No implementation language was chosen for this session."
-            if verification_enabled:
-                self.state.verification_status = 'skipped'
-            return
+    async def _deliver(self) -> None:
+        """Hand the finished design to its delivery and stay open until that ends."""
         session_id = workflow.info().workflow_id
         try:
-            self.state.code = await workflow.execute_child_workflow(
-                "CodegenWorkflow",
-                args=[session_id, self.state.document["document_id"], self.state.language],
-                id=self._generation_child_id('codegen', session_id),
-                task_queue=CODEGEN_TASK_QUEUE,
-                result_type=dict,
+            await workflow.execute_child_workflow(
+                "DeliveryWorkflow",
+                DeliveryState(spec=TaskSpec(
+                    session_id=session_id,
+                    requirements=self.state.requirements,
+                    requirements_document=self.state.requirements_document,
+                    api=self.state.api,
+                    document_id=self.state.document["document_id"],
+                    language=self.state.language,
+                    repository=self.state.repository,
+                    checkout=self.state.checkout,
+                )),
+                id=delivery_id(session_id),
             )
         except ChildWorkflowError as exc:
-            workflow.logger.warning("Code generation failed: %s", exc.cause or exc)
-            self.state.code_error = "The server code could not be generated."
-            if verification_enabled:
-                self.state.verification_status = 'skipped'
-            return
-        workflow.logger.info("Server code generated")
-        if workflow.patched("implementation-child-workflow"):
-            if workflow.patched("parallel-test-generation"):
-                # Each branch records its own failure, so one never cancels the other.
-                await asyncio.gather(
-                    self._implement_service(session_id), self._generate_tests(session_id),
-                )
-            else:
-                # Histories from before test generation retain the original child order.
-                await self._implement_service(session_id)
-        if verification_enabled:
-            if (self.state.implementation and self.state.tests
-                    and not self.state.implementation_error and not self.state.tests_error):
-                await self._verify_and_repair(session_id)
-            else:
-                self.state.verification_status = 'skipped'
-
-    def _generation_child_id(self, stage: str, session_id: str, repair: int = 0) -> str:
-        child_id = f'{stage}-{session_id}'
-        if self.state.generation_retry_stage:
-            child_id += f'-{workflow.info().run_id}'
-        if repair:
-            child_id += f'-repair-{repair}'
-        return child_id
-
-    async def _retry_generation(self) -> None:
-        session_id = workflow.info().workflow_id
-        if self.state.generation_retry_stage == 'repository':
-            # Generation and verification already succeeded; only the push is repeated.
-            return
-        if self.state.generation_retry_stage == 'server' and not self.state.code:
-            # A failed codegen never started either authoring branch.
-            await self._generate_code()
-            return
-        if self.state.generation_retry_stage == 'server':
-            await self._implement_service(session_id)
-        else:
-            await self._generate_tests(session_id)
-        if (self.state.implementation and self.state.tests
-                and not self.state.implementation_error and not self.state.tests_error):
-            await self._verify_and_repair(session_id)
-        else:
-            self.state.verification_status = 'skipped'
-
-    def _tests_failed(self) -> bool:
-        return bool(self.state.verification_status == 'completed' and self.state.verification
-                    and self.state.verification['status'] == 'failed')
-
-    async def _verify_and_repair(self, session_id: str) -> None:
-        """Verify; while tests fail, repair the side at fault and verify again."""
-        await self._verify_service(session_id)
-        # Histories from before the repair loop end with their first verification.
-        if not self._tests_failed() or not workflow.patched('verification-repair-loop'):
-            return
-        for attempt in range(1, MAX_REPAIR_ROUNDS + 1):
-            if not await self._repair(session_id, attempt):
-                return
-            await self._verify_service(session_id, attempt)
-            if not self._tests_failed():
-                return
-        self.state.verification_error = (
-            f'Tests still fail after {MAX_REPAIR_ROUNDS} automatic repair rounds.')
-
-    async def _repair(self, session_id: str, attempt: int) -> bool:
-        """Decide which side the failed tests condemn and have its own stage correct it."""
-        self.state.verification_status = 'diagnosing'
-        try:
-            diagnosis = await workflow.execute_child_workflow(
-                'DiagnosisWorkflow',
-                args=[session_id, {**self._coding_context(),
-                                   'verification': self.state.verification}],
-                id=self._generation_child_id('diagnosis', session_id, attempt),
-                task_queue=DIAGNOSIS_TASK_QUEUE,
-                result_type=dict,
-            )
-        except ChildWorkflowError as exc:
-            workflow.logger.warning('Verification diagnosis failed: %s', exc.cause or exc)
-            self.state.verification_error = 'The failed tests could not be diagnosed.'
-            self.state.verification_status = 'completed'
-            return False
-        target = diagnosis['target']
-        workflow.logger.info('Repair round %d: correcting the %s', attempt, target)
-        self.state.repairs.append(
-            {'attempt': attempt, 'target': target, 'summary': diagnosis['summary']})
-        self.state.verification_status = 'repairing'
-        repair = repair_request(diagnosis, self.state.verification, attempt)
-        # A failed repair keeps the previous image and records the stage's own error.
-        if target == 'implementation':
-            await self._implement_service(session_id, repair)
-        else:
-            await self._generate_tests(session_id, repair)
-        if self.state.implementation_error or self.state.tests_error:
-            self.state.verification_status = 'completed'
-            return False
-        return True
-
-    async def _verify_service(self, session_id: str, repair: int = 0) -> None:
-        self.state.verification_status = 'running'
-        try:
-            self.state.verification = await workflow.execute_child_workflow(
-                'VerificationWorkflow',
-                args=[session_id, self.state.implementation['image_id'],
-                      self.state.tests['image_id'], self.state.language],
-                id=self._generation_child_id('verification', session_id, repair),
-                task_queue=VERIFICATION_TASK_QUEUE,
-                result_type=dict,
-            )
-        except ChildWorkflowError as exc:
-            workflow.logger.warning('Service verification failed: %s', exc.cause or exc)
-            self.state.verification_error = 'Service verification could not complete.'
-            self.state.verification_status = 'error'
-        else:
-            self.state.verification_status = 'completed'
-
-    def _coding_context(self) -> dict[str, Any]:
-        return {
-            "requirements": self.state.requirements,
-            "requirements_document": self.state.requirements_document,
-            "api_design": self.state.api,
-            "language": self.state.language,
-        }
-
-    def _stage_context(self, repair: dict[str, Any] | None) -> dict[str, Any]:
-        context = self._coding_context()
-        if self.state.checkout:
-            # The authors then work inside the session's checkout of this repository.
-            context['repository'] = self.state.repository
-        if repair:
-            context['repair'] = repair
-        return context
-
-    async def _publish(self) -> None:
-        """Push the sources that passed verification to a new branch of the repository."""
-        if not self.state.checkout:
-            return
-        if not (self.state.verification_status == 'completed' and self.state.verification
-                and self.state.verification['status'] == 'passed'):
-            self.state.publication_status = 'skipped'
-            return
-        self.state.publication_status = 'running'
-        self.state.publication_error = None
-        try:
-            self.state.publication = await workflow.execute_activity(
-                publish_repository,
-                args=[workflow.info().workflow_id, self.state.repository, self.state.language],
-                start_to_close_timeout=timedelta(minutes=10),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
-        except ActivityError as exc:
-            workflow.logger.warning('Repository push failed: %s', exc.cause or exc)
-            reason = str(getattr(exc.cause, 'message', '') or '')[-500:]
-            self.state.publication_error = (
-                'The verified sources could not be pushed to the repository.'
-                + (f' {reason}' if reason else ''))
-            self.state.publication_status = 'error'
-        else:
-            workflow.logger.info('Verified sources pushed to %s',
-                                 self.state.publication['branch'])
-            self.state.publication_status = 'completed'
-
-    async def _implement_service(self, session_id: str,
-                                 repair: dict[str, Any] | None = None) -> None:
-        try:
-            self.state.implementation = await workflow.execute_child_workflow(
-                "ImplementationWorkflow",
-                args=[session_id, self._stage_context(repair)],
-                id=self._generation_child_id('implementation', session_id,
-                                             repair['attempt'] if repair else 0),
-                task_queue=IMPLEMENTATION_TASK_QUEUE,
-                result_type=dict,
-            )
-        except ChildWorkflowError as exc:
-            workflow.logger.warning("Service implementation failed: %s", exc.cause or exc)
-            self.state.implementation_error = "The service could not be implemented or built."
-
-    async def _generate_tests(self, session_id: str,
-                              repair: dict[str, Any] | None = None) -> None:
-        try:
-            self.state.tests = await workflow.execute_child_workflow(
-                "TestGenerationWorkflow",
-                args=[session_id, self._stage_context(repair)],
-                id=self._generation_child_id('test-generation', session_id,
-                                             repair['attempt'] if repair else 0),
-                task_queue=TEST_GENERATION_TASK_QUEUE,
-                result_type=dict,
-            )
-        except ChildWorkflowError as exc:
-            workflow.logger.warning("Service test generation failed: %s", exc.cause or exc)
-            self.state.tests_error = "The service tests could not be generated or built."
+            # Stage failures are results of the delivery; only an aborted one ends here.
+            workflow.logger.warning("Delivery did not finish: %s", exc.cause or exc)
 
     async def _expire(self) -> None:
         """After a day without messages, keep the API if it is complete."""
