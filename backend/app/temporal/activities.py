@@ -123,7 +123,7 @@ async def checkout_repository(
 @activity.defn
 @trace_activity('publish-repository', feature='repository', input_parameter='repository')
 async def publish_repository(
-    session_id: str, repository: RepositorySelection, language: str | None = None,
+    session_id: str, repository: RepositorySelection, language: str,
 ) -> RepositoryPublication:
     """Commit the verified service and its contract tests to a new branch and push it."""
     service_files = partial(is_service_file, session_language(language))

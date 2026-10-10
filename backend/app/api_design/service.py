@@ -11,7 +11,6 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from app.api_design.models import ApiDesignState
 from app.api_design.openapi import design_problems
-from app.languages.java import JAVA
 from app.config import TASK_QUEUE
 from app.documents import DocumentNotFound, get_generated_document
 from app.requirements import service as requirements_service
@@ -124,9 +123,10 @@ async def retry_generation(session_id: str,
         raise SessionBusy('Only failed generation can be retried.')
     if stage == 'tests' and not state.code:
         raise SessionBusy('Retry server generation first.')
-    if state.code and not state.language:
-        # Code generated before sessions chose a language was always Java.
-        state.language = JAVA.name
+    if not state.language:
+        # A completed session takes no messages, so only a fork can choose one.
+        raise SessionBusy('No implementation language was chosen for this session. '
+                          'Fork it from a message and choose a language there.')
     state.generation_retry_stage = stage
     state.previous_run_id = description.run_id
     if state.checkout:

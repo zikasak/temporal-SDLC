@@ -15,7 +15,7 @@ class CodegenWorkflow:
 
     @workflow.run
     async def run(
-        self, session_id: str, document_id: str, language: str | None = None,
+        self, session_id: str, document_id: str, language: str,
     ) -> dict[str, Any]:
         workflow.logger.info("Generating %s server code for %s", language, session_id)
         server = await workflow.execute_activity(

@@ -416,8 +416,7 @@ class ApiDesignWorkflow:
         else:
             self.state.messages.append({"role": "assistant", "content": result["reply"]})
             self.state.api = result["api"]
-            # Turns recorded before languages were chosen carry none.
-            self.state.language = result.get("language", self.state.language)
+            self.state.language = result["language"]
             ok = True
         self.state.status = "interviewing"
         return ok
@@ -454,8 +453,7 @@ class ApiDesignWorkflow:
             if verification_enabled:
                 self.state.verification_status = 'skipped'
             return
-        # Histories from before languages were chosen replay their original generation.
-        if not self.state.language and workflow.patched("codegen-language"):
+        if not self.state.language:
             self.state.code_error = "No implementation language was chosen for this session."
             if verification_enabled:
                 self.state.verification_status = 'skipped'
@@ -590,14 +588,12 @@ class ApiDesignWorkflow:
             self.state.verification_status = 'completed'
 
     def _coding_context(self) -> dict[str, Any]:
-        context = {
+        return {
             "requirements": self.state.requirements,
             "requirements_document": self.state.requirements_document,
             "api_design": self.state.api,
+            "language": self.state.language,
         }
-        if self.state.language:
-            context["language"] = self.state.language
-        return context
 
     def _stage_context(self, repair: dict[str, Any] | None) -> dict[str, Any]:
         context = self._coding_context()

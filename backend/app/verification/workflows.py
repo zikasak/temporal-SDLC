@@ -13,7 +13,7 @@ with workflow.unsafe.imports_passed_through():
 class VerificationWorkflow:
     @workflow.run
     async def run(self, session_id: str, service_image: str, test_image: str,
-                  language: str | None = None) -> VerificationResult:
+                  language: str) -> VerificationResult:
         return await workflow.execute_activity(
             verify_service, args=[session_id, service_image, test_image, language],
             start_to_close_timeout=timedelta(minutes=15),

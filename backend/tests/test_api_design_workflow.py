@@ -66,7 +66,7 @@ class FakeActivities:
         self.verification_results: list[str] = []
         self.verification_images = None
         self.verified_images: list[tuple[str, str]] = []
-        self.verified_languages: list[str | None] = []
+        self.verified_languages: list[str] = []
         # The side each successive diagnosis blames; the last one repeats.
         self.diagnoses = ['implementation']
         self.diagnosed: list[dict[str, Any]] = []
@@ -90,7 +90,7 @@ class FakeActivities:
 
     @activity.defn(name="publish_repository")
     async def publish_repository(self, session_id: str, repository: dict[str, Any],
-                                 language: str | None = None) -> dict[str, Any]:
+                                 language: str) -> dict[str, Any]:
         if self.fail_publication:
             raise ApplicationError("remote: Permission denied", non_retryable=True)
         self.published.append((session_id, repository["full_name"]))
@@ -106,7 +106,8 @@ class FakeActivities:
             if self.fail_draft:
                 raise ApplicationError("no model", non_retryable=True)
             api["endpoints"] = self.draft_endpoints
-            return {"reply": "Draft ready. Who calls the API?", "api": api}
+            return {"reply": "Draft ready. Who calls the API?", "api": api,
+                    "language": state.language}
         # Each message becomes an endpoint path, e.g. "/rooms".
         if self.fail_turn:
             raise ApplicationError("model unavailable", non_retryable=True)
@@ -152,7 +153,7 @@ class FakeActivities:
 
     @activity.defn(name='verify_service')
     async def verify_service(self, session_id: str, service_image: str, test_image: str,
-                             language: str | None = None) -> dict[str, Any]:
+                             language: str) -> dict[str, Any]:
         self.verified_languages.append(language)
         self.verification_images = (service_image, test_image)
         self.verified_images.append((service_image, test_image))
@@ -178,10 +179,10 @@ class FakeActivities:
 @workflow.defn(name="CodegenWorkflow")
 class FakeCodegenWorkflow:
     fail = False
-    languages: list[str | None] = []
+    languages: list[str] = []
 
     @workflow.run
-    async def run(self, session_id: str, document_id: str, language: str | None = None
+    async def run(self, session_id: str, document_id: str, language: str
                   ) -> dict[str, Any]:
         FakeCodegenWorkflow.languages.append(language)
         if FakeCodegenWorkflow.fail:
@@ -787,7 +788,7 @@ async def test_language_must_be_chosen_before_code_is_generated(env, worker):
     assert worker.verified_languages == ["java"]
 
 
-async def test_idle_session_without_a_language_keeps_the_document_only(env, worker):
+async def test_idle_session_without_a_language_keeps_the_document_only(env, worker, monkeypatch):
     handle = await start(env, language=None)
     await wait_for_status(handle, "interviewing")
     await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
@@ -797,6 +798,17 @@ async def test_idle_session_without_a_language_keeps_the_document_only(env, work
     assert state.code is None and FakeCodegenWorkflow.languages == []
     assert state.code_error == "No implementation language was chosen for this session."
     assert state.verification_status == 'skipped'
+
+    async def connect():
+        return env.client
+
+    # Retrying cannot choose a language, so it is refused instead of restarting
+    # a run that would only fail the same way.
+    monkeypatch.setattr(service, 'connect_temporal', connect)
+    with pytest.raises(sessions.SessionBusy, match="Fork it"):
+        await service.retry_generation(handle.id, 'server')
+    description = await handle.describe()
+    assert description.run_id == handle.result_run_id
 
 
 async def test_idle_session_with_problems_fails(env, worker):

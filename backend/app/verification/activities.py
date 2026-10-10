@@ -137,7 +137,7 @@ async def cleanup(service: str, runner: str, network: str) -> None:
 
 
 async def run_verification(session_id: str, service_image: str, test_image: str,
-                           language: str | None = None) -> VerificationResult:
+                           language: str) -> VerificationResult:
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
         raise ApplicationError('Invalid session ID', non_retryable=True)
     if not all(re.fullmatch(r'sha256:[0-9a-f]{64}', image) for image in (service_image, test_image)):
@@ -267,5 +267,5 @@ async def run_verification(session_id: str, service_image: str, test_image: str,
 @activity.defn
 @trace_activity('verify-service', feature='verification', input_parameter='service_image')
 async def verify_service(session_id: str, service_image: str, test_image: str,
-                         language: str | None = None) -> VerificationResult:
+                         language: str) -> VerificationResult:
     return await run_verification(session_id, service_image, test_image, language)

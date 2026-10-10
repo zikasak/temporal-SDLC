@@ -13,7 +13,7 @@ from app.temporal.tracing import trace_activity
 @activity.defn
 @trace_activity('generate-server-code', feature='codegen', input_parameter='document_id')
 async def generate_server_code(
-    session_id: str, document_id: str, language: str | None = None,
+    session_id: str, document_id: str, language: str,
 ) -> dict[str, Any]:
     try:
         generator = get_language(language)

@@ -20,7 +20,7 @@ class FakeActivities:
 
     @activity.defn(name="generate_server_code")
     async def generate_server_code(
-        self, session_id: str, document_id: str, language: str | None = None,
+        self, session_id: str, document_id: str, language: str,
     ) -> dict[str, Any]:
         self.calls.append((session_id, document_id, language))
         if self.fail:
