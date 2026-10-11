@@ -10,7 +10,7 @@ from app.api_design.openapi import DOCUMENT_FILENAME as OPENAPI_FILENAME
 from app.api_design.openapi import render_openapi
 from app.github.checkout import CONTRACTS_DIR
 from app.requirements.document import render_requirements_markdown, requirements_narrative
-from app.requirements.models import Requirement
+from app.requirements.models import CATEGORY_PREFIXES, Requirement
 
 # The model the OpenAPI document is rendered from; the YAML alone cannot be read back.
 API_FILENAME = 'api.json'
@@ -66,13 +66,24 @@ def read_contract(repository: Path) -> RepositoryContract:
     """The contract of a repository this pipeline published; any other is unsupported."""
     directory = repository / CONTRACTS_DIR
     try:
-        return {
+        contract: RepositoryContract = {
             'language': json.loads((directory / LANGUAGE_FILENAME).read_text())['name'],
             'requirements': json.loads((directory / REQUIREMENTS_FILENAME).read_text()),
             'requirements_document': (directory / NARRATIVE_FILENAME).read_text(),
             'api': json.loads((directory / API_FILENAME).read_text()),
         }
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+        # The files are a repository's content: anything a later stage would trip over
+        # is found here, where it can still be reported as an unsupported repository.
+        if (not isinstance(contract['language'], str)
+                or not isinstance(contract['requirements'], list)
+                or not all(isinstance(item['id'], str)
+                           and item['category'] in CATEGORY_PREFIXES
+                           for item in contract['requirements'])):
+            raise TypeError('The contract is not in the published form')
+        render_requirements_markdown(contract['requirements'])
+        render_openapi(contract['api'])
+        return contract
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise ContractError(
             f'The repository has no readable contract in {CONTRACTS_DIR}/. Only repositories '
             'this pipeline published a service to are supported.') from exc

@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
-from app.delivery.contract import ContractError, read_contract
+from app.delivery.contract import ContractError, read_contract, write_contract
 from app.github import checkout, storage
 from app.llm import graph
 from app.temporal import activities
@@ -151,7 +151,22 @@ async def test_bugfix_of_a_requirements_session_gets_its_own_branch(tmp_path, re
     assert await environment.run(activities.read_repository_contract, session_id) == CONTRACT
 
 
-def test_a_repository_without_a_contract_is_reported_as_unsupported(tmp_path):
+@pytest.mark.parametrize("damage", [
+    None,
+    {"requirements.json": '{"FR-1": "Place an order"}'},
+    {"requirements.json": '["Place an order"]'},
+    {"requirements.json": '[{"id": 1, "category": "functional"}]'},
+    {"requirements.json": '[{"id": "FR-1", "category": "wishes", "title": "T", '
+                          '"description": "D", "priority": "must"}]'},
+    {"language.json": '{"name": ["java"]}'},
+    {"api.json": '{"info": {}, "endpoints": "none"}'},
+])
+def test_a_repository_without_a_usable_contract_is_reported_as_unsupported(tmp_path, damage):
+    """Whatever is wrong with the files, the session is told, not left to fail later."""
+    if damage:
+        write_contract(tmp_path, CONTRACT)
+        for name, text in damage.items():
+            (tmp_path / "contracts" / name).write_text(text)
     with pytest.raises(ContractError, match="no readable contract in contracts/"):
         read_contract(tmp_path)
 
