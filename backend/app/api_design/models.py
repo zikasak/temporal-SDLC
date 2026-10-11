@@ -3,7 +3,7 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 from app.conversations.models import ConversationMessage, ForkOrigin
 from app.github.models import RepositoryCheckout, RepositorySelection
-from app.requirements.models import Requirement, SessionStatus
+from app.requirements.models import Requirement, SessionStatus, TaskKind
 
 HttpMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
 ParameterLocation = Literal["path", "query", "header"]
@@ -83,6 +83,8 @@ class ApiDesignState:
     source_session_id: str = ""
     requirements: list[Requirement] = field(default_factory=list)
     requirements_document: str = ""
+    # The kind of task the requirements session recorded.
+    kind: TaskKind | None = None
     messages: list[ConversationMessage] = field(default_factory=list)
     api: ApiModel = field(default_factory=empty_api)
     # Name of the registered language the server code is generated in, once chosen.

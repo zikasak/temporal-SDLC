@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 
 from langchain_core.tools import BaseTool, tool
 
-from app.requirements.models import CATEGORY_PREFIXES, PRIORITIES, Requirement
+from app.requirements.models import (
+    CATEGORY_PREFIXES, PRIORITIES, TASK_KINDS, Requirement, TaskKind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +24,20 @@ class RequirementsContext:
     """In-memory requirements for one turn; the workflow stores the result."""
 
     requirements: dict[str, Requirement] = field(default_factory=dict)
+    kind: TaskKind | None = None
 
     @classmethod
-    def from_list(cls, requirements: list[Requirement]) -> "RequirementsContext":
-        return cls({item["id"]: dict(item) for item in requirements})  # type: ignore[misc]
+    def from_list(cls, requirements: list[Requirement],
+                  kind: TaskKind | None = None) -> "RequirementsContext":
+        return cls({item["id"]: dict(item) for item in requirements}, kind)  # type: ignore[misc]
+
+    def set_kind(self, kind: str) -> TaskKind:
+        """Only a known kind can be recorded; anything else raises."""
+        kind = kind.strip().lower().replace("-", "_").replace(" ", "_")
+        if kind not in TASK_KINDS:
+            raise ValueError(f"kind must be one of: {', '.join(TASK_KINDS)}.")
+        self.kind = kind  # type: ignore[assignment]
+        return self.kind  # type: ignore[return-value]
 
     def as_list(self) -> list[Requirement]:
         def order(item: Requirement) -> tuple[int, int]:
@@ -83,6 +95,20 @@ class RequirementsContext:
 
 def build(ctx: RequirementsContext) -> list[BaseTool]:
     @tool
+    async def set_task_kind(kind: str) -> str:
+        """Record what kind of task this is, exactly as the user named it.
+
+        kind: new_service, api_change, bugfix (also any other change that leaves
+            the API as it is), or docs. Never call this with a guess.
+        """
+        try:
+            recorded = ctx.set_kind(kind)
+        except ValueError as exc:
+            logger.warning("Task kind not recorded: %s", exc)
+            return f"Task kind not recorded: {exc}"
+        return json.dumps({"action": "recorded", "kind": recorded})
+
+    @tool
     async def record_requirement(
         category: str, title: str, description: str, priority: str,
         rationale: str = "", id: str | None = None,
@@ -116,4 +142,4 @@ def build(ctx: RequirementsContext) -> list[BaseTool]:
         """List all requirements recorded so far."""
         return json.dumps(ctx.as_list(), ensure_ascii=False)
 
-    return [record_requirement, remove_requirement, list_requirements]
+    return [set_task_kind, record_requirement, remove_requirement, list_requirements]

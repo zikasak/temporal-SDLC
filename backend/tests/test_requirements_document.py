@@ -1,7 +1,7 @@
 import pytest
 
 from app.requirements.document import render_requirements_markdown, without_repeated_tables
-from app.tools.requirements import RequirementsContext
+from app.tools.requirements import RequirementsContext, build
 
 
 def test_record_assigns_ids_per_category():
@@ -45,6 +45,16 @@ def test_remove():
     assert ctx.as_list() == []
     with pytest.raises(ValueError):
         ctx.remove("TR-1")
+
+
+async def test_set_task_kind_records_only_known_kinds():
+    ctx = RequirementsContext()
+    tools = {item.name: item for item in build(ctx)}
+    refused = await tools["set_task_kind"].ainvoke({"kind": "refactoring"})
+    assert "not recorded" in refused and "bugfix" in refused
+    assert ctx.kind is None
+    await tools["set_task_kind"].ainvoke({"kind": " API change "})
+    assert ctx.kind == "api_change"
 
 
 def test_render_contains_every_requirement_and_escapes_tables():

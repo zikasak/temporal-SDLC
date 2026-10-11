@@ -7,7 +7,7 @@ from app.diagnosis.models import RepairRound
 from app.github.models import (
     PublicationStatus, RepositoryCheckout, RepositoryPublication, RepositorySelection,
 )
-from app.requirements.models import Requirement
+from app.requirements.models import Requirement, TaskKind
 from app.verification.models import VerificationResult, VerificationStatus
 
 RetryStage = Literal['server', 'tests', 'repository']
@@ -30,6 +30,8 @@ class TaskSpec:
     api: ApiModel
     # The stored OpenAPI document the server code is generated from.
     document_id: str
+    # What the user said the task is; every kind is still built as a new service.
+    kind: TaskKind | None = None
     # Missing when the session expired before a language was chosen.
     language: str | None = None
     repository: RepositorySelection | None = None

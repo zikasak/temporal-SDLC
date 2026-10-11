@@ -243,7 +243,8 @@ async def test_new_api_design_inherits_the_requirements_repository(env, worker, 
     from app.requirements.models import RequirementsState
 
     selected = repository_selection if linked else None
-    source = RequirementsState(status="completed", document={"document_id": "0" * 32}, repository=selected)
+    source = RequirementsState(status="completed", document={"document_id": "0" * 32}, repository=selected,
+                               kind="api_change")
 
     async def requirements_state(session_id):
         return source
@@ -266,7 +267,7 @@ async def test_new_api_design_inherits_the_requirements_repository(env, worker, 
     handle = env.client.get_workflow_handle(await service.start_session("requirements-session-" + "0" * 32))
     try:
         state = await wait_for_status(handle, "interviewing")
-        assert state.repository == selected
+        assert state.repository == selected and state.kind == "api_change"
         assert (await service.get_session(handle.id))["repository"] == selected
     finally:
         await handle.terminate()

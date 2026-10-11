@@ -40,6 +40,7 @@ async def start_session(requirements_session_id: str) -> str:
         source_session_id=requirements_session_id,
         requirements=source.requirements,
         requirements_document=requirements_document,
+        kind=source.kind,
         repository=source.repository,
     )
     return await _start(state)
@@ -74,6 +75,7 @@ async def fork_session(session_id: str, message_index: int) -> str:
         source_session_id=source.source_session_id,
         requirements=source.requirements,
         requirements_document=source.requirements_document,
+        kind=source.kind,
         messages=messages,
         api=api,
         # The choice is kept even when the fork point precedes it; the user can change it.

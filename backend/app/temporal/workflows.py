@@ -13,7 +13,7 @@ with workflow.unsafe.imports_passed_through():
     from app.api_design.prompt import OPENING_FALLBACK
     from app.delivery.models import DeliveryState, TaskSpec, delivery_id
     from app.github.models import RepositorySelection
-    from app.requirements.models import RequirementsState
+    from app.requirements.models import KIND_PROBLEM, RequirementsState
     from app.requirements.prompt import OPENING_MESSAGE
     from app.temporal.activities import (
         api_design_turn,
@@ -214,6 +214,8 @@ class RequirementsWorkflow:
     def validate_finalize(self) -> None:
         if self.state.status != "interviewing" or self.state.messages[-1]["role"] == "user":
             raise ValueError("Retry the unanswered message before generating the document.")
+        if not self.state.kind:
+            raise ValueError(KIND_PROBLEM)
         if not self.state.requirements:
             raise ValueError("No requirements have been recorded yet.")
 
@@ -223,7 +225,7 @@ class RequirementsWorkflow:
         try:
             result = await workflow.execute_activity(
                 requirements_turn,
-                args=[self.state.messages, self.state.requirements],
+                args=[self.state.messages, self.state.requirements, self.state.kind],
                 start_to_close_timeout=timedelta(minutes=6),
                 schedule_to_close_timeout=timedelta(minutes=7),
                 retry_policy=RetryPolicy(maximum_attempts=1),
@@ -235,6 +237,7 @@ class RequirementsWorkflow:
         else:
             self.state.messages.append({"role": "assistant", "content": result["reply"]})
             self.state.requirements = result["requirements"]
+            self.state.kind = result["kind"]
             ok = True
         self.state.status = "interviewing"
         return ok
@@ -262,13 +265,14 @@ class RequirementsWorkflow:
     async def _expire(self) -> None:
         """After a day without messages, keep whatever was gathered."""
         workflow.logger.info("Requirements session idle, expiring")
-        if self.state.requirements and await self._write_document():
+        complete = bool(self.state.kind and self.state.requirements)
+        if complete and await self._write_document():
             return
         self.state.status = "failed"
         self.state.error = (
-            "The session expired before any requirements were recorded."
-            if not self.state.requirements
-            else "The session expired and the document could not be generated."
+            "The session expired and the document could not be generated." if complete
+            else "The session expired before the kind of task and any requirements "
+                 "were recorded."
         )
 
 
@@ -438,6 +442,7 @@ class ApiDesignWorkflow:
                     requirements_document=self.state.requirements_document,
                     api=self.state.api,
                     document_id=self.state.document["document_id"],
+                    kind=self.state.kind,
                     language=self.state.language,
                     repository=self.state.repository,
                     checkout=self.state.checkout,
