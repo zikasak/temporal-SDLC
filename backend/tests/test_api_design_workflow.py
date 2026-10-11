@@ -93,10 +93,11 @@ class FakeActivities:
 
     @activity.defn(name="publish_repository")
     async def publish_repository(self, session_id: str, repository: dict[str, Any],
-                                 language: str) -> dict[str, Any]:
+                                 contract: dict[str, Any]) -> dict[str, Any]:
         if self.fail_publication:
             raise ApplicationError("remote: Permission denied", non_retryable=True)
         self.published.append((session_id, repository["full_name"]))
+        self.contract = contract
         return {"branch": "generated/abc", "commit": "2" * 40,
                 "url": repository["html_url"] + "/tree/generated/abc"}
 
@@ -299,6 +300,11 @@ async def test_repository_is_checked_out_first_and_pushed_once_verified(env, wor
     assert state.publication["branch"] == "generated/abc" and state.publication_error is None
     assert state.publication_status == "completed" and state.verification["status"] == "passed"
     assert worker.published == [(handle.id, repository_selection["full_name"])]
+    # The contract the authors worked from is published with their sources.
+    built = state.implementation["context"]
+    assert worker.contract == {
+        "language": built["language"], "requirements": built["requirements"],
+        "requirements_document": built["requirements_document"], "api": built["api_design"]}
     assert len(worker.verified_images) == 1 and len(worker.checkouts) == 1
     with pytest.raises(sessions.SessionBusy):
         await service.retry_generation(handle.id, "repository")

@@ -156,7 +156,8 @@ async def test_session_with_a_repository_is_implemented_inside_its_checkout(tmp_
     checkout = tmp_path / 'session/repository'
     for name, text in {'src/main/Api.java': 'outdated contract', 'src/main/Orders.java': 'existing code',
                        'pom.xml': 'project pom', 'src/test/OrdersTest.java': 'project tests',
-                       'contract-tests/pom.xml': 'contract tests', '.git/config': 'origin'}.items():
+                       'contract-tests/pom.xml': 'contract tests',
+                       'contracts/api.json': 'published contract', '.git/config': 'origin'}.items():
         (checkout / name).parent.mkdir(parents=True, exist_ok=True)
         (checkout / name).write_text(text)
     (checkout / 'mvnw').write_text('#!/bin/sh')

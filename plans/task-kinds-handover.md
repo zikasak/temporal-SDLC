@@ -1,7 +1,7 @@
 # Handover: tasks that are not "build a new service"
 
 Written on 2026-10-10 for whoever continues this work. It assumes you have not seen the
-system before. Steps 1 and 2 of six are done; the rest is described below in the order it
+system before. Steps 1 to 3 of six are done; the rest is described below in the order it
 should be built.
 
 ## 1. What the system is
@@ -70,7 +70,7 @@ cd backend
 /Users/zikasak/programming/temporal-project/backend/env/bin/python -m pytest tests -q
 ```
 
-The suite takes about 35 seconds: 275 passed, 11 skipped (the skipped ones need Docker).
+The suite takes about 35 seconds: 279 passed, 11 skipped (the skipped ones need Docker).
 If a run produces no output for more than a minute it is hanging, not slow; see
 "Traps" at the end. The frontend type-check is `npx tsc --noEmit -p .` in `frontend/`
 (it needs `node_modules`, which also exists only in the main checkout).
@@ -177,27 +177,28 @@ session cannot be started without a repository today, so there is nothing to enf
 revisit it if that changes. A fork keeps its source's kind even when the fork point
 precedes the choice, as forks do for the language.
 
+### Step 3: the contract in the repository
+
+Every later kind starts from the contract of the repository it changes, so a delivery
+now publishes it:
+
+- `backend/app/delivery/contract.py`: `RepositoryContract` (language, requirements,
+  requirements document, API model), `write_contract` and `read_contract`.
+- `publish_repository` takes the contract instead of the language and writes it to
+  `contracts/` in the checkout before the push: `language.json`, `requirements.json`,
+  `requirements.md`, `api.json` (the structured model, which is what gets read back) and
+  `openapi.yaml` (rendered from the model, for readers). The directory is replaced whole.
+- `is_service_file` excludes `contracts/`, so the implementation agent never sees or
+  writes it. The test workspace only ever took `contract-tests/` from the checkout.
+- The language is stored because a task that skips API design has nowhere else to get it.
+
+Not done: nothing calls `read_contract` yet. It raises `ContractError` for a repository
+without a contract (decision 2); steps 4 and 5 are its callers and must report that error
+to the user.
+
 ## 5. What remains
 
 Build these in order; each is a usable checkpoint.
-
-### Step 3: publish the contract into the repository
-
-Today the OpenAPI document and requirements are deliberately kept out of the repository
-(see the comment on `CONTRACTS_DIR` in `backend/app/agent_workflows/contracts.py`). Every
-later kind needs them as its starting point.
-
-- On publish (`publish_repository` in `backend/app/temporal/activities.py`), also write
-  the contract to the repository, for example `contracts/openapi.yaml` and
-  `contracts/requirements.json`.
-- Make sure neither coding agent's workspace treats that directory as source: check
-  `is_service_file` in `backend/app/implementation/activities.py` and the population of
-  the test workspace in `backend/app/test_generation/activities.py`.
-- The OpenAPI YAML is rendered from the structured API model. Steps 4 and 5 need the
-  model back, so either store the model as JSON beside the YAML or write a parser. Storing
-  the model is simpler and lossless.
-- Repositories published before this step have no contract and are not supported
-  (decision 2). Report a clear error when it is missing.
 
 ### Step 4: the bugfix path
 

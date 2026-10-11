@@ -190,7 +190,8 @@ class DeliveryWorkflow:
         return context
 
     async def _publish(self) -> None:
-        """Push the sources that passed verification to a new branch of the repository."""
+        """Push the sources that passed verification, with their contract, to a new branch
+        of the repository."""
         if not self.spec.checkout:
             return
         if not (self.progress.verification_status == 'completed' and self.progress.verification
@@ -202,7 +203,12 @@ class DeliveryWorkflow:
         try:
             self.progress.publication = await workflow.execute_activity(
                 publish_repository,
-                args=[self.spec.session_id, self.spec.repository, self.spec.language],
+                args=[self.spec.session_id, self.spec.repository, {
+                    'language': self.spec.language,
+                    'requirements': self.spec.requirements,
+                    'requirements_document': self.spec.requirements_document,
+                    'api': self.spec.api,
+                }],
                 start_to_close_timeout=timedelta(minutes=10),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )

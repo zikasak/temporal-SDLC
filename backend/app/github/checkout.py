@@ -24,6 +24,8 @@ CHECKOUT_DIR = 'repository'
 MANIFEST = 'repository.json'
 # The independent contract tests' directory inside the repository.
 TESTS_DIR = 'contract-tests'
+# The published contract the repository's later tasks start from.
+CONTRACTS_DIR = 'contracts'
 BRANCH_PREFIX = 'generated/'
 GITHUB_URL = 'https://github.com/'
 GIT_TIMEOUT = 540

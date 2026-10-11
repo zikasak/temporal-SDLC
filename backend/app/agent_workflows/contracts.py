@@ -7,7 +7,8 @@ from app.api_design.openapi import DOCUMENT_FILENAME as OPENAPI_FILENAME
 from app.api_design.openapi import endpoint_key, render_openapi
 from app.config import CONTRACT_EMBED_CHARS
 
-# Beside the agent's project, never inside it: contract files are not published.
+# Beside the agent's project, never inside it: the repository's own copy is written
+# from the task when it is published, never from a workspace.
 CONTRACTS_DIR = 'contracts'
 REQUIREMENTS_FILENAME = 'requirements.json'
 NARRATIVE_FILENAME = 'requirements.md'

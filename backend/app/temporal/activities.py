@@ -16,6 +16,7 @@ from app.api_design.openapi import DOCUMENT_FILENAME as OPENAPI_FILENAME
 from app.api_design.openapi import api_problems, render_openapi
 from app.api_design.prompt import api_turn_messages
 from app.config import GENERATED_CODE_DIR
+from app.delivery.contract import RepositoryContract, write_contract
 from app.documents import (
     DocumentConflict,
     DocumentNotFound,
@@ -123,10 +124,11 @@ async def checkout_repository(
 @activity.defn
 @trace_activity('publish-repository', feature='repository', input_parameter='repository')
 async def publish_repository(
-    session_id: str, repository: RepositorySelection, language: str,
+    session_id: str, repository: RepositorySelection, contract: RepositoryContract,
 ) -> RepositoryPublication:
-    """Commit the verified service and its contract tests to a new branch and push it."""
-    service_files = partial(is_service_file, session_language(language))
+    """Commit the verified service, its contract tests and the contract they were built
+    from to a new branch and push it."""
+    service_files = partial(is_service_file, session_language(contract['language']))
     target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
     service = target.parent / 'implementation/service'
     suite = target.parent / 'tests/suite'
@@ -139,10 +141,11 @@ async def publish_repository(
         await asyncio.to_thread(repository_checkout.replace_files, service, target, service_files)
         await asyncio.to_thread(repository_checkout.replace_files, suite,
                                 target / repository_checkout.TESTS_DIR, lambda relative: True)
+        await asyncio.to_thread(write_contract, target, contract)
         result = await repository_checkout.push(
             target, repository, token,
             branch=repository_checkout.publication_branch(session_id),
-            message=("Add generated service and contract tests\n\n"
+            message=("Add generated service, contract tests and contract\n\n"
                      f"Generated from {repository['branch']} by session {session_id}."),
             author=(bot, f"{connection['bot_user_id']}+{bot}@users.noreply.github.com"),
         )
