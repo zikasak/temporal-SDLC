@@ -71,7 +71,7 @@ cd backend
 /Users/zikasak/programming/temporal-project/backend/env/bin/python -m pytest tests -q
 ```
 
-The suite takes about 40 seconds: 301 passed, 11 skipped (the skipped ones need Docker).
+The suite takes about 40 seconds: 303 passed, 11 skipped (the skipped ones need Docker).
 If a run produces no output for more than a minute it is hanging, not slow; see
 "Traps" at the end. The frontend type-check is `npx tsc --noEmit -p .` in `frontend/`
 (it needs `node_modules`, which also exists only in the main checkout).
@@ -249,9 +249,11 @@ Not done, and open:
 
 - The bugfix path has only run against fake stages and the unit tests of each stage. It
   has not been run end to end with real agents and Docker.
-- Only test methods are protected from change. A repair can still alter a shared helper
-  or fixture, which changes what untouched tests do; the final run and, for a bugfix,
-  the baseline are the only checks on that.
+- Only test methods, with their own annotations, are protected from change. A repair can
+  still alter a shared helper or fixture, or annotate a whole class, which changes what
+  untouched tests do. For a bugfix the baseline catches a test that is switched off this
+  way, because it refuses a run with any skipped test. The other kinds have no such
+  check: their verification still passes with skipped tests.
 - Test identity relies on Surefire naming a report entry after its method. A test with a
   custom display name for its invocations may not be matched, which ends a baseline as
   "did not run" rather than passing silently.

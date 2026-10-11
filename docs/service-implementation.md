@@ -349,8 +349,8 @@ flowchart LR
    `baseline_status`:
    - `reproduced`: every added test fails and every existing test passes;
    - `not_reproduced`: an added test does not fail. Nothing is changed;
-   - `error`: an existing test fails, an added test did not run, or the run could not
-     complete.
+   - `error`: an existing test fails, any test is skipped, an added test did not run, or
+     the run could not complete.
 
    Anything but `reproduced` ends the delivery with `baseline_error`, verification
    `skipped` and nothing pushed.
@@ -386,7 +386,8 @@ started from such a session.
 
 A test is identified by itself, not by its file: the language's `TestSuite.test_cases`
 reads every test of a suite with its source (Java: each `@Test`-like method as
-`package.Class#method`, nested classes counted with their file's class), and
+`package.Class#method`, from the first annotation or modifier of its declaration, so
+adding `@Disabled` changes it; nested classes counted with their file's class), and
 `TestSuite.case_id` gives the same identity for a report entry. Whitespace is not a
 change. Helpers, fixtures and build files are not tests and are not protected.
 

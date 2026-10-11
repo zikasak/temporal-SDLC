@@ -393,6 +393,7 @@ async def test_bugfix_is_delivered_red_to_green_from_the_requirements_session(en
 @pytest.mark.parametrize('baseline, status, error', [
     ('not_reproduced', 'not_reproduced', 'com.example.RoomsTest#refusesDoubleBooking (1 of 2)'),
     ('existing_failed', 'error', 'Existing tests failing against the service as the repository holds it: 1'),
+    ('skipped', 'error', 'Tests skipped in the baseline run: 1'),
     ('error', 'error', 'The baseline run could not complete.'),
 ])
 async def test_nothing_is_fixed_unless_the_added_tests_fail_alone(env, worker, baseline, status, error, repository_selection):

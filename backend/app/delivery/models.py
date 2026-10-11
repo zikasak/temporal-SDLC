@@ -92,6 +92,10 @@ def judge_baseline(result: VerificationResult, added: list[str], changed: list[s
     tracked = result['tracked']
     if result['status'] == 'error' or tracked is None:
         return 'error', 'The baseline run could not complete.'
+    if result['skipped']:
+        # However it came to be skipped, a test that does not run protects nothing.
+        return 'error', (f'Tests skipped in the baseline run: {result["skipped"]}. Every '
+                         'test of the suite has to run for the baseline to prove anything.')
     existing = result['failures'] + result['errors'] - sum(
         tracked[case]['failed'] for case in {*added, *changed})
     if existing:

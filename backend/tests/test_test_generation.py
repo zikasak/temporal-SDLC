@@ -220,7 +220,9 @@ async def test_repository_session_continues_only_the_repositorys_contract_tests(
 
 
 def java_tests(**bodies: str) -> str:
-    methods = ''.join(f'    @Test\n    void {name}() {{ {body} }}\n' for name, body in bodies.items())
+    # "annotations|body" puts the annotations before @Test.
+    methods = ''.join(f'    {body.rpartition("|")[0]}\n    @Test\n    void {name}() {{ {body.rpartition("|")[2]} }}\n'
+                      for name, body in bodies.items())
     return f'package com.example;\n\nclass OrdersTest {{\n{methods}}}\n'
 
 
@@ -231,6 +233,9 @@ def java_tests(**bodies: str) -> str:
     (None, {'lists': 'weakened();', 'refusesDoubleBooking': 'post();'},
      'may not touch: com.example.OrdersTest#lists'),
     (None, {'refusesDoubleBooking': 'post();'}, 'may not touch: com.example.OrdersTest#lists'),
+    # Switching a test off changes it as much as rewriting it.
+    (None, {'lists': '@Disabled("flaky (sometimes)") public|get();', 'refusesDoubleBooking': 'post();'},
+     'may not touch: com.example.OrdersTest#lists'),
     # A repair changes or removes the tests found broken, and only those.
     ('lists', {'lists': 'corrected();', 'refusesDoubleBooking': 'post();'}, None),
     ('lists', {'refusesDoubleBooking': 'post();'}, None),

@@ -29,6 +29,13 @@ Compile with mvn -B -DskipTests -Dmaven.test.skip=false test-compile and fix fai
 
 TEST_GLOB = "src/test/java/**/*Test.java"
 PACKAGE = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)
+# An annotation or modifier that ends where a test annotation begins: part of the same
+# method declaration, and able to change whether or how the test runs.
+PRECEDING = re.compile(
+    r"(?:@[\w.]+\s*(?:\((?:[^()]|\([^()]*\))*\))?"
+    r"|\b(?:public|protected|private|static|final|abstract|synchronized))\s*$")
+# How far back a declaration is searched for them.
+DECLARATION_CHARS = 4000
 TEST_ANNOTATION = re.compile(
     r"@(?:[\w.]+\.)?(?:Test|ParameterizedTest|RepeatedTest|TestFactory|TestTemplate)\b")
 INTERFACE = re.compile(r"^public interface (\w+)", re.MULTILINE)
@@ -92,6 +99,14 @@ def _test_method(text: str, start: int) -> tuple[str, int] | None:
     return None
 
 
+def _declaration_start(text: str, start: int) -> int:
+    """Where the method declaration holding the test annotation at `start` begins: before
+    annotations such as @Disabled that precede it."""
+    while found := PRECEDING.search(text, max(0, start - DECLARATION_CHARS), start):
+        start = found.start()
+    return start
+
+
 def _test_cases(project: Path) -> dict[str, str]:
     """Every test method of the project by `Class#method`. Methods of nested classes
     count as their file's class, as `_case_id` reads reports."""
@@ -109,7 +124,7 @@ def _test_cases(project: Path) -> dict[str, str]:
                 continue
             name, end = method
             # Overloads share an identity; layout alone is not a change.
-            source = " ".join(text[annotation.start():end + 1].split())
+            source = " ".join(text[_declaration_start(text, annotation.start()):end + 1].split())
             case = f"{owner}#{name}"
             cases[case] = f"{cases[case]} {source}" if case in cases else source
     return cases

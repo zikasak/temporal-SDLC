@@ -43,7 +43,7 @@ class FakeStages:
         self.verified_languages: list[str] = []
         # Outcomes of successive baseline runs: 'reproduced' (only the added tests and
         # the corrected existing ones fail), 'not_reproduced' (an added test passes),
-        # 'existing_failed' or 'error'; the last one repeats.
+        # 'existing_failed', 'skipped' (a test did not run) or 'error'; the last one repeats.
         self.baseline_results = ['reproduced']
         self.baselines: list[tuple[str, str, list[str]]] = []
         # Repository tests a repair of the tests corrects, as that stage reports them.
@@ -131,8 +131,9 @@ class FakeStages:
                     'skipped': 0, 'tracked': {}, 'error': 'The service stopped during verification'}
         passing = tracked[:1] if outcome == 'not_reproduced' else []
         failures = len(tracked) - len(passing) + (outcome == 'existing_failed')
-        return {'status': 'failed', 'tests': 9, 'failures': failures, 'passed': 9 - failures,
-                'errors': 0, 'skipped': 0, 'error': None,
+        return {'status': 'failed', 'tests': 9, 'failures': failures,
+                'passed': 9 - failures - (outcome == 'skipped'),
+                'errors': 0, 'skipped': int(outcome == 'skipped'), 'error': None,
                 'tracked': {case: {'tests': 1, 'failed': int(case not in passing)}
                             for case in tracked}}
 
