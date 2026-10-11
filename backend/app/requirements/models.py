@@ -16,6 +16,18 @@ CATEGORY_PREFIXES: dict[str, str] = {
     "technical": "TR",
 }
 PRIORITIES = ("must", "should", "could")
+KIND_PROBLEM = "The kind of task is not recorded. Tell the interviewer what kind it is."
+
+# What the session's task is. Only the user can say which; it is never inferred.
+TaskKind = Literal["new_service", "api_change", "bugfix", "docs"]
+TASK_KINDS: dict[str, str] = {
+    "new_service": "a new service built from nothing",
+    "api_change": "a change to an existing service's API, such as a new endpoint or a "
+                  "changed field",
+    "bugfix": "a bugfix or another change to an existing service that leaves its API as "
+              "it is",
+    "docs": "a change to documentation only",
+}
 
 
 class Requirement(TypedDict):
@@ -33,6 +45,8 @@ class RequirementsState:
 
     messages: list[ConversationMessage] = field(default_factory=list)
     requirements: list[Requirement] = field(default_factory=list)
+    # Unset until the user has said what kind of task this is.
+    kind: TaskKind | None = None
     status: SessionStatus = "interviewing"
     document: dict[str, Any] | None = None
     error: str | None = None

@@ -27,6 +27,8 @@ class FakeActivities:
         self.release_turn.set()
         self.documents: list[str] = []
         self.fail_turn = False
+        # The kind the model records on its next turn, when any.
+        self.kind: str | None = "new_service"
         self.checkouts: list[str] = []
 
     @activity.defn(name="checkout_repository")
@@ -36,7 +38,8 @@ class FakeActivities:
 
     @activity.defn(name="requirements_turn")
     async def requirements_turn(
-        self, messages: list[dict[str, Any]], requirements: list[dict[str, Any]]
+        self, messages: list[dict[str, Any]], requirements: list[dict[str, Any]],
+        kind: str | None,
     ) -> dict[str, Any]:
         await self.release_turn.wait()
         if self.fail_turn:
@@ -48,6 +51,7 @@ class FakeActivities:
                 "id": f"FR-{number}", "category": "functional",
                 "title": messages[-1]["content"], "description": "D", "priority": "must",
             }],
+            "kind": self.kind or kind,
         }
 
     @activity.defn(name="write_requirements_document")
@@ -167,6 +171,34 @@ async def test_idle_session_auto_finalizes(env, worker):
     assert await handle.result() == DOCUMENT
 
 
+async def test_kind_must_be_recorded_before_the_document_is_generated(env, worker):
+    handle = await start(env)
+    worker.kind = None
+    await handle.execute_update(RequirementsWorkflow.send_message, "Book rooms")
+    with pytest.raises(WorkflowUpdateFailedError) as refused:
+        await handle.execute_update(RequirementsWorkflow.finalize)
+    assert "kind of task is not recorded" in str(refused.value.cause)
+
+    worker.kind = "bugfix"
+    await handle.execute_update(RequirementsWorkflow.send_message, "It is a bugfix")
+    # A later turn that records nothing keeps the kind.
+    worker.kind = None
+    await handle.execute_update(RequirementsWorkflow.send_message, "Rooms double-book")
+    await handle.execute_update(RequirementsWorkflow.finalize)
+    assert await handle.result() == DOCUMENT
+    assert (await handle.query(RequirementsWorkflow.get_state)).kind == "bugfix"
+
+
+async def test_idle_session_without_kind_fails(env, worker):
+    handle = await start(env)
+    worker.kind = None
+    await handle.execute_update(RequirementsWorkflow.send_message, "Book rooms")
+    await env.sleep(timedelta(hours=25))
+    assert await handle.result() is None
+    assert worker.documents == []
+    assert (await handle.query(RequirementsWorkflow.get_state)).status == "failed"
+
+
 async def test_idle_session_without_requirements_fails(env, worker):
     handle = await start(env)
     await env.sleep(timedelta(hours=25))
@@ -239,7 +271,7 @@ class ContinuingRequirements:
         self.state = state
         state.messages.append({"role": "user", "content": f"Topic {len(state.messages)}"})
         result = await workflow.execute_activity(
-            "requirements_turn", args=[state.messages, state.requirements],
+            "requirements_turn", args=[state.messages, state.requirements, state.kind],
             start_to_close_timeout=timedelta(seconds=10),
         )
         state.messages.append({"role": "assistant", "content": result["reply"]})

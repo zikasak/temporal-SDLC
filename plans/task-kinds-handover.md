@@ -1,8 +1,8 @@
 # Handover: tasks that are not "build a new service"
 
 Written on 2026-10-10 for whoever continues this work. It assumes you have not seen the
-system before. Step 1 of six is done and uncommitted on branch `t3code/c29d2fba`; the rest
-is described below in the order it should be built.
+system before. Steps 1 and 2 of six are done; the rest is described below in the order it
+should be built.
 
 ## 1. What the system is
 
@@ -132,7 +132,9 @@ Without a selected repository only "new service" is valid, but the agent still a
 5. **Final run**: the whole suite, old and new, must pass. Failures go through the
    existing diagnosis and repair loop.
 
-## 4. What is done (step 1)
+## 4. What is done
+
+### Step 1: delivery as its own workflow
 
 Delivery used to be a set of methods inside `ApiDesignWorkflow`, so nothing could reach
 it without an API design. It is now its own workflow:
@@ -153,31 +155,31 @@ it without an API design. It is now its own workflow:
 The Temporal replay patches for the moved stages were deleted along with two tests of
 them, per decision 2.
 
-Nothing is committed. `git status` shows the full change set.
+### Step 2: the task kind
+
+- `TaskKind` and `TASK_KINDS` in `backend/app/requirements/models.py`: `new_service`,
+  `api_change`, `bugfix` (also any other non-API change) and `docs`.
+- `RequirementsState.kind` starts unset. The interviewer records it with the
+  `set_task_kind` tool (`backend/app/tools/requirements.py`); `requirements_turn` takes the
+  kind and returns it with the requirements.
+- The opening message asks for the kind. `kind_guidance` in
+  `backend/app/requirements/prompt.py` tells the interviewer never to assume it while it
+  is unset, and afterwards selects the interview: the full one for a new service, a short
+  brief for the others.
+- `validate_finalize` refuses while the kind is unset, and an idle session without a kind
+  fails instead of writing a document.
+- The kind is carried into `ApiDesignState.kind` and `TaskSpec.kind`. Nothing routes on it
+  yet: every kind is still built as a new service.
+- The requirements page shows the kind and disables "Generate document" until it is set.
+
+Not done: "without a selected repository only new service is valid". A requirements
+session cannot be started without a repository today, so there is nothing to enforce;
+revisit it if that changes. A fork keeps its source's kind even when the fork point
+precedes the choice, as forks do for the language.
 
 ## 5. What remains
 
 Build these in order; each is a usable checkpoint.
-
-### Step 2: the task kind
-
-- Add a `kind` to the requirements session state (`RequirementsState` in
-  `backend/app/requirements/models.py`) and to `TaskSpec`. It starts unset.
-- Add a tool the interviewer calls to record it, next to `record_requirement` in
-  `backend/app/tools/requirements.py`. Copy the pattern of the language choice:
-  the `set_language` tool in `backend/app/tools/api_design.py`, the "never assume"
-  wording in `LANGUAGE_UNKNOWN` in `backend/app/api_design/prompt.py`, and the check in
-  `design_problems` (`backend/app/api_design/openapi.py`) that blocks finalizing until it
-  is set.
-- Change the opening message and guidance in `backend/app/requirements/prompt.py` so the
-  first question is the kind, and so the rest of the interview depends on it (a full
-  interview for a new service; a short brief otherwise).
-- Refuse to finalize a requirements session while the kind is unset (`validate_finalize`
-  in `RequirementsWorkflow`).
-- Show the kind on the requirements page.
-
-Routing on the kind arrives with the steps below; in this step every kind still follows
-the new-service path.
 
 ### Step 3: publish the contract into the repository
 

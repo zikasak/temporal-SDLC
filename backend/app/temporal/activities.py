@@ -227,16 +227,18 @@ async def send_llm_message(
 @activity.defn
 @trace_activity('gather-requirements', feature='requirements', as_type='agent')
 async def requirements_turn(
-    messages: list[dict[str, Any]], requirements: list[dict[str, Any]]
+    messages: list[dict[str, Any]], requirements: list[dict[str, Any]],
+    kind: str | None = None,
 ) -> dict[str, Any]:
-    ctx = requirements_tools.RequirementsContext.from_list(requirements)
+    ctx = requirements_tools.RequirementsContext.from_list(requirements, kind)
     repository = _repository_tools()
     started = time.perf_counter()
     try:
         graph = get_message_graph([*requirements_tools.build(ctx), *repository])
         result = await graph.ainvoke(
             {"messages": interview_messages(
-                messages, requirements, repository_tools.GUIDANCE if repository else "")},
+                messages, requirements, kind,
+                repository_tools.GUIDANCE if repository else "")},
             config=langchain_config(recursion_limit=20, run_name='interview-with-tools'),
         )
         reply = str(result["messages"][-1].text).strip()
@@ -247,11 +249,11 @@ async def requirements_turn(
     activity.logger.info("Requirements turn took %.1fs: %d -> %d requirements",
                          time.perf_counter() - started, len(requirements), len(updated))
     if not reply:
-        if updated == requirements:
+        if updated == requirements and ctx.kind == kind:
             activity.logger.warning("Requirements turn returned no text and no changes")
             raise ApplicationError("The model returned no text", non_retryable=True)
         reply = f"Noted. {len(updated)} requirements are recorded so far. What else should I know?"
-    return {"reply": reply, "requirements": updated}
+    return {"reply": reply, "requirements": updated, "kind": ctx.kind}
 
 
 async def _save_session_document(

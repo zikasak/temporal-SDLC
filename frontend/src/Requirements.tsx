@@ -8,6 +8,7 @@ import { markdownComponents, remarkPlugins } from "./markdown";
 
 type SessionStatus = "preparing" | "interviewing" | "turn_running" | "finalizing" | "completed" | "failed";
 type Category = "functional" | "non_functional" | "technical";
+type TaskKind = "new_service" | "api_change" | "bugfix" | "docs";
 
 type Requirement = {
   id: string;
@@ -30,6 +31,7 @@ type Session = {
   status: SessionStatus;
   messages: { role: "user" | "assistant"; content: string }[];
   requirements: Requirement[];
+  kind: TaskKind | null;
   document: RequirementsDocument | null;
   error: string | null;
   forked_from: { session_id: string; message_index: number } | null;
@@ -51,6 +53,12 @@ const categories: [Category, string][] = [
   ["non_functional", "Non-functional"],
   ["technical", "Technical"],
 ];
+const kindLabels: Record<TaskKind, string> = {
+  new_service: "New service",
+  api_change: "API change",
+  bugfix: "Bugfix or other non-API change",
+  docs: "Documentation only",
+};
 const statusLabels: Record<SessionStatus, string> = {
   preparing: "Checking out repository",
   interviewing: "Interviewing",
@@ -117,6 +125,9 @@ function sessionRecord(value: unknown): Session {
     status: value.status as SessionStatus,
     messages: value.messages as Session["messages"],
     requirements: value.requirements as Requirement[],
+    kind: "kind" in value && typeof value.kind === "string" && value.kind in kindLabels
+      ? (value.kind as TaskKind)
+      : null,
     document,
     error: "error" in value && typeof value.error === "string" ? value.error : null,
     forked_from: forkOrigin(value),
@@ -324,7 +335,7 @@ export default function Requirements() {
   const unanswered = session?.messages.at(-1)?.role === "user" && session.status === "interviewing";
   const canCompose = session?.status === "interviewing" && !unanswered && !submitting;
   const forkedFrom = session?.forked_from ?? null;
-  const canFinalize = canCompose && session.requirements.length > 0;
+  const canFinalize = canCompose && session.kind !== null && session.requirements.length > 0;
   const status = error ? "error" : session ? session.status : sessionId ? "loading" : "idle";
   const documentUrl = session
     ? `/api/requirements/sessions/${encodeURIComponent(session.session_id)}/document`
@@ -335,8 +346,8 @@ export default function Requirements() {
       <header className="page-heading">
         <h1>Requirements interview</h1>
         <p className="page-intro">
-          Describe the system you want to build. The LLM asks questions, records functional,
-          non-functional and technical requirements as you go, and writes them up as a document.
+          Say what kind of task this is and describe it. The LLM asks questions, records
+          requirements as you go, and writes them up as a document.
         </p>
       </header>
 
@@ -451,6 +462,12 @@ export default function Requirements() {
           {sessionId && (
             <p className="request-id">
               Session ID <code>{sessionId}</code>
+            </p>
+          )}
+
+          {session && (
+            <p className="request-id">
+              Task kind <strong>{session.kind ? kindLabels[session.kind] : "Not chosen yet"}</strong>
             </p>
           )}
 
