@@ -383,7 +383,8 @@ model is unchanged. `DeliveryProgress` reports `baseline_status`
 `GET /api/requirements/sessions/{id}` returns the progress as `delivery` (null until the
 session delivers), and `POST /api/requirements/sessions/{id}/generation/retry` retries a
 failed stage as for a design session. Retrying `tests` is also how a failed or
-unreproduced baseline, or a verification that ended with an error, is retried: the tests are written again and held against the
+unreproduced baseline, or a verification that ended with an error or could not complete,
+is retried: the tests are written again and held against the
 baseline again, and the fix is written only if there is none yet. An API design cannot be
 started from such a session.
 

@@ -49,10 +49,14 @@ async def retry(session_id: str, stage: RetryStage) -> None:
     ).query('get_state', result_type=DeliveryState)
     progress = state.progress
     change = state.spec.kind == 'bugfix'
+    # A run that could not complete is returned as a result, not recorded as an error.
+    unverified = progress.verification_error or (
+        progress.verification and progress.verification['status'] == 'error')
     failed = {'server': progress.code_error or progress.implementation_error,
-              # The tests of a change are retried with the baseline run that judges them.
+              # The tests of a change are retried with the baseline run that judges them,
+              # and that retry is also the way on from a verification that proved nothing.
               'tests': (progress.tests_error or progress.baseline_error
-                        or change and progress.verification_error),
+                        or change and unverified),
               'repository': progress.publication_error}[stage]
     if not failed:
         raise SessionBusy('Only failed generation can be retried.')

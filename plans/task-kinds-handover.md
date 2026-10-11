@@ -71,7 +71,7 @@ cd backend
 /Users/zikasak/programming/temporal-project/backend/env/bin/python -m pytest tests -q
 ```
 
-The suite takes about 40 seconds: 311 passed, 11 skipped (the skipped ones need Docker).
+The suite takes about 40 seconds: 312 passed, 11 skipped (the skipped ones need Docker).
 If a run produces no output for more than a minute it is hanging, not slow; see
 "Traps" at the end. The frontend type-check is `npx tsc --noEmit -p .` in `frontend/`
 (it needs `node_modules`, which also exists only in the main checkout).

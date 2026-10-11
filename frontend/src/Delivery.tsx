@@ -254,6 +254,10 @@ export function DeliveryResults({ progress, retrying, disabled, onRetry }: {
   const repairing = progress.repairs[progress.repairs.length - 1];
   // A change to an existing service generates no code and has a baseline instead.
   const change = progress.baseline_status !== "not_applicable";
+  // A change whose verification proved nothing goes on by retrying its tests, unless
+  // a failed stage above already offers that.
+  const unverified = change && !progress.tests_error && !progress.baseline_error &&
+    (Boolean(progress.verification_error) || result?.status === "error");
   const service = progress.implementation ? "built" : progress.implementation_error ? "build failed" : "building";
   return <>
     {change && <Baseline progress={progress} retrying={retrying} disabled={disabled} onRetry={onRetry} />}
@@ -293,6 +297,12 @@ export function DeliveryResults({ progress, retrying, disabled, onRetry }: {
         </button>
       </div>}
       {progress.verification_error && <p role="alert">{progress.verification_error}</p>}
+      {unverified && <div className="generation-failure">
+        <button type="button" className="generate-button" disabled={disabled}
+          onClick={() => onRetry("tests")}>
+          {retrying === "tests" ? "Writing the regression tests again…" : "Write the regression tests again"}
+        </button>
+      </div>}
       {result && <>
         <p className={`verification-outcome verification-${result.status}`} role="status">
           {result.status === "passed" ? "Tests passed" : result.status === "failed" ? "Tests failed" : "Verification could not complete"}

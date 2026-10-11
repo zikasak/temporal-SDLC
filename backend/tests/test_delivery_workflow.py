@@ -415,12 +415,18 @@ async def test_nothing_is_fixed_unless_the_added_tests_fail_alone(env, worker, b
     assert state.verification['status'] == 'passed' and state.publication_status == 'completed'
 
 
-async def test_bugfix_is_not_published_while_a_test_is_skipped_with_the_fix(env, worker, repository_selection):
-    # Red on the unchanged service, then skipped rather than green on the changed one.
-    worker.verification_results = ['skipped', 'passed']
+@pytest.mark.parametrize('outcome', ['skipped', 'error'])
+async def test_bugfix_is_not_published_until_every_test_is_seen_to_pass(env, worker, outcome, repository_selection):
+    # Red on the unchanged service, then skipped rather than green on the changed one,
+    # or a run that could not complete at all.
+    worker.verification_results = [outcome, 'passed']
     handle, state = await fixed(env, repository_selection)
-    assert state.baseline_status == 'reproduced' and state.verification['status'] == 'passed'
-    assert 'Tests skipped in the run against the changed service: 1' in state.verification_error
+    assert state.baseline_status == 'reproduced'
+    if outcome == 'skipped':
+        assert state.verification['status'] == 'passed'
+        assert 'Tests skipped in the run against the changed service: 1' in state.verification_error
+    else:
+        assert state.verification['status'] == 'error' and state.verification_error is None
     assert state.publication_status == 'skipped' and not worker.published
     # The run answers for the tests the change added.
     assert worker.verified_tracked == [ADDED_TESTS]
