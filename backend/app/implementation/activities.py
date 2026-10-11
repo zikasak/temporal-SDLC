@@ -14,7 +14,7 @@ from app.agent_workflows.host import (
 )
 from app.config import GENERATED_CODE_DIR
 from app.docker_agents import default_agent_image
-from app.github.checkout import CHECKOUT_DIR, TESTS_DIR
+from app.github.checkout import CHECKOUT_DIR, CONTRACTS_DIR, TESTS_DIR
 from app.languages import Language
 from app.requirements.document import without_repeated_tables
 
@@ -24,9 +24,9 @@ EXCLUDED = {'.git', '.openapi-generator', '__pycache__', '.agent-output'}
 
 def is_service_file(language: Language, relative: Path) -> bool:
     """Source files only: never tests, build metadata, agent logs or the repository's
-    contract tests."""
+    contract tests and published contract."""
     excluded = EXCLUDED | set(language.implementation.test_dirs) | set(language.build_dirs)
-    return (relative.parts[0] != TESTS_DIR
+    return (relative.parts[0] not in (TESTS_DIR, CONTRACTS_DIR)
             and not any(part.lower() in excluded for part in relative.parts))
 
 

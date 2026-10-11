@@ -189,8 +189,10 @@ requirement (ID, category, priority, title), endpoint (operation, summary, requi
 IDs) and schema name, and the complete documents are written to `/workspace/contracts/`
 (`requirements.json`, `openapi.yaml`, and `requirements.md` when there is a narrative or
 unrecognised document). The agent gets two extra read-only tools, `read_contract` and
-`search_contracts`, confined to that directory, which lies outside the published
-project. Smaller contracts are embedded exactly as described here.
+`search_contracts`, confined to that directory, which lies outside the agent's project
+and is not the repository's own `contracts/` (see
+[Working in the repository](#working-in-the-repository)). Smaller contracts are embedded
+exactly as described here.
 
 It implements the service and writes its production `Dockerfile` and `.dockerignore`.
 The host retrieves sources, excludes tests/build output again, and builds that Dockerfile.
@@ -272,7 +274,7 @@ before its first model turn (see [GitHub connector](github-connector.md#checkout
 and both authors work inside it. Containers still receive copies, never host mounts:
 
 - **Implementation.** `/workspace/service` is the checkout without Git metadata, tests,
-  build output or `contract-tests/`, with the generated server tree added: generated files
+  build output, `contract-tests/` or `contracts/`, with the generated server tree added: generated files
   under `src/` (the API contract) replace the repository's, any other generated file only
   fills a gap, so an existing `pom.xml` or `README.md` is kept. The published
   `implementation/service` is therefore the whole repository tree as the author left it.
@@ -284,7 +286,24 @@ and both authors work inside it. Containers still receive copies, never host mou
 The checkout itself is untouched until verification passes. Then the main worker makes the
 files the implementation author could see equal to `implementation/service` (files it
 removed are deleted; tests it never saw stay), replaces `contract-tests/` with
-`tests/suite`, commits and pushes the new `generated/…` branch.
+`tests/suite`, writes the contract to `contracts/`, commits and pushes the new
+`generated/…` branch.
+
+`contracts/` is what a later task on the repository starts from. It is written from the
+delivery's `TaskSpec`, never from an author's workspace, and replaces whatever was there:
+
+| File | Content |
+|---|---|
+| `language.json` | `{"name": "<language>"}` |
+| `requirements.json` | The requirement list |
+| `requirements.md` | The requirements document |
+| `api.json` | The structured API model |
+| `openapi.yaml` | The OpenAPI document rendered from `api.json`, for readers |
+
+`read_contract` in `backend/app/delivery/contract.py` reads it back and raises
+`ContractError` for a repository without one: repositories this pipeline did not publish
+to are not supported.
+
 `DeliveryWorkflow.get_state().progress` reports `publication_status` (`waiting`, `running`,
 `completed`, `skipped` when verification did not pass, `error`), `publication` and
 `publication_error`.

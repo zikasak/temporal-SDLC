@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
+from app.delivery.contract import ContractError, read_contract
 from app.github import checkout, storage
 from app.llm import graph
 from app.temporal import activities
@@ -17,6 +18,22 @@ TOKEN = "ghs_SECRET_SENTINEL"
 TOKEN_PATH = "/app/installations/99/access_tokens"
 SESSION = "api-design-session-" + "a" * 32
 BRANCH = "generated/" + "a" * 12
+CONTRACT = {
+    "language": "java",
+    "requirements": [{"id": "FR-1", "category": "functional", "title": "Place an order",
+                      "description": "A customer places an order.", "priority": "must"}],
+    "requirements_document": "# Orders\n",
+    "api": {
+        "info": {"title": "Orders", "version": "1.0.0", "description": "", "auth": "none"},
+        "schemas": [],
+        "endpoints": [{
+            "method": "POST", "path": "/orders", "summary": "Place an order", "description": "",
+            "tag": "orders", "parameters": [], "request_schema": None, "response_status": 201,
+            "response_schema": None, "response_array": False, "error_statuses": [],
+            "requirement_ids": ["FR-1"],
+        }],
+    },
+}
 
 
 def git(*args, cwd):
@@ -35,7 +52,8 @@ def remote(tmp_path, monkeypatch, repository_selection, github_connection):
     git("clone", "--quiet", str(bare), str(seed), cwd=tmp_path)
     for name, text in {"README.md": "project", ".gitignore": "build/\n", "src/main/Old.java": "obsolete",
                        "src/main/Kept.java": "kept", "src/test/UnitTest.java": "unit test",
-                       "contract-tests/src/test/java/StaleTest.java": "stale"}.items():
+                       "contract-tests/src/test/java/StaleTest.java": "stale",
+                       "contracts/obsolete.json": "previous contract"}.items():
         (seed / name).parent.mkdir(parents=True, exist_ok=True)
         (seed / name).write_text(text)
     git("add", "--all", cwd=seed)
@@ -64,12 +82,13 @@ async def test_verified_sources_are_pushed_to_a_new_branch(tmp_path, remote, rep
 
     with pytest.raises(ApplicationError, match="unavailable"):
         await environment.run(activities.publish_repository, SESSION, repository_selection,
-                              'java')
+                              CONTRACT)
     for name, text in {"implementation/service/src/main/Kept.java": "kept, extended",
                        "implementation/service/src/main/Orders.java": "new service",
                        "implementation/service/Dockerfile": "FROM scratch",
                        "implementation/service/.gitignore": "build/\n",
                        "implementation/service/build/classes/Orders.class": "compiled",
+                       "implementation/service/contracts/api.json": "the author's own",
                        "tests/suite/src/test/java/OrdersTest.java": "contract test",
                        "tests/suite/pom.xml": "pom"}.items():
         (session / name).parent.mkdir(parents=True, exist_ok=True)
@@ -78,7 +97,7 @@ async def test_verified_sources_are_pushed_to_a_new_branch(tmp_path, remote, rep
     (session / "implementation/service/mvnw").chmod(0o755)
 
     published = await environment.run(activities.publish_repository, SESSION, repository_selection,
-                              'java')
+                              CONTRACT)
     assert published == {"branch": BRANCH, "commit": git("rev-parse", BRANCH, cwd=remote),
                          "url": f"{repository_selection['html_url']}/tree/{BRANCH}",
                          "ignored": ["build/"], "ignored_count": 1}
@@ -86,11 +105,17 @@ async def test_verified_sources_are_pushed_to_a_new_branch(tmp_path, remote, rep
     # The author's tree replaces what it was shown (Old.java and README.md are gone, as
     # it removed them); the unit tests it never saw stay, and the suite replaces the
     # repository's contract tests. Build output the repository ignores stays out of
-    # the branch and is reported instead.
+    # the branch and is reported instead. The contract is the task's, whatever the
+    # repository or the author had in its place.
     assert git("ls-tree", BRANCH, "mvnw", cwd=remote).startswith("100755 ")
     assert files == {"src/main/Kept.java", "src/main/Orders.java", "Dockerfile", "mvnw", ".gitignore",
                      "src/test/UnitTest.java", "contract-tests/pom.xml",
-                     "contract-tests/src/test/java/OrdersTest.java"}
+                     "contract-tests/src/test/java/OrdersTest.java", "contracts/language.json",
+                     "contracts/requirements.json", "contracts/requirements.md",
+                     "contracts/api.json", "contracts/openapi.yaml"}
+    assert "/orders" in git("show", f"{BRANCH}:contracts/openapi.yaml", cwd=remote)
+    # A later task reads back exactly what this one was built from.
+    assert read_contract(session / "repository") == CONTRACT
     assert git("show", f"{BRANCH}:src/main/Kept.java", cwd=remote) == "kept, extended"
     assert git("rev-parse", f"{BRANCH}~1", cwd=remote) == base
     assert git("log", "-1", "--format=%an <%ae>", BRANCH, cwd=remote) == (
@@ -101,7 +126,12 @@ async def test_verified_sources_are_pushed_to_a_new_branch(tmp_path, remote, rep
 
     # Repeating a push that already happened succeeds without another commit.
     assert await environment.run(activities.publish_repository, SESSION, repository_selection,
-                              'java') == published
+                              CONTRACT) == published
+
+
+def test_a_repository_without_a_contract_is_reported_as_unsupported(tmp_path):
+    with pytest.raises(ContractError, match="no readable contract in contracts/"):
+        read_contract(tmp_path)
 
 
 async def test_a_diverged_remote_branch_is_reported_not_overwritten(tmp_path, remote, repository_selection):
@@ -121,7 +151,7 @@ async def test_a_diverged_remote_branch_is_reported_not_overwritten(tmp_path, re
 
     with pytest.raises(ApplicationError, match="git push failed") as raised:
         await environment.run(activities.publish_repository, SESSION, repository_selection,
-                              'java')
+                              CONTRACT)
     assert TOKEN not in str(raised.value)
     assert git("rev-parse", BRANCH, cwd=remote) == theirs
 
