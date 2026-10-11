@@ -8,7 +8,7 @@ from app.implementation.workflows import ImplementationWorkflow
 
 async def main() -> None:
     await run_agent_worker(task_queue=IMPLEMENTATION_TASK_QUEUE,
-                           workflow_type=ImplementationWorkflow, activity_fn=implement_service,
+                           workflow_type=ImplementationWorkflow, activities=[implement_service],
                            label='Implementation')
 
 

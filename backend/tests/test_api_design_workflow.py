@@ -10,30 +10,22 @@ from temporalio import activity, workflow
 from temporalio.client import WorkflowUpdateFailedError, WorkflowUpdateStage
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
+from temporalio.worker import Replayer, Worker
 
 from app.api.routes.api_design import router
 from app.api_design import service
 from app.api_design.models import ApiDesignState, empty_api
 from app.api_design.prompt import OPENING_FALLBACK
-from app.config import (
-    CODEGEN_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, IMPLEMENTATION_TASK_QUEUE,
-    TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
-)
 from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, delivery_id
 from app.delivery.workflows import DeliveryWorkflow
-from app.diagnosis.workflows import DiagnosisWorkflow
-from app.implementation.workflows import ImplementationWorkflow
 from app.temporal import sessions
 from app.temporal.workflows import ApiDesignWorkflow
-from app.test_generation.workflows import TestGenerationWorkflow as ServiceTestWorkflow
-from app.verification.workflows import VerificationWorkflow
+from tests.pipeline import CODE, FakeCodegenWorkflow, FakeStages, stage_workers
 
 TASK_QUEUE = "api-design-test"
 DOCUMENT = {"document_id": "0" * 32, "filename": "openapi.yaml",
             "content_type": "application/yaml", "size_bytes": 10, "revision": 1}
-CODE = {"server": {"path": "/generated/server", "files": 8}}
 
 
 def endpoint(path: str, response_schema: str | None = None) -> dict[str, Any]:
@@ -45,61 +37,17 @@ def endpoint(path: str, response_schema: str | None = None) -> dict[str, Any]:
     }
 
 
-class FakeActivities:
+class FakeActivities(FakeStages):
     def __init__(self) -> None:
+        super().__init__()
         self.release_turn = asyncio.Event()
         self.release_turn.set()
         self.fail_draft = False
         self.fail_turn = False
         self.draft_endpoints: list[dict[str, Any]] = []
         self.documents: list[str] = []
-        self.fail_implementation = False
-        self.fail_tests = False
-        self.implementation_started = asyncio.Event()
-        self.tests_started = asyncio.Event()
-        self.release_implementation = asyncio.Event()
-        self.release_implementation.set()
-        self.release_tests = asyncio.Event()
-        self.release_tests.set()
-        self.verification_started = asyncio.Event()
-        self.release_verification = asyncio.Event()
-        self.release_verification.set()
-        self.verification_result = 'passed'
-        # Outcomes of successive verifications; the last one repeats.
-        self.verification_results: list[str] = []
-        self.verification_images = None
-        self.verified_images: list[tuple[str, str]] = []
-        self.verified_languages: list[str] = []
-        # The side each successive diagnosis blames; the last one repeats.
-        self.diagnoses = ['implementation']
-        self.diagnosed: list[dict[str, Any]] = []
-        self.fail_diagnosis = False
-        self.repairs: list[tuple[str, dict[str, Any]]] = []
-        # What had already run when each repository was checked out.
-        self.checkouts: list[tuple[str, bool]] = []
-        self.turns = 0
-        self.fail_checkout = False
-        self.published: list[tuple[str, str]] = []
-        self.fail_publication = False
         # The language the model records on its next turn, when any.
         self.language: str | None = None
-
-    @activity.defn(name="checkout_repository")
-    async def checkout_repository(self, session_id: str, repository: dict[str, Any]) -> dict[str, Any]:
-        if self.fail_checkout:
-            raise ApplicationError("clone rejected", non_retryable=True)
-        self.checkouts.append((repository["full_name"], self.turns > 0))
-        return {"commit": "1" * 40}
-
-    @activity.defn(name="publish_repository")
-    async def publish_repository(self, session_id: str, repository: dict[str, Any],
-                                 contract: dict[str, Any]) -> dict[str, Any]:
-        if self.fail_publication:
-            raise ApplicationError("remote: Permission denied", non_retryable=True)
-        self.published.append((session_id, repository["full_name"]))
-        self.contract = contract
-        return {"branch": "generated/abc", "commit": "2" * 40,
-                "url": repository["html_url"] + "/tree/generated/abc"}
 
     @activity.defn(name="api_design_turn")
     async def api_design_turn(self, state: ApiDesignState) -> dict[str, Any]:
@@ -124,75 +72,6 @@ class FakeActivities:
         self.documents.append(session_id)
         return DOCUMENT
 
-    @activity.defn(name="implement_service")
-    async def implement_service(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
-        self.implementation_started.set()
-        await self.release_implementation.wait()
-        if self.fail_implementation:
-            raise ApplicationError("build failed", non_retryable=True)
-        if 'repair' in context:
-            self.repairs.append(('implementation', context['repair']))
-            return {"image_id": "sha256:" + "c" * 64}
-        return {"image_id": "sha256:" + "a" * 64, "context": context}
-
-    @activity.defn(name="generate_service_tests")
-    async def generate_service_tests(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
-        self.tests_started.set()
-        await self.release_tests.wait()
-        if self.fail_tests:
-            raise ApplicationError("test compilation failed", non_retryable=True)
-        if 'repair' in context:
-            self.repairs.append(('tests', context['repair']))
-            return {"image_id": "sha256:" + "d" * 64}
-        return {"image_id": "sha256:" + "b" * 64, "context": context}
-
-    @activity.defn(name='diagnose_failure')
-    async def diagnose_failure(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
-        if self.fail_diagnosis:
-            raise ApplicationError('no verdict', non_retryable=True)
-        target = self.diagnoses[min(len(self.diagnosed), len(self.diagnoses) - 1)]
-        self.diagnosed.append(context)
-        return {'session_id': session_id, 'target': target, 'summary': f'The {target} is wrong.',
-                'instructions': f'Correct the {target}.', 'path': '/diagnosis'}
-
-    @activity.defn(name='verify_service')
-    async def verify_service(self, session_id: str, service_image: str, test_image: str,
-                             language: str) -> dict[str, Any]:
-        self.verified_languages.append(language)
-        self.verification_images = (service_image, test_image)
-        self.verified_images.append((service_image, test_image))
-        self.verification_started.set()
-        await self.release_verification.wait()
-        outcome = self.verification_result
-        if self.verification_results:
-            outcome = self.verification_results[
-                min(len(self.verified_images), len(self.verification_results)) - 1]
-        if outcome == 'child_error':
-            raise ApplicationError('verification worker failed', non_retryable=True)
-        failed = outcome == 'failed'
-        return {'status': outcome, 'session_id': session_id,
-                'tests': 1, 'passed': int(outcome == 'passed'),
-                'failures': int(failed), 'errors': 0,
-                'skipped': 0, 'duration_seconds': 1.0, 'exit_code': 0,
-                'test_failures': [{'class_name': 'RoomsTest', 'name': 'lists', 'kind': 'failure',
-                                   'message': 'Expected 200, got 500'}] if failed else [],
-                'details_truncated': False, 'service_log': 'NullPointerException' if failed else '',
-                'runner_log': '', 'error': None, 'path': '/verification'}
-
-
-@workflow.defn(name="CodegenWorkflow")
-class FakeCodegenWorkflow:
-    fail = False
-    languages: list[str] = []
-
-    @workflow.run
-    async def run(self, session_id: str, document_id: str, language: str
-                  ) -> dict[str, Any]:
-        FakeCodegenWorkflow.languages.append(language)
-        if FakeCodegenWorkflow.fail:
-            raise ApplicationError("generator failed", non_retryable=True)
-        return CODE
-
 
 @pytest.fixture(scope="session")
 async def env():
@@ -207,25 +86,7 @@ async def worker(env):
         env.client, task_queue=TASK_QUEUE, workflows=[ApiDesignWorkflow, DeliveryWorkflow],
         activities=[activities.api_design_turn, activities.write_openapi_document,
                     activities.checkout_repository, activities.publish_repository],
-    ), Worker(
-        # The fake lives in this module, whose imports the sandbox would reject.
-        env.client, task_queue=CODEGEN_TASK_QUEUE, workflows=[FakeCodegenWorkflow],
-        workflow_runner=UnsandboxedWorkflowRunner(),
-    ), Worker(
-        env.client, task_queue=IMPLEMENTATION_TASK_QUEUE,
-        workflows=[ImplementationWorkflow], activities=[activities.implement_service],
-    ), Worker(
-        env.client, task_queue=TEST_GENERATION_TASK_QUEUE,
-        workflows=[ServiceTestWorkflow], activities=[activities.generate_service_tests],
-    ), Worker(
-        env.client, task_queue=VERIFICATION_TASK_QUEUE,
-        workflows=[VerificationWorkflow], activities=[activities.verify_service],
-    ), Worker(
-        env.client, task_queue=DIAGNOSIS_TASK_QUEUE,
-        workflows=[DiagnosisWorkflow], activities=[activities.diagnose_failure],
-    ):
-        FakeCodegenWorkflow.fail = False
-        FakeCodegenWorkflow.languages = []
+    ), stage_workers(env, activities):
         yield activities
 
 
@@ -308,16 +169,6 @@ async def test_repository_is_checked_out_first_and_pushed_once_verified(env, wor
     assert len(worker.verified_images) == 1 and len(worker.checkouts) == 1
     with pytest.raises(sessions.SessionBusy):
         await service.retry_generation(handle.id, "repository")
-
-
-async def test_unverified_sources_are_not_pushed(env, worker, repository_selection):
-    worker.verification_result = "error"
-    handle = await start(env, repository_selection)
-    await wait_for_status(handle, "interviewing")
-    await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
-    await handle.execute_update(ApiDesignWorkflow.finalize)
-    state = await delivered(env, handle)
-    assert state.publication_status == "skipped" and not worker.published
 
 
 async def test_pre_checkout_history_replays_without_checkout_or_push(env, worker, monkeypatch, repository_selection):
@@ -439,152 +290,6 @@ async def test_finalize_writes_document_and_delivers_it(env, worker, verificatio
     assert response['verification_error'] == state.verification_error
 
 
-async def finalized(env) -> DeliveryProgress:
-    """The outcome of delivering a one-endpoint design."""
-    handle = await start(env)
-    await wait_for_status(handle, 'interviewing')
-    await handle.execute_update(ApiDesignWorkflow.send_message, '/rooms')
-    await handle.execute_update(ApiDesignWorkflow.finalize)
-    return await delivered(env, handle)
-
-
-async def test_failed_tests_send_the_diagnosed_side_back_until_verification_passes(env, worker):
-    worker.verification_results = ['failed', 'failed', 'passed']
-    worker.diagnoses = ['tests', 'implementation']
-    state = await finalized(env)
-    assert state.verification['status'] == 'passed'
-    assert state.verification_status == 'completed' and state.verification_error is None
-    assert [(item['attempt'], item['target']) for item in state.repairs] == [
-        (1, 'tests'), (2, 'implementation')]
-    assert state.repairs[0]['summary'] == 'The tests is wrong.'
-    # Every diagnosis sees the contracts and the verification that just failed.
-    assert [item['verification']['status'] for item in worker.diagnosed] == ['failed', 'failed']
-    assert worker.diagnosed[0]['api_design']['endpoints'][0]['path'] == '/rooms'
-    assert worker.diagnosed[0]['requirements_document'] == '# Requirements'
-    # Only the blamed side is rewritten each round, with the verdict and its failing tests.
-    assert [stage for stage, _ in worker.repairs] == ['tests', 'implementation']
-    tests_repair, service_repair = (repair for _, repair in worker.repairs)
-    assert tests_repair['instructions'] == 'Correct the tests.'
-    assert tests_repair['test_failures'][0]['name'] == 'lists'
-    assert 'service_log' not in tests_repair
-    assert service_repair['service_log'] == 'NullPointerException'
-    # Each verification runs the images as they stand after the preceding repair.
-    original, repaired = ('sha256:' + 'a' * 64, 'sha256:' + 'b' * 64), ('sha256:' + 'c' * 64, 'sha256:' + 'd' * 64)
-    assert worker.verified_images == [original, (original[0], repaired[1]), repaired]
-    assert (state.implementation['image_id'], state.tests['image_id']) == repaired
-
-
-async def test_repair_stops_after_the_round_limit_with_the_last_failure(env, worker):
-    worker.verification_result = 'failed'
-    state = await finalized(env)
-    assert len(state.repairs) == len(worker.repairs) == 5
-    assert len(worker.verified_images) == 6
-    assert state.verification['status'] == 'failed' and state.verification_status == 'completed'
-    assert state.verification_error == 'Tests still fail after 5 automatic repair rounds.'
-
-
-@pytest.mark.parametrize('broken', ['diagnosis', 'implementation'])
-async def test_failed_diagnosis_or_repair_keeps_the_published_images(env, worker, broken, connected):
-    worker.verification_results = ['failed', 'passed']
-    worker.fail_diagnosis = broken == 'diagnosis'
-    worker.release_verification.clear()
-    handle = await start(env)
-    await wait_for_status(handle, 'interviewing')
-    await handle.execute_update(ApiDesignWorkflow.send_message, '/rooms')
-    await handle.execute_update(ApiDesignWorkflow.finalize)
-    await asyncio.wait_for(worker.verification_started.wait(), timeout=10)
-    # The first build succeeded; only the repair of it fails.
-    worker.fail_implementation = broken == 'implementation'
-    worker.release_verification.set()
-    state = await delivered(env, handle)
-    assert len(worker.verified_images) == 1 and not worker.repairs
-    assert state.verification['status'] == 'failed' and state.verification_status == 'completed'
-    assert state.implementation['image_id'] == 'sha256:' + 'a' * 64
-    if broken == 'diagnosis':
-        assert state.verification_error == 'The failed tests could not be diagnosed.'
-        assert state.repairs == [] and state.implementation_error is None
-        return
-    assert state.implementation_error == 'The service could not be implemented or built.'
-
-    # The failed repair is recoverable through the existing manual retry, which
-    # rebuilds the service and resumes verification with a clean repair history.
-    worker.fail_implementation = False
-    await service.retry_generation(handle.id, 'server')
-    state = await delivered(env, handle)
-    assert state.verification['status'] == 'passed' and state.repairs == []
-
-
-@pytest.mark.parametrize('failed', [{'implementation'}, {'tests'}, {'implementation', 'tests'}])
-async def test_failed_coding_branches_preserve_other_artifacts(env, worker, failed, connected, repository_selection):
-    worker.fail_implementation = 'implementation' in failed
-    worker.fail_tests = 'tests' in failed
-    handle = await start(env, repository_selection)
-    await wait_for_status(handle, "interviewing")
-    await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
-    await handle.execute_update(ApiDesignWorkflow.finalize)
-    state = await delivered(env, handle)
-    assert state.code == CODE
-    assert state.verification_status == 'skipped' and state.verification is None
-    assert not worker.verification_started.is_set()
-    if 'implementation' in failed:
-        assert state.implementation is None
-        assert state.implementation_error == "The service could not be implemented or built."
-    else:
-        assert state.implementation["image_id"] == "sha256:" + "a" * 64
-        assert state.implementation_error is None
-    if 'tests' in failed:
-        assert state.tests is None
-        assert state.tests_error == "The service tests could not be generated or built."
-    else:
-        assert state.tests["image_id"] == "sha256:" + "b" * 64
-        assert state.tests_error is None
-
-    # A fresh delivery run retries only the requested failed stage, without
-    # regenerating successful siblings.
-    for branch in sorted(failed):
-        getattr(worker, f'{branch}_started').clear()
-        sibling = 'tests' if branch == 'implementation' else 'implementation'
-        getattr(worker, f'{sibling}_started').clear()
-        stage = 'server' if branch == 'implementation' else 'tests'
-        # Refuse a successful stage and a second retry while this one runs.
-        if sibling not in failed:
-            with pytest.raises(sessions.SessionBusy):
-                await service.retry_generation(handle.id, 'tests' if sibling == 'tests' else 'server')
-        # Another failure must remain retryable, including across closed runs.
-        await service.retry_generation(handle.id, stage)
-        still_failed = await delivered(env, handle)
-        assert getattr(still_failed, f'{branch}_error')
-        assert still_failed.verification_status == 'skipped'
-        assert not getattr(worker, f'{sibling}_started').is_set()
-        getattr(worker, f'{branch}_started').clear()
-        getattr(worker, f'release_{branch}').clear()
-        setattr(worker, f'fail_{branch}', False)
-        attempts = await asyncio.gather(
-            service.retry_generation(handle.id, stage),
-            service.retry_generation(handle.id, stage),
-            return_exceptions=True,
-        )
-        assert sum(result is None for result in attempts) == 1
-        assert sum(isinstance(result, sessions.SessionBusy) for result in attempts) == 1
-        await asyncio.wait_for(getattr(worker, f'{branch}_started').wait(), timeout=10)
-        with pytest.raises(sessions.SessionBusy):
-            await service.retry_generation(handle.id, stage)
-        pending = await service.get_session(handle.id)
-        assert pending[f'{branch}_error'] is None
-        assert pending['verification_status'] == 'waiting'
-        getattr(worker, f'release_{branch}').set()
-        state = await delivered(env, handle)
-        assert getattr(state, branch)['image_id']
-        assert getattr(state, f'{branch}_error') is None
-        assert not getattr(worker, f'{sibling}_started').is_set()
-        assert state.code == CODE
-        # The retried stage still works in the session's repository.
-        assert getattr(state, branch)['context']['repository'] == repository_selection
-        assert worker.documents == [handle.id]
-    assert state.verification_status == 'completed'
-    assert worker.verification_started.is_set()
-
-
 async def test_generation_retry_http_validation(env, worker, connected):
     app = FastAPI()
     app.include_router(router, prefix='/api')
@@ -603,69 +308,6 @@ async def test_generation_retry_http_validation(env, worker, connected):
             assert response.status_code == 404
     finally:
         await handle.terminate()
-
-
-@pytest.mark.parametrize('first', ['tests', 'implementation'])
-async def test_implementation_and_tests_start_before_either_finishes(env, worker, first):
-    """Sequential children would leave one activity waiting forever at this barrier."""
-    worker.release_implementation.clear()
-    worker.release_tests.clear()
-    worker.release_verification.clear()
-    handle = await start(env)
-    try:
-        await wait_for_status(handle, "interviewing")
-        await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
-        await handle.execute_update(ApiDesignWorkflow.finalize)
-        await asyncio.wait_for(asyncio.gather(
-            worker.implementation_started.wait(), worker.tests_started.wait(),
-        ), timeout=10)
-        state = await progress(env, handle)
-        assert state.implementation is None and state.tests is None
-        assert state.verification_status == 'waiting'
-        assert not worker.verification_started.is_set()
-        # Either result is observable while the other branch remains running;
-        # verification must not start until the second one succeeds.
-        getattr(worker, f'release_{first}').set()
-        for _ in range(100):
-            state = await progress(env, handle)
-            if getattr(state, first) is not None:
-                break
-            await asyncio.sleep(0.05)
-        assert getattr(state, first) is not None
-        assert state.verification is None and not worker.verification_started.is_set()
-        worker.release_implementation.set()
-        worker.release_tests.set()
-        await asyncio.wait_for(worker.verification_started.wait(), timeout=10)
-        assert (await progress(env, handle)).verification_status == 'running'
-    finally:
-        worker.release_implementation.set()
-        worker.release_tests.set()
-        worker.release_verification.set()
-        await delivered(env, handle)
-
-
-async def test_failed_code_generation_can_be_retried(env, worker, connected):
-    FakeCodegenWorkflow.fail = True
-    handle = await start(env)
-    await wait_for_status(handle, "interviewing")
-    await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
-    await handle.execute_update(ApiDesignWorkflow.finalize)
-    state = await delivered(env, handle)
-    assert state.code is None
-    assert state.code_error == "The server code could not be generated."
-    assert not worker.implementation_started.is_set() and not worker.tests_started.is_set()
-    assert state.verification_status == 'skipped'
-    assert not worker.verification_started.is_set()
-
-    with pytest.raises(sessions.SessionBusy):
-        await service.retry_generation(handle.id, 'tests')
-    FakeCodegenWorkflow.fail = False
-    await service.retry_generation(handle.id, 'server')
-    state = await delivered(env, handle)
-    assert state.code == CODE and state.code_error is None
-    assert state.implementation and state.tests
-    assert state.verification_status == 'completed'
-    assert worker.documents == [handle.id]
 
 
 async def test_failed_draft_falls_back_to_opening_question(env, worker):

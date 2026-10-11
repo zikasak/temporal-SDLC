@@ -36,15 +36,20 @@ def copy_service(language: Language, source: Path, target: Path) -> None:
 
 
 def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any]) -> StageInputs:
-    # A repair continues from the published implementation, not the generated skeleton.
-    repair = context.get('repair')
-    source = session_dir / ('implementation/service' if repair else 'server')
-    if not source.is_dir():
-        raise ApplicationError('Generated server code is unavailable', non_retryable=True)
     # The author of a session with a repository works in its checkout.
     checkout = session_dir / CHECKOUT_DIR if context.get('repository') else None
     if checkout and not checkout.is_dir():
         raise ApplicationError('The repository checkout is unavailable', non_retryable=True)
+    repair = context.get('repair')
+    # A change to an existing service generates no code: the checkout alone is edited.
+    change = bool(context.get('brief'))
+    if change and not checkout:
+        raise ApplicationError('The repository checkout is unavailable', non_retryable=True)
+    # A repair continues from the published implementation, not the generated skeleton.
+    source = (session_dir / 'implementation/service' if repair
+              else checkout if change else session_dir / 'server')
+    if not source.is_dir():
+        raise ApplicationError('Generated server code is unavailable', non_retryable=True)
 
     context = without_repeated_tables(context)
     index, files = on_demand_contracts(context, len(json.dumps(context))) or (context, {})
@@ -52,7 +57,7 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
 
     def populate(workspace: Path) -> None:
         project = workspace / 'service'
-        if checkout and not repair:
+        if checkout and not repair and not change:
             copy_service(language, checkout, project)
             # Generated sources are the contract and replace the repository's; any other
             # generated file only fills a gap, so an existing build file is kept.

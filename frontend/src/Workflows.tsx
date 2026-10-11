@@ -89,9 +89,11 @@ function pageRecord(value: unknown): Page {
   };
 }
 
-/** A delivery is named after the session whose task it builds. */
-function sessionOfDelivery(workflowId: string) {
-  return workflowId.replace(/^delivery-/, "");
+/** A delivery is named after the session whose task it builds, and shown on its page. */
+function deliveryLink(workflowId: string) {
+  const sessionId = workflowId.replace(/^delivery-/, "");
+  const mode = sessionId.startsWith("requirements-session-") ? "requirements" : "api-design";
+  return `?mode=${mode}&session_id=${encodeURIComponent(sessionId)}`;
 }
 
 /** The screen that shows this workflow, if there is one. */
@@ -105,11 +107,9 @@ function workflowLink(item: WorkflowExecution) {
     case "ApiDesignWorkflow":
       return `?mode=api-design&session_id=${id}`;
     case "DeliveryWorkflow":
-      return `?mode=api-design&session_id=${encodeURIComponent(sessionOfDelivery(item.workflow_id))}`;
+      return deliveryLink(item.workflow_id);
     case "CodegenWorkflow":
-      return item.parent_workflow_id
-        ? `?mode=api-design&session_id=${encodeURIComponent(sessionOfDelivery(item.parent_workflow_id))}`
-        : null;
+      return item.parent_workflow_id ? deliveryLink(item.parent_workflow_id) : null;
     default:
       return null;
   }

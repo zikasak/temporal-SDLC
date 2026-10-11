@@ -4,8 +4,11 @@ import { errorMessage, failure, readBody } from "./api";
 import ForkButton from "./ForkButton";
 import { RepositorySummary } from "./RepositoryPicker";
 import {
-  repositoryCheckout, repositoryPublication, repositorySelection,
-  type RepositoryCheckout, type RepositoryPublication, type RepositorySelection,
+  DeliveryResults, deliveryPending, deliveryProgress, retriedProgress,
+  type DeliveryProgress, type GenerationStage,
+} from "./Delivery";
+import {
+  repositoryCheckout, repositorySelection, type RepositoryCheckout, type RepositorySelection,
 } from "./github";
 import { markdownComponents, remarkPlugins } from "./markdown";
 
@@ -57,169 +60,8 @@ type OpenApiDocument = {
   revision: number;
 };
 
-type GeneratedCode = {
-  server: { path: string; files: number };
-};
-
-type ImageArtifact = { image_id: string };
-type VerificationStatus = "not_applicable" | "waiting" | "running" | "diagnosing" | "repairing" |
-  "completed" | "skipped" | "error";
-type RepairRound = { attempt: number; target: "implementation" | "tests"; summary: string };
-type VerificationResult = {
-  status: "passed" | "failed" | "error";
-  tests: number;
-  passed: number;
-  failures: number;
-  errors: number;
-  skipped: number;
-  duration_seconds: number;
-  test_failures: { class_name: string; name: string; kind: string; message: string }[];
-  details_truncated: boolean;
-  service_log: string;
-  runner_log: string;
-  error: string | null;
-};
-
-const verificationStatuses: VerificationStatus[] = [
-  "not_applicable", "waiting", "running", "diagnosing", "repairing", "completed", "skipped", "error",
-];
-
-function repairRounds(value: unknown): RepairRound[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is RepairRound => isObject(item) &&
-    typeof item.attempt === "number" && typeof item.summary === "string" &&
-    (item.target === "implementation" || item.target === "tests"));
-}
-
-function verificationRecord(value: unknown): VerificationResult | null {
-  if (!isObject(value)) return null;
-  if (
-    !["passed", "failed", "error"].includes(String(value.status)) ||
-    !["tests", "passed", "failures", "errors", "skipped", "duration_seconds"].every(
-      (key) => typeof value[key] === "number" && Number.isFinite(value[key]) && value[key] >= 0,
-    ) ||
-    !Array.isArray(value.test_failures) ||
-    !value.test_failures.every((item) => isObject(item) &&
-      ["class_name", "name", "kind", "message"].every((key) => typeof item[key] === "string")) ||
-    typeof value.details_truncated !== "boolean" ||
-    typeof value.service_log !== "string" || typeof value.runner_log !== "string" ||
-    !(value.error === null || typeof value.error === "string")
-  ) throw new Error("The backend returned invalid verification results.");
-  return value as VerificationResult;
-}
-
-function imageArtifact(value: unknown): ImageArtifact | null {
-  return isObject(value) && typeof value.image_id === "string" ? { image_id: value.image_id } : null;
-}
-
-type GenerationStage = "server" | "tests" | "repository";
-type PublicationStatus = "not_applicable" | "waiting" | "running" | "completed" | "skipped" | "error";
-const publicationStatuses: PublicationStatus[] = [
-  "not_applicable", "waiting", "running", "completed", "skipped", "error",
-];
-
-function VerificationResults({ session, retrying, disabled, onRetry }: {
-  session: Session;
-  retrying: GenerationStage | null;
-  disabled: boolean;
-  onRetry: (stage: GenerationStage) => void;
-}) {
-  const result = session.verification;
-  const stage = session.verification_status;
-  const pending = stage === "waiting" || stage === "running";
-  const repairing = session.repairs[session.repairs.length - 1];
-  return (
-    <section className="verification-results" aria-labelledby="verification-title">
-      <h3 id="verification-title">Service verification</h3>
-      {pending && (
-        <div role="status">
-          <p>{stage === "running" ? "Running contract tests against the service…" :
-            !session.code ? "Waiting for server code…" : "Waiting for service and test builds…"}</p>
-          {session.code && <p className="verification-builds">
-            Service: {session.implementation ? "built" : session.implementation_error ? "build failed" : "building"}
-            {" · "}Tests: {session.tests ? "compiled" : session.tests_error ? "generation or build failed" : "generating and compiling"}
-          </p>}
-        </div>
-      )}
-      {stage === "diagnosing" && <p role="status">
-        Tests failed. Deciding whether the implementation or the tests are wrong…
-      </p>}
-      {stage === "repairing" && repairing && <p role="status">
-        Repair round {repairing.attempt}: correcting the {repairing.target}…
-      </p>}
-      {stage === "not_applicable" && <p>Verification is not available for this session.</p>}
-      {stage === "skipped" && <p>Verification skipped because a prerequisite did not complete.</p>}
-      {session.implementation_error && <div className="generation-failure">
-        <p role="alert">{session.implementation_error}</p>
-        <button type="button" className="generate-button" disabled={disabled}
-          onClick={() => onRetry("server")}>
-          {retrying === "server" ? "Restarting server generation…" : "Retry server generation"}
-        </button>
-      </div>}
-      {session.tests_error && <div className="generation-failure">
-        <p role="alert">{session.tests_error}</p>
-        <button type="button" className="generate-button" disabled={disabled}
-          onClick={() => onRetry("tests")}>
-          {retrying === "tests" ? "Restarting test generation…" : "Retry test generation"}
-        </button>
-      </div>}
-      {session.verification_error && <p role="alert">{session.verification_error}</p>}
-      {result && <>
-        <p className={`verification-outcome verification-${result.status}`} role="status">
-          {result.status === "passed" ? "Tests passed" : result.status === "failed" ? "Tests failed" : "Verification could not complete"}
-        </p>
-        <p className="verification-counts">
-          {result.tests} tests · {result.passed} passed · {result.failures} failed · {result.errors} errors · {result.skipped} skipped
-          {" · "}{result.duration_seconds.toFixed(1)}s
-        </p>
-        {result.error && <p role="alert">{result.error}</p>}
-        {result.test_failures.length > 0 && <ul className="verification-failures">
-          {result.test_failures.map((item, index) => <li key={index}>
-            <strong>{item.class_name}{item.class_name && "."}{item.name}</strong>
-            <span>{item.kind === "error" ? "Test error" : "Assertion failed"}</span>
-            <pre>{item.message || "No failure message was reported."}</pre>
-          </li>)}
-        </ul>}
-        {session.repairs.length > 0 && <ol className="verification-failures">
-          {session.repairs.map((round) => <li key={round.attempt}>
-            <strong>Repair round {round.attempt}: {round.target} corrected</strong>
-            {round.summary && <span>{round.summary}</span>}
-          </li>)}
-        </ol>}
-        {result.details_truncated && <p>Showing the first {result.test_failures.length} failures. Full reports are saved with the verification artifacts.</p>}
-        {(result.service_log || result.runner_log) && <details className="verification-logs">
-          <summary>Container logs (last 200 lines, up to 8,000 characters each)</summary>
-          {result.service_log && <><h4>Service</h4><pre>{result.service_log}</pre></>}
-          {result.runner_log && <><h4>Test runner</h4><pre>{result.runner_log}</pre></>}
-        </details>}
-      </>}
-      {session.publication_status !== "not_applicable" && <>
-        <h3>Repository branch</h3>
-        {session.publication_status === "waiting" && <p>Verified sources are pushed to a new branch once the tests pass.</p>}
-        {session.publication_status === "running" && <p role="status">Pushing the verified sources to a new branch…</p>}
-        {session.publication_status === "skipped" && <p>Nothing was pushed because verification did not pass.</p>}
-        {session.publication && <p className="verification-outcome verification-passed" role="status">
-          Pushed to <a href={session.publication.url} target="_blank" rel="noreferrer">{session.publication.branch}</a>
-          {" "}at <code>{session.publication.commit.slice(0, 7)}</code>
-        </p>}
-        {session.publication && session.publication.ignored_count > 0 && <p>
-          Not committed because the repository's .gitignore matches them ({session.publication.ignored_count}):
-          {" "}{session.publication.ignored.join(", ")}
-          {session.publication.ignored_count > session.publication.ignored.length && ", …"}
-        </p>}
-        {session.publication_error && <div className="generation-failure">
-          <p role="alert">{session.publication_error}</p>
-          <button type="button" className="generate-button" disabled={disabled}
-            onClick={() => onRetry("repository")}>
-            {retrying === "repository" ? "Pushing again…" : "Retry push"}
-          </button>
-        </div>}
-      </>}
-    </section>
-  );
-}
-
-type Session = {
+// The design and the progress of the delivery it started, reported as one session.
+type Session = DeliveryProgress & {
   session_id: string;
   source_session_id: string;
   status: SessionStatus;
@@ -230,22 +72,9 @@ type Session = {
   problems: string[];
   document: OpenApiDocument | null;
   error: string | null;
-  code: GeneratedCode | null;
-  code_error: string | null;
-  implementation: ImageArtifact | null;
-  implementation_error: string | null;
-  tests: ImageArtifact | null;
-  tests_error: string | null;
-  verification_status: VerificationStatus;
-  verification: VerificationResult | null;
-  verification_error: string | null;
-  repairs: RepairRound[];
   forked_from: { session_id: string; message_index: number } | null;
   repository: RepositorySelection | null;
   checkout: RepositoryCheckout | null;
-  publication: RepositoryPublication | null;
-  publication_error: string | null;
-  publication_status: PublicationStatus;
 };
 
 const sessionStatuses: SessionStatus[] = [
@@ -316,13 +145,10 @@ function sessionRecord(value: unknown): Session {
       : null;
   const repository = repositorySelection(value.repository);
   return {
+    ...deliveryProgress(value, repository),
     session_id: value.session_id,
     repository,
     checkout: repositoryCheckout(value.checkout),
-    publication: repositoryPublication(value.publication, repository),
-    publication_error: typeof value.publication_error === "string" ? value.publication_error : null,
-    publication_status: publicationStatuses.includes(value.publication_status as PublicationStatus)
-      ? value.publication_status as PublicationStatus : "not_applicable",
     source_session_id:
       typeof value.source_session_id === "string" ? value.source_session_id : "",
     status: value.status as SessionStatus,
@@ -333,22 +159,6 @@ function sessionRecord(value: unknown): Session {
     problems: value.problems.filter((item): item is string => typeof item === "string"),
     document,
     error: typeof value.error === "string" ? value.error : null,
-    code:
-      isObject(value.code) &&
-      isObject(value.code.server) &&
-      typeof value.code.server.path === "string"
-        ? (value.code as GeneratedCode)
-        : null,
-    code_error: typeof value.code_error === "string" ? value.code_error : null,
-    implementation: imageArtifact(value.implementation),
-    implementation_error: typeof value.implementation_error === "string" ? value.implementation_error : null,
-    tests: imageArtifact(value.tests),
-    tests_error: typeof value.tests_error === "string" ? value.tests_error : null,
-    verification_status: verificationStatuses.includes(value.verification_status as VerificationStatus)
-      ? value.verification_status as VerificationStatus : "not_applicable",
-    verification: verificationRecord(value.verification),
-    verification_error: typeof value.verification_error === "string" ? value.verification_error : null,
-    repairs: repairRounds(value.repairs),
     forked_from:
       isObject(value.forked_from) &&
       typeof value.forked_from.session_id === "string" &&
@@ -367,9 +177,7 @@ function codePending(session: Session) {
 }
 
 function pipelinePending(session: Session) {
-  return codePending(session) ||
-    ["waiting", "running", "diagnosing", "repairing"].includes(session.verification_status) ||
-    ["waiting", "running"].includes(session.publication_status);
+  return codePending(session) || deliveryPending(session);
 }
 
 function typeLabel(type: string | null, array: boolean) {
@@ -510,20 +318,7 @@ export default function ApiDesign() {
     setError("");
     try {
       await post(`/${encodeURIComponent(session.session_id)}/generation/retry`, { stage });
-      setSession({
-        ...session,
-        ...(stage === "server"
-          ? { code_error: null, implementation: null, implementation_error: null }
-          : stage === "tests" ? { tests: null, tests_error: null } : {}),
-        // A repeated push keeps the verification it publishes.
-        ...(stage === "repository" ? {} : {
-          verification: null,
-          verification_error: null,
-          verification_status: "waiting" as const,
-          repairs: [],
-        }),
-        ...(session.checkout ? { publication_error: null, publication_status: "waiting" as const } : {}),
-      });
+      setSession({ ...session, ...retriedProgress(session, stage, Boolean(session.checkout)) });
       setRefreshKey((value) => value + 1);
     } catch (caught) {
       setError(failure(caught, stage === "repository" ? "Could not retry the push."
@@ -824,7 +619,7 @@ export default function ApiDesign() {
                     {retryingGeneration === "server" ? "Restarting server generation…" : "Retry server generation"}
                   </button>
                 </div>}
-                <VerificationResults session={session} retrying={retryingGeneration}
+                <DeliveryResults progress={session} retrying={retryingGeneration}
                   disabled={submitting || pipelinePending(session)}
                   onRetry={(stage) => void retryGeneration(stage)} />
               </section>

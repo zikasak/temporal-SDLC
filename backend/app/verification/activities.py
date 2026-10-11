@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -17,9 +18,12 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from app import docker_agents
+from app.agent_workflows.host import build_image, publish_manifest, session_language
+from app.github.checkout import CHECKOUT_DIR
+from app.implementation.activities import copy_service
 from app.languages import TestReports, UnsupportedLanguage, get_language
 from app.config import GENERATED_CODE_DIR
-from app.verification.models import TestFailure, VerificationResult
+from app.verification.models import TestFailure, TrackedTest, VerificationResult
 from app.temporal.tracing import trace_activity
 
 logger = logging.getLogger(__name__)
@@ -29,6 +33,7 @@ MAX_REPORT_BYTES = 1024 * 1024
 MAX_REPORT_FILES = 1000
 MAX_TESTS = 100000
 MAX_FAILURE_DETAILS = 50
+MAX_TRACKED_TESTS = 1000
 LOG_LIMIT = 8000
 CONSTRAINTS = (
     '--cap-drop=ALL', '--security-opt=no-new-privileges', '--pids-limit=256',
@@ -78,8 +83,11 @@ async def collect_reports(container: str, destination: Path, reports: TestReport
         logger.info('Collected %d test reports (container=%s)', len(names), container)
 
 
-def summarize_reports(directory: Path, reports: TestReports) -> dict:
-    """Count JUnit XML testcase outcomes, not redundant nested suite summary attributes."""
+def summarize_reports(directory: Path, reports: TestReports,
+                      tracked: dict[str, TrackedTest] | None = None,
+                      case_id: Callable[[str, str], str] | None = None) -> dict:
+    """Count JUnit XML testcase outcomes, not redundant nested suite summary attributes.
+    The outcomes of the tests in `tracked`, keyed by `case_id`, are recorded in it."""
     totals = dict(tests=0, passed=0, failures=0, errors=0, skipped=0)
     failures: list[TestFailure] = []
     files = sorted(directory.glob(reports.pattern))
@@ -98,20 +106,23 @@ def summarize_reports(directory: Path, reports: TestReports) -> dict:
         if root.tag not in {'testsuite', 'testsuites'}:
             raise RuntimeError('Invalid test report root')
         for case in root.iter('testcase'):
-            totals['tests'] += 1
-            if totals['tests'] > MAX_TESTS:
+            if totals['tests'] >= MAX_TESTS:
                 raise RuntimeError('Test count exceeds limit')
             outcomes = [child for child in case if child.tag in {'failure', 'error', 'skipped'}]
             if len(outcomes) > 1:
                 raise RuntimeError('Conflicting test outcomes')
             outcome = outcomes[0] if outcomes else None
-            if outcome is None:
-                totals['passed'] += 1
-            elif outcome.tag == 'skipped':
-                totals['skipped'] += 1
-            else:
+            key = ('passed' if outcome is None else 'skipped' if outcome.tag == 'skipped'
+                   else 'failures' if outcome.tag == 'failure' else 'errors')
+            totals['tests'] += 1
+            totals[key] += 1
+            watched = tracked and tracked.get(case_id(case.get('classname', ''),
+                                                      case.get('name', '')))
+            if watched:
+                watched['tests'] += 1
+                watched['failed'] += key in ('failures', 'errors')
+            if key in ('failures', 'errors'):
                 kind = outcome.tag
-                totals['failures' if kind == 'failure' else 'errors'] += 1
                 if len(failures) < MAX_FAILURE_DETAILS:
                     failures.append({
                         'class_name': case.get('classname', '')[:256],
@@ -137,15 +148,21 @@ async def cleanup(service: str, runner: str, network: str) -> None:
 
 
 async def run_verification(session_id: str, service_image: str, test_image: str,
-                           language: str) -> VerificationResult:
+                           language: str, tracked_tests: list[str] | None = None,
+                           ) -> VerificationResult:
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
         raise ApplicationError('Invalid session ID', non_retryable=True)
     if not all(re.fullmatch(r'sha256:[0-9a-f]{64}', image) for image in (service_image, test_image)):
         raise ApplicationError('Invalid verification image ID', non_retryable=True)
     try:
-        reports = get_language(language).test_reports
+        stack = get_language(language)
     except UnsupportedLanguage as exc:
         raise ApplicationError(str(exc), non_retryable=True) from exc
+    reports = stack.test_reports
+    if tracked_tests is not None and len(tracked_tests) > MAX_TRACKED_TESTS:
+        raise ApplicationError('Too many tests to track', non_retryable=True)
+    tracked: dict[str, TrackedTest] | None = None if tracked_tests is None else {
+        item: {'tests': 0, 'failed': 0} for item in tracked_tests}
     token = uuid.uuid4().hex
     network = f'verification-{token}'
     service, runner = f'{network}-service', f'{network}-tests'
@@ -156,7 +173,7 @@ async def run_verification(session_id: str, service_image: str, test_image: str,
         'session_id': session_id, 'status': 'error',
         'tests': 0, 'passed': 0, 'failures': 0, 'errors': 0, 'skipped': 0,
         'duration_seconds': 0, 'exit_code': None, 'test_failures': [],
-        'details_truncated': False, 'service_log': '', 'runner_log': '',
+        'details_truncated': False, 'tracked': tracked, 'service_log': '', 'runner_log': '',
         'error': None, 'path': str(run_dir),
     }
     started = time.monotonic()
@@ -224,7 +241,8 @@ async def run_verification(session_id: str, service_image: str, test_image: str,
                 if runner_started:
                     try:
                         await collect_reports(runner, run_dir / 'reports', reports)
-                        result.update(summarize_reports(run_dir / 'reports', reports))
+                        result.update(summarize_reports(run_dir / 'reports', reports, tracked,
+                                                        stack.test_suite.case_id))
                     except Exception as exc:
                         result['error'] = result['error'] or f'Could not read test reports: {str(exc)[-1000:]}'
             if runner_state.get('OOMKilled') or service_state.get('OOMKilled'):
@@ -267,5 +285,36 @@ async def run_verification(session_id: str, service_image: str, test_image: str,
 @activity.defn
 @trace_activity('verify-service', feature='verification', input_parameter='service_image')
 async def verify_service(session_id: str, service_image: str, test_image: str,
-                         language: str) -> VerificationResult:
-    return await run_verification(session_id, service_image, test_image, language)
+                         language: str, tracked_tests: list[str] | None = None,
+                         ) -> VerificationResult:
+    return await run_verification(session_id, service_image, test_image, language,
+                                  tracked_tests)
+
+
+@activity.defn
+@trace_activity('build-baseline', feature='verification', input_parameter='language')
+async def build_baseline(session_id: str, language: str) -> dict[str, str]:
+    """Build the service as the repository holds it: what the baseline run of a change
+    executes the tests against, from the same files the implementation author sees."""
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
+        raise ApplicationError('Invalid session ID', non_retryable=True)
+    stack = session_language(language)
+    session_dir = GENERATED_CODE_DIR / session_id
+    checkout = session_dir / CHECKOUT_DIR
+    if not checkout.is_dir():
+        raise ApplicationError('The repository checkout is unavailable', non_retryable=True)
+    artifact_dir = session_dir / 'baseline'
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    async with docker_agents.keep_activity_alive('Building the repository service'):
+        with tempfile.TemporaryDirectory(dir=artifact_dir) as temporary:
+            clean = Path(temporary) / 'build'
+            copy_service(stack, checkout, clean)
+            if not (clean / 'Dockerfile').is_file():
+                raise ApplicationError('The repository has no Dockerfile to build its service',
+                                       non_retryable=True)
+            image_id = await build_image(clean, 'baseline service',
+                                         artifact_dir / 'image-build.log')
+    result = {'image_id': image_id, 'session_id': session_id}
+    publish_manifest(artifact_dir, result)
+    logger.info('Baseline service image built (session=%s, image=%s)', session_id, image_id)
+    return result

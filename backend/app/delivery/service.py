@@ -48,11 +48,14 @@ async def retry(session_id: str, stage: RetryStage) -> None:
         delivery_id(session_id), run_id=description.run_id,
     ).query('get_state', result_type=DeliveryState)
     progress = state.progress
+    change = state.spec.kind == 'bugfix'
     failed = {'server': progress.code_error or progress.implementation_error,
-              'tests': progress.tests_error, 'repository': progress.publication_error}[stage]
+              # The tests of a change are retried with the baseline run that judges them.
+              'tests': progress.tests_error or progress.baseline_error,
+              'repository': progress.publication_error}[stage]
     if not failed:
         raise SessionBusy('Only failed generation can be retried.')
-    if stage == 'tests' and not progress.code:
+    if stage == 'tests' and not progress.code and not change:
         raise SessionBusy('Retry server generation first.')
     if not state.spec.language:
         # A completed session takes no messages, so only a fork can choose one.
@@ -75,6 +78,10 @@ async def retry(session_id: str, stage: RetryStage) -> None:
     elif stage == 'tests':
         progress.tests = None
         progress.tests_error = None
+        if change:
+            progress.baseline = None
+            progress.baseline_error = None
+            progress.baseline_status = 'waiting'
     try:
         await client.start_workflow(
             'DeliveryWorkflow', state, id=delivery_id(session_id),

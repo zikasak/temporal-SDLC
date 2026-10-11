@@ -217,3 +217,74 @@ async def test_repository_session_continues_only_the_repositorys_contract_tests(
     assert json.loads(sent['input.json'])['repository'] == context['repository']
     # The implementation in the same repository stays out of the test author's reach.
     assert not any('Orders.java' in name for name in sent)
+
+
+def java_tests(**bodies: str) -> str:
+    methods = ''.join(f'    @Test\n    void {name}() {{ {body} }}\n' for name, body in bodies.items())
+    return f'package com.example;\n\nclass OrdersTest {{\n{methods}}}\n'
+
+
+@pytest.mark.parametrize('broken, written, refused', [
+    # A new case beside the existing ones, in their class.
+    (None, {'lists': 'get();', 'refusesDoubleBooking': 'post();'}, None),
+    (None, {'lists': 'get();'}, 'did not add a regression test'),
+    (None, {'lists': 'weakened();', 'refusesDoubleBooking': 'post();'},
+     'may not touch: com.example.OrdersTest#lists'),
+    (None, {'refusesDoubleBooking': 'post();'}, 'may not touch: com.example.OrdersTest#lists'),
+    # A repair changes or removes the tests found broken, and only those.
+    ('lists', {'lists': 'corrected();', 'refusesDoubleBooking': 'post();'}, None),
+    ('lists', {'refusesDoubleBooking': 'post();'}, None),
+    ('lists', {'lists': 'get();', 'refusesDoubleBooking': 'weakened();'},
+     'may not touch: com.example.OrdersTest#refusesDoubleBooking'),
+])
+async def test_only_tests_found_broken_may_differ_from_what_they_were(tmp_path, monkeypatch, broken, written, refused):
+    monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
+    source = 'src/test/java/com/example/OrdersTest.java'
+    existing = tmp_path / 'session/repository/contract-tests' / source
+    existing.parent.mkdir(parents=True)
+    existing.write_text(java_tests(lists='get();'))
+    brief = [{'id': 'FR-1', 'category': 'functional', 'title': 'No double booking',
+              'description': 'A booked room is refused.', 'priority': 'must'}]
+    context = {'requirements': [], 'api_design': empty_api(), 'language': 'java',
+               'repository': {'full_name': 'octocat/project', 'branch': 'main'},
+               'brief': {'requirements': brief, 'requirements_document':
+                         render_requirements_markdown(brief, 'Seen on Fridays.')}}
+    if broken:
+        # The suite the change published, of which the diagnosis condemned one test.
+        published = tmp_path / 'session/tests/suite' / source
+        published.parent.mkdir(parents=True)
+        published.write_text(java_tests(lists='get();', refusesDoubleBooking='post();'))
+        (tmp_path / 'session/tests/suite/pom.xml').write_text('pom')
+        context['repair'] = {'attempt': 1, 'broken_tests': [
+            {'class_name': 'com.example.OrdersTest', 'name': broken}]}
+    sent = {}
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': 0})
+        if args[0] == 'cp' and args[1] == '-a':
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.update(json.loads(archive.extractfile('input.json').read()))
+        if args[0] == 'cp' and args[1].endswith(':/workspace/tests/.'):
+            (Path(args[2]) / source).parent.mkdir(parents=True)
+            # Laid out differently, which changes no test.
+            (Path(args[2]) / source).write_text(java_tests(**written).replace('    ', '\t'))
+            (Path(args[2]) / 'pom.xml').write_text('pom')
+        if args[0] == 'build' and '--iidfile' in args:
+            Path(args[args.index('--iidfile') + 1]).write_text('sha256:' + 'd' * 64)
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    run = ActivityEnvironment().run(activities.generate_service_tests, 'session', context)
+    if refused:
+        with pytest.raises(RuntimeError, match=refused):
+            await run
+        return
+    result = await run
+    assert sent['brief'] == {'requirements': brief, 'requirements_narrative': 'Seen on Fridays.'}
+    # The baseline run holds each test to what the change did to it.
+    changes = {key: result[key] for key in ('added_tests', 'changed_tests', 'removed_tests')}
+    assert changes == {
+        'added_tests': ['com.example.OrdersTest#refusesDoubleBooking'],
+        'changed_tests': ['com.example.OrdersTest#lists'] if written.get('lists') == 'corrected();' else [],
+        'removed_tests': [] if 'lists' in written else ['com.example.OrdersTest#lists']}

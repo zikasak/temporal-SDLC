@@ -8,7 +8,7 @@ from app.diagnosis.workflows import DiagnosisWorkflow
 
 async def main() -> None:
     await run_agent_worker(task_queue=DIAGNOSIS_TASK_QUEUE,
-                           workflow_type=DiagnosisWorkflow, activity_fn=diagnose_failure,
+                           workflow_type=DiagnosisWorkflow, activities=[diagnose_failure],
                            label='Diagnosis')
 
 

@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 from langchain_core.tools import BaseTool, tool
 
 from app.requirements.models import (
-    CATEGORY_PREFIXES, PRIORITIES, TASK_KINDS, Requirement, TaskKind,
+    CATEGORY_PREFIXES, DIRECT_KINDS, PRIORITIES, TASK_KINDS, Requirement, TaskKind,
+    numbered_after,
 )
 
 logger = logging.getLogger(__name__)
@@ -25,19 +26,31 @@ class RequirementsContext:
 
     requirements: dict[str, Requirement] = field(default_factory=dict)
     kind: TaskKind | None = None
+    # IDs of the requirements in the repository's contract, when it has one.
+    published: tuple[str, ...] = ()
 
     @classmethod
-    def from_list(cls, requirements: list[Requirement],
-                  kind: TaskKind | None = None) -> "RequirementsContext":
-        return cls({item["id"]: dict(item) for item in requirements}, kind)  # type: ignore[misc]
+    def from_list(cls, requirements: list[Requirement], kind: TaskKind | None = None,
+                  published: tuple[str, ...] = ()) -> "RequirementsContext":
+        return cls({item["id"]: dict(item) for item in requirements}, kind,  # type: ignore[misc]
+                   published)
 
-    def set_kind(self, kind: str) -> TaskKind:
-        """Only a known kind can be recorded; anything else raises."""
+    def _reserved(self) -> tuple[str, ...]:
+        """A task that changes the repository's service adds its requirements to that
+        contract, so its IDs continue the contract's instead of repeating them."""
+        return self.published if self.kind in DIRECT_KINDS else ()
+
+    def set_kind(self, kind: str) -> dict[str, str]:
+        """Only a known kind can be recorded; anything else raises. Returns the new ID
+        of each requirement, recorded under another kind, that the new kind renumbers."""
         kind = kind.strip().lower().replace("-", "_").replace(" ", "_")
         if kind not in TASK_KINDS:
             raise ValueError(f"kind must be one of: {', '.join(TASK_KINDS)}.")
         self.kind = kind  # type: ignore[assignment]
-        return self.kind  # type: ignore[return-value]
+        before = self.as_list()
+        after = numbered_after(before, self._reserved())
+        self.requirements = {item["id"]: item for item in after}
+        return {old["id"]: new["id"] for old, new in zip(before, after) if old["id"] != new["id"]}
 
     def as_list(self) -> list[Requirement]:
         def order(item: Requirement) -> tuple[int, int]:
@@ -50,7 +63,7 @@ class RequirementsContext:
         prefix = CATEGORY_PREFIXES[category]
         numbers = [
             int(match.group(2))
-            for match in map(REQUIREMENT_ID.fullmatch, self.requirements)
+            for match in map(REQUIREMENT_ID.fullmatch, [*self.requirements, *self._reserved()])
             if match and match.group(1) == prefix
         ]
         return f"{prefix}-{max(numbers, default=0) + 1}"
@@ -102,11 +115,17 @@ def build(ctx: RequirementsContext) -> list[BaseTool]:
             the API as it is), or docs. Never call this with a guess.
         """
         try:
-            recorded = ctx.set_kind(kind)
+            renumbered = ctx.set_kind(kind)
         except ValueError as exc:
             logger.warning("Task kind not recorded: %s", exc)
             return f"Task kind not recorded: {exc}"
-        return json.dumps({"action": "recorded", "kind": recorded})
+        result: dict[str, object] = {"action": "recorded", "kind": ctx.kind}
+        if renumbered:
+            result["renumbered"] = renumbered
+            result["note"] = ("These requirements have new IDs, because the service already "
+                              "has requirements with their old ones. Tell the user each old "
+                              "and new ID, and use only the new IDs from now on.")
+        return json.dumps(result)
 
     @tool
     async def record_requirement(

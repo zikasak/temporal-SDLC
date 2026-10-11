@@ -1,12 +1,10 @@
 import re
-from typing import Literal
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.downloads import session_document_download
 from app.api.errors import http_error
-from app.api.routes.requirements import ForkBody, MessageBody
+from app.api.routes.requirements import ForkBody, MessageBody, RetryGenerationBody
 from app.api_design.service import (
     finalize_session,
     fork_session,
@@ -23,10 +21,6 @@ SESSION_ID_PATTERN = re.compile(r"api-design-session-[0-9a-f]{32}")
 
 class StartBody(BaseModel):
     requirements_session_id: str = Field(pattern=r"^requirements-session-[0-9a-f]{32}$")
-
-
-class RetryGenerationBody(BaseModel):
-    stage: Literal['server', 'tests', 'repository']
 
 
 def _check_session_id(session_id: str) -> None:

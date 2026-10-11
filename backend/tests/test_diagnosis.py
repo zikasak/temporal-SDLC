@@ -11,7 +11,10 @@ from app.api_design.models import empty_api
 from app.diagnosis import activities
 
 RUN = 'f' * 32
+BROKEN = {'class_name': 'OrdersTest', 'name': 'creates'}
 VERDICT = {'target': 'tests', 'summary': 'The contract documents 201.',
+           # Only a test that failed can be found broken; anything else named is dropped.
+           'tests': [BROKEN, {'class_name': 'OrdersTest', 'name': 'lists'}, 'creates'],
            'instructions': 'POST /orders returns 201; assert 201, not 200.'}
 
 
@@ -70,6 +73,7 @@ async def test_diagnosis_reviews_both_sides_and_publishes_a_bounded_verdict(sess
                'api_design': empty_api(), 'verification': failed_verification(session)}
     result = await ActivityEnvironment().run(activities.diagnose_failure, 'session', context)
     assert result == {'session_id': 'session', 'target': 'tests', 'summary': 's' * 1000,
+                      'tests': [BROKEN],
                       'instructions': VERDICT['instructions'], 'path': str(session / 'diagnosis')}
     assert json.loads((session / 'diagnosis/verdict.json').read_text()) == result
     removed = sent.pop('removed')
@@ -90,6 +94,7 @@ async def test_diagnosis_reviews_both_sides_and_publishes_a_bounded_verdict(sess
 
 @pytest.mark.parametrize('verdict', [
     None, 'link', 'not json', '[]', {**VERDICT, 'target': 'both'}, {**VERDICT, 'instructions': ' '},
+    {**VERDICT, 'tests': []}, {**VERDICT, 'tests': [{'class_name': 'OrdersTest', 'name': 'lists'}]},
 ])
 async def test_unusable_verdicts_never_select_a_repair(session, monkeypatch, verdict):
     sent: dict = {}

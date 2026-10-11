@@ -9,6 +9,7 @@ from app.api_design.models import ApiModel
 from app.api_design.openapi import DOCUMENT_FILENAME as OPENAPI_FILENAME
 from app.api_design.openapi import render_openapi
 from app.github.checkout import CONTRACTS_DIR
+from app.requirements.document import render_requirements_markdown, requirements_narrative
 from app.requirements.models import Requirement
 
 # The model the OpenAPI document is rendered from; the YAML alone cannot be read back.
@@ -29,6 +30,20 @@ class RepositoryContract(TypedDict):
 
 def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2) + '\n'
+
+
+def with_requirements(contract: RepositoryContract,
+                      added: list[Requirement]) -> RepositoryContract:
+    """The contract after a change that leaves the API as it is: what the change required
+    is now required of the service too, so later tasks keep the tests written for it.
+    `added` is numbered after the contract's own requirements already."""
+    requirements = [*contract['requirements'], *added]
+    # The document's tables render the list; one this pipeline did not render is kept.
+    narrative = requirements_narrative(contract['requirements_document'],
+                                       contract['requirements'])
+    document = (contract['requirements_document'] if narrative is None
+                else render_requirements_markdown(requirements, narrative))
+    return {**contract, 'requirements': requirements, 'requirements_document': document}
 
 
 def write_contract(repository: Path, contract: RepositoryContract) -> None:

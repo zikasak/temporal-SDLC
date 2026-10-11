@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal, NotRequired, TypedDict
 
@@ -28,6 +29,8 @@ TASK_KINDS: dict[str, str] = {
               "it is",
     "docs": "a change to documentation only",
 }
+# Kinds that leave the API as it is and are delivered straight from the interview.
+DIRECT_KINDS = ("bugfix",)
 
 
 class Requirement(TypedDict):
@@ -54,3 +57,24 @@ class RequirementsState:
     repository: RepositorySelection | None = None
     # Set once the repository is on the worker's disk; forks check out their own.
     checkout: RepositoryCheckout | None = None
+    # The contract the repository was published with, read when a task that changes its
+    # service is finalized: such a task is delivered from here, without an API design.
+    contract: dict[str, Any] | None = None
+
+
+def numbered_after(requirements: list[Requirement], published: Iterable[str],
+                   ) -> list[Requirement]:
+    """The requirements of a change to a service, with a new ID for each one whose ID a
+    requirement of the service's contract (`published`) already has. Applying it again
+    changes nothing."""
+    taken = set(published)
+    result = []
+    for item in requirements:
+        if item["id"] in taken:
+            prefix = CATEGORY_PREFIXES[item["category"]] + "-"
+            numbers = [int(used[len(prefix):]) for used in taken
+                       if used.startswith(prefix) and used[len(prefix):].isdigit()]
+            item = {**item, "id": f"{prefix}{max(numbers, default=0) + 1}"}
+        taken.add(item["id"])
+        result.append(item)
+    return result

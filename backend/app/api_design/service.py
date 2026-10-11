@@ -13,6 +13,7 @@ from app.delivery.models import DeliveryProgress, RetryStage
 from app.documents import DocumentNotFound, get_generated_document
 from app.requirements import service as requirements_service
 from app.requirements.document import render_requirements_markdown
+from app.requirements.models import DIRECT_KINDS
 from app.temporal.client import connect_temporal
 from app.temporal.sessions import SessionBusy, fork_messages, start_update, state_at_message
 
@@ -23,6 +24,9 @@ async def start_session(requirements_session_id: str) -> str:
     source = await requirements_service.get_state(requirements_session_id)
     if source.status != "completed" or not source.document:
         raise SessionBusy("Generate the requirements document before designing the API.")
+    if source.kind in DIRECT_KINDS:
+        raise SessionBusy("This task leaves the API as it is, so it has no API design: "
+                          "its requirements session delivers it.")
     if not source.repository:
         raise SessionBusy("This requirements session has no repository. Start a new "
                           "requirements session and choose one.")

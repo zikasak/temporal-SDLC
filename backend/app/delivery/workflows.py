@@ -11,7 +11,8 @@ with workflow.unsafe.imports_passed_through():
         CODEGEN_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, IMPLEMENTATION_TASK_QUEUE,
         TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
     )
-    from app.delivery.models import DeliveryProgress, DeliveryState
+    from app.delivery.contract import with_requirements
+    from app.delivery.models import DeliveryProgress, DeliveryState, judge_baseline
     from app.diagnosis.models import repair_request
     from app.temporal.activities import publish_repository
 
@@ -23,8 +24,10 @@ MAX_REPAIR_ROUNDS = 5
 class DeliveryWorkflow:
     """Turns a specified task into verified, published sources: code generation, the
     parallel service and test authors, verification with its repair loop, and the push.
-    A stage that fails records its own error instead of failing the run, so it can be
-    retried on its own."""
+    A bugfix generates no code and goes red to green instead: regression tests, proof
+    that they fail against the repository's service, then the fix and the same
+    verification. A stage that fails records its own error instead of failing the run,
+    so it can be retried on its own."""
 
     @workflow.init
     def __init__(self, state: DeliveryState) -> None:
@@ -39,7 +42,10 @@ class DeliveryWorkflow:
         else:
             if self.spec.checkout:
                 self.progress.publication_status = 'waiting'
-            await self._generate()
+            if self.spec.kind == 'bugfix':
+                await self._change()
+            else:
+                await self._generate()
         await self._publish()
         return self.progress
 
@@ -72,6 +78,59 @@ class DeliveryWorkflow:
         await asyncio.gather(self._implement_service(), self._generate_tests())
         await self._verify_built()
 
+    async def _change(self) -> None:
+        """Change the repository's service red to green: regression tests first, proof
+        that they fail against the service as it is, then the fix and the whole suite."""
+        self.progress.verification_status = 'waiting'
+        self.progress.baseline_status = 'waiting'
+        await self._generate_tests()
+        # Nothing is fixed before the added tests are shown to fail without the fix.
+        if not await self._reproduce():
+            self.progress.verification_status = 'skipped'
+            return
+        # Retried tests are verified against the fix the delivery already has.
+        if not self.progress.implementation:
+            await self._implement_service()
+        await self._verify_built()
+
+    async def _reproduce(self, repair: int = 0) -> bool:
+        """Run the changed suite against the service as the repository holds it: true
+        when every added test fails there and every existing test passes, but for
+        those a repair corrected."""
+        if not self.progress.tests or self.progress.tests_error:
+            self.progress.baseline_status = 'skipped'
+            return False
+        self.progress.baseline_status = 'running'
+        self.progress.baseline = None
+        self.progress.baseline_error = None
+        added, changed = (self.progress.tests[key] for key in ('added_tests', 'changed_tests'))
+        try:
+            image = await workflow.execute_activity(
+                'build_baseline', args=[self.spec.session_id, self.spec.language],
+                task_queue=VERIFICATION_TASK_QUEUE, result_type=dict,
+                start_to_close_timeout=timedelta(minutes=30),
+                heartbeat_timeout=timedelta(minutes=2),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+            self.progress.baseline = await workflow.execute_child_workflow(
+                'VerificationWorkflow',
+                args=[self.spec.session_id, image['image_id'], self.progress.tests['image_id'],
+                      self.spec.language, [*added, *changed]],
+                id=self._child_id('baseline', repair),
+                task_queue=VERIFICATION_TASK_QUEUE,
+                result_type=dict,
+            )
+        except (ActivityError, ChildWorkflowError) as exc:
+            workflow.logger.warning('Baseline run failed: %s', exc.cause or exc)
+            self.progress.baseline_error = ('The tests could not be run against the service as '
+                                            'the repository holds it.')
+            self.progress.baseline_status = 'error'
+            return False
+        self.progress.baseline_status, self.progress.baseline_error = judge_baseline(
+            self.progress.baseline, added, changed)
+        workflow.logger.info('Baseline run: %s', self.progress.baseline_status)
+        return self.progress.baseline_status == 'reproduced'
+
     def _child_id(self, stage: str, repair: int = 0) -> str:
         child_id = f'{stage}-{self.spec.session_id}'
         if self.state.retry_stage:
@@ -84,7 +143,12 @@ class DeliveryWorkflow:
         if self.state.retry_stage == 'repository':
             # Generation and verification already succeeded; only the push is repeated.
             return
-        if self.state.retry_stage == 'server' and not self.progress.code:
+        if self.spec.kind == 'bugfix':
+            if self.state.retry_stage == 'tests':
+                # New tests have to be shown to fail without the fix again.
+                await self._change()
+                return
+        elif self.state.retry_stage == 'server' and not self.progress.code:
             # A failed codegen never started either authoring branch.
             await self._generate()
             return
@@ -141,7 +205,8 @@ class DeliveryWorkflow:
         target = diagnosis['target']
         workflow.logger.info('Repair round %d: correcting the %s', attempt, target)
         self.progress.repairs.append(
-            {'attempt': attempt, 'target': target, 'summary': diagnosis['summary']})
+            {'attempt': attempt, 'target': target, 'tests': diagnosis['tests'],
+             'summary': diagnosis['summary']})
         self.progress.verification_status = 'repairing'
         repair = repair_request(diagnosis, self.progress.verification, attempt)
         # A failed repair keeps the previous image and records the stage's own error.
@@ -150,6 +215,11 @@ class DeliveryWorkflow:
         else:
             await self._generate_tests(repair)
         if self.progress.implementation_error or self.progress.tests_error:
+            self.progress.verification_status = 'completed'
+            return False
+        if (target == 'tests' and self.spec.kind == 'bugfix'
+                and not await self._reproduce(attempt)):
+            # Repaired added tests that no longer fail without the fix prove nothing.
             self.progress.verification_status = 'completed'
             return False
         return True
@@ -173,12 +243,16 @@ class DeliveryWorkflow:
             self.progress.verification_status = 'completed'
 
     def _coding_context(self) -> dict[str, Any]:
-        return {
+        context = {
             "requirements": self.spec.requirements,
             "requirements_document": self.spec.requirements_document,
             "api_design": self.spec.api,
             "language": self.spec.language,
         }
+        if self.spec.brief:
+            # A change to an existing service: the contract above is the repository's.
+            context['brief'] = self.spec.brief
+        return context
 
     def _stage_context(self, repair: dict[str, Any] | None) -> dict[str, Any]:
         context = self._coding_context()
@@ -198,17 +272,25 @@ class DeliveryWorkflow:
                 and self.progress.verification['status'] == 'passed'):
             self.progress.publication_status = 'skipped'
             return
+        if self.spec.kind == 'bugfix' and self.progress.baseline_status != 'reproduced':
+            # Green alone is not enough: the tests must have been red without the fix.
+            self.progress.publication_status = 'skipped'
+            return
         self.progress.publication_status = 'running'
         self.progress.publication_error = None
+        contract = {
+            'language': self.spec.language,
+            'requirements': self.spec.requirements,
+            'requirements_document': self.spec.requirements_document,
+            'api': self.spec.api,
+        }
+        if self.spec.brief:
+            # The repository's contract grows by what the change required of the service.
+            contract = with_requirements(contract, self.spec.brief['requirements'])
         try:
             self.progress.publication = await workflow.execute_activity(
                 publish_repository,
-                args=[self.spec.session_id, self.spec.repository, {
-                    'language': self.spec.language,
-                    'requirements': self.spec.requirements,
-                    'requirements_document': self.spec.requirements_document,
-                    'api': self.spec.api,
-                }],
+                args=[self.spec.session_id, self.spec.repository, contract, self.spec.kind],
                 start_to_close_timeout=timedelta(minutes=10),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )

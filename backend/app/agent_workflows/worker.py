@@ -12,10 +12,10 @@ from app.temporal.lifecycle import run_worker
 
 
 async def run_agent_worker(*, task_queue: str, workflow_type: type,
-                           activity_fn: Callable[..., Any], label: str) -> None:
+                           activities: list[Callable[..., Any]], label: str) -> None:
     configure_logging()
     client = await Client.connect(TEMPORAL_ADDRESS)
     worker = Worker(client, task_queue=task_queue, workflows=[workflow_type],
-                    activities=[activity_fn], max_concurrent_activities=1)
+                    activities=activities, max_concurrent_activities=1)
     logging.getLogger(__name__).info('%s worker started on %s', label, task_queue)
     await run_worker(worker)

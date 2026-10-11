@@ -36,6 +36,27 @@ follow its structure and conventions and extend what is already there instead of
 duplicating it. Do not remove files that are unrelated to this service.
 """
 
+CHANGE_PROMPT = """Change the existing service in /workspace/service, a checkout of the
+project's Git repository named by the `repository` entry of the input. The `brief` entry
+of the input is the task: the problem, the expected behaviour and the acceptance criteria.
+The supplied requirements and OpenAPI design are the contract the service was built from;
+the API stays exactly as it is.
+{instructions}
+Read the code that handles the behaviour the brief describes before changing anything.
+Locate code with list_files and search_files and read only the relevant line ranges with
+read_file. Make the expected behaviour true with targeted edits to the existing code,
+using edit_file; create a file with write_file only when the change needs a new one. Do
+not regenerate, restructure or rewrite code the brief does not concern, and do not remove
+files. Use shell for builds and anything else.
+Do not generate, read, or execute tests.
+Build the service without running tests. Fix build failures.
+Keep the Dockerfile at the project root building the service and serving it on 8080 as a
+non-root user. Do not put secrets in files.
+You have no Docker daemon; the outer worker will build the Dockerfile.
+Every file you change is pushed to a new branch of the repository once the service passes
+verification. Only finish once the change and a successful build are complete.
+"""
+
 REPAIR_PROMPT = """
 This is a repair run. /workspace/service already holds your previous implementation. It
 compiled, but independently written HTTP contract tests failed against the running service
@@ -57,8 +78,11 @@ def main() -> None:
     inputs = json.loads(context)
     language = json.loads(LANGUAGE.read_text())
     run_agent(AgentProfile(
-        root=ROOT, prompt=(PROMPT.format(instructions=language['instructions'])
-                           + (REPOSITORY_PROMPT if inputs.get('repository') else '')
+        # A change to an existing service is told about its checkout by its own prompt.
+        root=ROOT, prompt=((CHANGE_PROMPT.format(instructions=language['instructions'])
+                            if inputs.get('brief')
+                            else PROMPT.format(instructions=language['instructions'])
+                            + (REPOSITORY_PROMPT if inputs.get('repository') else ''))
                            + (REPAIR_PROMPT if inputs.get('repair') else '')),
         initial_messages=[context],
         max_turns_env='IMPLEMENTATION_MAX_TURNS', validate_completion=validate_completion,

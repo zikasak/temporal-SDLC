@@ -82,6 +82,23 @@ def copy_regular_files(source: Path, target: Path, *,
             copy_file(item, destination)
 
 
+async def build_image(context: Path, label: str, log_path: Path) -> str:
+    """Build the image of a sanitized source tree and return its immutable ID."""
+    iid = context.parent / 'image-id'
+    await docker_agents.docker('build', '--iidfile', str(iid), str(context), log_path=log_path)
+    image_id = iid.read_text().strip()
+    if not re.fullmatch(r'sha256:[0-9a-f]{64}', image_id):
+        raise RuntimeError(f'Docker returned an invalid {label} image ID')
+    return image_id
+
+
+def publish_manifest(artifact_dir: Path, result: dict[str, Any]) -> None:
+    """Replace the stage's image.json in one step, so a reader never sees half of it."""
+    manifest = artifact_dir / f'{uuid.uuid4().hex}.json'
+    manifest.write_text(json.dumps(result, indent=2))
+    os.replace(manifest, artifact_dir / 'image.json')
+
+
 async def run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
                     generated_code_dir: Path) -> dict[str, Any]:
     with trace_operation(f'build-{stage.role.replace("_", "-")}', session_id=session_id,
@@ -118,23 +135,16 @@ async def _run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
             clean = work / 'build'
             stage.sanitize_output(output, clean)
             stage.validate_output(clean)
-            iid = work / 'image-id'
             build_log = artifact_dir / 'image-build.log'
             logger.info('%s stage building %s image (session=%s, log=%s)',
                         stage.role, stage.image_label, session_id, build_log)
-            await docker_agents.docker('build', '--iidfile', str(iid), str(clean),
-                                       log_path=build_log)
-            image_id = iid.read_text().strip()
-            if not re.fullmatch(r'sha256:[0-9a-f]{64}', image_id):
-                raise RuntimeError(f'Docker returned an invalid {stage.image_label} image ID')
+            image_id = await build_image(clean, stage.image_label, build_log)
             destination = artifact_dir / stage.output_subdir
             if destination.exists():
                 shutil.rmtree(destination)
             os.replace(clean, destination)
             result = {'image_id': image_id, 'path': str(destination), 'session_id': session_id}
-            manifest = artifact_dir / f'{uuid.uuid4().hex}.json'
-            manifest.write_text(json.dumps(result, indent=2))
-            os.replace(manifest, artifact_dir / 'image.json')
+            publish_manifest(artifact_dir, result)
             logger.info('%s stage published image (session=%s, image=%s, path=%s)',
                         stage.role, session_id, image_id, destination)
             return result

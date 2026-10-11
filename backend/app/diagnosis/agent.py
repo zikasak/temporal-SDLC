@@ -40,13 +40,26 @@ side is reviewed again after the next verification.
 Do not change service/ or tests/ and do not run the tests. Finish by writing verdict.json
 in the project root with write_file, containing exactly this JSON object:
 {{"target": "implementation" or "tests",
+ "tests": [{{"class_name": "...", "name": "..."}}],
  "summary": "one short paragraph explaining the decision",
  "instructions": "what must be corrected"}}
+When the target is the tests, `tests` lists every failing test that is itself wrong, with
+its `class_name` and `name` copied exactly from the `verification` entry. The repair may
+change those tests and no others, so a wrong test you leave out stays wrong, and a test
+that did not fail cannot be listed. When the target is the implementation, `tests` is [].
 The author who repairs the chosen side receives only `instructions` and the failing test
 names and messages: the implementation author never sees the tests and the test author
 never sees the implementation. Make `instructions` self-contained: for every defect name
 the endpoint or requirement, quote what the contract requires, and state the observed
 wrong behavior and the required correction. Only finish once verdict.json is written.
+"""
+
+CHANGE_PROMPT = """
+The service existed before this run and was changed for the task in the `brief` entry of
+the input: the problem, the expected behaviour and the acceptance criteria. The test suite
+is the repository's existing one plus regression tests for that brief. The brief has the
+same authority as the contract, and overrides it where it states the expected behaviour
+more precisely.
 """
 
 
@@ -57,14 +70,18 @@ def validate_completion(root: Path) -> None:
         raise RuntimeError('Agent finished without a readable verdict.json') from exc
     if not isinstance(verdict, dict) or verdict.get('target') not in {'implementation', 'tests'}:
         raise RuntimeError('Agent verdict does not name the implementation or the tests')
+    if verdict['target'] == 'tests' and not verdict.get('tests'):
+        raise RuntimeError('Agent verdict against the tests lists no broken test')
 
 
 def main() -> None:
+    context = Path('/workspace/input.json').read_text()
     language = json.loads(LANGUAGE.read_text())
     run_agent(AgentProfile(
-        root=ROOT, prompt=PROMPT.format(label=language['label'],
-                                        report_pattern=language['report_pattern']),
-        initial_messages=[Path('/workspace/input.json').read_text()],
+        root=ROOT, prompt=(PROMPT.format(label=language['label'],
+                                         report_pattern=language['report_pattern'])
+                           + (CHANGE_PROMPT if json.loads(context).get('brief') else '')),
+        initial_messages=[context],
         max_turns_env='DIAGNOSIS_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Diagnosis completed',
         exhaustion_message='Diagnosis exceeded the tool-turn limit',

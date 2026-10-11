@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -23,12 +24,14 @@ from app.diagnosis.models import (
 from app.implementation.activities import copy_service
 from app.languages import Language
 from app.requirements.document import without_repeated_tables
+from app.verification.models import TestRef
 from app.temporal.tracing import activity_metadata
 from app.tracing import trace_operation
 
 logger = logging.getLogger(__name__)
 
 MAX_VERDICT_BYTES = 256 * 1024
+MAX_BROKEN_TESTS = 200
 
 
 def prepare_review(language: Language, session_dir: Path, context: dict[str, Any],
@@ -62,7 +65,25 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
         {**index, 'verification': {**counts, **failed_tests(verification)}}, ensure_ascii=False))
 
 
-def read_verdict(output: Path) -> dict[str, str]:
+def broken_tests(named: Any, verification: dict[str, Any],
+                 case_id: Callable[[str, str], str]) -> list[TestRef]:
+    """The tests a verdict against the tests may have repaired: those it names that did
+    fail in the run. A test that did not fail cannot be found broken."""
+    failed = {case_id(item['class_name'], item['name']): item
+              for item in verification.get('test_failures') or []}
+    cases = {case_id(item['class_name'], item['name'])
+             for item in (named if isinstance(named, list) else [])[:MAX_BROKEN_TESTS]
+             if isinstance(item, dict) and all(isinstance(item.get(key), str)
+                                               for key in ('class_name', 'name'))}
+    tests = [{'class_name': failed[case]['class_name'], 'name': failed[case]['name']}
+             for case in sorted(cases & failed.keys())]
+    if not tests:
+        raise RuntimeError('Diagnosis verdict against the tests names no failing test as broken')
+    return tests
+
+
+def read_verdict(output: Path, verification: dict[str, Any],
+                 case_id: Callable[[str, str], str]) -> dict[str, Any]:
     """The agent's output is untrusted: accept one bounded, well-formed decision."""
     file = output / VERDICT
     if file.is_symlink() or not file.is_file() or file.stat().st_size > MAX_VERDICT_BYTES:
@@ -77,7 +98,9 @@ def read_verdict(output: Path) -> dict[str, str]:
                              for key in ('summary', 'instructions'))
     if not instructions:
         raise RuntimeError('Diagnosis verdict has no repair instructions')
-    return {'target': verdict['target'], 'summary': summary[:SUMMARY_CHARS],
+    tests = (broken_tests(verdict.get('tests'), verification, case_id)
+             if verdict['target'] == 'tests' else [])
+    return {'target': verdict['target'], 'tests': tests, 'summary': summary[:SUMMARY_CHARS],
             'instructions': instructions[:INSTRUCTION_CHARS]}
 
 
@@ -99,7 +122,9 @@ async def run_diagnosis(session_id: str, context: dict[str, Any]) -> Diagnosis:
                                           artifact_dir / 'agent.log', image_build=dataclasses.replace(
                                               docker_agents.default_agent_image('diagnosis', 'review'),
                                               dockerfile=language.agent_dockerfile))
-        result: Diagnosis = {'session_id': session_id, **read_verdict(output),
+        verdict = read_verdict(output, context.get('verification') or {},
+                               language.test_suite.case_id)
+        result: Diagnosis = {'session_id': session_id, **verdict,
                              'path': str(artifact_dir)}
     manifest = artifact_dir / f'{uuid.uuid4().hex}.json'
     manifest.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')

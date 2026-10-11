@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import Markdown from "react-markdown";
 import { errorMessage, failure, readBody } from "./api";
+import {
+  DeliveryResults, deliveryPending, deliveryProgress, retriedProgress,
+  type DeliveryProgress, type GenerationStage,
+} from "./Delivery";
 import ForkButton from "./ForkButton";
 import RepositoryPicker, { RepositorySummary } from "./RepositoryPicker";
 import { repositoryCheckout, repositorySelection, selectionInput, type RepositoryCheckout, type RepositorySelection } from "./github";
@@ -37,6 +41,8 @@ type Session = {
   forked_from: { session_id: string; message_index: number } | null;
   repository: RepositorySelection | null;
   checkout: RepositoryCheckout | null;
+  // The delivery of a task this session hands over itself, once it has finished.
+  delivery: DeliveryProgress | null;
 };
 
 const sessionStatuses: SessionStatus[] = [
@@ -53,6 +59,8 @@ const categories: [Category, string][] = [
   ["non_functional", "Non-functional"],
   ["technical", "Technical"],
 ];
+// Kinds that leave the API as it is: the session delivers them without an API design.
+const directKinds: TaskKind[] = ["bugfix"];
 const kindLabels: Record<TaskKind, string> = {
   new_service: "New service",
   api_change: "API change",
@@ -120,7 +128,11 @@ function sessionRecord(value: unknown): Session {
     typeof value.document.document_id === "string"
       ? (value.document as RequirementsDocument)
       : null;
+  const repository = repositorySelection("repository" in value ? value.repository : null);
+  const delivery = "delivery" in value ? value.delivery : null;
   return {
+    delivery: typeof delivery === "object" && delivery !== null
+      ? deliveryProgress(delivery as Record<string, unknown>, repository) : null,
     session_id: value.session_id,
     status: value.status as SessionStatus,
     messages: value.messages as Session["messages"],
@@ -131,7 +143,7 @@ function sessionRecord(value: unknown): Session {
     document,
     error: "error" in value && typeof value.error === "string" ? value.error : null,
     forked_from: forkOrigin(value),
-    repository: repositorySelection("repository" in value ? value.repository : null),
+    repository,
     checkout: repositoryCheckout("checkout" in value ? value.checkout : null),
   };
 }
@@ -156,6 +168,7 @@ export default function Requirements() {
   const [session, setSession] = useState<Session | null>(null);
   const [message, setMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [retryingGeneration, setRetryingGeneration] = useState<GenerationStage | null>(null);
   const [error, setError] = useState("");
   const [repositoryChoice, setRepositoryChoice] = useState<RepositorySelection | null>(null);
   const conversation = useRef<HTMLDivElement>(null);
@@ -179,7 +192,7 @@ export default function Requirements() {
         const record = sessionRecord(body);
         setSession(record);
         setError("");
-        if (pendingStatuses.includes(record.status)) {
+        if (pendingStatuses.includes(record.status) || (record.delivery && deliveryPending(record.delivery))) {
           timer = window.setTimeout(poll, 2000);
         }
       } catch (caught) {
@@ -290,6 +303,26 @@ export default function Requirements() {
     }
   }
 
+  async function retryGeneration(stage: GenerationStage) {
+    if (!session?.delivery || submitting || deliveryPending(session.delivery)) return;
+    setSubmitting(true);
+    setRetryingGeneration(stage);
+    setError("");
+    try {
+      await post(`/${encodeURIComponent(session.session_id)}/generation/retry`, { stage });
+      setSession({
+        ...session,
+        delivery: retriedProgress(session.delivery, stage, Boolean(session.checkout)),
+      });
+      setRefreshKey((value) => value + 1);
+    } catch (caught) {
+      setError(failure(caught, "Could not retry this step."));
+    } finally {
+      setSubmitting(false);
+      setRetryingGeneration(null);
+    }
+  }
+
   async function forkSession(messageIndex: number) {
     if (!session) return;
     setSubmitting(true);
@@ -347,7 +380,8 @@ export default function Requirements() {
         <h1>Requirements interview</h1>
         <p className="page-intro">
           Say what kind of task this is and describe it. The LLM asks questions, records
-          requirements as you go, and writes them up as a document.
+          requirements as you go, and writes them up as a document. A bugfix is then
+          delivered from here: regression tests, the fix, and a new branch.
         </p>
       </header>
 
@@ -542,7 +576,7 @@ export default function Requirements() {
                     <span>revision {session.document.revision}</span>
                   </li>
                 </ul>
-                {session.status === "completed" && (
+                {session.status === "completed" && session.kind && !directKinds.includes(session.kind) && (
                   <a
                     className="next-step"
                     href={`?mode=api-design&requirements_session_id=${encodeURIComponent(
@@ -551,6 +585,11 @@ export default function Requirements() {
                   >
                     Design the API from these requirements →
                   </a>
+                )}
+                {session.delivery && (
+                  <DeliveryResults progress={session.delivery} retrying={retryingGeneration}
+                    disabled={submitting || deliveryPending(session.delivery)}
+                    onRetry={(stage) => void retryGeneration(stage)} />
                 )}
               </section>
             )}

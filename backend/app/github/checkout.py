@@ -44,7 +44,8 @@ def checkout_path(base: Path, session_id: str) -> Path:
 
 
 def publication_branch(session_id: str) -> str:
-    return BRANCH_PREFIX + session_id.removeprefix('api-design-session-')[:12]
+    """Named after the session, whichever kind of session started the delivery."""
+    return BRANCH_PREFIX + session_id.rpartition('-session-')[2][:12]
 
 
 def _credentials(token: str) -> str:

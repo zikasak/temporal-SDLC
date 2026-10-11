@@ -1,4 +1,5 @@
 import re
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
@@ -11,6 +12,7 @@ from app.requirements.service import (
     finalize_session,
     fork_session,
     get_session,
+    retry_generation,
     retry_message,
     send_message,
     start_session,
@@ -35,6 +37,10 @@ class MessageBody(BaseModel):
         if not value:
             raise ValueError("Message cannot be empty")
         return value
+
+
+class RetryGenerationBody(BaseModel):
+    stage: Literal['server', 'tests', 'repository']
 
 
 class ForkBody(BaseModel):
@@ -86,6 +92,16 @@ async def retry(session_id: str):
     except Exception as exc:
         raise http_error(exc) from exc
     return {"session_id": session_id, "status": "turn_running"}
+
+
+@router.post('/{session_id}/generation/retry', status_code=202)
+async def restart_generation(session_id: str, body: RetryGenerationBody):
+    _check_session_id(session_id)
+    try:
+        await retry_generation(session_id, body.stage)
+    except Exception as exc:
+        raise http_error(exc) from exc
+    return {'session_id': session_id, 'verification_status': 'waiting'}
 
 
 @router.post("/{session_id}/finalize", status_code=202)
