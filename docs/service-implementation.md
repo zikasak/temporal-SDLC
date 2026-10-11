@@ -349,7 +349,8 @@ flowchart LR
    `baseline_status`:
    - `reproduced`: every added test fails and every existing test passes;
    - `not_reproduced`: an added test does not fail. Nothing is changed;
-   - `error`: an existing test fails, any test is skipped, an added test did not run, or
+   - `error`: an existing test fails, any test is skipped, a test in the suite's sources
+     has no report (`missing_tests`: the build configuration left it out, for example), or
      the run could not complete.
 
    Anything but `reproduced` ends the delivery with `baseline_error`, verification
@@ -362,7 +363,11 @@ flowchart LR
    repository test the repair corrected because the change made it wrong may fail there;
    every other existing test must still pass.
 
-The push requires a passed verification and a `reproduced` baseline. The published
+A passed final run counts only when every test of the suite ran: with a skipped test, or
+one missing from the reports, `verification_error` says so and nothing is pushed. A test
+that fails without the fix and is skipped with it has not been seen to pass.
+
+The push requires such a verification and a `reproduced` baseline. The published
 contract is the repository's with the brief's requirements appended (`with_requirements`
 in `app/delivery/contract.py`) and `requirements.md` rendered again from the longer list,
 so a later task keeps the tests written for them. Their IDs cannot clash: once the user has said the task is a
@@ -378,7 +383,7 @@ model is unchanged. `DeliveryProgress` reports `baseline_status`
 `GET /api/requirements/sessions/{id}` returns the progress as `delivery` (null until the
 session delivers), and `POST /api/requirements/sessions/{id}/generation/retry` retries a
 failed stage as for a design session. Retrying `tests` is also how a failed or
-unreproduced baseline is retried: the tests are written again and held against the
+unreproduced baseline, or a verification that ended with an error, is retried: the tests are written again and held against the
 baseline again, and the fix is written only if there is none yet. An API design cannot be
 started from such a session.
 
@@ -475,6 +480,9 @@ The verification child returns a summary with:
   `details_truncated` when more failures exist;
 - `tracked`: for each test the caller named, how many report entries it had and how many
   failed, or null when it named none (only the baseline run of a bugfix does);
+- `missing_tests`: in such a run, the tests in the sources of the published suite
+  (`tests/suite`, which must be what the test image was built from) that no report
+  mentions, up to 50;
 - bounded service/runner log tails (up to 200 lines/8,000 characters each), an optional
   infrastructure `error`, and artifact `path`.
 

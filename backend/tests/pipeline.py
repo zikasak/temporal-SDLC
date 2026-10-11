@@ -41,9 +41,11 @@ class FakeStages:
         self.verification_images = None
         self.verified_images: list[tuple[str, str]] = []
         self.verified_languages: list[str] = []
+        self.verified_tracked: list[list[str] | None] = []
         # Outcomes of successive baseline runs: 'reproduced' (only the added tests and
         # the corrected existing ones fail), 'not_reproduced' (an added test passes),
-        # 'existing_failed', 'skipped' (a test did not run) or 'error'; the last one repeats.
+        # 'existing_failed', 'skipped', 'left_out' (a test of the suite was not run at
+        # all) or 'error'; the last one repeats.
         self.baseline_results = ['reproduced']
         self.baselines: list[tuple[str, str, list[str]]] = []
         # Repository tests a repair of the tests corrects, as that stage reports them.
@@ -128,12 +130,14 @@ class FakeStages:
         self.baselines.append((service_image, test_image, tracked))
         if outcome == 'error':
             return {'status': 'error', 'tests': 0, 'passed': 0, 'failures': 0, 'errors': 0,
-                    'skipped': 0, 'tracked': {}, 'error': 'The service stopped during verification'}
+                    'skipped': 0, 'tracked': {}, 'missing_tests': [],
+                    'error': 'The service stopped during verification'}
         passing = tracked[:1] if outcome == 'not_reproduced' else []
         failures = len(tracked) - len(passing) + (outcome == 'existing_failed')
         return {'status': 'failed', 'tests': 9, 'failures': failures,
                 'passed': 9 - failures - (outcome == 'skipped'),
                 'errors': 0, 'skipped': int(outcome == 'skipped'), 'error': None,
+                'missing_tests': ['com.example.RoomsTest#lists'] if outcome == 'left_out' else [],
                 'tracked': {case: {'tests': 1, 'failed': int(case not in passing)}
                             for case in tracked}}
 
@@ -143,11 +147,12 @@ class FakeStages:
         details = {'session_id': session_id, 'duration_seconds': 1.0, 'exit_code': 0,
                    'test_failures': [], 'details_truncated': False, 'service_log': '',
                    'runner_log': '', 'path': '/verification'}
-        if tracked_tests is not None:
+        if service_image == BASELINE_IMAGE:
             self.stages.append('baseline-run')
             return {**details, **self._baseline(service_image, test_image, tracked_tests)}
         self.stages.append('verification')
         self.verified_languages.append(language)
+        self.verified_tracked.append(tracked_tests)
         self.verification_images = (service_image, test_image)
         self.verified_images.append((service_image, test_image))
         self.verification_started.set()
@@ -159,12 +164,14 @@ class FakeStages:
         if outcome == 'child_error':
             raise ApplicationError('verification worker failed', non_retryable=True)
         failed = outcome == 'failed'
-        return {**details, 'status': outcome,
-                'tests': 1, 'passed': int(outcome == 'passed'),
-                'failures': int(failed), 'errors': 0, 'skipped': 0,
+        # 'skipped': the runner is content, but one of its tests did not run.
+        skipped = outcome == 'skipped'
+        return {**details, 'status': 'passed' if skipped else outcome,
+                'tests': 1 + skipped, 'passed': int(outcome in ('passed', 'skipped')),
+                'failures': int(failed), 'errors': 0, 'skipped': int(skipped),
                 'test_failures': [{'class_name': 'RoomsTest', 'name': 'lists', 'kind': 'failure',
                                    'message': 'Expected 200, got 500'}] if failed else [],
-                'tracked': None, 'service_log': 'NullPointerException' if failed else '',
+                'tracked': None, 'missing_tests': None, 'service_log': 'NullPointerException' if failed else '',
                 'error': None}
 
 

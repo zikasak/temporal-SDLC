@@ -71,7 +71,7 @@ cd backend
 /Users/zikasak/programming/temporal-project/backend/env/bin/python -m pytest tests -q
 ```
 
-The suite takes about 40 seconds: 309 passed, 11 skipped (the skipped ones need Docker).
+The suite takes about 40 seconds: 311 passed, 11 skipped (the skipped ones need Docker).
 If a run produces no output for more than a minute it is hanging, not slow; see
 "Traps" at the end. The frontend type-check is `npx tsc --noEmit -p .` in `frontend/`
 (it needs `node_modules`, which also exists only in the main checkout).
@@ -243,7 +243,10 @@ Beyond what the plan asked for:
 
 - A repair of the *tests* in the final loop runs the baseline again. Without this a
   repaired added test could pass with and without the fix.
-- Retrying `tests` is also the retry of a failed or unreproduced baseline.
+- Retrying `tests` is also the retry of a failed or unreproduced baseline, and of a
+  verification that ended with an error.
+- The final run of a bugfix must run every test: a skipped or unreported test leaves a
+  passed run unpublished (`unproven_green` in `delivery/models.py`).
 
 Not done, and open:
 
@@ -251,8 +254,9 @@ Not done, and open:
   has not been run end to end with real agents and Docker.
 - Only test methods, with their own annotations, are protected from change. A repair can
   still alter a shared helper or fixture, or annotate a whole class, which changes what
-  untouched tests do. For a bugfix the baseline catches a test that is switched off this
-  way, because it refuses a run with any skipped test. The other kinds have no such
+  untouched tests do, and the build file can leave tests out of the run. For a bugfix
+  the baseline catches both, because it refuses a run with a skipped test or with a test
+  of the suite's sources missing from the reports. The other kinds have no such
   check: their verification still passes with skipped tests.
 - Test identity relies on Surefire naming a report entry after its method. A test with a
   custom display name for its invocations may not be matched, which ends a baseline as

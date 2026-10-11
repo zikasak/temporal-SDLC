@@ -41,6 +41,9 @@ class VerificationResult(TypedDict):
     # The outcome of each test the caller named, by the language's test case identity;
     # None when it named none.
     tracked: dict[str, TrackedTest] | None
+    # Tests in the suite's sources that the run has no report of (the first few), when
+    # the caller named tests: whatever kept them from running, they proved nothing.
+    missing_tests: list[str] | None
     service_log: str
     runner_log: str
     error: str | None

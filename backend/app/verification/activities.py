@@ -21,7 +21,7 @@ from app import docker_agents
 from app.agent_workflows.host import build_image, publish_manifest, session_language
 from app.github.checkout import CHECKOUT_DIR
 from app.implementation.activities import copy_service
-from app.languages import TestReports, UnsupportedLanguage, get_language
+from app.languages import Language, TestReports, UnsupportedLanguage, get_language
 from app.config import GENERATED_CODE_DIR
 from app.verification.models import TestFailure, TrackedTest, VerificationResult
 from app.temporal.tracing import trace_activity
@@ -34,6 +34,7 @@ MAX_REPORT_FILES = 1000
 MAX_TESTS = 100000
 MAX_FAILURE_DETAILS = 50
 MAX_TRACKED_TESTS = 1000
+MAX_MISSING_TESTS = 50
 LOG_LIMIT = 8000
 CONSTRAINTS = (
     '--cap-drop=ALL', '--security-opt=no-new-privileges', '--pids-limit=256',
@@ -85,10 +86,13 @@ async def collect_reports(container: str, destination: Path, reports: TestReport
 
 def summarize_reports(directory: Path, reports: TestReports,
                       tracked: dict[str, TrackedTest] | None = None,
-                      case_id: Callable[[str, str], str] | None = None) -> dict:
+                      case_id: Callable[[str, str], str] | None = None,
+                      suite_tests: set[str] | None = None) -> dict:
     """Count JUnit XML testcase outcomes, not redundant nested suite summary attributes.
-    The outcomes of the tests in `tracked`, keyed by `case_id`, are recorded in it."""
+    The outcomes of the tests in `tracked`, keyed by `case_id`, are recorded in it, and
+    the tests of `suite_tests` without any report entry are returned as missing."""
     totals = dict(tests=0, passed=0, failures=0, errors=0, skipped=0)
+    reported: set[str] = set()
     failures: list[TestFailure] = []
     files = sorted(directory.glob(reports.pattern))
     if not files or len(files) > MAX_REPORT_FILES:
@@ -116,8 +120,9 @@ def summarize_reports(directory: Path, reports: TestReports,
                    else 'failures' if outcome.tag == 'failure' else 'errors')
             totals['tests'] += 1
             totals[key] += 1
-            watched = tracked and tracked.get(case_id(case.get('classname', ''),
-                                                      case.get('name', '')))
+            identity = case_id(case.get('classname', ''), case.get('name', '')) if case_id else ''
+            reported.add(identity)
+            watched = tracked and tracked.get(identity)
             if watched:
                 watched['tests'] += 1
                 watched['failed'] += key in ('failures', 'errors')
@@ -131,8 +136,20 @@ def summarize_reports(directory: Path, reports: TestReports,
                     })
     if not totals['tests'] or totals['tests'] == totals['skipped']:
         raise RuntimeError('No tests were executed')
-    return {**totals, 'test_failures': failures,
+    missing = None if suite_tests is None else sorted(suite_tests - reported)[:MAX_MISSING_TESTS]
+    return {**totals, 'missing_tests': missing, 'test_failures': failures,
             'details_truncated': totals['failures'] + totals['errors'] > len(failures)}
+
+
+def published_suite_tests(artifact_dir: Path, test_image: str, language: Language) -> set[str]:
+    """Every test in the sources of the published suite that `test_image` was built from."""
+    try:
+        manifest = json.loads((artifact_dir / 'image.json').read_text())
+    except (OSError, ValueError):
+        manifest = None
+    if not isinstance(manifest, dict) or manifest.get('image_id') != test_image:
+        raise ApplicationError('The sources of the test image are unavailable', non_retryable=True)
+    return set(language.test_suite.test_cases(artifact_dir / 'suite'))
 
 
 async def cleanup(service: str, runner: str, network: str) -> None:
@@ -163,6 +180,12 @@ async def run_verification(session_id: str, service_image: str, test_image: str,
         raise ApplicationError('Too many tests to track', non_retryable=True)
     tracked: dict[str, TrackedTest] | None = None if tracked_tests is None else {
         item: {'tests': 0, 'failed': 0} for item in tracked_tests}
+    suite_tests = None
+    if tracked is not None:
+        # A run that answers for single tests answers for the whole suite: its build
+        # configuration could otherwise leave tests out without any of them failing.
+        suite_tests = published_suite_tests(GENERATED_CODE_DIR / session_id / 'tests',
+                                            test_image, stack)
     token = uuid.uuid4().hex
     network = f'verification-{token}'
     service, runner = f'{network}-service', f'{network}-tests'
@@ -173,7 +196,8 @@ async def run_verification(session_id: str, service_image: str, test_image: str,
         'session_id': session_id, 'status': 'error',
         'tests': 0, 'passed': 0, 'failures': 0, 'errors': 0, 'skipped': 0,
         'duration_seconds': 0, 'exit_code': None, 'test_failures': [],
-        'details_truncated': False, 'tracked': tracked, 'service_log': '', 'runner_log': '',
+        'details_truncated': False, 'tracked': tracked, 'missing_tests': None,
+        'service_log': '', 'runner_log': '',
         'error': None, 'path': str(run_dir),
     }
     started = time.monotonic()
@@ -241,8 +265,9 @@ async def run_verification(session_id: str, service_image: str, test_image: str,
                 if runner_started:
                     try:
                         await collect_reports(runner, run_dir / 'reports', reports)
-                        result.update(summarize_reports(run_dir / 'reports', reports, tracked,
-                                                        stack.test_suite.case_id))
+                        result.update(summarize_reports(
+                            run_dir / 'reports', reports, tracked, stack.test_suite.case_id,
+                            suite_tests))
                     except Exception as exc:
                         result['error'] = result['error'] or f'Could not read test reports: {str(exc)[-1000:]}'
             if runner_state.get('OOMKilled') or service_state.get('OOMKilled'):

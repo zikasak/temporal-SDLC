@@ -96,15 +96,17 @@ def judge_baseline(result: VerificationResult, added: list[str], changed: list[s
         # However it came to be skipped, a test that does not run protects nothing.
         return 'error', (f'Tests skipped in the baseline run: {result["skipped"]}. Every '
                          'test of the suite has to run for the baseline to prove anything.')
+    missing = result['missing_tests']
+    if missing:
+        return 'error', ('Tests of the suite that did not run in the baseline run: '
+                         f'{", ".join(missing[:NAMED_TESTS])} ({len(missing)}). Every test '
+                         'of the suite has to run for the baseline to prove anything.')
     existing = result['failures'] + result['errors'] - sum(
         tracked[case]['failed'] for case in {*added, *changed})
     if existing:
         return 'error', ('Existing tests failing against the service as the repository holds '
                          f'it: {existing}. The added tests prove nothing until the existing '
                          'suite passes there.')
-    idle = [case for case in added if not tracked[case]['tests']]
-    if idle:
-        return 'error', 'Added tests that did not run: ' + ', '.join(idle[:NAMED_TESTS]) + '.'
     passing = [case for case in added if tracked[case]['failed'] < tracked[case]['tests']]
     if passing or not added:
         return 'not_reproduced', (
@@ -113,6 +115,18 @@ def judge_baseline(result: VerificationResult, added: list[str], changed: list[s
              if passing else 'No added test is left in the suite.')
             + ' The problem was not reproduced, so nothing was changed.')
     return 'reproduced', None
+
+
+def unproven_green(result: VerificationResult) -> str | None:
+    """Why a passed run of a change's suite does not show the change working: a test that
+    did not run, such as one skipped by an assumption once the fix is in, passed nothing."""
+    if result['skipped']:
+        return (f'Tests skipped in the run against the changed service: {result["skipped"]}. '
+                'Every test of the suite has to run and pass.')
+    if result['missing_tests']:
+        return ('Tests of the suite that did not run against the changed service: '
+                f'{", ".join(result["missing_tests"][:NAMED_TESTS])}.')
+    return None
 
 
 @dataclass

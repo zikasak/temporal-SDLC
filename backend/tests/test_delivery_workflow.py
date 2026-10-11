@@ -394,6 +394,7 @@ async def test_bugfix_is_delivered_red_to_green_from_the_requirements_session(en
     ('not_reproduced', 'not_reproduced', 'com.example.RoomsTest#refusesDoubleBooking (1 of 2)'),
     ('existing_failed', 'error', 'Existing tests failing against the service as the repository holds it: 1'),
     ('skipped', 'error', 'Tests skipped in the baseline run: 1'),
+    ('left_out', 'error', 'did not run in the baseline run: com.example.RoomsTest#lists (1)'),
     ('error', 'error', 'The baseline run could not complete.'),
 ])
 async def test_nothing_is_fixed_unless_the_added_tests_fail_alone(env, worker, baseline, status, error, repository_selection):
@@ -412,6 +413,21 @@ async def test_nothing_is_fixed_unless_the_added_tests_fail_alone(env, worker, b
     assert worker.stages[-5:] == ['tests', 'baseline', 'baseline-run', 'implementation', 'verification']
     assert state.baseline_status == 'reproduced' and state.baseline_error is None
     assert state.verification['status'] == 'passed' and state.publication_status == 'completed'
+
+
+async def test_bugfix_is_not_published_while_a_test_is_skipped_with_the_fix(env, worker, repository_selection):
+    # Red on the unchanged service, then skipped rather than green on the changed one.
+    worker.verification_results = ['skipped', 'passed']
+    handle, state = await fixed(env, repository_selection)
+    assert state.baseline_status == 'reproduced' and state.verification['status'] == 'passed'
+    assert 'Tests skipped in the run against the changed service: 1' in state.verification_error
+    assert state.publication_status == 'skipped' and not worker.published
+    # The run answers for the tests the change added.
+    assert worker.verified_tracked == [ADDED_TESTS]
+
+    await requirements_service.retry_generation(handle.id, 'tests')
+    state = await delivered(env, handle.id)
+    assert state.verification_error is None and state.publication_status == 'completed'
 
 
 @pytest.mark.parametrize('still_red', [True, False])

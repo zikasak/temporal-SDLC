@@ -185,7 +185,15 @@ async def test_invalid_inputs_never_touch_docker_or_files(
     assert not transport['calls'] and not (tmp_path / 'generated').exists()
 
 
-async def test_named_tests_are_reported_one_by_one(transport):
+async def test_named_tests_are_reported_one_by_one(transport, tmp_path):
+    # The suite the runner image was built from; its build left `hidden` out of the run.
+    suite = tmp_path / 'generated/session/tests'
+    (suite / 'suite/src/test/java/com/example').mkdir(parents=True)
+    (suite / 'suite/src/test/java/com/example/OrdersTest.java').write_text(
+        'package com.example;\nclass OrdersTest {\n' + ''.join(
+            f'  @Test void {name}() {{}}\n' for name in ('lists', 'refuses', 'accepts', 'hidden'))
+        + '}\n')
+    (suite / 'image.json').write_text(json.dumps({'image_id': TEST_IMAGE}))
     case = '<testcase classname="com.example.{}" name="{}">{}</testcase>'
     failure = '<failure message="200"/>'
     data = ('<testsuite>' + case.format('OrdersTest', 'lists', failure)
@@ -204,6 +212,13 @@ async def test_named_tests_are_reported_one_by_one(transport):
     assert result['tracked'] == {'com.example.OrdersTest#refuses': {'tests': 1, 'failed': 1},
                                  'com.example.OrdersTest#accepts': {'tests': 2, 'failed': 1},
                                  'com.example.OrdersTest#renamed': {'tests': 0, 'failed': 0}}
+    assert result['missing_tests'] == ['com.example.OrdersTest#hidden']
+
+    # Sources of another image say nothing about what this one should have run.
+    (suite / 'image.json').write_text(json.dumps({'image_id': SERVICE_IMAGE}))
+    with pytest.raises(ApplicationError, match='sources of the test image'):
+        await ActivityEnvironment().run(
+            activities.verify_service, 'session', SERVICE_IMAGE, TEST_IMAGE, 'java', [])
 
 
 async def test_baseline_image_is_the_repositorys_service_without_its_tests(tmp_path, monkeypatch):

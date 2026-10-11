@@ -51,7 +51,8 @@ async def retry(session_id: str, stage: RetryStage) -> None:
     change = state.spec.kind == 'bugfix'
     failed = {'server': progress.code_error or progress.implementation_error,
               # The tests of a change are retried with the baseline run that judges them.
-              'tests': progress.tests_error or progress.baseline_error,
+              'tests': (progress.tests_error or progress.baseline_error
+                        or change and progress.verification_error),
               'repository': progress.publication_error}[stage]
     if not failed:
         raise SessionBusy('Only failed generation can be retried.')

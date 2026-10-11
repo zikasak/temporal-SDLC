@@ -12,7 +12,9 @@ with workflow.unsafe.imports_passed_through():
         TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
     )
     from app.delivery.contract import with_requirements
-    from app.delivery.models import DeliveryProgress, DeliveryState, judge_baseline
+    from app.delivery.models import (
+        DeliveryProgress, DeliveryState, judge_baseline, unproven_green,
+    )
     from app.diagnosis.models import repair_request
     from app.temporal.activities import publish_repository
 
@@ -226,11 +228,14 @@ class DeliveryWorkflow:
 
     async def _verify_service(self, repair: int = 0) -> None:
         self.progress.verification_status = 'running'
+        change = self.spec.kind == 'bugfix'
         try:
             self.progress.verification = await workflow.execute_child_workflow(
                 'VerificationWorkflow',
                 args=[self.spec.session_id, self.progress.implementation['image_id'],
-                      self.progress.tests['image_id'], self.spec.language],
+                      self.progress.tests['image_id'], self.spec.language,
+                      # The run of a change answers for every test of its suite.
+                      self.progress.tests['added_tests'] if change else None],
                 id=self._child_id('verification', repair),
                 task_queue=VERIFICATION_TASK_QUEUE,
                 result_type=dict,
@@ -241,6 +246,9 @@ class DeliveryWorkflow:
             self.progress.verification_status = 'error'
         else:
             self.progress.verification_status = 'completed'
+            if change and self.progress.verification['status'] == 'passed':
+                # Red without the fix is only half of it: every test must be seen green.
+                self.progress.verification_error = unproven_green(self.progress.verification)
 
     def _coding_context(self) -> dict[str, Any]:
         context = {
@@ -272,8 +280,10 @@ class DeliveryWorkflow:
                 and self.progress.verification['status'] == 'passed'):
             self.progress.publication_status = 'skipped'
             return
-        if self.spec.kind == 'bugfix' and self.progress.baseline_status != 'reproduced':
-            # Green alone is not enough: the tests must have been red without the fix.
+        if self.spec.kind == 'bugfix' and (self.progress.baseline_status != 'reproduced'
+                                           or self.progress.verification_error):
+            # Green alone is not enough: the tests must have been red without the fix,
+            # and all of them must have run with it.
             self.progress.publication_status = 'skipped'
             return
         self.progress.publication_status = 'running'
