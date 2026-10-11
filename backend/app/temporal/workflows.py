@@ -13,13 +13,18 @@ with workflow.unsafe.imports_passed_through():
     from app.api_design.prompt import OPENING_FALLBACK
     from app.delivery.models import DeliveryState, TaskSpec, delivery_id
     from app.github.models import RepositorySelection
-    from app.requirements.models import KIND_PROBLEM, RequirementsState
+    from app.requirements.document import render_requirements_markdown
+    from app.requirements.models import (
+        DIRECT_KINDS, KIND_PROBLEM, RequirementsState, numbered_after,
+    )
     from app.requirements.prompt import OPENING_MESSAGE
     from app.temporal.activities import (
         api_design_turn,
         checkout_repository,
         greet,
         parse_document,
+        read_repository_contract,
+        read_requirements_document,
         requirements_turn,
         send_llm_message,
         write_openapi_document,
@@ -119,7 +124,9 @@ class LLMRequestWorkflow:
 @workflow.defn
 class RequirementsWorkflow:
     """One requirements interview: each user message is an update, and the
-    finalize update turns the gathered requirements into a document."""
+    finalize update turns the gathered requirements into a document. A task that
+    leaves the API as it is has no API design to follow, so the session then hands
+    it to a DeliveryWorkflow itself."""
 
     @workflow.init
     def __init__(self, state: RequirementsState | None = None) -> None:
@@ -158,6 +165,8 @@ class RequirementsWorkflow:
                 workflow.logger.info("Continuing as new")
                 workflow.continue_as_new(self.state)
         await workflow.wait_condition(workflow.all_handlers_finished)
+        if self.state.status == "completed" and self.state.contract:
+            await self._deliver()
         return self.state.document
 
     @workflow.query
@@ -242,9 +251,38 @@ class RequirementsWorkflow:
         self.state.status = "interviewing"
         return ok
 
+    async def _read_contract(self) -> bool:
+        """A task delivered from here changes the service its repository was published
+        with, so it cannot be specified for a repository without a contract."""
+        try:
+            self.state.contract = await workflow.execute_activity(
+                read_repository_contract,
+                workflow.info().workflow_id,
+                start_to_close_timeout=timedelta(minutes=1),
+                schedule_to_close_timeout=timedelta(minutes=3),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except ActivityError as exc:
+            workflow.logger.warning("Repository contract unavailable: %s", exc.cause or exc)
+            unsupported = isinstance(exc.cause, ApplicationError) and exc.cause.type == "ContractError"
+            self.state.error = (exc.cause.message if unsupported
+                                else "The repository's contract could not be read. Try again.")
+            return False
+        # The task's requirements join the contract's when it is published. The interview
+        # numbers them past the contract's already; this holds whatever it was given.
+        self.state.requirements = numbered_after(
+            self.state.requirements,
+            [item["id"] for item in self.state.contract["requirements"]])
+        return True
+
     async def _write_document(self) -> bool:
         self.state.status = "finalizing"
         self.state.error = None
+        # Only a task delivered from here keeps a contract, whatever kind it was before.
+        self.state.contract = None
+        if self.state.kind in DIRECT_KINDS and not await self._read_contract():
+            self.state.status = "interviewing"
+            return False
         try:
             self.state.document = await workflow.execute_activity(
                 write_requirements_document,
@@ -262,6 +300,44 @@ class RequirementsWorkflow:
         self.state.status = "completed"
         return True
 
+    async def _deliver(self) -> None:
+        """Hand the brief and the repository's contract to a delivery and stay open
+        until that ends."""
+        session_id = workflow.info().workflow_id
+        try:
+            document = await workflow.execute_activity(
+                read_requirements_document,
+                args=[session_id, self.state.document["document_id"]],
+                start_to_close_timeout=timedelta(minutes=1),
+                schedule_to_close_timeout=timedelta(minutes=3),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except ActivityError as exc:
+            # The stored document expired; the requirement tables still carry the content.
+            workflow.logger.warning("Requirements document unavailable: %s", exc.cause or exc)
+            document = render_requirements_markdown(self.state.requirements)
+        contract = self.state.contract
+        try:
+            await workflow.execute_child_workflow(
+                "DeliveryWorkflow",
+                DeliveryState(spec=TaskSpec(
+                    session_id=session_id,
+                    requirements=contract["requirements"],
+                    requirements_document=contract["requirements_document"],
+                    api=contract["api"],
+                    kind=self.state.kind,
+                    brief={"requirements": self.state.requirements,
+                           "requirements_document": document},
+                    language=contract["language"],
+                    repository=self.state.repository,
+                    checkout=self.state.checkout,
+                )),
+                id=delivery_id(session_id),
+            )
+        except ChildWorkflowError as exc:
+            # Stage failures are results of the delivery; only an aborted one ends here.
+            workflow.logger.warning("Delivery did not finish: %s", exc.cause or exc)
+
     async def _expire(self) -> None:
         """After a day without messages, keep whatever was gathered."""
         workflow.logger.info("Requirements session idle, expiring")
@@ -270,7 +346,9 @@ class RequirementsWorkflow:
             return
         self.state.status = "failed"
         self.state.error = (
-            "The session expired and the document could not be generated." if complete
+            # Why it could not, when the repository is the reason.
+            self.state.error or "The session expired and the document could not be generated."
+            if complete
             else "The session expired before the kind of task and any requirements "
                  "were recorded."
         )

@@ -6,11 +6,13 @@ import uuid
 from typing import Any
 
 from app.config import TASK_QUEUE
+from app.delivery import service as delivery_service
+from app.delivery.models import DeliveryProgress, RetryStage
 from app.github.models import RepositorySelection
 from app.requirements.models import RequirementsState
 from app.requirements.prompt import OPENING_MESSAGE
 from app.temporal.client import connect_temporal
-from app.temporal.sessions import fork_messages, start_update, state_at_message
+from app.temporal.sessions import SessionBusy, fork_messages, start_update, state_at_message
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,25 @@ async def get_state(session_id: str) -> RequirementsState:
     return await handle.query("get_state", result_type=RequirementsState)
 
 
+def _delivers(state: RequirementsState) -> bool:
+    """Whether the session's own delivery builds its task, with no API design between."""
+    return state.status == "completed" and bool(state.contract)
+
+
+async def retry_generation(session_id: str, stage: RetryStage) -> None:
+    if not _delivers(await get_state(session_id)):
+        raise SessionBusy('Only failed generation can be retried.')
+    await delivery_service.retry(session_id, stage)
+
+
 async def get_session(session_id: str) -> dict[str, Any]:
     state = await get_state(session_id)
-    return {"session_id": session_id, **dataclasses.asdict(state)}
+    session = dataclasses.asdict(state)
+    # Polled every few seconds; the page shows the brief, not the repository's contract.
+    del session["contract"]
+    delivery = None
+    if _delivers(state):
+        delivery = dataclasses.asdict(
+            await delivery_service.get_progress(session_id)
+            or DeliveryProgress(verification_status='waiting', baseline_status='waiting'))
+    return {"session_id": session_id, **session, "delivery": delivery}

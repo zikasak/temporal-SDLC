@@ -205,3 +205,41 @@ async def test_session_with_a_repository_is_implemented_inside_its_checkout(tmp_
     shutil.rmtree(checkout)
     with pytest.raises(ApplicationError, match='repository checkout is unavailable'):
         await ActivityEnvironment().run(activities.implement_service, 'session', context)
+
+
+async def test_change_edits_the_checkout_without_generated_code(tmp_path, monkeypatch):
+    monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
+    checkout = tmp_path / 'session/repository'
+    for name, text in {'src/main/Api.java': 'published contract code', 'Dockerfile': 'FROM scratch',
+                       'src/test/OrdersTest.java': 'project tests',
+                       'contract-tests/pom.xml': 'contract tests',
+                       'contracts/api.json': 'published contract'}.items():
+        (checkout / name).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / name).write_text(text)
+    brief = {'requirements': [], 'requirements_document': 'Rooms double-book.'}
+    context = {'requirements': [], 'language': 'java', 'brief': brief,
+               'repository': {'full_name': 'octocat/project', 'branch': 'main'}}
+    sent = {}
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': 0})
+        if args[0] == 'cp' and args[1] == '-a':
+            import tarfile
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.update({item.name: archive.extractfile(item).read().decode()
+                             for item in archive.getmembers() if item.isfile()})
+        if args[0] == 'cp' and args[1].endswith(':/workspace/service/.'):
+            (Path(args[2]) / 'Dockerfile').write_text('FROM scratch')
+        if args[0] == 'build' and '--iidfile' in args:
+            Path(args[args.index('--iidfile') + 1]).write_text('sha256:' + 'c' * 64)
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    # No code was generated for the session, and none is needed.
+    await ActivityEnvironment().run(activities.implement_service, 'session', context)
+    assert json.loads(sent.pop('input.json'))['brief'] == brief
+    del sent['language.json']
+    # The repository's service as it is; never either kind of tests or the contract.
+    assert sent == {'service/src/main/Api.java': 'published contract code',
+                    'service/Dockerfile': 'FROM scratch'}

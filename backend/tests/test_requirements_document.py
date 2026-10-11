@@ -57,6 +57,24 @@ async def test_set_task_kind_records_only_known_kinds():
     assert ctx.kind == "api_change"
 
 
+async def test_change_to_a_published_service_continues_its_requirement_ids():
+    ctx = RequirementsContext(published=("FR-1", "FR-2", "NFR-1", "TR-5"))
+    # Until the user says the task changes that service, it is numbered on its own.
+    assert ctx.record("functional", "Sign in", "D", "must")["id"] == "FR-1"
+    assert ctx.record("technical", "Postgres", "D", "must")["id"] == "TR-1"
+    set_task_kind = build(ctx)[0]
+    # The analyst is told what changed, so the conversation never keeps a stale ID silently.
+    assert '"renumbered": {"FR-1": "FR-3"}' in await set_task_kind.ainvoke({"kind": "bugfix"})
+    assert [item["id"] for item in ctx.as_list()] == ["FR-3", "TR-1"]
+    # In the usual order, kind first, an ID is right from the moment it is given.
+    assert ctx.record("functional", "Sign out", "D", "must")["id"] == "FR-4"
+    assert ctx.record("non_functional", "Fast", "D", "should")["id"] == "NFR-2"
+    assert "renumbered" not in await set_task_kind.ainvoke({"kind": "bugfix"})
+    # A new service does not join the repository's contract.
+    await set_task_kind.ainvoke({"kind": "new_service"})
+    assert ctx.record("technical", "Redis", "D", "must")["id"] == "TR-2"
+
+
 def test_render_contains_every_requirement_and_escapes_tables():
     ctx = RequirementsContext()
     ctx.record("functional", "Search", "Search by name | date.", "must", "Users asked")

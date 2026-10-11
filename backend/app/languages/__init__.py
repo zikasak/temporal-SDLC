@@ -42,6 +42,11 @@ class TestSuite:
     published: tuple[str, ...]
     # Glob, relative to the project, that at least one test file must match.
     test_glob: str
+    # The test cases of a suite project: the identity of each, in the form `case_id`
+    # gives, and its source, so that a changed test can be told from an untouched one.
+    test_cases: Callable[[Path], dict[str, str]]
+    # The identity of the test case a report entry (class name, test name) belongs to.
+    case_id: Callable[[str, str], str]
     # Files a complete suite always has.
     required: tuple[str, ...] = ()
 

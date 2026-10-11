@@ -52,15 +52,55 @@ already hold tests from an earlier version of the contract: keep those the suppl
 contract supports and correct or remove the rest.
 """
 
+CHANGE_PROMPT = """Add regression tests to the HTTP test suite in /workspace/tests, the
+contract-tests directory of the project's Git repository named by the `repository` entry
+of the input. The `brief` entry of the input describes a change to the running service:
+the problem, the expected behaviour and the acceptance criteria. The supplied requirements
+and OpenAPI contract describe the service, whose API stays exactly as it is.
+The implementation is changed independently in another container. Its source, image and
+logs are unavailable. Derive all expected behavior from the brief and the contract.
+{instructions}
+Write tests that fail while the problem exists and pass once the expected behaviour is
+in place: one for each acceptance criterion, asserting the expected behaviour through
+HTTP exactly as the brief states it. The suite is first run against the service as it is
+today, where every test you add must fail and every existing test must pass; a new test
+that passes there does not reproduce the problem and stops the task.
+Add each test where it belongs: in the existing test class that covers the behaviour, or
+in a new class. Do not change, rename or delete any existing test: they keep protecting
+the rest of the service, and the outer worker rejects a suite in which one of them
+differs. Follow the structure, helpers and conventions the existing tests use.
+
+Read SERVICE_BASE_URL from the environment, as the existing tests do, and use bounded HTTP
+connection and request timeouts. Never import implementation classes, create production
+sources, implement the service, or mock the behavior being tested. Use independent
+expected values. Avoid assertion-free probes, source inspections, invented contracts and
+tests that only verify their own fixtures. Do not disable/skip tests or swallow failures.
+Set up test data through documented public APIs and clean it up when supported. Keep
+tests independent and repeatable; do not assume implementation class names, database
+structure, existing data or unspecified response ordering.
+
+Use only the brief and the supplied requirements and OpenAPI contract as your authority.
+Credentials must come from environment variables; never put secrets in files.
+Create files with write_file and change existing files with edit_file, not by
+rewriting them. Locate code with list_files and search_files, read only the relevant
+line ranges with read_file, and use shell to adjust and build test dependencies.
+The service is not available during authoring; do not execute service tests here.
+The outer worker builds the test runner image and independently compiles the suite.
+Only finish when the regression tests and a successful build are complete.
+"""
+
 REPAIR_PROMPT = """
 This is a repair run. /workspace/tests already holds your previous suite. It compiled, but
 some tests failed against the running service and a reviewer who compared them with the
 contract concluded that those tests, not the service, are wrong. The `repair` entry of the
-input holds the reviewer's `instructions` and the failing `test_failures`.
-Correct each reported test with targeted edits so that it asserts exactly what the contract
-states; do not start over or rewrite tests that are not reported. Never make a test pass by
-weakening it: do not delete or disable tests, drop assertions the contract supports, or
-accept any response. Remove an assertion only when the contract does not support it. The
+input holds the reviewer's `instructions`, the failing `test_failures` and `broken_tests`:
+the tests the reviewer found wrong. Those are the only tests you may change. Every other
+test must stay exactly as it is, including a failing one, and the outer worker rejects a
+suite in which one of them differs or is missing.
+Correct each broken test with targeted edits so that it asserts exactly what the contract
+states; do not start over. Never make a test pass by weakening it: do not disable tests,
+drop assertions the contract supports, or accept any response. Remove an assertion, or a
+whole broken test, only when the contract does not support what it asserts. The
 requirements and OpenAPI contract remain the authority: where the instructions contradict
 them, follow the contract. The implementation stays unavailable.
 """
@@ -76,8 +116,11 @@ def main() -> None:
     inputs = json.loads(context)
     language = json.loads(LANGUAGE.read_text())
     run_agent(AgentProfile(
-        root=ROOT, prompt=(PROMPT.format(instructions=language['instructions'])
-                           + (REPOSITORY_PROMPT if inputs.get('repository') else '')
+        # A change to an existing service is told about its repository by its own prompt.
+        root=ROOT, prompt=((CHANGE_PROMPT.format(instructions=language['instructions'])
+                            if inputs.get('brief')
+                            else PROMPT.format(instructions=language['instructions'])
+                            + (REPOSITORY_PROMPT if inputs.get('repository') else ''))
                            + (REPAIR_PROMPT if inputs.get('repair') else '')),
         initial_messages=[context,
                           *(['OpenAPI contract:\n' + OPENAPI.read_text()]

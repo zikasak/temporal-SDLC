@@ -1,6 +1,8 @@
 """Bounded verdict and repair payloads exchanged between verification and authoring."""
 from typing import Any, Literal, TypedDict
 
+from app.verification.models import TestRef
+
 RepairTarget = Literal['implementation', 'tests']
 TARGETS = ('implementation', 'tests')
 SUMMARY_CHARS = 1000
@@ -13,6 +15,9 @@ FAILURE_MESSAGE_CHARS = 600
 class Diagnosis(TypedDict):
     session_id: str
     target: RepairTarget
+    # The failing tests that are themselves wrong: the only ones a repair of the tests
+    # may change. Empty when the implementation is at fault.
+    tests: list[TestRef]
     summary: str
     instructions: str
     path: str
@@ -21,6 +26,7 @@ class Diagnosis(TypedDict):
 class RepairRound(TypedDict):
     attempt: int
     target: RepairTarget
+    tests: list[TestRef]
     summary: str
 
 
@@ -42,4 +48,6 @@ def repair_request(diagnosis: dict[str, Any], verification: dict[str, Any],
     if diagnosis['target'] == 'implementation':
         # The test author works from the contract alone, so only the service sees its log.
         request['service_log'] = verification.get('service_log', '')
+    else:
+        request['broken_tests'] = diagnosis['tests']
     return request

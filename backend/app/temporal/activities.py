@@ -16,7 +16,7 @@ from app.api_design.openapi import DOCUMENT_FILENAME as OPENAPI_FILENAME
 from app.api_design.openapi import api_problems, render_openapi
 from app.api_design.prompt import api_turn_messages
 from app.config import GENERATED_CODE_DIR
-from app.delivery.contract import RepositoryContract, write_contract
+from app.delivery.contract import ContractError, RepositoryContract, read_contract, write_contract
 from app.documents import (
     DocumentConflict,
     DocumentNotFound,
@@ -24,6 +24,7 @@ from app.documents import (
     DocumentValidationError,
     create_generated_document,
     edit_generated_document,
+    get_generated_document,
     list_generated_documents,
     list_session_passages,
     parse_stored_document,
@@ -47,6 +48,10 @@ from app.tools import api_design as api_design_tools
 from app.tools import repository as repository_tools
 from app.tools import requirements as requirements_tools
 from app.tools.document_write import summarize_tool_results
+
+COMMIT_SUBJECT = "Add generated service, contract tests and contract"
+# What the commit of a task that changes an existing service says instead.
+COMMIT_SUBJECTS = {"bugfix": "Fix the service and add regression tests"}
 
 
 def _attached_document_ids(messages: list[dict[str, Any]]) -> list[str]:
@@ -87,6 +92,19 @@ def _repository_tools(session_id: str | None = None) -> list[BaseTool]:
     return repository_tools.build(root) if root.is_dir() else []
 
 
+def _published_requirement_ids() -> tuple[str, ...]:
+    """IDs of the requirements in the contract of the session's repository; none for a
+    repository this pipeline has not published a service to."""
+    if not activity.in_activity():
+        return ()
+    try:
+        contract = read_contract(repository_checkout.checkout_path(
+            GENERATED_CODE_DIR, activity.info().workflow_id))
+    except ContractError:
+        return ()
+    return tuple(item["id"] for item in contract["requirements"])
+
+
 async def _github_token() -> tuple[str, dict[str, Any]]:
     """A fresh installation token and the saved connection it belongs to."""
     try:
@@ -125,6 +143,7 @@ async def checkout_repository(
 @trace_activity('publish-repository', feature='repository', input_parameter='repository')
 async def publish_repository(
     session_id: str, repository: RepositorySelection, contract: RepositoryContract,
+    kind: str | None = None,
 ) -> RepositoryPublication:
     """Commit the verified service, its contract tests and the contract they were built
     from to a new branch and push it."""
@@ -145,7 +164,7 @@ async def publish_repository(
         result = await repository_checkout.push(
             target, repository, token,
             branch=repository_checkout.publication_branch(session_id),
-            message=("Add generated service, contract tests and contract\n\n"
+            message=(f"{COMMIT_SUBJECTS.get(kind, COMMIT_SUBJECT)}\n\n"
                      f"Generated from {repository['branch']} by session {session_id}."),
             author=(bot, f"{connection['bot_user_id']}+{bot}@users.noreply.github.com"),
         )
@@ -155,6 +174,20 @@ async def publish_repository(
     activity.logger.info("Pushed session %s to %s (%s)", session_id, result["branch"],
                          result["commit"])
     return result
+
+
+@activity.defn
+@trace_activity('read-repository-contract', feature='repository', input_parameter='session_id')
+async def read_repository_contract(session_id: str) -> RepositoryContract:
+    """The contract the session's repository was published with, which a task that
+    changes its service starts from."""
+    target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
+    try:
+        return await asyncio.to_thread(read_contract, target)
+    except ContractError as exc:
+        activity.logger.warning("Session %s has no usable contract: %s", session_id, exc)
+        # Shown to the user as it is; another attempt reads the same checkout.
+        raise ApplicationError(str(exc), type='ContractError', non_retryable=True) from exc
 
 
 @activity.defn
@@ -233,7 +266,8 @@ async def requirements_turn(
     messages: list[dict[str, Any]], requirements: list[dict[str, Any]],
     kind: str | None = None,
 ) -> dict[str, Any]:
-    ctx = requirements_tools.RequirementsContext.from_list(requirements, kind)
+    ctx = requirements_tools.RequirementsContext.from_list(
+        requirements, kind, await asyncio.to_thread(_published_requirement_ids))
     repository = _repository_tools()
     started = time.perf_counter()
     try:
@@ -305,6 +339,15 @@ async def write_requirements_document(
         narrative = None
     content = render_requirements_markdown(requirements, narrative)
     return await _save_session_document(session_id, DOCUMENT_FILENAME, content)
+
+
+@activity.defn
+async def read_requirements_document(session_id: str, document_id: str) -> str:
+    """The text of the session's requirements document, as the user downloads it."""
+    try:
+        return (await get_generated_document(document_id, session_id))["parsed_text"]
+    except DocumentNotFound as exc:
+        raise ApplicationError(str(exc), non_retryable=True) from exc
 
 
 @activity.defn

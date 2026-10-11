@@ -56,12 +56,16 @@ def without_repeated_tables(context: dict[str, Any]) -> dict[str, Any]:
     """Coding context whose document is reduced to its narrative when that loses nothing.
 
     An edited, foreign or otherwise unrecognised document is passed through whole.
+    The brief of a change to an existing service is reduced the same way.
     """
+    result = dict(context)
+    if result.get("brief"):
+        result["brief"] = without_repeated_tables(result["brief"])
     narrative = requirements_narrative(context.get("requirements_document") or "",
                                        context.get("requirements") or [])
     if narrative is None:
-        return dict(context)
-    result = {key: value for key, value in context.items() if key != "requirements_document"}
+        return result
+    del result["requirements_document"]
     if narrative:
         result["requirements_narrative"] = narrative
     return result

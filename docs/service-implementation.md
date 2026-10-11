@@ -5,6 +5,8 @@ The pipeline is API design → code generation → parallel implementation and t
 Everything after the design is one `DeliveryWorkflow` (`backend/app/delivery/`), named
 `delivery-<session-id>`. A finished API-design session starts it with a `TaskSpec`: the
 requirements, API model, OpenAPI document, language and repository the session agreed on.
+A bugfix skips the design and code generation and is delivered from its requirements
+session instead; see [Changing an existing service](#changing-an-existing-service-bugfix).
 The delivery keeps each stage's result or error in its own `DeliveryProgress`, which the
 session GET endpoint merges into the session it reports. The design session stays open
 until its delivery ends.
@@ -54,7 +56,8 @@ tree. The test worker uses only contract inputs and the static test-suite templa
 session's language (`backend/app/languages/<language>/test_suite`; today Java's Maven template).
 The verification worker also needs Docker and writable `GENERATED_CODE_DIR`, and must
 use the same Docker daemon as both authoring workers: images are local immutable IDs,
-not registry tags. `TEMPORAL_VERIFICATION_TASK_QUEUE` defaults to `verification`.
+not registry tags. It also builds the baseline image of a
+[bugfix](#changing-an-existing-service-bugfix) from the session's checkout. `TEMPORAL_VERIFICATION_TASK_QUEUE` defaults to `verification`.
 The diagnosis worker has the same Docker and `GENERATED_CODE_DIR` needs as the coding
 workers and reads the published service, test suite and verification artifacts.
 `TEMPORAL_DIAGNOSIS_TASK_QUEUE` defaults to `diagnosis`.
@@ -308,6 +311,101 @@ to are not supported.
 `completed`, `skipped` when verification did not pass, `error`), `publication` and
 `publication_error`.
 
+## Changing an existing service (bugfix)
+
+A requirements session whose task kind is `bugfix` (a bugfix or any other change that
+leaves the API as it is) has no API design. When it is finalized it reads the
+repository's contract from `contracts/` in its checkout; a repository without one is
+refused there, with the reason shown in the session. Once the document is written the
+session starts the `DeliveryWorkflow` itself (`delivery-<requirements-session-id>`) and
+stays open until it ends. The `TaskSpec` holds the **repository's** contract as
+`requirements`, `requirements_document`, `api` and `language`, and the interview's own
+requirements and document as `brief`. Both authors and the diagnosis receive the brief
+beside the contract.
+
+No code is generated, and the stages run in sequence, red to green:
+
+```mermaid
+flowchart LR
+    brief[Requirements session] --> tests[TestGenerationWorkflow]
+    tests --> baseline[Baseline run]
+    repository[Repository service image] --> baseline
+    baseline -- added tests fail, existing pass --> fix[ImplementationWorkflow]
+    baseline -- anything else --> stop[Stop and report]
+    fix --> verification[VerificationWorkflow and repair loop]
+```
+
+1. **Regression tests.** The test author's workspace is the repository's `contract-tests/`
+   as usual. It adds tests wherever they belong, in an existing class or a new one, and
+   may not change or remove an existing test; the stage fails otherwise (see
+   [Which tests an author may change](#which-tests-an-author-may-change)). The stage
+   result describes the suite against the repository's: `added_tests`, and after repairs
+   `changed_tests` and `removed_tests`.
+2. **Baseline run.** The verification worker's `build_baseline` activity builds the service
+   from the checkout, filtered exactly as the implementation author sees it, and publishes
+   `<GENERATED_CODE_DIR>/<session-id>/baseline/image.json`. `VerificationWorkflow` then runs
+   the new suite against that image and reports each added and changed test on its own
+   (`tracked`). `judge_baseline` (`app/delivery/models.py`) turns the result into
+   `baseline_status`:
+   - `reproduced`: every added test fails and every existing test passes;
+   - `not_reproduced`: an added test does not fail. Nothing is changed;
+   - `error`: an existing test fails, any test is skipped, a test in the suite's sources
+     has no report (`missing_tests`: the build configuration left it out, for example), or
+     the run could not complete.
+
+   Anything but `reproduced` ends the delivery with `baseline_error`, verification
+   `skipped` and nothing pushed.
+3. **The fix.** The implementation author's workspace is the checkout alone, without
+   generated code, and its prompt asks for targeted edits for the brief.
+4. **Final run.** The whole suite against the changed service, with the usual repair loop.
+   When a repair corrects the tests, the baseline is run again with the repaired suite.
+   Added tests must still fail there, or the delivery ends as `not_reproduced`. A
+   repository test the repair corrected because the change made it wrong may fail there;
+   every other existing test must still pass.
+
+A passed final run counts only when every test of the suite ran: with a skipped test, or
+one missing from the reports, `verification_error` says so and nothing is pushed. A test
+that fails without the fix and is skipped with it has not been seen to pass.
+
+The push requires such a verification and a `reproduced` baseline. The published
+contract is the repository's with the brief's requirements appended (`with_requirements`
+in `app/delivery/contract.py`) and `requirements.md` rendered again from the longer list,
+so a later task keeps the tests written for them. Their IDs cannot clash: once the user has said the task is a
+bugfix, the interviewer's `record_requirement` numbers past the IDs of the repository's
+contract, so an ID is final when the user first sees it. Requirements recorded before
+that are renumbered when the kind is set (`numbered_after`), and the tool tells the
+analyst to say which IDs changed. Finalizing applies the same rule once more before the
+document is written. The conversation, the document, both authors, the tests and the
+repository therefore quote the same IDs. The API
+model is unchanged. `DeliveryProgress` reports `baseline_status`
+(`not_applicable` for every other kind), `baseline` and `baseline_error`.
+
+`GET /api/requirements/sessions/{id}` returns the progress as `delivery` (null until the
+session delivers), and `POST /api/requirements/sessions/{id}/generation/retry` retries a
+failed stage as for a design session. Retrying `tests` is also how a failed or
+unreproduced baseline, or a verification that ended with an error or could not complete,
+is retried: the tests are written again and held against the
+baseline again, and the fix is written only if there is none yet. An API design cannot be
+started from such a session.
+
+## Which tests an author may change
+
+A test is identified by itself, not by its file: the language's `TestSuite.test_cases`
+reads every test of a suite with its source (Java: each `@Test`-like method as
+`package.Class#method`, from the first annotation or modifier of its declaration, so
+adding `@Disabled` changes it; nested classes counted with their file's class), and
+`TestSuite.case_id` gives the same identity for a report entry. Whitespace is not a
+change. Helpers, fixtures and build files are not tests and are not protected.
+
+- The first test author of a change may add tests and nothing else.
+- A repair of the tests, for any kind of task, may change or remove only the tests the
+  diagnosis found broken. The verdict lists them as `tests` (`class_name` and `name`, as
+  reports name them); the host keeps only those that failed in the verification being
+  diagnosed and rejects a verdict against the tests that names none. They reach the test
+  author as `broken_tests` in its `repair` entry, and each `repairs` round reports them.
+- A suite in which any other test differs from what it was, or is missing, is rejected
+  and the stage fails without publishing.
+
 ## Add a future stage
 
 1. Define explicit policies in the new role's host module. `prepare_inputs(session_dir,
@@ -381,6 +479,11 @@ The verification child returns a summary with:
   `exit_code`;
 - up to 50 failed/error-test details (class/name, kind and a bounded message), with
   `details_truncated` when more failures exist;
+- `tracked`: for each test the caller named, how many report entries it had and how many
+  failed, or null when it named none (only the baseline run of a bugfix does);
+- `missing_tests`: in such a run, the tests in the sources of the published suite
+  (`tests/suite`, which must be what the test image was built from) that no report
+  mentions, up to 50;
 - bounded service/runner log tails (up to 200 lines/8,000 characters each), an optional
   infrastructure `error`, and artifact `path`.
 
@@ -414,7 +517,8 @@ verification passes. Each round is:
    failed run (`verification/`: Surefire reports and both container logs) and the
    requirements and API design, embedded or on demand like the coding stages. The contract
    is the only authority. The agent writes `verdict.json` with `target`
-   (`implementation` or `tests`), a `summary` and self-contained repair `instructions`.
+   (`implementation` or `tests`), the broken `tests` when the tests are the target, a
+   `summary` and self-contained repair `instructions`.
    The host accepts only a bounded, well-formed verdict and publishes it as
    `<GENERATED_CODE_DIR>/<session-id>/diagnosis/verdict.json`.
 2. **Repair** (`verification_status: repairing`). The blamed side's own workflow

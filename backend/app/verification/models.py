@@ -12,6 +12,20 @@ class TestFailure(TypedDict):
     message: str
 
 
+class TestRef(TypedDict):
+    """A test as reports name it."""
+    class_name: str
+    name: str
+
+
+class TrackedTest(TypedDict):
+    # Report entries of the test: more than one for a parameterized test, none when
+    # it did not run.
+    tests: int
+    # How many of them failed or ended in an error.
+    failed: int
+
+
 class VerificationResult(TypedDict):
     session_id: str
     status: Literal['passed', 'failed', 'error']
@@ -24,6 +38,12 @@ class VerificationResult(TypedDict):
     exit_code: int | None
     test_failures: list[TestFailure]
     details_truncated: bool
+    # The outcome of each test the caller named, by the language's test case identity;
+    # None when it named none.
+    tracked: dict[str, TrackedTest] | None
+    # Tests in the suite's sources that the run has no report of (the first few), when
+    # the caller named tests: whatever kept them from running, they proved nothing.
+    missing_tests: list[str] | None
     service_log: str
     runner_log: str
     error: str | None

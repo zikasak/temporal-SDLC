@@ -8,7 +8,7 @@ from app.test_generation.workflows import TestGenerationWorkflow
 
 async def main() -> None:
     await run_agent_worker(task_queue=TEST_GENERATION_TASK_QUEUE,
-                           workflow_type=TestGenerationWorkflow, activity_fn=generate_service_tests,
+                           workflow_type=TestGenerationWorkflow, activities=[generate_service_tests],
                            label='Test generation')
 
 

@@ -183,3 +183,64 @@ async def test_invalid_inputs_never_touch_docker_or_files(
         await ActivityEnvironment().run(
             activities.verify_service, session, service_image, test_image, language)
     assert not transport['calls'] and not (tmp_path / 'generated').exists()
+
+
+async def test_named_tests_are_reported_one_by_one(transport, tmp_path):
+    # The suite the runner image was built from; its build left `hidden` out of the run.
+    suite = tmp_path / 'generated/session/tests'
+    (suite / 'suite/src/test/java/com/example').mkdir(parents=True)
+    (suite / 'suite/src/test/java/com/example/OrdersTest.java').write_text(
+        'package com.example;\nclass OrdersTest {\n' + ''.join(
+            f'  @Test void {name}() {{}}\n' for name in ('lists', 'refuses', 'accepts', 'hidden'))
+        + '}\n')
+    (suite / 'image.json').write_text(json.dumps({'image_id': TEST_IMAGE}))
+    case = '<testcase classname="com.example.{}" name="{}">{}</testcase>'
+    failure = '<failure message="200"/>'
+    data = ('<testsuite>' + case.format('OrdersTest', 'lists', failure)
+            + case.format('OrdersTest', 'refuses', failure)
+            + case.format('OrdersTest$Sizes', 'accepts(int)[1]', '')
+            + case.format('OrdersTest$Sizes', 'accepts(int)[2]', '<error message="x"/>')
+            + '</testsuite>').encode()
+    transport['archive'].write_bytes(report_archive(data))
+    transport['exit_code'] = 1
+    result = await ActivityEnvironment().run(
+        activities.verify_service, 'session', SERVICE_IMAGE, TEST_IMAGE, 'java',
+        ['com.example.OrdersTest#refuses', 'com.example.OrdersTest#accepts',
+         'com.example.OrdersTest#renamed'])
+    assert (result['tests'], result['failures'], result['errors']) == (4, 2, 1)
+    # Each test by itself, whatever class or invocation its report entries belong to.
+    assert result['tracked'] == {'com.example.OrdersTest#refuses': {'tests': 1, 'failed': 1},
+                                 'com.example.OrdersTest#accepts': {'tests': 2, 'failed': 1},
+                                 'com.example.OrdersTest#renamed': {'tests': 0, 'failed': 0}}
+    assert result['missing_tests'] == ['com.example.OrdersTest#hidden']
+
+    # Sources of another image say nothing about what this one should have run.
+    (suite / 'image.json').write_text(json.dumps({'image_id': SERVICE_IMAGE}))
+    with pytest.raises(ApplicationError, match='sources of the test image'):
+        await ActivityEnvironment().run(
+            activities.verify_service, 'session', SERVICE_IMAGE, TEST_IMAGE, 'java', [])
+
+
+async def test_baseline_image_is_the_repositorys_service_without_its_tests(tmp_path, monkeypatch):
+    monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
+    checkout = tmp_path / 'session/repository'
+    for name in ('src/main/Orders.java', 'src/test/OrdersTest.java', 'contract-tests/pom.xml',
+                 'contracts/api.json', '.git/config'):
+        (checkout / name).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / name).write_text(name)
+    built = []
+
+    async def docker(*args, **kwargs):
+        context = Path(args[-1])
+        built.extend(sorted(str(item.relative_to(context)) for item in context.rglob('*')
+                            if item.is_file()))
+        Path(args[args.index('--iidfile') + 1]).write_text(SERVICE_IMAGE)
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    run = lambda: ActivityEnvironment().run(activities.build_baseline, 'session', 'java')
+    with pytest.raises(ApplicationError, match='no Dockerfile'):
+        await run()
+    (checkout / 'Dockerfile').write_text('FROM scratch')
+    assert (await run())['image_id'] == SERVICE_IMAGE
+    assert built == ['Dockerfile', 'src/main/Orders.java']

@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
-from app.delivery.contract import ContractError, read_contract
+from app.delivery.contract import ContractError, read_contract, write_contract
 from app.github import checkout, storage
 from app.llm import graph
 from app.temporal import activities
@@ -129,7 +129,44 @@ async def test_verified_sources_are_pushed_to_a_new_branch(tmp_path, remote, rep
                               CONTRACT) == published
 
 
-def test_a_repository_without_a_contract_is_reported_as_unsupported(tmp_path):
+async def test_bugfix_of_a_requirements_session_gets_its_own_branch(tmp_path, remote, repository_selection):
+    session_id = "requirements-session-" + "b" * 32
+    environment = ActivityEnvironment()
+    await environment.run(activities.checkout_repository, session_id, repository_selection)
+    session = tmp_path / "generated" / session_id
+    # The seeded repository was never published to by this pipeline.
+    with pytest.raises(ApplicationError, match="no readable contract") as refused:
+        await environment.run(activities.read_repository_contract, session_id)
+    assert refused.value.type == "ContractError" and refused.value.non_retryable
+    for name in ("implementation/service/src/main/Kept.java", "tests/suite/pom.xml"):
+        (session / name).parent.mkdir(parents=True, exist_ok=True)
+        (session / name).write_text("fixed")
+    published = await environment.run(activities.publish_repository, session_id,
+                                      repository_selection, CONTRACT, "bugfix")
+    # Named after this session, not after the kind of session it is.
+    assert published["branch"] == "generated/" + "b" * 12
+    assert git("log", "-1", "--format=%s", published["branch"], cwd=remote) == (
+        "Fix the service and add regression tests")
+    # The next task on that branch starts from the contract published with it.
+    assert await environment.run(activities.read_repository_contract, session_id) == CONTRACT
+
+
+@pytest.mark.parametrize("damage", [
+    None,
+    {"requirements.json": '{"FR-1": "Place an order"}'},
+    {"requirements.json": '["Place an order"]'},
+    {"requirements.json": '[{"id": 1, "category": "functional"}]'},
+    {"requirements.json": '[{"id": "FR-1", "category": "wishes", "title": "T", '
+                          '"description": "D", "priority": "must"}]'},
+    {"language.json": '{"name": ["java"]}'},
+    {"api.json": '{"info": {}, "endpoints": "none"}'},
+])
+def test_a_repository_without_a_usable_contract_is_reported_as_unsupported(tmp_path, damage):
+    """Whatever is wrong with the files, the session is told, not left to fail later."""
+    if damage:
+        write_contract(tmp_path, CONTRACT)
+        for name, text in damage.items():
+            (tmp_path / "contracts" / name).write_text(text)
     with pytest.raises(ContractError, match="no readable contract in contracts/"):
         read_contract(tmp_path)
 

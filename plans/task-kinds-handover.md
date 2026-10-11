@@ -1,7 +1,7 @@
 # Handover: tasks that are not "build a new service"
 
 Written on 2026-10-10 for whoever continues this work. It assumes you have not seen the
-system before. Steps 1 to 3 of six are done; the rest is described below in the order it
+system before. Steps 1 to 4 of six are done; the rest is described below in the order it
 should be built.
 
 ## 1. What the system is
@@ -58,7 +58,8 @@ Vocabulary used below:
 | `backend/app/languages/` | The language registry; `java/` is the only entry |
 | `backend/app/github/checkout.py`, `backend/app/temporal/activities.py` | Clone and push (`checkout_repository`, `publish_repository`) |
 | `backend/app/api/routes/` | HTTP routes |
-| `frontend/src/Requirements.tsx`, `ApiDesign.tsx` | The two chat pages; `ApiDesign.tsx` also renders delivery progress |
+| `frontend/src/Requirements.tsx`, `ApiDesign.tsx` | The two chat pages |
+| `frontend/src/Delivery.tsx` | Delivery progress, rendered by both pages |
 | `docs/service-implementation.md` | The detailed reference for delivery. Read it before changing a stage. |
 
 ### Running the tests
@@ -70,14 +71,15 @@ cd backend
 /Users/zikasak/programming/temporal-project/backend/env/bin/python -m pytest tests -q
 ```
 
-The suite takes about 35 seconds: 279 passed, 11 skipped (the skipped ones need Docker).
+The suite takes about 40 seconds: 312 passed, 11 skipped (the skipped ones need Docker).
 If a run produces no output for more than a minute it is hanging, not slow; see
 "Traps" at the end. The frontend type-check is `npx tsc --noEmit -p .` in `frontend/`
 (it needs `node_modules`, which also exists only in the main checkout).
 
 ## 2. The problem
 
-Every stage assumes the task is "build a new service from nothing":
+Before this work every stage assumed the task is "build a new service from nothing"
+(a bugfix no longer goes this way, see step 4):
 
 - the requirements interview asks what the user wants to build and covers a whole system;
 - API design always runs, starts from an empty API, and is the only door into delivery;
@@ -168,8 +170,8 @@ them, per decision 2.
   brief for the others.
 - `validate_finalize` refuses while the kind is unset, and an idle session without a kind
   fails instead of writing a document.
-- The kind is carried into `ApiDesignState.kind` and `TaskSpec.kind`. Nothing routes on it
-  yet: every kind is still built as a new service.
+- The kind is carried into `ApiDesignState.kind` and `TaskSpec.kind`. Only `bugfix` routes
+  on it (step 4): the other kinds are still built as a new service.
 - The requirements page shows the kind and disables "Generate document" until it is set.
 
 Not done: "without a selected repository only new service is valid". A requirements
@@ -192,41 +194,79 @@ now publishes it:
   writes it. The test workspace only ever took `contract-tests/` from the checkout.
 - The language is stored because a task that skips API design has nowhere else to get it.
 
-Not done: nothing calls `read_contract` yet. It raises `ContractError` for a repository
-without a contract (decision 2); steps 4 and 5 are its callers and must report that error
-to the user.
+`read_contract` raises `ContractError` for a repository without a contract (decision 2).
+Step 4 calls it through the `read_repository_contract` activity; step 5 is its other
+caller and must report that error to the user too.
+
+### Step 4: the bugfix path
+
+The reference is "Changing an existing service (bugfix)" in
+`docs/service-implementation.md`. In short:
+
+- **Entry.** `RequirementsWorkflow` reads the repository's contract when a session of a
+  kind in `DIRECT_KINDS` (`backend/app/requirements/models.py`, today only `bugfix`) is
+  finalized, keeps it in `RequirementsState.contract`, and after the document is written
+  starts the `DeliveryWorkflow` and waits for it (`_deliver`). A repository without a
+  contract refuses the finalize and the session shows why. An API design cannot be
+  started from such a session.
+- **`TaskSpec`.** Its contract fields hold the repository's contract; `brief` holds the
+  interview's requirements and document. `document_id` is unset.
+- **`DeliveryWorkflow._change`.** Test agent, baseline (`_reproduce`), implementation
+  agent, then the usual `_verify_built`. `judge_baseline` in `delivery/models.py` decides
+  `baseline_status`; only `reproduced` goes on.
+- **Baseline image.** `build_baseline` in `verification/activities.py`, on the
+  verification queue, builds the checkout as the implementation agent sees it.
+- **New tests and old.** Tests are tracked one by one, not by file: `TestSuite.test_cases`
+  and `case_id` in `backend/app/languages/`. The test agent may add tests anywhere and
+  change none; the stage reports `added_tests`, and verification reports each named test
+  on its own (`VerificationResult.tracked`).
+- **Which tests a repair may change** (every kind of task). The diagnosis verdict names
+  the failing tests that are themselves wrong (`tests`); the test agent may change or
+  remove those and no others, and the stage rejects the suite otherwise. A repository
+  test corrected this way (`changed_tests`) may fail at the baseline; an added test must
+  still fail there.
+- **Prompts.** `CHANGE_PROMPT` in `implementation/agent.py`, `test_generation/agent.py`
+  and `diagnosis/agent.py`, selected by the `brief` entry of the stage context.
+- **Contract.** A published bugfix appends the brief's requirements to the repository's
+  contract (`with_requirements` in `delivery/contract.py`), so a later task's test agent
+  keeps the regression tests. The interview numbers a bugfix's requirements past the contract's
+  from the start (`RequirementsContext.published` in `tools/requirements.py`); ones
+  recorded before the kind was set are renumbered then (`numbered_after`) and the analyst
+  announces it. Finalizing applies the rule again as a guard.
+- **Reporting.** `DeliveryProgress.baseline*`; `frontend/src/Delivery.tsx` renders delivery
+  progress for both pages. The requirements session API returns it as `delivery` and has
+  its own `generation/retry` route.
+- **Tests.** `backend/tests/pipeline.py` holds the stage fakes; the pipeline tests are in
+  `backend/tests/test_delivery_workflow.py`, entered directly or through a bugfix session.
+
+Beyond what the plan asked for:
+
+- A repair of the *tests* in the final loop runs the baseline again. Without this a
+  repaired added test could pass with and without the fix.
+- Retrying `tests` is also the retry of a failed or unreproduced baseline, and of a
+  verification that ended with an error.
+- The final run of a bugfix must run every test: a skipped or unreported test leaves a
+  passed run unpublished (`unproven_green` in `delivery/models.py`).
+
+Not done, and open:
+
+- The bugfix path has only run against fake stages and the unit tests of each stage. It
+  has not been run end to end with real agents and Docker.
+- Only test methods, with their own annotations, are protected from change. A repair can
+  still alter a shared helper or fixture, or annotate a whole class, which changes what
+  untouched tests do, and the build file can leave tests out of the run. For a bugfix
+  the baseline catches both, because it refuses a run with a skipped test or with a test
+  of the suite's sources missing from the reports. The other kinds have no such
+  check: their verification still passes with skipped tests.
+- Test identity relies on Surefire naming a report entry after its method. A test with a
+  custom display name for its invocations may not be matched, which ends a baseline as
+  "did not run" rather than passing silently.
+- The interviewer is not told what the repository's contract says; it can read
+  `contracts/` with its repository tools.
 
 ## 5. What remains
 
 Build these in order; each is a usable checkpoint.
-
-### Step 4: the bugfix path
-
-The largest step. A non-API task must reach delivery without an API design, so the
-requirements session has to be able to start a `DeliveryWorkflow` itself, with the
-contract read from the repository checkout instead of from an API design session.
-
-- `TaskSpec` needs the brief (problem, expected behaviour, acceptance criteria).
-- `DeliveryWorkflow` branches on the kind. For a bugfix: no code generation; the test
-  agent first, then the baseline run, then the implementation agent, then the final run.
-- **Building the baseline image.** Verification takes a service image. The baseline needs
-  one built from the unmodified checkout, which no stage produces today. Add that.
-- **Telling new tests from old.** The baseline rule ("new fail, old pass") needs the list
-  of tests the agent added. Compare test names before and after test generation, or have
-  the stage report them. `VerificationResult` in `backend/app/verification/models.py`
-  already lists failures by class and test name.
-- **Prompts.** Both agents get a variant for this kind, in the style of the existing
-  `REPOSITORY_PROMPT` and `REPAIR_PROMPT` in `implementation/agent.py` and
-  `test_generation/agent.py`. The test agent: add tests for the brief, keep the rest of
-  the suite untouched. The implementation agent: fix the described defect with targeted
-  edits; do not regenerate anything.
-- **Skipped code generation.** The implementation workspace currently has generated code
-  copied over the repository (`prepare_inputs` in `implementation/activities.py`). For a
-  bugfix it must be the checkout alone.
-- **Reporting.** `DeliveryProgress` needs the baseline result and a distinct outcome for
-  "not reproduced". The frontend needs somewhere to show a delivery that has no API
-  design session: today delivery progress is rendered only inside `ApiDesign.tsx`, so
-  extract that part into its own component first.
 
 ### Step 5: the API change path
 
@@ -255,8 +295,8 @@ contract read from the repository checkout instead of from an API design session
 - **Do not let a session workflow finish while its delivery child is still running.** The
   first version started the delivery with `ParentClosePolicy.ABANDON` and returned. The
   Temporal time-skipping test server then stops advancing time, and every test that waits
-  for the idle timeout hangs forever. This is why `ApiDesignWorkflow` waits for its
-  delivery. The same applies when the requirements session starts one in step 4.
+  for the idle timeout hangs forever. This is why `ApiDesignWorkflow` and
+  `RequirementsWorkflow` wait for their delivery.
 - **Workflow code must be deterministic.** Anything that reads the clock, the disk or the
   network belongs in an activity. Changing the order of commands in a workflow breaks
   replay of its existing histories; that is acceptable here (decision 2) but it means
@@ -269,9 +309,5 @@ contract read from the repository checkout instead of from an API design session
 - **Artifacts on disk are keyed by the session ID**, not the delivery ID:
   `<GENERATED_CODE_DIR>/<session-id>/…`. Always pass `TaskSpec.session_id` to stages.
 - **The published branch name is derived from the session ID** in
-  `publication_branch` (`backend/app/github/checkout.py`), which strips the
-  `api-design-session-` prefix. A delivery started by a requirements session has a
-  different prefix.
-- **Tests of the delivery pipeline live in `backend/tests/test_api_design_workflow.py`**
-  and drive it through a design session with fake activities. When delivery gets a second
-  entry point, move them to their own file with the fakes shared.
+  `publication_branch` (`backend/app/github/checkout.py`): what follows `-session-`,
+  whichever kind of session started the delivery.

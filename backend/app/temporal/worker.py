@@ -18,6 +18,8 @@ with workflow.unsafe.imports_passed_through():
         greet,
         parse_document,
         publish_repository,
+        read_repository_contract,
+        read_requirements_document,
         requirements_turn,
         send_llm_message,
         write_openapi_document,
@@ -50,6 +52,7 @@ async def main():
             requirements_turn, write_requirements_document,
             api_design_turn, write_openapi_document,
             checkout_repository, publish_repository,
+            read_repository_contract, read_requirements_document,
         ],
     )
     logger.info("Worker started on task queue %s at %s", TASK_QUEUE, TEMPORAL_ADDRESS)
