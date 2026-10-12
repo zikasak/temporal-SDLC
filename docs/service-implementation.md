@@ -7,6 +7,8 @@ Everything after the design is one `DeliveryWorkflow` (`backend/app/delivery/`),
 requirements, API model, OpenAPI document, language and repository the session agreed on.
 A bugfix skips the design and code generation and is delivered from its requirements
 session instead; see [Changing an existing service](#changing-an-existing-service-bugfix).
+An API change goes the whole way, starting from the contract its repository holds; see
+[Changing an existing API](#changing-an-existing-api).
 The delivery keeps each stage's result or error in its own `DeliveryProgress`, which the
 session GET endpoint merges into the session it reports. The design session stays open
 until its delivery ends.
@@ -14,6 +16,7 @@ After successful code generation the delivery starts `ImplementationWorkflow` an
 `TestGenerationWorkflow` on separate task queues.
 Both children start before either is awaited to completion. Each result becomes
 available independently; failure in one branch does not cancel the other.
+With a repository, the delivery first [records its tests](#the-snapshot-of-the-repositorys-tests).
 `VerificationWorkflow` starts only after both authoring children succeed. Failed assertions are completed test
 results, not workflow failures; failed builds skip verification. Failed tests start the
 [repair loop](#automatic-repair-of-failed-tests): `DiagnosisWorkflow` decides whether the
@@ -320,8 +323,9 @@ refused there, with the reason shown in the session. Once the document is writte
 session starts the `DeliveryWorkflow` itself (`delivery-<requirements-session-id>`) and
 stays open until it ends. The `TaskSpec` holds the **repository's** contract as
 `requirements`, `requirements_document`, `api` and `language`, and the interview's own
-requirements and document as `brief`. Both authors and the diagnosis receive the brief
-beside the contract.
+requirements and document as `brief`, with the contract requirements the change ends as
+its `retired` entry (see [Retiring requirements](#retiring-requirements-of-the-existing-service)).
+Both authors and the diagnosis receive the brief beside the contract.
 
 No code is generated, and the stages run in sequence, red to green:
 
@@ -368,8 +372,9 @@ one missing from the reports, `verification_error` says so and nothing is pushed
 that fails without the fix and is skipped with it has not been seen to pass.
 
 The push requires such a verification and a `reproduced` baseline. The published
-contract is the repository's with the brief's requirements appended (`with_requirements`
-in `app/delivery/contract.py`) and `requirements.md` rendered again from the longer list,
+contract is the repository's without the retired requirements and with the brief's
+appended (`with_requirements` in `app/delivery/contract.py`), and `requirements.md`
+rendered again from that list,
 so a later task keeps the tests written for them. Their IDs cannot clash: once the user has said the task is a
 bugfix, the interviewer's `record_requirement` numbers past the IDs of the repository's
 contract, so an ID is final when the user first sees it. Requirements recorded before
@@ -387,6 +392,91 @@ unreproduced baseline, or a verification that ended with an error or could not c
 is retried: the tests are written again and held against the
 baseline again, and the fix is written only if there is none yet. An API design cannot be
 started from such a session.
+
+## Retiring requirements of the existing service
+
+A change can contradict, replace or remove something the service was built to do. The
+contract must then lose that requirement, or later authors would be given both.
+
+- While the task kind is one of `CHANGE_KINDS` (`api_change`, `bugfix`), the interviewer's
+  prompt lists the requirements of the repository's contract, and two tools change which
+  of them the change ends: `retire_requirement(id)` and `keep_requirement(id)`
+  (`app/tools/requirements.py`). Only an ID of the contract is accepted. To edit an
+  existing requirement the interviewer retires it and records the new statement.
+- The result is `RequirementsState.retired`, which `requirements_turn` takes and returns
+  like the requirements. Changing the kind to one that changes no service clears it.
+  Finalizing keeps only IDs the contract has, with the contract's own wording.
+- The requirements document lists them under "Retired requirements", ahead of its tables.
+  The session API returns `retired`, and the page shows it.
+- `with_requirements(contract, added, retired)` is the only place the contract changes:
+  it drops the retired requirements, appends the added ones, and removes the retired IDs
+  from every endpoint's `requirement_ids`.
+
+## Changing an existing API
+
+A requirements session whose task kind is `api_change` reads the repository's contract
+when it is finalized, exactly as a bugfix does, and refuses a repository without one. Its
+requirements are numbered past the contract's by the same rule. It delivers nothing
+itself: the contract stays in `RequirementsState.contract` for the API design, with the
+commit it was read at in `contract_commit`.
+
+`start_session` in `app/api_design/service.py` starts the design from that contract
+instead of an empty API:
+
+- `api` and `language` are the contract's. The language cannot be changed:
+  `set_language` refuses, and the prompt says so.
+- `requirements` and `requirements_document` are the contract's without the requirements
+  the change retired and with the change's added (`with_requirements`).
+- `change_document` is the requirements document of the change. It marks the session as
+  a change to an existing service; forks keep it.
+- `contract` and `contract_commit` are the contract as the requirements session read it
+  and the commit it was read at.
+
+Every session clones the repository for itself, so the branch may have moved since the
+requirements were gathered. After its checkout the design session compares the commit
+with `contract_commit` (`_confirm_contract` in `app/temporal/workflows.py`). When they
+differ it reads the contract from its own checkout: if that is the same contract, the
+change still applies, the session goes on and records the new commit; otherwise the
+session fails before any model turn and asks for a new requirements session. A fork is
+checked the same way against its own clone.
+
+The designer is told (`CHANGE_GUIDANCE` in `app/api_design/prompt.py`) that it edits an
+existing API, that the change document alone says what to change, and that everything
+else stays as it is. Its first turn applies what clearly follows from the change.
+
+The delivery is the one a new service gets, in the repository: code generation from the
+changed OpenAPI document, both authors extending what the repository holds, the full
+suite, and a push whose contract is the design session's. Nothing is run against the
+service as the repository holds it, so there is no red to green proof for this kind.
+Two checks stand in for it:
+
+- **Every test runs.** As for a bugfix, a passed run with a skipped test, or with a test
+  of the suite's sources missing from the reports, sets `verification_error` and nothing
+  is pushed.
+- **Supported tests are kept.** The test author may rewrite or remove repository tests the
+  new contract no longer supports, and the stage reports them as `changed_tests` and
+  `removed_tests` against the [snapshot](#the-snapshot-of-the-repositorys-tests). Once
+  verification has passed, `build_repository_tests` builds the snapshot's own runner and
+  `VerificationWorkflow` runs it against the changed service, tracking exactly those tests
+  (`DeliveryProgress.existing_tests`). A test that still passes as it was is one the new
+  contract supports, so changing or removing it is refused (`judge_kept` in
+  `app/delivery/models.py`): `verification_error` names it and nothing is pushed. Retrying
+  `tests` writes a new suite, which is judged the same way.
+
+## The snapshot of the repository's tests
+
+Before anything else, a delivery with a checkout runs `snapshot_repository_tests` on the
+verification queue. It copies `contract-tests/` from the checkout to
+`<GENERATED_CODE_DIR>/<session-id>/repository-tests/suite`, with the trusted runner files.
+The copy is made once: a retried delivery keeps the first one, whatever the checkout
+holds by then (a publication writes the new suite into the checkout before it pushes).
+
+Everything that refers to "the repository's tests" reads this copy and not the checkout:
+the test author's workspace, the tests a change may not touch, `added_tests`,
+`changed_tests` and `removed_tests`, and the runner of the kept-tests check. A test stage
+with a repository and no snapshot fails. A snapshot that cannot be taken ends the
+delivery before any author runs; the error is reported on the stage whose retry starts it
+over (`tests` for a bugfix, `server` otherwise).
 
 ## Which tests an author may change
 

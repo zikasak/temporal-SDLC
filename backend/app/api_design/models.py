@@ -83,6 +83,15 @@ class ApiDesignState:
     source_session_id: str = ""
     requirements: list[Requirement] = field(default_factory=list)
     requirements_document: str = ""
+    # The requirements document of a change to an existing service. The fields above are
+    # then that service's contract with the change's requirements added, and `api` and
+    # `language` start as the contract's.
+    change_document: str = ""
+    # The contract that change was specified against, and the commit it was last seen
+    # unchanged at. A session clones the repository for itself, so both are compared
+    # with what its own checkout holds before the discussion starts.
+    contract: dict[str, Any] | None = None
+    contract_commit: str | None = None
     # The kind of task the requirements session recorded.
     kind: TaskKind | None = None
     messages: list[ConversationMessage] = field(default_factory=list)

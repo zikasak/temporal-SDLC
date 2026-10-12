@@ -32,18 +32,26 @@ def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2) + '\n'
 
 
-def with_requirements(contract: RepositoryContract,
-                      added: list[Requirement]) -> RepositoryContract:
-    """The contract after a change that leaves the API as it is: what the change required
-    is now required of the service too, so later tasks keep the tests written for it.
+def with_requirements(contract: RepositoryContract, added: list[Requirement],
+                      retired: list[Requirement]) -> RepositoryContract:
+    """The contract after a change to its service: what the change required is now
+    required of the service too, so later tasks keep the tests written for it, and what
+    the change ended (`retired`) is not, nor is any endpoint linked to it any longer.
     `added` is numbered after the contract's own requirements already."""
-    requirements = [*contract['requirements'], *added]
+    ended = {item['id'] for item in retired}
+    requirements = [*(item for item in contract['requirements'] if item['id'] not in ended),
+                    *added]
+    api = {**contract['api'], 'endpoints': [
+        {**endpoint, 'requirement_ids': [item for item in endpoint['requirement_ids']
+                                         if item not in ended]}
+        for endpoint in contract['api']['endpoints']]}
     # The document's tables render the list; one this pipeline did not render is kept.
     narrative = requirements_narrative(contract['requirements_document'],
                                        contract['requirements'])
     document = (contract['requirements_document'] if narrative is None
                 else render_requirements_markdown(requirements, narrative))
-    return {**contract, 'requirements': requirements, 'requirements_document': document}
+    return {**contract, 'requirements': requirements, 'requirements_document': document,
+            'api': api}
 
 
 def write_contract(repository: Path, contract: RepositoryContract) -> None:

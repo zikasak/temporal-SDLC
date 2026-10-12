@@ -20,6 +20,18 @@ KICKOFF_MESSAGE = (
     "requirements, then briefly describe the draft and ask your first questions."
 )
 
+CHANGE_OPENING_FALLBACK = (
+    "I've read the change you want and the API your service has now. Which endpoint "
+    "or field of the existing API should change first, and how?"
+)
+
+CHANGE_KICKOFF_MESSAGE = (
+    "Here are the requirements document of my existing service and the document of "
+    "the change I want. The API model already holds the service's API as it is. "
+    "Record what clearly follows from the change, then briefly say what you changed "
+    "and ask your first questions."
+)
+
 DESIGNER_GUIDANCE = (
     "You are a senior API designer. You discuss with the user the HTTP JSON API of "
     "the system described in the requirements document below, and you build its "
@@ -62,21 +74,48 @@ LANGUAGE_KNOWN = (
 )
 
 
-def language_guidance(language: str | None) -> str:
-    template = LANGUAGE_KNOWN if language else LANGUAGE_UNKNOWN
+LANGUAGE_FIXED = (
+    "\nThe service is written in {language}. A change to it cannot choose another "
+    "language; say so if the user asks for one."
+)
+
+CHANGE_GUIDANCE = (
+    "\nThis discussion changes an existing service; it does not design a new API. "
+    "The API model below started as the API the service has now, and the "
+    "requirements document is the one the service was built from, with the "
+    "requirements of the change added to its tables. The change document below is "
+    "what the user asked for, and it alone says what to change. Where it conflicts "
+    "with an earlier requirement, the change wins. Add, change or remove only the "
+    "endpoints, schemas and fields the change needs, and leave everything else "
+    "exactly as it is, down to names, paths and status codes: the service's clients "
+    "and its existing tests depend on them. Link each endpoint you add or change to "
+    "the requirements of the change. Ask only about the change, and tell the user "
+    "when what they ask for would break something existing clients rely on."
+)
+
+
+def language_guidance(language: str | None, fixed: bool = False) -> str:
+    template = LANGUAGE_FIXED if fixed else LANGUAGE_KNOWN if language else LANGUAGE_UNKNOWN
     return template.format(language=language, supported=describe_supported())
 
 
 def api_turn_messages(state: ApiDesignState, extra_guidance: str = "") -> list[BaseMessage]:
     problems = design_problems(state.api, state.language)
+    change = bool(state.change_document)
     guidance = (
-        f"{DESIGNER_GUIDANCE}{language_guidance(state.language)}{extra_guidance}\n\n<requirements_document>\n{state.requirements_document}"
-        f"\n</requirements_document>\n\nCurrent API model: "
+        f"{DESIGNER_GUIDANCE}{CHANGE_GUIDANCE if change else ''}"
+        f"{language_guidance(state.language, fixed=change)}{extra_guidance}"
+        f"\n\n<requirements_document>\n{state.requirements_document}"
+        f"\n</requirements_document>\n\n"
+        + (f"<change_document>\n{state.change_document}\n</change_document>\n\n"
+           if change else "")
+        + f"Current API model: "
         f"{json.dumps(state.api, ensure_ascii=False)}\nOpen problems: "
         f"{json.dumps(problems, ensure_ascii=False)}"
     )
     # Chat templates expect the conversation to start with a user turn.
-    conversation: list[BaseMessage] = [HumanMessage(content=KICKOFF_MESSAGE)]
+    conversation: list[BaseMessage] = [
+        HumanMessage(content=CHANGE_KICKOFF_MESSAGE if change else KICKOFF_MESSAGE)]
     conversation += [
         HumanMessage(content=item["content"]) if item["role"] == "user"
         else AIMessage(content=item["content"])

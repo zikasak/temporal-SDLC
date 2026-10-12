@@ -1,6 +1,8 @@
 import pytest
 
-from app.requirements.document import render_requirements_markdown, without_repeated_tables
+from app.requirements.document import (
+    render_requirements_markdown, requirements_narrative, without_repeated_tables,
+)
 from app.tools.requirements import RequirementsContext, build
 
 
@@ -57,22 +59,61 @@ async def test_set_task_kind_records_only_known_kinds():
     assert ctx.kind == "api_change"
 
 
-async def test_change_to_a_published_service_continues_its_requirement_ids():
-    ctx = RequirementsContext(published=("FR-1", "FR-2", "NFR-1", "TR-5"))
+@pytest.mark.parametrize("kind", ["bugfix", "api_change"])
+async def test_change_to_a_published_service_continues_its_requirement_ids(kind):
+    ctx = RequirementsContext(published=tuple(
+        {"id": item, "category": category, "title": "T", "description": "D", "priority": "must"}
+        for item, category in (("FR-1", "functional"), ("FR-2", "functional"),
+                               ("NFR-1", "non_functional"), ("TR-5", "technical"))))
     # Until the user says the task changes that service, it is numbered on its own.
     assert ctx.record("functional", "Sign in", "D", "must")["id"] == "FR-1"
     assert ctx.record("technical", "Postgres", "D", "must")["id"] == "TR-1"
     set_task_kind = build(ctx)[0]
     # The analyst is told what changed, so the conversation never keeps a stale ID silently.
-    assert '"renumbered": {"FR-1": "FR-3"}' in await set_task_kind.ainvoke({"kind": "bugfix"})
+    assert '"renumbered": {"FR-1": "FR-3"}' in await set_task_kind.ainvoke({"kind": kind})
     assert [item["id"] for item in ctx.as_list()] == ["FR-3", "TR-1"]
     # In the usual order, kind first, an ID is right from the moment it is given.
     assert ctx.record("functional", "Sign out", "D", "must")["id"] == "FR-4"
     assert ctx.record("non_functional", "Fast", "D", "should")["id"] == "NFR-2"
-    assert "renumbered" not in await set_task_kind.ainvoke({"kind": "bugfix"})
+    assert "renumbered" not in await set_task_kind.ainvoke({"kind": kind})
     # A new service does not join the repository's contract.
     await set_task_kind.ainvoke({"kind": "new_service"})
     assert ctx.record("technical", "Redis", "D", "must")["id"] == "TR-2"
+
+
+async def test_only_a_change_retires_requirements_and_only_the_services():
+    service = ({"id": "FR-1", "category": "functional", "title": "Book rooms",
+                "description": "Guests book rooms.", "priority": "must"},)
+    ctx = RequirementsContext(published=service)
+    tools = {item.name: item for item in build(ctx)}
+    # Until the user has said the task changes that service, nothing of it can end.
+    refused = await tools["retire_requirement"].ainvoke({"id": "FR-1"})
+    assert refused.startswith("Requirement not retired:") and ctx.retired_list() == []
+    await tools["set_task_kind"].ainvoke({"kind": "api_change"})
+    # The change's own requirement, FR-2, is removed, not retired.
+    assert ctx.record("functional", "Cancel", "D", "must")["id"] == "FR-2"
+    assert "not a requirement of the existing service" in await tools[
+        "retire_requirement"].ainvoke({"id": "FR-2"})
+    assert '"action": "retired"' in await tools["retire_requirement"].ainvoke({"id": " fr-1 "})
+    assert ctx.retired_list() == list(service)
+    await tools["keep_requirement"].ainvoke({"id": "FR-1"})
+    assert ctx.retired_list() == []
+    # A new service has no earlier requirements to end.
+    await tools["retire_requirement"].ainvoke({"id": "FR-1"})
+    await tools["set_task_kind"].ainvoke({"kind": "new_service"})
+    assert ctx.retired_list() == [] and not ctx.retired
+
+
+def test_document_names_retired_requirements_and_keeps_its_narrative_readable():
+    kept = [{"id": "FR-2", "category": "functional", "title": "Cancel",
+             "description": "Guests cancel.", "priority": "must"}]
+    retired = [{"id": "FR-1", "category": "functional", "title": "No refunds",
+                "description": "A booking | is final.", "priority": "must"}]
+    document = render_requirements_markdown(kept, "## Overview\n\nRefunds.", retired)
+    assert "| FR-1 | No refunds | A booking \\| is final. |" in document
+    # The coding agents still get the tables once: what is retired travels as narrative.
+    narrative = requirements_narrative(document, kept)
+    assert narrative.startswith("## Overview") and "## Retired requirements" in narrative
 
 
 def test_render_contains_every_requirement_and_escapes_tables():

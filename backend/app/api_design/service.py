@@ -9,6 +9,7 @@ from app.api_design.models import ApiDesignState
 from app.api_design.openapi import design_problems
 from app.config import TASK_QUEUE
 from app.delivery import service as delivery_service
+from app.delivery.contract import with_requirements
 from app.delivery.models import DeliveryProgress, RetryStage
 from app.documents import DocumentNotFound, get_generated_document
 from app.requirements import service as requirements_service
@@ -39,7 +40,8 @@ async def start_session(requirements_session_id: str) -> str:
         # The stored document expired; the requirements tables still carry the content.
         logger.info("Requirements document for %s expired; rendering from tables",
                     requirements_session_id)
-        requirements_document = render_requirements_markdown(source.requirements)
+        requirements_document = render_requirements_markdown(source.requirements,
+                                                             retired=source.retired)
     state = ApiDesignState(
         source_session_id=requirements_session_id,
         requirements=source.requirements,
@@ -47,6 +49,17 @@ async def start_session(requirements_session_id: str) -> str:
         kind=source.kind,
         repository=source.repository,
     )
+    if source.contract:
+        # A change to the service the repository holds: the design goes on from that
+        # service's contract, which the change's requirements join.
+        contract = with_requirements(source.contract, source.requirements, source.retired)
+        state.requirements = contract["requirements"]
+        state.requirements_document = contract["requirements_document"]
+        state.change_document = requirements_document
+        state.contract = source.contract
+        state.contract_commit = source.contract_commit
+        state.api = contract["api"]
+        state.language = contract["language"]
     return await _start(state)
 
 
@@ -79,6 +92,9 @@ async def fork_session(session_id: str, message_index: int) -> str:
         source_session_id=source.source_session_id,
         requirements=source.requirements,
         requirements_document=source.requirements_document,
+        change_document=source.change_document,
+        contract=source.contract,
+        contract_commit=source.contract_commit,
         kind=source.kind,
         messages=messages,
         api=api,
@@ -124,7 +140,7 @@ async def get_session(session_id: str) -> dict[str, Any]:
     state = await get_state(session_id)
     session = dataclasses.asdict(state)
     # Polled every few seconds; the requirement list is enough for the page.
-    del session["requirements_document"]
+    del session["requirements_document"], session["change_document"], session["contract"]
     # The pipeline's results belong to the delivery a finished design starts.
     progress = DeliveryProgress()
     if state.status == 'completed' and state.document:

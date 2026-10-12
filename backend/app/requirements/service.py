@@ -9,7 +9,7 @@ from app.config import TASK_QUEUE
 from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, RetryStage
 from app.github.models import RepositorySelection
-from app.requirements.models import RequirementsState
+from app.requirements.models import DIRECT_KINDS, RequirementsState
 from app.requirements.prompt import OPENING_MESSAGE
 from app.temporal.client import connect_temporal
 from app.temporal.sessions import SessionBusy, fork_messages, start_update, state_at_message
@@ -58,6 +58,7 @@ async def fork_session(session_id: str, message_index: int) -> str:
         requirements=requirements,
         # The choice is kept even when the fork point precedes it; the user can change it.
         kind=source.kind,
+        retired=source.retired,
         repository=source.repository,
         forked_from={"session_id": session_id, "message_index": message_index},
     ))
@@ -89,7 +90,7 @@ async def get_state(session_id: str) -> RequirementsState:
 
 def _delivers(state: RequirementsState) -> bool:
     """Whether the session's own delivery builds its task, with no API design between."""
-    return state.status == "completed" and bool(state.contract)
+    return state.status == "completed" and state.kind in DIRECT_KINDS
 
 
 async def retry_generation(session_id: str, stage: RetryStage) -> None:
@@ -101,7 +102,7 @@ async def retry_generation(session_id: str, stage: RetryStage) -> None:
 async def get_session(session_id: str) -> dict[str, Any]:
     state = await get_state(session_id)
     session = dataclasses.asdict(state)
-    # Polled every few seconds; the page shows the brief, not the repository's contract.
+    # Polled every few seconds; the page shows the task, not the repository's contract.
     del session["contract"]
     delivery = None
     if _delivers(state):

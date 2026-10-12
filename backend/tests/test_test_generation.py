@@ -13,8 +13,16 @@ from app.api_design.openapi import render_openapi
 from app.requirements.document import render_requirements_markdown
 from app.languages import get_language
 from app.test_generation import activities
+from app.verification import activities as verification
 
 TEMPLATE = get_language('java').test_suite.template
+
+
+async def record_repository_tests(tmp_path, monkeypatch) -> dict:
+    """What the delivery does before any author runs."""
+    monkeypatch.setattr(verification, 'GENERATED_CODE_DIR', tmp_path)
+    return await ActivityEnvironment().run(verification.snapshot_repository_tests,
+                                           'session', 'java')
 
 
 @pytest.mark.parametrize('failure', [None, 'agent', 'build', 'empty', 'cancel'])
@@ -192,6 +200,13 @@ async def test_repository_session_continues_only_the_repositorys_contract_tests(
         (checkout / name).write_text(text)
     context = {'requirements': [], 'api_design': empty_api(), 'language': 'java',
                'repository': {'full_name': 'octocat/project', 'branch': 'main'}}
+    with pytest.raises(ApplicationError, match='not recorded'):
+        await ActivityEnvironment().run(activities.generate_service_tests, 'session', context)
+    await record_repository_tests(tmp_path, monkeypatch)
+    # The record is of the tests as they were first found: what a later stage or a
+    # failed push leaves in the checkout does not replace it.
+    (checkout / 'contract-tests/src/test/java/OrdersTest.java').write_text('rewritten since')
+    await record_repository_tests(tmp_path, monkeypatch)
     sent = {}
 
     async def docker(*args, **kwargs):
@@ -248,6 +263,7 @@ async def test_only_tests_found_broken_may_differ_from_what_they_were(tmp_path, 
     existing = tmp_path / 'session/repository/contract-tests' / source
     existing.parent.mkdir(parents=True)
     existing.write_text(java_tests(lists='get();'))
+    assert await record_repository_tests(tmp_path, monkeypatch) == {'tests': 1}
     brief = [{'id': 'FR-1', 'category': 'functional', 'title': 'No double booking',
               'description': 'A booked room is refused.', 'priority': 'must'}]
     context = {'requirements': [], 'api_design': empty_api(), 'language': 'java',

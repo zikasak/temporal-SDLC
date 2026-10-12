@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from langchain_core.tools import BaseTool, tool
 
 from app.requirements.models import (
-    CATEGORY_PREFIXES, DIRECT_KINDS, PRIORITIES, TASK_KINDS, Requirement, TaskKind,
+    CATEGORY_PREFIXES, CHANGE_KINDS, PRIORITIES, TASK_KINDS, Requirement, TaskKind,
     numbered_after,
 )
 
@@ -26,19 +26,41 @@ class RequirementsContext:
 
     requirements: dict[str, Requirement] = field(default_factory=dict)
     kind: TaskKind | None = None
-    # IDs of the requirements in the repository's contract, when it has one.
-    published: tuple[str, ...] = ()
+    # The requirements in the repository's contract, when it has one.
+    published: tuple[Requirement, ...] = ()
+    # IDs of those the change ends.
+    retired: set[str] = field(default_factory=set)
 
     @classmethod
     def from_list(cls, requirements: list[Requirement], kind: TaskKind | None = None,
-                  published: tuple[str, ...] = ()) -> "RequirementsContext":
+                  published: tuple[Requirement, ...] = (),
+                  retired: list[Requirement] | None = None) -> "RequirementsContext":
         return cls({item["id"]: dict(item) for item in requirements}, kind,  # type: ignore[misc]
-                   published)
+                   published, {item["id"] for item in retired or []})
+
+    def service_requirements(self) -> tuple[Requirement, ...]:
+        """The contract a task that changes the repository's service starts from."""
+        return self.published if self.kind in CHANGE_KINDS else ()
 
     def _reserved(self) -> tuple[str, ...]:
         """A task that changes the repository's service adds its requirements to that
         contract, so its IDs continue the contract's instead of repeating them."""
-        return self.published if self.kind in DIRECT_KINDS else ()
+        return tuple(item["id"] for item in self.service_requirements())
+
+    def retired_list(self) -> list[Requirement]:
+        return [item for item in self.service_requirements() if item["id"] in self.retired]
+
+    def retire(self, requirement_id: str, retire: bool = True) -> Requirement:
+        """End a requirement of the existing service, or with `retire` false keep it
+        after all. Only a requirement of the repository's contract can be named."""
+        requirement_id = requirement_id.strip().upper()
+        if self.kind not in CHANGE_KINDS:
+            raise ValueError("only a change to an existing service can retire its requirements.")
+        found = next((item for item in self.published if item["id"] == requirement_id), None)
+        if found is None:
+            raise ValueError(f"{requirement_id} is not a requirement of the existing service.")
+        (self.retired.add if retire else self.retired.discard)(requirement_id)
+        return found
 
     def set_kind(self, kind: str) -> dict[str, str]:
         """Only a known kind can be recorded; anything else raises. Returns the new ID
@@ -47,6 +69,8 @@ class RequirementsContext:
         if kind not in TASK_KINDS:
             raise ValueError(f"kind must be one of: {', '.join(TASK_KINDS)}.")
         self.kind = kind  # type: ignore[assignment]
+        if kind not in CHANGE_KINDS:
+            self.retired.clear()
         before = self.as_list()
         after = numbered_after(before, self._reserved())
         self.requirements = {item["id"]: item for item in after}
@@ -161,4 +185,30 @@ def build(ctx: RequirementsContext) -> list[BaseTool]:
         """List all requirements recorded so far."""
         return json.dumps(ctx.as_list(), ensure_ascii=False)
 
-    return [set_task_kind, record_requirement, remove_requirement, list_requirements]
+    @tool
+    async def retire_requirement(id: str) -> str:
+        """End a requirement of the existing service that this change contradicts,
+        replaces or removes. It leaves the service's contract once the change is
+        delivered. Record what holds instead, if anything, with record_requirement.
+
+        id: the ID of a requirement of the existing service, not of this change.
+        """
+        try:
+            requirement = ctx.retire(id)
+        except ValueError as exc:
+            logger.warning("Requirement not retired: %s", exc)
+            return f"Requirement not retired: {exc}"
+        return json.dumps({"action": "retired", **requirement}, ensure_ascii=False)
+
+    @tool
+    async def keep_requirement(id: str) -> str:
+        """Undo retire_requirement: the existing service's requirement holds after all."""
+        try:
+            requirement = ctx.retire(id, retire=False)
+        except ValueError as exc:
+            logger.warning("Requirement not kept: %s", exc)
+            return f"Requirement not kept: {exc}"
+        return json.dumps({"action": "kept", **requirement}, ensure_ascii=False)
+
+    return [set_task_kind, record_requirement, remove_requirement, list_requirements,
+            retire_requirement, keep_requirement]

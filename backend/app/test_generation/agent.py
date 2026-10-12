@@ -49,7 +49,9 @@ REPOSITORY_PROMPT = """
 the `repository` entry of the input. Every file you read or change is inside it, and it is
 pushed to a new branch of the repository once the service passes verification. It may
 already hold tests from an earlier version of the contract: keep those the supplied
-contract supports and correct or remove the rest.
+contract supports and correct or remove the rest. Leave a test you keep exactly as it is:
+do not rename, restructure or rewrite it. Every existing test you change or remove is
+afterwards run, as it was, against the new service, and the task fails if it still passes.
 """
 
 CHANGE_PROMPT = """Add regression tests to the HTTP test suite in /workspace/tests, the
@@ -57,6 +59,8 @@ contract-tests directory of the project's Git repository named by the `repositor
 of the input. The `brief` entry of the input describes a change to the running service:
 the problem, the expected behaviour and the acceptance criteria. The supplied requirements
 and OpenAPI contract describe the service, whose API stays exactly as it is.
+The brief's `retired` entry lists the requirements of that contract the change ends:
+they no longer hold once it is made, whatever the contract still says.
 The implementation is changed independently in another container. Its source, image and
 logs are unavailable. Derive all expected behavior from the brief and the contract.
 {instructions}

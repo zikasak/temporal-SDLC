@@ -17,13 +17,26 @@ def _cell(text: str) -> str:
     return " ".join(text.split()).replace("|", "\\|")
 
 
+RETIRED_HEADING = "## Retired requirements"
+
+
 def render_requirements_markdown(
-    requirements: list[Requirement], narrative: str | None = None
+    requirements: list[Requirement], narrative: str | None = None,
+    retired: list[Requirement] | None = None,
 ) -> str:
-    """The requirement sections come straight from the list, so none are lost."""
+    """The requirement sections come straight from the list, so none are lost. `retired`
+    are the requirements of the existing service that a change to it ends."""
     parts = [TITLE]
     if narrative and narrative.strip():
         parts.append(narrative.strip())
+    if retired:
+        # Ahead of the tables, so the document still ends with exactly those.
+        parts.append(RETIRED_HEADING)
+        parts.append("This change ends these requirements of the existing service. They "
+                     "no longer hold once it is made.")
+        parts.append("\n".join(["| ID | Requirement | Description |", "| --- | --- | --- |"] + [
+            f"| {item['id']} | {_cell(item['title'])} | {_cell(item['description'])} |"
+            for item in retired]))
     for category, heading in SECTIONS:
         items = [item for item in requirements if item["category"] == category]
         parts.append(f"## {heading}")

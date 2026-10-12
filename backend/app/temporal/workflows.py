@@ -10,12 +10,12 @@ from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflow
 with workflow.unsafe.imports_passed_through():
     from app.api_design.models import ApiDesignState
     from app.api_design.openapi import api_problems, design_problems
-    from app.api_design.prompt import OPENING_FALLBACK
+    from app.api_design.prompt import CHANGE_OPENING_FALLBACK, OPENING_FALLBACK
     from app.delivery.models import DeliveryState, TaskSpec, delivery_id
     from app.github.models import RepositorySelection
     from app.requirements.document import render_requirements_markdown
     from app.requirements.models import (
-        DIRECT_KINDS, KIND_PROBLEM, RequirementsState, numbered_after,
+        CHANGE_KINDS, DIRECT_KINDS, KIND_PROBLEM, RequirementsState, numbered_after,
     )
     from app.requirements.prompt import OPENING_MESSAGE
     from app.temporal.activities import (
@@ -165,7 +165,7 @@ class RequirementsWorkflow:
                 workflow.logger.info("Continuing as new")
                 workflow.continue_as_new(self.state)
         await workflow.wait_condition(workflow.all_handlers_finished)
-        if self.state.status == "completed" and self.state.contract:
+        if self.state.status == "completed" and self.state.kind in DIRECT_KINDS:
             await self._deliver()
         return self.state.document
 
@@ -234,7 +234,8 @@ class RequirementsWorkflow:
         try:
             result = await workflow.execute_activity(
                 requirements_turn,
-                args=[self.state.messages, self.state.requirements, self.state.kind],
+                args=[self.state.messages, self.state.requirements, self.state.kind,
+                      self.state.retired],
                 start_to_close_timeout=timedelta(minutes=6),
                 schedule_to_close_timeout=timedelta(minutes=7),
                 retry_policy=RetryPolicy(maximum_attempts=1),
@@ -247,13 +248,14 @@ class RequirementsWorkflow:
             self.state.messages.append({"role": "assistant", "content": result["reply"]})
             self.state.requirements = result["requirements"]
             self.state.kind = result["kind"]
+            self.state.retired = result["retired"]
             ok = True
         self.state.status = "interviewing"
         return ok
 
     async def _read_contract(self) -> bool:
-        """A task delivered from here changes the service its repository was published
-        with, so it cannot be specified for a repository without a contract."""
+        """A change to the service a repository was published with starts from that
+        contract, so it cannot be specified for a repository without one."""
         try:
             self.state.contract = await workflow.execute_activity(
                 read_repository_contract,
@@ -268,25 +270,33 @@ class RequirementsWorkflow:
             self.state.error = (exc.cause.message if unsupported
                                 else "The repository's contract could not be read. Try again.")
             return False
+        self.state.contract_commit = self.state.checkout["commit"]
         # The task's requirements join the contract's when it is published. The interview
         # numbers them past the contract's already; this holds whatever it was given.
         self.state.requirements = numbered_after(
             self.state.requirements,
             [item["id"] for item in self.state.contract["requirements"]])
+        # Only what this contract requires can be ended, and as the contract states it.
+        ended = {item["id"] for item in self.state.retired}
+        self.state.retired = [item for item in self.state.contract["requirements"]
+                              if item["id"] in ended]
         return True
 
     async def _write_document(self) -> bool:
         self.state.status = "finalizing"
         self.state.error = None
-        # Only a task delivered from here keeps a contract, whatever kind it was before.
+        # Only a change to an existing service keeps a contract, whatever kind it was before.
         self.state.contract = None
-        if self.state.kind in DIRECT_KINDS and not await self._read_contract():
+        if self.state.kind not in CHANGE_KINDS:
+            self.state.retired = []
+        elif not await self._read_contract():
             self.state.status = "interviewing"
             return False
         try:
             self.state.document = await workflow.execute_activity(
                 write_requirements_document,
-                args=[workflow.info().workflow_id, self.state.messages, self.state.requirements],
+                args=[workflow.info().workflow_id, self.state.messages, self.state.requirements,
+                      self.state.retired],
                 start_to_close_timeout=timedelta(minutes=6),
                 schedule_to_close_timeout=timedelta(minutes=13),
                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -315,7 +325,8 @@ class RequirementsWorkflow:
         except ActivityError as exc:
             # The stored document expired; the requirement tables still carry the content.
             workflow.logger.warning("Requirements document unavailable: %s", exc.cause or exc)
-            document = render_requirements_markdown(self.state.requirements)
+            document = render_requirements_markdown(self.state.requirements,
+                                                    retired=self.state.retired)
         contract = self.state.contract
         try:
             await workflow.execute_child_workflow(
@@ -327,7 +338,8 @@ class RequirementsWorkflow:
                     api=contract["api"],
                     kind=self.state.kind,
                     brief={"requirements": self.state.requirements,
-                           "requirements_document": document},
+                           "requirements_document": document,
+                           "retired": self.state.retired},
                     language=contract["language"],
                     repository=self.state.repository,
                     checkout=self.state.checkout,
@@ -357,7 +369,8 @@ class RequirementsWorkflow:
 @workflow.defn
 class ApiDesignWorkflow:
     """One API design discussion based on a finished requirements session: the
-    model drafts the API first, each user message is an update, and the
+    model drafts the API first, or for a change to an existing service applies the
+    change to the API its repository holds, each user message is an update, and the
     finalize update renders the API model as an OpenAPI document, which the
     session then hands to a DeliveryWorkflow."""
 
@@ -374,12 +387,15 @@ class ApiDesignWorkflow:
 
     @workflow.run
     async def run(self, state: ApiDesignState) -> dict[str, Any] | None:
-        ready = await _check_out(self.state, self._resume_status)
+        ready = (await _check_out(self.state, self._resume_status)
+                 and await self._confirm_contract())
         if ready and not self.state.messages:
             async with self._turn_lock:
                 if not await self._turn():
                     self.state.messages.append(
-                        {"role": "assistant", "content": OPENING_FALLBACK}
+                        {"role": "assistant",
+                         "content": (CHANGE_OPENING_FALLBACK if self.state.change_document
+                                     else OPENING_FALLBACK)}
                     )
                     self.state.error = None
         elif ready and self.state.messages[-1]["role"] == "user":
@@ -410,6 +426,39 @@ class ApiDesignWorkflow:
     @workflow.query
     def get_state(self) -> ApiDesignState:
         return self.state
+
+    async def _confirm_contract(self) -> bool:
+        """A change was specified against the contract of one commit, and this session
+        cloned the repository again. When the branch has moved since, the change can go
+        on only if the contract is still the same; False when it cannot."""
+        commit = self.state.checkout["commit"] if self.state.checkout else None
+        if not self.state.contract or commit == self.state.contract_commit:
+            return True
+        workflow.logger.info("Repository moved from %s to %s; comparing contracts",
+                             self.state.contract_commit, commit)
+        status = self.state.status
+        self.state.status = "preparing"
+        try:
+            contract = await workflow.execute_activity(
+                read_repository_contract,
+                workflow.info().workflow_id,
+                start_to_close_timeout=timedelta(minutes=1),
+                schedule_to_close_timeout=timedelta(minutes=3),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except ActivityError as exc:
+            workflow.logger.warning("Repository contract unavailable: %s", exc.cause or exc)
+            contract = None
+        if contract != self.state.contract:
+            self.state.status = "failed"
+            self.state.error = (
+                "The repository changed after this task's requirements were gathered, and "
+                "its contract is no longer the one they were written against. Start a new "
+                "requirements session for the change.")
+            return False
+        self.state.contract_commit = commit
+        self.state.status = status
+        return True
 
     @workflow.update
     async def send_message(self, message: str) -> None:

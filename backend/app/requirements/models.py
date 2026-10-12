@@ -29,7 +29,10 @@ TASK_KINDS: dict[str, str] = {
               "it is",
     "docs": "a change to documentation only",
 }
-# Kinds that leave the API as it is and are delivered straight from the interview.
+# Kinds that change the service a repository was published with, and so start from the
+# contract it holds.
+CHANGE_KINDS = ("api_change", "bugfix")
+# Those of them that leave the API as it is and are delivered straight from the interview.
 DIRECT_KINDS = ("bugfix",)
 
 
@@ -50,6 +53,9 @@ class RequirementsState:
     requirements: list[Requirement] = field(default_factory=list)
     # Unset until the user has said what kind of task this is.
     kind: TaskKind | None = None
+    # Requirements of the repository's contract that a change to its service ends: they
+    # leave the contract when the change is published.
+    retired: list[Requirement] = field(default_factory=list)
     status: SessionStatus = "interviewing"
     document: dict[str, Any] | None = None
     error: str | None = None
@@ -58,8 +64,11 @@ class RequirementsState:
     # Set once the repository is on the worker's disk; forks check out their own.
     checkout: RepositoryCheckout | None = None
     # The contract the repository was published with, read when a task that changes its
-    # service is finalized: such a task is delivered from here, without an API design.
+    # service is finalized. The delivery of a task that leaves the API as it is starts
+    # from it here; the API design of any other starts from it.
     contract: dict[str, Any] | None = None
+    # The commit of the checkout that contract was read from.
+    contract_commit: str | None = None
 
 
 def numbered_after(requirements: list[Requirement], published: Iterable[str],

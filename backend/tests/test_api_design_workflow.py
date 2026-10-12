@@ -19,6 +19,7 @@ from app.api_design.prompt import OPENING_FALLBACK
 from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, delivery_id
 from app.delivery.workflows import DeliveryWorkflow
+from app.requirements.document import render_requirements_markdown
 from app.temporal import sessions
 from app.temporal.workflows import ApiDesignWorkflow
 from tests.pipeline import CODE, FakeCodegenWorkflow, FakeStages, stage_workers
@@ -48,6 +49,14 @@ class FakeActivities(FakeStages):
         self.documents: list[str] = []
         # The language the model records on its next turn, when any.
         self.language: str | None = None
+        # What the contract files of the session's own checkout hold.
+        self.repository_contract: dict[str, Any] | None = None
+
+    @activity.defn(name="read_repository_contract")
+    async def read_repository_contract(self, session_id: str) -> dict[str, Any]:
+        if self.repository_contract is None:
+            raise ApplicationError("no contract", type="ContractError", non_retryable=True)
+        return self.repository_contract
 
     @activity.defn(name="api_design_turn")
     async def api_design_turn(self, state: ApiDesignState) -> dict[str, Any]:
@@ -57,7 +66,7 @@ class FakeActivities(FakeStages):
         if not state.messages:
             if self.fail_draft:
                 raise ApplicationError("no model", non_retryable=True)
-            api["endpoints"] = self.draft_endpoints
+            api["endpoints"] = [*api["endpoints"], *self.draft_endpoints]
             return {"reply": "Draft ready. Who calls the API?", "api": api,
                     "language": state.language}
         # Each message becomes an endpoint path, e.g. "/rooms".
@@ -85,7 +94,8 @@ async def worker(env):
     async with Worker(
         env.client, task_queue=TASK_QUEUE, workflows=[ApiDesignWorkflow, DeliveryWorkflow],
         activities=[activities.api_design_turn, activities.write_openapi_document,
-                    activities.checkout_repository, activities.publish_repository],
+                    activities.checkout_repository, activities.publish_repository,
+                    activities.read_repository_contract],
     ), stage_workers(env, activities):
         yield activities
 
@@ -106,7 +116,7 @@ async def test_new_api_design_inherits_the_requirements_repository(env, worker, 
 
     selected = repository_selection if linked else None
     source = RequirementsState(status="completed", document={"document_id": "0" * 32}, repository=selected,
-                               kind="api_change")
+                               kind="new_service")
 
     async def requirements_state(session_id):
         return source
@@ -129,10 +139,90 @@ async def test_new_api_design_inherits_the_requirements_repository(env, worker, 
     handle = env.client.get_workflow_handle(await service.start_session("requirements-session-" + "0" * 32))
     try:
         state = await wait_for_status(handle, "interviewing")
-        assert state.repository == selected and state.kind == "api_change"
+        assert state.repository == selected and state.kind == "new_service"
         assert (await service.get_session(handle.id))["repository"] == selected
     finally:
         await handle.terminate()
+
+
+def requirement(number: int, title: str) -> dict[str, Any]:
+    return {"id": f"FR-{number}", "category": "functional", "title": title,
+            "description": "D", "priority": "must"}
+
+
+@pytest.fixture
+def change(monkeypatch, connected, repository_selection):
+    """A finished requirements session that changes the API of a published service: it
+    adds FR-3 and ends FR-2, which one of the service's endpoints is linked to."""
+    from app.requirements.models import RequirementsState
+
+    published = [requirement(1, "Book rooms"), requirement(2, "List rooms by floor")]
+    contract = {"language": "java", "requirements": published,
+                "requirements_document": render_requirements_markdown(published, "A hotel."),
+                "api": {**empty_api(), "endpoints": [
+                    {**endpoint("/rooms"), "requirement_ids": ["FR-1", "FR-2"]}]}}
+    source = RequirementsState(
+        status="completed", document={"document_id": "0" * 32}, kind="api_change",
+        repository=repository_selection, requirements=[requirement(3, "Cancel bookings")],
+        retired=published[1:], contract=contract,
+        # The commit the fake checkout of every session reports.
+        contract_commit="1" * 40)
+
+    async def requirements_state(session_id):
+        return source
+
+    async def document(*args):
+        return {"parsed_text": "# Change"}
+
+    monkeypatch.setattr(service.requirements_service, "get_state", requirements_state)
+    monkeypatch.setattr(service, "get_generated_document", document)
+    return source
+
+
+async def test_api_change_is_designed_from_the_repository_contract(env, worker, change):
+    worker.draft_endpoints = [endpoint("/bookings")]
+    handle = env.client.get_workflow_handle(await service.start_session("requirements-session-" + "0" * 32))
+    state = await wait_for_status(handle, "interviewing")
+    # The designer starts from the API and the language the service has, not from nothing.
+    assert [item["path"] for item in state.api["endpoints"]] == ["/rooms", "/bookings"]
+    assert state.language == "java" and state.change_document == "# Change"
+    # What the change ends is gone from the requirements and from the endpoints' links.
+    required = [change.contract["requirements"][0], *change.requirements]
+    assert state.requirements == required
+    assert state.api["endpoints"][0]["requirement_ids"] == ["FR-1"]
+
+    # A fork changes the same service.
+    fork = env.client.get_workflow_handle(await service.fork_session(handle.id, 0))
+    forked = await wait_for_status(fork, "interviewing")
+    assert forked.change_document == "# Change" and forked.api == state.api
+    await fork.terminate()
+
+    await handle.execute_update(ApiDesignWorkflow.finalize)
+    progress = await delivered(env, handle)
+    # The service is built and published with the contract as the change leaves it.
+    merged = render_requirements_markdown(required, "A hotel.")
+    assert worker.contract == {"language": "java", "requirements": required,
+                               "requirements_document": merged, "api": state.api}
+    assert worker.published_kind == "api_change"
+    assert progress.implementation["context"]["requirements_document"] == merged
+
+
+@pytest.mark.parametrize("same_contract", [True, False])
+async def test_api_change_goes_on_from_a_moved_repository_only_with_the_same_contract(env, worker, change, same_contract):
+    # The branch moved between the requirements session's clone and this session's.
+    change.contract_commit = "0" * 40
+    worker.repository_contract = (
+        change.contract if same_contract else {**change.contract, "requirements": []})
+    handle = env.client.get_workflow_handle(await service.start_session("requirements-session-" + "0" * 32))
+    if same_contract:
+        state = await wait_for_status(handle, "interviewing")
+        assert state.contract_commit == "1" * 40 and worker.turns == 1
+        await handle.terminate()
+        return
+    assert await handle.result() is None
+    state = await handle.query(ApiDesignWorkflow.get_state)
+    assert state.status == "failed" and "contract is no longer the one" in state.error
+    assert worker.turns == 0 and state.messages == []
 
 
 async def test_repository_is_checked_out_first_and_pushed_once_verified(env, worker, connected, repository_selection):

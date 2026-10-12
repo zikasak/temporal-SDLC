@@ -185,6 +185,13 @@ async def test_set_language_records_only_supported_languages():
     assert "The implementation language is not chosen." not in result["problems"]
 
 
+async def test_existing_service_keeps_its_language():
+    ctx = ApiDesignContext.from_model(empty_api(), set(), "java", language_fixed=True)
+    tools = {item.name: item for item in build(ctx)}
+    refused = await tools["set_language"].ainvoke({"language": "java"})
+    assert refused.startswith("Language not recorded:") and ctx.language == "java"
+
+
 def test_tool_schemas_still_describe_lists():
     tools = {item.name: item for item in build(context())}
     schema = tools["record_schema"].tool_call_schema.model_json_schema()

@@ -79,6 +79,28 @@ KIND_INTERVIEWS: dict[str, str] = {
 }
 
 
+SERVICE_GUIDANCE = (
+    "\nThe existing service was built to meet the requirements listed below as the "
+    "service's requirements. They stay in force and are not part of this interview: "
+    "never record one of them again. When the change contradicts, replaces or removes "
+    "one of them, that one no longer holds. Say which one it is, and once the user "
+    "confirms, call retire_requirement with its ID and record what holds instead, if "
+    "anything, as a new requirement. Call keep_requirement to undo this. Before "
+    "telling the user they can generate the document, check each of the service's "
+    "requirements against the change and settle every conflict this way."
+)
+
+
+def service_guidance(published: list[Requirement], retired: list[Requirement]) -> str:
+    """What a change to an existing service is told about the contract it changes."""
+    if not published:
+        return ""
+    return (SERVICE_GUIDANCE + "\nThe service's requirements: "
+            + json.dumps(published, ensure_ascii=False)
+            + "\nRetired by this change so far: "
+            + json.dumps([item["id"] for item in retired]))
+
+
 def kind_guidance(kind: TaskKind | None) -> str:
     if kind is None:
         kinds = "; ".join(f"{name} ({text})" for name, text in TASK_KINDS.items())
@@ -109,15 +131,19 @@ def _conversation(messages: list[ConversationMessage]) -> list[BaseMessage]:
 def interview_messages(
     messages: list[ConversationMessage], requirements: list[Requirement],
     kind: TaskKind | None, extra_guidance: str = "",
+    published: list[Requirement] | None = None, retired: list[Requirement] | None = None,
 ) -> list[BaseMessage]:
+    """`published` are the requirements of the service a change starts from."""
     guidance = (INTERVIEWER_GUIDANCE + kind_guidance(kind) + extra_guidance
+                + service_guidance(published or [], retired or [])
                 + "\nRequirements recorded so far: "
                 + json.dumps(requirements, ensure_ascii=False))
     return [SystemMessage(content=guidance), *_conversation(messages)]
 
 
 def document_messages(
-    messages: list[ConversationMessage], requirements: list[Requirement]
+    messages: list[ConversationMessage], requirements: list[Requirement],
+    retired: list[Requirement] | None = None,
 ) -> list[BaseMessage]:
     transcript = "\n\n".join(
         f"{'User' if item['role'] == 'user' else 'Analyst'}: {item['content']}"
@@ -128,5 +154,7 @@ def document_messages(
         HumanMessage(content=(
             f"<transcript>\n{transcript}\n</transcript>\n\n<requirements>\n"
             f"{json.dumps(requirements, ensure_ascii=False)}\n</requirements>"
+            + (f"\n\n<retired_requirements>\n{json.dumps(retired, ensure_ascii=False)}"
+               "\n</retired_requirements>" if retired else "")
         )),
     ]

@@ -35,6 +35,8 @@ type Session = {
   status: SessionStatus;
   messages: { role: "user" | "assistant"; content: string }[];
   requirements: Requirement[];
+  // Requirements of the existing service that this change ends.
+  retired: Requirement[];
   kind: TaskKind | null;
   document: RequirementsDocument | null;
   error: string | null;
@@ -88,6 +90,18 @@ function rememberSessionId(sessionId: string) {
   window.history.replaceState(null, "", url);
 }
 
+function isRequirement(item: unknown): boolean {
+  if (typeof item !== "object" || item === null) return false;
+  const record = item as Record<string, unknown>;
+  return (
+    typeof record.id === "string" &&
+    categories.some(([category]) => category === record.category) &&
+    typeof record.title === "string" &&
+    typeof record.description === "string" &&
+    typeof record.priority === "string"
+  );
+}
+
 function sessionRecord(value: unknown): Session {
   if (
     typeof value !== "object" ||
@@ -107,16 +121,10 @@ function sessionRecord(value: unknown): Session {
     ) ||
     !("requirements" in value) ||
     !Array.isArray(value.requirements) ||
-    !value.requirements.every(
-      (item) =>
-        typeof item === "object" &&
-        item !== null &&
-        typeof item.id === "string" &&
-        categories.some(([category]) => category === item.category) &&
-        typeof item.title === "string" &&
-        typeof item.description === "string" &&
-        typeof item.priority === "string",
-    )
+    !value.requirements.every(isRequirement) ||
+    !("retired" in value) ||
+    !Array.isArray(value.retired) ||
+    !value.retired.every(isRequirement)
   ) {
     throw new Error("The backend returned an invalid session.");
   }
@@ -137,6 +145,7 @@ function sessionRecord(value: unknown): Session {
     status: value.status as SessionStatus,
     messages: value.messages as Session["messages"],
     requirements: value.requirements as Requirement[],
+    retired: value.retired as Requirement[],
     kind: "kind" in value && typeof value.kind === "string" && value.kind in kindLabels
       ? (value.kind as TaskKind)
       : null,
@@ -626,6 +635,22 @@ export default function Requirements() {
                     </div>
                   );
                 })}
+                {session.retired.length > 0 && (
+                  <div className="requirement-group">
+                    <h4>Retired from the existing service</h4>
+                    <ul>
+                      {session.retired.map((item) => (
+                        <li key={item.id}>
+                          <div className="requirement-heading">
+                            <code>{item.id}</code>
+                            <strong>{item.title}</strong>
+                          </div>
+                          <p>{item.description}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </section>
             )}
 
