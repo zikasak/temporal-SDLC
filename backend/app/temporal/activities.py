@@ -42,6 +42,7 @@ from app.llm.prompt import INLINE_DOCUMENT_CHARS, MAX_REMEMBERED_CHARS, model_me
 from app.temporal.tracing import trace_activity
 from app.tracing import langchain_config
 from app.requirements.document import DOCUMENT_FILENAME, render_requirements_markdown
+from app.requirements.models import Requirement
 from app.requirements.prompt import document_messages, interview_messages
 from app.tools import ToolContext, build_tools
 from app.tools import api_design as api_design_tools
@@ -51,7 +52,8 @@ from app.tools.document_write import summarize_tool_results
 
 COMMIT_SUBJECT = "Add generated service, contract tests and contract"
 # What the commit of a task that changes an existing service says instead.
-COMMIT_SUBJECTS = {"bugfix": "Fix the service and add regression tests"}
+COMMIT_SUBJECTS = {"api_change": "Change the service's API, contract tests and contract",
+                   "bugfix": "Fix the service and add regression tests"}
 
 
 def _attached_document_ids(messages: list[dict[str, Any]]) -> list[str]:
@@ -92,8 +94,8 @@ def _repository_tools(session_id: str | None = None) -> list[BaseTool]:
     return repository_tools.build(root) if root.is_dir() else []
 
 
-def _published_requirement_ids() -> tuple[str, ...]:
-    """IDs of the requirements in the contract of the session's repository; none for a
+def _published_requirements() -> tuple[Requirement, ...]:
+    """The requirements in the contract of the session's repository; none for a
     repository this pipeline has not published a service to."""
     if not activity.in_activity():
         return ()
@@ -102,7 +104,7 @@ def _published_requirement_ids() -> tuple[str, ...]:
             GENERATED_CODE_DIR, activity.info().workflow_id))
     except ContractError:
         return ()
-    return tuple(item["id"] for item in contract["requirements"])
+    return tuple(contract["requirements"])
 
 
 async def _github_token() -> tuple[str, dict[str, Any]]:
@@ -264,10 +266,11 @@ async def send_llm_message(
 @trace_activity('gather-requirements', feature='requirements', as_type='agent')
 async def requirements_turn(
     messages: list[dict[str, Any]], requirements: list[dict[str, Any]],
-    kind: str | None = None,
+    kind: str | None = None, retired: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    retired = retired or []
     ctx = requirements_tools.RequirementsContext.from_list(
-        requirements, kind, await asyncio.to_thread(_published_requirement_ids))
+        requirements, kind, await asyncio.to_thread(_published_requirements), retired)
     repository = _repository_tools()
     started = time.perf_counter()
     try:
@@ -275,7 +278,8 @@ async def requirements_turn(
         result = await graph.ainvoke(
             {"messages": interview_messages(
                 messages, requirements, kind,
-                repository_tools.GUIDANCE if repository else "")},
+                repository_tools.GUIDANCE if repository else "",
+                list(ctx.service_requirements()), ctx.retired_list())},
             config=langchain_config(recursion_limit=20, run_name='interview-with-tools'),
         )
         reply = str(result["messages"][-1].text).strip()
@@ -286,11 +290,12 @@ async def requirements_turn(
     activity.logger.info("Requirements turn took %.1fs: %d -> %d requirements",
                          time.perf_counter() - started, len(requirements), len(updated))
     if not reply:
-        if updated == requirements and ctx.kind == kind:
+        if updated == requirements and ctx.kind == kind and ctx.retired_list() == retired:
             activity.logger.warning("Requirements turn returned no text and no changes")
             raise ApplicationError("The model returned no text", non_retryable=True)
         reply = f"Noted. {len(updated)} requirements are recorded so far. What else should I know?"
-    return {"reply": reply, "requirements": updated, "kind": ctx.kind}
+    return {"reply": reply, "requirements": updated, "kind": ctx.kind,
+            "retired": ctx.retired_list()}
 
 
 async def _save_session_document(
@@ -325,11 +330,12 @@ async def _save_session_document(
 @trace_activity('write-requirements-document', feature='requirements',
                 input_parameter='requirements')
 async def write_requirements_document(
-    session_id: str, messages: list[dict[str, Any]], requirements: list[dict[str, Any]]
+    session_id: str, messages: list[dict[str, Any]], requirements: list[dict[str, Any]],
+    retired: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     try:
         answer = await get_model().ainvoke(
-            document_messages(messages, requirements),
+            document_messages(messages, requirements, retired),
             config=langchain_config(run_name='write-requirements-overview'),
         )
         narrative = str(answer.text).strip() or None
@@ -337,7 +343,7 @@ async def write_requirements_document(
         # The requirement tables alone are still a useful document.
         activity.logger.exception("Could not write the requirements overview")
         narrative = None
-    content = render_requirements_markdown(requirements, narrative)
+    content = render_requirements_markdown(requirements, narrative, retired)
     return await _save_session_document(session_id, DOCUMENT_FILENAME, content)
 
 
@@ -354,7 +360,8 @@ async def read_requirements_document(session_id: str, document_id: str) -> str:
 @trace_activity('design-api', feature='api-design', as_type='agent')
 async def api_design_turn(state: ApiDesignState) -> dict[str, Any]:
     ctx = api_design_tools.ApiDesignContext.from_model(
-        state.api, {item["id"] for item in state.requirements}, state.language
+        state.api, {item["id"] for item in state.requirements}, state.language,
+        language_fixed=bool(state.change_document),
     )
     repository = _repository_tools()
     started = time.perf_counter()

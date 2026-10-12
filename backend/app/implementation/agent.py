@@ -41,6 +41,8 @@ project's Git repository named by the `repository` entry of the input. The `brie
 of the input is the task: the problem, the expected behaviour and the acceptance criteria.
 The supplied requirements and OpenAPI design are the contract the service was built from;
 the API stays exactly as it is.
+The brief's `retired` entry lists the requirements of that contract the change ends:
+they no longer hold once it is made, whatever the contract still says.
 {instructions}
 Read the code that handles the behaviour the brief describes before changing anything.
 Locate code with list_files and search_files and read only the relevant line ranges with

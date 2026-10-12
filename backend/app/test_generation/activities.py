@@ -16,7 +16,7 @@ from app.agent_workflows.host import (
 from app.api_design.openapi import render_openapi
 from app.config import GENERATED_CODE_DIR
 from app.docker_agents import default_agent_image
-from app.github.checkout import CHECKOUT_DIR, TESTS_DIR
+from app.github.checkout import SNAPSHOT_DIR
 from app.languages import Language, TestSuite
 from app.requirements.document import without_repeated_tables
 
@@ -56,12 +56,13 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
         contracts['repair'] = repair
 
     # The author of a session with a repository continues that repository's contract
-    # tests; the rest of the checkout stays out of its workspace.
+    # tests, as the delivery recorded them before any author ran; the rest of the
+    # checkout stays out of its workspace.
     repository = context.get('repository')
-    checkout = session_dir / CHECKOUT_DIR
+    snapshot = session_dir / SNAPSHOT_DIR / 'suite'
     if repository:
-        if not checkout.is_dir():
-            raise ApplicationError('The repository checkout is unavailable', non_retryable=True)
+        if not snapshot.is_dir():
+            raise ApplicationError('The repository tests were not recorded', non_retryable=True)
         contracts['repository'] = repository
 
     openapi = render_openapi(api_design)
@@ -73,8 +74,8 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
         if repair:
             # A repair continues from the published suite; runner files stay the template's.
             copy_test_suite(suite, previous, workspace / 'tests')
-        elif repository and (checkout / TESTS_DIR).is_dir():
-            copy_test_suite(suite, checkout / TESTS_DIR, workspace / 'tests')
+        elif repository:
+            copy_test_suite(suite, snapshot, workspace / 'tests')
         write_language(workspace, language, instructions=suite.instructions,
                        test_glob=suite.test_glob)
         if files:
@@ -124,8 +125,10 @@ async def generate_service_tests(session_id: str, context: dict[str, Any]) -> di
     session_dir = GENERATED_CODE_DIR / session_id
     repair = context.get('repair')
     change = bool(context.get('brief'))
-    # A change to an existing service adds to the repository's tests and leaves them alone.
-    repository = suite.test_cases(session_dir / CHECKOUT_DIR / TESTS_DIR) if change else {}
+    # The repository's tests as they were before any author ran. A change that leaves the
+    # API as it is adds to them and leaves them alone.
+    continued = bool(context.get('repository'))
+    repository = (suite.test_cases(session_dir / SNAPSHOT_DIR / 'suite') if continued else {})
     frozen = None
     if repair:
         # Only the tests the diagnosis found broken may differ from the published suite.
@@ -137,9 +140,9 @@ async def generate_service_tests(session_id: str, context: dict[str, Any]) -> di
         frozen = repository
     result = await run_stage(stage(language, frozen, must_add=change and not repair),
                              session_id, context, GENERATED_CODE_DIR)
-    if not change:
+    if not continued:
         return result
-    # What the suite now differs in from the repository's, for the baseline run.
+    # What the suite now differs in from the repository's, for the runs that judge it.
     cases = suite.test_cases(Path(result['path']))
     return {**result,
             'added_tests': sorted(cases.keys() - repository.keys()),

@@ -1,8 +1,8 @@
 # Handover: tasks that are not "build a new service"
 
-Written on 2026-10-10 for whoever continues this work. It assumes you have not seen the
-system before. Steps 1 to 4 of six are done; the rest is described below in the order it
-should be built.
+Written on 2026-10-10 and updated on 2026-10-12 for whoever continues this work. It
+assumes you have not seen the system before. Steps 1 to 5 of six are done; the last is
+described below.
 
 ## 1. What the system is
 
@@ -204,9 +204,10 @@ The reference is "Changing an existing service (bugfix)" in
 `docs/service-implementation.md`. In short:
 
 - **Entry.** `RequirementsWorkflow` reads the repository's contract when a session of a
-  kind in `DIRECT_KINDS` (`backend/app/requirements/models.py`, today only `bugfix`) is
-  finalized, keeps it in `RequirementsState.contract`, and after the document is written
-  starts the `DeliveryWorkflow` and waits for it (`_deliver`). A repository without a
+  kind in `CHANGE_KINDS` (`backend/app/requirements/models.py`: `api_change` and `bugfix`)
+  is finalized and keeps it in `RequirementsState.contract`. For a kind in `DIRECT_KINDS`
+  (today only `bugfix`) it then starts the `DeliveryWorkflow` once the document is written
+  and waits for it (`_deliver`). A repository without a
   contract refuses the finalize and the session shows why. An API design cannot be
   started from such a session.
 - **`TaskSpec`.** Its contract fields hold the repository's contract; `brief` holds the
@@ -228,7 +229,7 @@ The reference is "Changing an existing service (bugfix)" in
 - **Prompts.** `CHANGE_PROMPT` in `implementation/agent.py`, `test_generation/agent.py`
   and `diagnosis/agent.py`, selected by the `brief` entry of the stage context.
 - **Contract.** A published bugfix appends the brief's requirements to the repository's
-  contract (`with_requirements` in `delivery/contract.py`), so a later task's test agent
+  contract and drops the ones it retired (`with_requirements` in `delivery/contract.py`), so a later task's test agent
   keeps the regression tests. The interview numbers a bugfix's requirements past the contract's
   from the start (`RequirementsContext.published` in `tools/requirements.py`); ones
   recorded before the kind was set are renumbered then (`numbered_after`) and the analyst
@@ -256,27 +257,57 @@ Not done, and open:
   still alter a shared helper or fixture, or annotate a whole class, which changes what
   untouched tests do, and the build file can leave tests out of the run. For a bugfix
   the baseline catches both, because it refuses a run with a skipped test or with a test
-  of the suite's sources missing from the reports. The other kinds have no such
-  check: their verification still passes with skipped tests.
+  of the suite's sources missing from the reports. An API change has the same
+  rule for its final run; a new service's verification still passes with skipped tests.
 - Test identity relies on Surefire naming a report entry after its method. A test with a
   custom display name for its invocations may not be matched, which ends a baseline as
   "did not run" rather than passing silently.
-- The interviewer is not told what the repository's contract says; it can read
-  `contracts/` with its repository tools.
-
-## 5. What remains
-
-Build these in order; each is a usable checkpoint.
 
 ### Step 5: the API change path
 
-- Start the API design session from the stored contract instead of `empty_api()`
-  (`ApiDesignState` in `backend/app/api_design/models.py`, `start_session` in
-  `backend/app/api_design/service.py`), and tell the designer it is editing an existing
-  API.
-- The rest already works: the repository mode of delivery keeps existing files and both
-  agents are told to extend what is there. Check that the test agent keeps existing tests
-  the new contract still supports (its `REPOSITORY_PROMPT` already says so).
+The reference is "Changing an existing API" in `docs/service-implementation.md`. In short:
+
+- **Entry.** An `api_change` requirements session reads the contract at finalize like a
+  bugfix (same refusal, same numbering of its requirements past the contract's) but does
+  not deliver.
+- **Design.** `start_session` in `backend/app/api_design/service.py` seeds the design
+  with the contract's API and language and with the contract's requirements plus the
+  change's. `ApiDesignState.change_document` holds the change's own document and marks
+  the session as a change.
+- **Prompt.** `CHANGE_GUIDANCE`, `CHANGE_KICKOFF_MESSAGE` and `LANGUAGE_FIXED` in
+  `backend/app/api_design/prompt.py`. `set_language` refuses in such a session.
+- **Delivery.** Unchanged: the new-service path in the repository. The test agent's
+  `REPOSITORY_PROMPT` tells it to keep the existing tests the new contract supports.
+
+- **Retired requirements.** The interviewer of a change sees the contract's requirements
+  and ends the ones the change contradicts with the `retire_requirement` tool
+  (`keep_requirement` undoes it). `RequirementsState.retired` carries them, and
+  `with_requirements` drops them from the contract and from the endpoints' links. This
+  holds for a bugfix too, whose brief passes them to the agents as `retired`.
+- **Snapshot of the tests.** Every delivery with a checkout first copies the repository's
+  tests to `<session>/repository-tests/` (`snapshot_repository_tests`, once). The test
+  stage and every comparison read that copy, not the checkout.
+- **Kept tests.** A change's verification must run every test (`unproven_green`, now for
+  both change kinds). For an API change, each repository test the author changed or
+  removed is then run as it was against the changed service; one that still passes blocks
+  the publication (`_prove_kept` in `DeliveryWorkflow`, `judge_kept`).
+- **Moved repository.** The contract is kept with the commit it was read at. The design
+  session compares its own checkout's commit and, when it differs, the contract itself:
+  the same contract goes on, a different one fails the session (`_confirm_contract`).
+
+Not done, and open:
+
+- Like the bugfix path, it has only run against fake stages.
+- A kept-tests violation ends the delivery; the user retries `tests`. Nothing restores
+  the tests automatically, and the retried author is not told which ones it must keep.
+- In the kept-tests run a test that was skipped counts as still passing.
+- Helpers, fixtures and build files are still not protected, as for a bugfix.
+- A moved repository is judged by its contract alone. Service code or tests pushed in
+  between are not compared; the delivery works from the newer checkout.
+- The requirements session's own interview is not rechecked: a session left open while
+  the branch moves still reads the contract of its first clone.
+
+## 5. What remains
 
 ### Step 6: the docs-only path
 

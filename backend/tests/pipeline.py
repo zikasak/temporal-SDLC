@@ -18,6 +18,7 @@ from app.verification.workflows import VerificationWorkflow
 
 CODE = {"server": {"path": "/generated/server", "files": 8}}
 BASELINE_IMAGE = "sha256:" + "e" * 64
+REPOSITORY_TESTS_IMAGE = "sha256:" + "f" * 64
 ADDED_TESTS = ["com.example.RoomsTest#refusesDoubleBooking", "com.example.OverlapTest#refuses"]
 BROKEN_TEST = {"class_name": "RoomsTest", "name": "lists"}
 
@@ -64,6 +65,16 @@ class FakeStages:
         self.published: list[tuple[str, str]] = []
         self.published_kind: str | None = None
         self.fail_publication = False
+        # What had already run each time the repository's tests were recorded.
+        self.snapshots: list[list[str]] = []
+        self.fail_snapshot = False
+        # Repository tests the test author of an API change rewrote, and those of them
+        # that still pass, as they were, against the changed service.
+        self.rewritten_tests: list[str] = []
+        self.still_passing: list[str] = []
+        # Those the runner of the repository's tests leaves out of its reports.
+        self.not_run: list[str] = []
+        self.existing_runs: list[tuple[str, list[str]]] = []
 
     @activity.defn(name="checkout_repository")
     async def checkout_repository(self, session_id: str, repository: dict[str, Any]) -> dict[str, Any]:
@@ -106,14 +117,28 @@ class FakeStages:
         if 'repair' in context:
             self.repairs.append(('tests', context['repair']))
             changed["changed_tests"] = self.corrected_tests
+        if 'brief' not in context:
+            changed = {"added_tests": [], "changed_tests": self.rewritten_tests,
+                       "removed_tests": []}
         result = {"image_id": "sha256:" + ("d" if 'repair' in context else "b") * 64,
-                  **(changed if 'brief' in context else {})}
+                  **(changed if 'repository' in context else {})}
         return result if 'repair' in context else {**result, "context": context}
 
     @activity.defn(name='build_baseline')
     async def build_baseline(self, session_id: str, language: str) -> dict[str, Any]:
         self.stages.append('baseline')
         return {'image_id': BASELINE_IMAGE, 'session_id': session_id}
+
+    @activity.defn(name='snapshot_repository_tests')
+    async def snapshot_repository_tests(self, session_id: str, language: str) -> dict[str, Any]:
+        if self.fail_snapshot:
+            raise ApplicationError('disk full', non_retryable=True)
+        self.snapshots.append(list(self.stages))
+        return {'tests': 3}
+
+    @activity.defn(name='build_repository_tests')
+    async def build_repository_tests(self, session_id: str, language: str) -> dict[str, Any]:
+        return {'image_id': REPOSITORY_TESTS_IMAGE, 'session_id': session_id}
 
     @activity.defn(name='diagnose_failure')
     async def diagnose_failure(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
@@ -143,10 +168,22 @@ class FakeStages:
 
     @activity.defn(name='verify_service')
     async def verify_service(self, session_id: str, service_image: str, test_image: str,
-                             language: str, tracked_tests: list[str] | None) -> dict[str, Any]:
+                             language: str, tracked_tests: list[str] | None,
+                             suite_dir: str) -> dict[str, Any]:
         details = {'session_id': session_id, 'duration_seconds': 1.0, 'exit_code': 0,
                    'test_failures': [], 'details_truncated': False, 'service_log': '',
                    'runner_log': '', 'path': '/verification'}
+        if test_image == REPOSITORY_TESTS_IMAGE:
+            # The repository's own tests, of which the changed service fails some.
+            self.existing_runs.append((suite_dir, tracked_tests))
+            failed = [case for case in tracked_tests
+                      if case not in self.still_passing and case not in self.not_run]
+            return {**details, 'status': 'failed' if failed else 'passed', 'tests': 3,
+                    'passed': 3 - len(failed), 'failures': len(failed), 'errors': 0,
+                    'skipped': 0, 'error': None, 'missing_tests': [],
+                    'tracked': {case: {'tests': int(case not in self.not_run),
+                                       'failed': int(case in failed)}
+                                for case in tracked_tests}}
         if service_image == BASELINE_IMAGE:
             self.stages.append('baseline-run')
             return {**details, **self._baseline(service_image, test_image, tracked_tests)}
@@ -171,7 +208,10 @@ class FakeStages:
                 'failures': int(failed), 'errors': 0, 'skipped': int(skipped),
                 'test_failures': [{'class_name': 'RoomsTest', 'name': 'lists', 'kind': 'failure',
                                    'message': 'Expected 200, got 500'}] if failed else [],
-                'tracked': None, 'missing_tests': None, 'service_log': 'NullPointerException' if failed else '',
+                'tracked': None if tracked_tests is None else {
+                    case: {'tests': 1, 'failed': 0} for case in tracked_tests},
+                'missing_tests': None if tracked_tests is None else [],
+                'service_log': 'NullPointerException' if failed else '',
                 'error': None}
 
 
@@ -204,7 +244,8 @@ async def stage_workers(env, stages: FakeStages):
         workflows=[ServiceTestWorkflow], activities=[stages.generate_service_tests],
     ), Worker(
         env.client, task_queue=VERIFICATION_TASK_QUEUE, workflows=[VerificationWorkflow],
-        activities=[stages.verify_service, stages.build_baseline],
+        activities=[stages.verify_service, stages.build_baseline,
+                    stages.snapshot_repository_tests, stages.build_repository_tests],
     ), Worker(
         env.client, task_queue=DIAGNOSIS_TASK_QUEUE,
         workflows=[DiagnosisWorkflow], activities=[stages.diagnose_failure],

@@ -10,6 +10,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from app.delivery.models import (
     RETRY_STAGES, DeliveryProgress, DeliveryState, RetryStage, delivery_id,
 )
+from app.requirements.models import CHANGE_KINDS
 from app.temporal.client import connect_temporal
 from app.temporal.sessions import SessionBusy
 
@@ -49,6 +50,8 @@ async def retry(session_id: str, stage: RetryStage) -> None:
     ).query('get_state', result_type=DeliveryState)
     progress = state.progress
     change = state.spec.kind == 'bugfix'
+    # A change is published only with a verification that proved all of it.
+    proved = state.spec.kind in CHANGE_KINDS
     # A run that could not complete is returned as a result, not recorded as an error.
     unverified = progress.verification_error or (
         progress.verification and progress.verification['status'] == 'error')
@@ -56,7 +59,7 @@ async def retry(session_id: str, stage: RetryStage) -> None:
               # The tests of a change are retried with the baseline run that judges them,
               # and that retry is also the way on from a verification that proved nothing.
               'tests': (progress.tests_error or progress.baseline_error
-                        or change and unverified),
+                        or proved and unverified),
               'repository': progress.publication_error}[stage]
     if not failed:
         raise SessionBusy('Only failed generation can be retried.')
@@ -74,6 +77,7 @@ async def retry(session_id: str, stage: RetryStage) -> None:
         # A repeated push keeps the verification it publishes.
         progress.verification = None
         progress.verification_error = None
+        progress.existing_tests = None
         progress.verification_status = 'waiting'
         progress.repairs = []
     if stage == 'server':

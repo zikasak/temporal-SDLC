@@ -140,16 +140,20 @@ class ApiDesignContext:
     endpoints: dict[str, Endpoint] = field(default_factory=dict)
     requirement_ids: set[str] = field(default_factory=set)
     language: str | None = None
+    # An existing service stays in the language it is written in.
+    language_fixed: bool = False
 
     @classmethod
     def from_model(cls, api: ApiModel, requirement_ids: set[str] | None = None,
-                   language: str | None = None) -> "ApiDesignContext":
+                   language: str | None = None, language_fixed: bool = False,
+                   ) -> "ApiDesignContext":
         return cls(
             dict(api["info"]),  # type: ignore[arg-type]
             {item["name"]: item for item in api["schemas"]},
             {endpoint_key(item): item for item in api["endpoints"]},
             requirement_ids or set(),
             language,
+            language_fixed,
         )
 
     def as_model(self) -> ApiModel:
@@ -163,6 +167,9 @@ class ApiDesignContext:
 
     def set_language(self, language: str) -> str:
         """Only registered languages can be recorded; anything else raises."""
+        if self.language_fixed:
+            raise ValueError(f"The existing service is written in {self.language}, and a "
+                             "change to it cannot choose another language.")
         self.language = get_language(language).name
         return self.language
 

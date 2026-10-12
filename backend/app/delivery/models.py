@@ -31,6 +31,8 @@ class Brief(TypedDict):
 
     requirements: list[Requirement]
     requirements_document: str
+    # Requirements of the repository's contract that the change ends.
+    retired: list[Requirement]
 
 
 @dataclass
@@ -75,6 +77,9 @@ class DeliveryProgress:
     verification: VerificationResult | None = None
     verification_error: str | None = None
     verification_status: VerificationStatus = 'not_applicable'
+    # The run of the repository's tests an API change rewrote or removed, as they were,
+    # against the changed service.
+    existing_tests: VerificationResult | None = None
     # One entry per diagnosed verification failure: which side was sent back for repair.
     repairs: list[RepairRound] = field(default_factory=list)
     # The new branch holding the sources that passed verification.
@@ -127,6 +132,27 @@ def unproven_green(result: VerificationResult) -> str | None:
         return ('Tests of the suite that did not run against the changed service: '
                 f'{", ".join(result["missing_tests"][:NAMED_TESTS])}.')
     return None
+
+
+def judge_kept(result: VerificationResult, touched: list[str]) -> str | None:
+    """Why an API change may not publish its suite: `touched` are the repository's tests
+    it changed or removed, and `result` their run, as they were, against the changed
+    service. One that still passes there is still supported by the new contract."""
+    tracked = result['tracked']
+    if result['status'] == 'error' or tracked is None:
+        return "The repository's tests could not be run against the changed service."
+    unrun = [case for case in touched if not tracked[case]['tests']]
+    if unrun:
+        # A test that did not run was not seen to fail, so nothing allows its change.
+        return ('Tests of the repository that were changed or removed did not run, as they '
+                f'were, against the changed service: {", ".join(unrun[:NAMED_TESTS])} '
+                f'({len(unrun)}). Nothing shows that the new contract no longer supports them.')
+    kept = [case for case in touched if not tracked[case]['failed']]
+    if not kept:
+        return None
+    return ('Tests of the repository that the changed service still passes were changed or '
+            f'removed: {", ".join(kept[:NAMED_TESTS])} ({len(kept)}). A test the new contract '
+            'still supports has to stay as it is.')
 
 
 @dataclass

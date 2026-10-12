@@ -59,7 +59,8 @@ The service existed before this run and was changed for the task in the `brief` 
 the input: the problem, the expected behaviour and the acceptance criteria. The test suite
 is the repository's existing one plus regression tests for that brief. The brief has the
 same authority as the contract, and overrides it where it states the expected behaviour
-more precisely.
+more precisely. The brief's `retired` entry lists the requirements of the contract the change ends:
+they no longer hold once it is made, whatever the contract still says.
 """
 
 

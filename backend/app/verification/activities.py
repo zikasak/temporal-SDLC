@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import tarfile
 import tempfile
 import time
@@ -19,8 +20,9 @@ from temporalio.exceptions import ApplicationError
 
 from app import docker_agents
 from app.agent_workflows.host import build_image, publish_manifest, session_language
-from app.github.checkout import CHECKOUT_DIR
+from app.github.checkout import CHECKOUT_DIR, SNAPSHOT_DIR, TESTS_DIR
 from app.implementation.activities import copy_service
+from app.test_generation.activities import copy_test_suite
 from app.languages import Language, TestReports, UnsupportedLanguage, get_language
 from app.config import GENERATED_CODE_DIR
 from app.verification.models import TestFailure, TrackedTest, VerificationResult
@@ -166,9 +168,13 @@ async def cleanup(service: str, runner: str, network: str) -> None:
 
 async def run_verification(session_id: str, service_image: str, test_image: str,
                            language: str, tracked_tests: list[str] | None = None,
-                           ) -> VerificationResult:
+                           suite_dir: str = 'tests') -> VerificationResult:
+    """`suite_dir` names the session artifact `test_image` was built from: the test
+    author's, or the snapshot of the repository's own tests."""
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
         raise ApplicationError('Invalid session ID', non_retryable=True)
+    if suite_dir not in ('tests', SNAPSHOT_DIR):
+        raise ApplicationError('Invalid test suite', non_retryable=True)
     if not all(re.fullmatch(r'sha256:[0-9a-f]{64}', image) for image in (service_image, test_image)):
         raise ApplicationError('Invalid verification image ID', non_retryable=True)
     try:
@@ -184,7 +190,7 @@ async def run_verification(session_id: str, service_image: str, test_image: str,
     if tracked is not None:
         # A run that answers for single tests answers for the whole suite: its build
         # configuration could otherwise leave tests out without any of them failing.
-        suite_tests = published_suite_tests(GENERATED_CODE_DIR / session_id / 'tests',
+        suite_tests = published_suite_tests(GENERATED_CODE_DIR / session_id / suite_dir,
                                             test_image, stack)
     token = uuid.uuid4().hex
     network = f'verification-{token}'
@@ -311,9 +317,60 @@ async def run_verification(session_id: str, service_image: str, test_image: str,
 @trace_activity('verify-service', feature='verification', input_parameter='service_image')
 async def verify_service(session_id: str, service_image: str, test_image: str,
                          language: str, tracked_tests: list[str] | None = None,
-                         ) -> VerificationResult:
+                         suite_dir: str = 'tests') -> VerificationResult:
     return await run_verification(session_id, service_image, test_image, language,
-                                  tracked_tests)
+                                  tracked_tests, suite_dir)
+
+
+@activity.defn
+@trace_activity('snapshot-repository-tests', feature='verification', input_parameter='language')
+async def snapshot_repository_tests(session_id: str, language: str) -> dict[str, int]:
+    """Copy the repository's tests aside, as the checkout holds them before any author has
+    run. Taken once: a later call, such as a retried delivery's, keeps the first copy,
+    whatever the checkout holds by then."""
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
+        raise ApplicationError('Invalid session ID', non_retryable=True)
+    suite = session_language(language).test_suite
+    session_dir = GENERATED_CODE_DIR / session_id
+    checkout = session_dir / CHECKOUT_DIR
+    if not checkout.is_dir():
+        raise ApplicationError('The repository checkout is unavailable', non_retryable=True)
+    snapshot = session_dir / SNAPSHOT_DIR
+    target = snapshot / 'suite'
+    if not target.is_dir():
+        snapshot.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=snapshot) as temporary:
+            clean = Path(temporary) / 'suite'
+            if (checkout / TESTS_DIR).is_dir():
+                copy_test_suite(suite, checkout / TESTS_DIR, clean)
+            else:
+                shutil.copytree(suite.template, clean)
+            os.replace(clean, target)
+        logger.info('Repository tests recorded (session=%s)', session_id)
+    return {'tests': len(suite.test_cases(target))}
+
+
+@activity.defn
+@trace_activity('build-repository-tests', feature='verification', input_parameter='language')
+async def build_repository_tests(session_id: str, language: str) -> dict[str, str]:
+    """Build the runner of the repository's tests as the snapshot holds them, to run the
+    tests an API change rewrote, as they were, against the changed service."""
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
+        raise ApplicationError('Invalid session ID', non_retryable=True)
+    session_language(language)
+    artifact_dir = GENERATED_CODE_DIR / session_id / SNAPSHOT_DIR
+    if not (artifact_dir / 'suite').is_dir():
+        raise ApplicationError('The repository tests were not recorded', non_retryable=True)
+    async with docker_agents.keep_activity_alive('Building the repository tests'):
+        with tempfile.TemporaryDirectory(dir=artifact_dir) as temporary:
+            clean = Path(temporary) / 'build'
+            shutil.copytree(artifact_dir / 'suite', clean)
+            image_id = await build_image(clean, 'repository test runner',
+                                         artifact_dir / 'image-build.log')
+    result = {'image_id': image_id, 'session_id': session_id}
+    publish_manifest(artifact_dir, result)
+    logger.info('Repository test image built (session=%s, image=%s)', session_id, image_id)
+    return result
 
 
 @activity.defn

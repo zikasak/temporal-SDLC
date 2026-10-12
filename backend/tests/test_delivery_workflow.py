@@ -53,14 +53,18 @@ class FakeActivities(FakeStages):
     def __init__(self) -> None:
         super().__init__()
         self.has_contract = True
+        # The kind the user names in the interview.
+        self.kind = "bugfix"
+        # Requirements of the repository's contract the interview ends.
+        self.retired: list[dict[str, Any]] = []
 
     @activity.defn(name="requirements_turn")
     async def requirements_turn(
         self, messages: list[dict[str, Any]], requirements: list[dict[str, Any]],
-        kind: str | None,
+        kind: str | None, retired: list[dict[str, Any]],
     ) -> dict[str, Any]:
         self.turns += 1
-        return {"reply": "Recorded.", "kind": "bugfix", "requirements": [{
+        return {"reply": "Recorded.", "kind": self.kind, "retired": self.retired, "requirements": [{
             "id": "FR-1", "category": "functional", "title": messages[-1]["content"],
             "description": "D", "priority": "must",
         }]}
@@ -68,9 +72,10 @@ class FakeActivities(FakeStages):
     @activity.defn(name="write_requirements_document")
     async def write_requirements_document(
         self, session_id: str, messages: list[dict[str, Any]],
-        requirements: list[dict[str, Any]],
+        requirements: list[dict[str, Any]], retired: list[dict[str, Any]],
     ) -> dict[str, Any]:
         self.documented = requirements
+        self.documented_retired = retired
         return DOCUMENT
 
     @activity.defn(name="read_requirements_document")
@@ -108,12 +113,13 @@ async def worker(env, monkeypatch):
         yield activities
 
 
-async def deliver(env, repository=None, language: str | None = "java"):
-    """Start the delivery of a new one-endpoint service, as a finished design does."""
+async def deliver(env, repository=None, language: str | None = "java",
+                  kind: str = "new_service"):
+    """Start the delivery of a one-endpoint service, as a finished design does."""
     session_id = f"api-design-session-{uuid.uuid4().hex}"
     spec = TaskSpec(session_id=session_id, requirements=[],
                     requirements_document="# Requirements", api=API, document_id="0" * 32,
-                    kind="new_service", language=language, repository=repository,
+                    kind=kind, language=language, repository=repository,
                     checkout={"commit": "1" * 40} if repository else None)
     await env.client.start_workflow(DeliveryWorkflow.run, DeliveryState(spec=spec),
                                     id=delivery_id(session_id), task_queue=TASK_QUEUE)
@@ -359,7 +365,9 @@ async def test_bugfix_is_delivered_red_to_green_from_the_requirements_session(en
     assert worker.verified_images == [ORIGINAL]
     # Both authors work from the repository's contract and the interview's brief.
     brief = {"requirements": (await handle.query(RequirementsWorkflow.get_state)).requirements,
-             "requirements_document": "# Brief"}
+             "requirements_document": "# Brief", "retired": []}
+    # The repository's tests were recorded before either author ran.
+    assert worker.snapshots == [[]]
     assert brief["requirements"][0]["title"] == "Rooms double-book"
     # The interview numbered it FR-1, which the repository's contract already has. It got
     # its own ID before anything quoted it: the document, the authors and the contract agree.
@@ -461,8 +469,71 @@ async def test_repaired_tests_of_a_bugfix_must_still_fail_without_the_fix(env, w
     assert state.publication_status == 'skipped' and not worker.published
 
 
-async def test_bugfix_needs_a_repository_this_pipeline_published(env, worker, repository_selection):
+async def test_bugfix_ends_the_requirements_its_interview_retired(env, worker, repository_selection):
+    # The interviewer names a requirement of the contract and one that is not in it.
+    worker.retired = [{**PUBLISHED[0], "title": "As the model remembers it"},
+                      {**PUBLISHED[0], "id": "FR-9"}]
+    handle, state = await fixed(env, repository_selection)
+    added = (await handle.query(RequirementsWorkflow.get_state)).requirements
+    # Both authors are told what ends, as the contract states it, and it leaves the
+    # contract with the publication.
+    assert state.tests["context"]["brief"]["retired"] == PUBLISHED
+    assert worker.documented_retired == PUBLISHED
+    assert worker.contract["requirements"] == added
+    assert worker.contract["requirements_document"] == render_requirements_markdown(added, "A hotel.")
+
+
+@pytest.mark.parametrize("still_passing, not_run, refused", [
+    ([], [], None),
+    (["com.example.RoomsTest#lists"], [],
+     "still passes were changed or removed: com.example.RoomsTest#lists (1)"),
+    # A rewritten test that was not seen to fail as it was is not shown to be unsupported.
+    ([], ["com.example.RoomsTest#books"], "did not run, as they were, against the changed "
+                                          "service: com.example.RoomsTest#books (1)"),
+])
+async def test_api_change_keeps_the_repository_tests_its_service_still_passes(env, worker, still_passing, not_run, refused, repository_selection):
+    rewritten = ["com.example.RoomsTest#lists", "com.example.RoomsTest#books"]
+    worker.rewritten_tests, worker.still_passing, worker.not_run = rewritten, still_passing, not_run
+    session_id = await deliver(env, repository_selection, kind="api_change")
+    state = await delivered(env, session_id)
+    assert worker.snapshots == [[]]
+    # Each rewritten test was run as the repository held it, against the changed service.
+    assert worker.existing_runs == [("repository-tests", rewritten)]
+    assert state.verification["status"] == "passed"
+    if not refused:
+        assert state.verification_error is None and state.publication_status == "completed"
+        return
+    assert refused in state.verification_error
+    assert state.publication_status == "skipped" and not worker.published
+    # The way on is a new suite, judged the same way.
+    worker.still_passing = worker.not_run = []
+    await delivery_service.retry(session_id, "tests")
+    assert (await delivered(env, session_id)).publication_status == "completed"
+
+
+async def test_api_change_is_not_published_with_a_test_that_did_not_run(env, worker, repository_selection):
+    worker.verification_result = "skipped"
+    state = await delivered(env, await deliver(env, repository_selection, kind="api_change"))
+    assert "Tests skipped" in state.verification_error
+    assert state.publication_status == "skipped" and not worker.published
+
+
+async def test_nothing_is_authored_when_the_repository_tests_cannot_be_recorded(env, worker, repository_selection):
+    worker.fail_snapshot = True
+    session_id = await deliver(env, repository_selection)
+    state = await delivered(env, session_id)
+    assert state.code_error == "The repository's tests could not be recorded."
+    assert not worker.stages and FakeCodegenWorkflow.languages == []
+    assert state.verification_status == "skipped" and state.publication_status == "skipped"
+    worker.fail_snapshot = False
+    await delivery_service.retry(session_id, "server")
+    assert (await delivered(env, session_id)).publication_status == "completed"
+
+
+@pytest.mark.parametrize("kind", ["bugfix", "api_change"])
+async def test_change_needs_a_repository_this_pipeline_published(env, worker, kind, repository_selection):
     worker.has_contract = False
+    worker.kind = kind
     handle = await specify_bugfix(env, repository_selection)
     try:
         await handle.execute_update(RequirementsWorkflow.finalize)
@@ -473,6 +544,25 @@ async def test_bugfix_needs_a_repository_this_pipeline_published(env, worker, re
         assert (await requirements_service.get_session(handle.id))["delivery"] is None
     finally:
         await handle.terminate()
+
+
+async def test_api_change_keeps_the_contract_for_its_design_and_delivers_nothing(env, worker, repository_selection):
+    worker.kind = "api_change"
+    handle = await specify_bugfix(env, repository_selection)
+    await handle.execute_update(RequirementsWorkflow.finalize)
+    assert await handle.result() == DOCUMENT
+    state = await handle.query(RequirementsWorkflow.get_state)
+    # The design starts from this contract, and the change's requirements join it.
+    assert state.contract == CONTRACT
+    # The commit it was read at lets the design notice a branch that moved since.
+    assert state.contract_commit == state.checkout["commit"] == "1" * 40
+    assert [item["id"] for item in state.requirements] == ["FR-2"]
+    assert worker.documented == state.requirements
+    # The API design delivers the task, not this session.
+    assert not worker.stages
+    assert (await requirements_service.get_session(handle.id))["delivery"] is None
+    with pytest.raises(sessions.SessionBusy):
+        await requirements_service.retry_generation(handle.id, "tests")
 
 
 async def test_generation_retry_http_validation(env, worker, repository_selection):
