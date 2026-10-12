@@ -72,6 +72,8 @@ class FakeStages:
         # that still pass, as they were, against the changed service.
         self.rewritten_tests: list[str] = []
         self.still_passing: list[str] = []
+        # Those the runner of the repository's tests leaves out of its reports.
+        self.not_run: list[str] = []
         self.existing_runs: list[tuple[str, list[str]]] = []
 
     @activity.defn(name="checkout_repository")
@@ -174,11 +176,13 @@ class FakeStages:
         if test_image == REPOSITORY_TESTS_IMAGE:
             # The repository's own tests, of which the changed service fails some.
             self.existing_runs.append((suite_dir, tracked_tests))
-            failed = [case for case in tracked_tests if case not in self.still_passing]
+            failed = [case for case in tracked_tests
+                      if case not in self.still_passing and case not in self.not_run]
             return {**details, 'status': 'failed' if failed else 'passed', 'tests': 3,
                     'passed': 3 - len(failed), 'failures': len(failed), 'errors': 0,
                     'skipped': 0, 'error': None, 'missing_tests': [],
-                    'tracked': {case: {'tests': 1, 'failed': int(case in failed)}
+                    'tracked': {case: {'tests': int(case not in self.not_run),
+                                       'failed': int(case in failed)}
                                 for case in tracked_tests}}
         if service_image == BASELINE_IMAGE:
             self.stages.append('baseline-run')

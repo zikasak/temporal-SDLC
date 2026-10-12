@@ -460,7 +460,8 @@ Two checks stand in for it:
   `VerificationWorkflow` runs it against the changed service, tracking exactly those tests
   (`DeliveryProgress.existing_tests`). A test that still passes as it was is one the new
   contract supports, so changing or removing it is refused (`judge_kept` in
-  `app/delivery/models.py`): `verification_error` names it and nothing is pushed. Retrying
+  `app/delivery/models.py`): `verification_error` names it and nothing is pushed. One that
+  did not run there at all is refused too, since nothing shows it is unsupported. Retrying
   `tests` writes a new suite, which is judged the same way.
 
 ## The snapshot of the repository's tests

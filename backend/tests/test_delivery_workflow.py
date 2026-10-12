@@ -483,23 +483,30 @@ async def test_bugfix_ends_the_requirements_its_interview_retired(env, worker, r
     assert worker.contract["requirements_document"] == render_requirements_markdown(added, "A hotel.")
 
 
-@pytest.mark.parametrize("still_passing", [[], ["com.example.RoomsTest#lists"]])
-async def test_api_change_keeps_the_repository_tests_its_service_still_passes(env, worker, still_passing, repository_selection):
+@pytest.mark.parametrize("still_passing, not_run, refused", [
+    ([], [], None),
+    (["com.example.RoomsTest#lists"], [],
+     "still passes were changed or removed: com.example.RoomsTest#lists (1)"),
+    # A rewritten test that was not seen to fail as it was is not shown to be unsupported.
+    ([], ["com.example.RoomsTest#books"], "did not run, as they were, against the changed "
+                                          "service: com.example.RoomsTest#books (1)"),
+])
+async def test_api_change_keeps_the_repository_tests_its_service_still_passes(env, worker, still_passing, not_run, refused, repository_selection):
     rewritten = ["com.example.RoomsTest#lists", "com.example.RoomsTest#books"]
-    worker.rewritten_tests, worker.still_passing = rewritten, still_passing
+    worker.rewritten_tests, worker.still_passing, worker.not_run = rewritten, still_passing, not_run
     session_id = await deliver(env, repository_selection, kind="api_change")
     state = await delivered(env, session_id)
     assert worker.snapshots == [[]]
     # Each rewritten test was run as the repository held it, against the changed service.
     assert worker.existing_runs == [("repository-tests", rewritten)]
     assert state.verification["status"] == "passed"
-    if not still_passing:
+    if not refused:
         assert state.verification_error is None and state.publication_status == "completed"
         return
-    assert "still passes were changed or removed: com.example.RoomsTest#lists (1)" in state.verification_error
+    assert refused in state.verification_error
     assert state.publication_status == "skipped" and not worker.published
     # The way on is a new suite, judged the same way.
-    worker.still_passing = []
+    worker.still_passing = worker.not_run = []
     await delivery_service.retry(session_id, "tests")
     assert (await delivered(env, session_id)).publication_status == "completed"
 
