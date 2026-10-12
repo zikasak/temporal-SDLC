@@ -40,7 +40,7 @@ class MessageBody(BaseModel):
 
 
 class RetryGenerationBody(BaseModel):
-    stage: Literal['server', 'tests', 'repository']
+    stage: Literal['server', 'tests', 'documentation', 'repository']
 
 
 class ForkBody(BaseModel):

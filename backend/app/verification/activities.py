@@ -323,6 +323,19 @@ async def verify_service(session_id: str, service_image: str, test_image: str,
 
 
 @activity.defn
+@trace_activity('verify-documentation', feature='verification', input_parameter='session_id')
+async def verify_documentation(session_id: str) -> VerificationResult:
+    """How a documentation task is verified: not at all yet. Nothing is started and the
+    result says so, for the delivery to publish its documentation as unverified. The
+    real check goes here."""
+    return {'session_id': session_id, 'status': 'not_implemented', 'tests': 0, 'passed': 0,
+            'failures': 0, 'errors': 0, 'skipped': 0, 'duration_seconds': 0.0,
+            'exit_code': None, 'test_failures': [], 'details_truncated': False,
+            'tracked': None, 'missing_tests': None, 'service_log': '', 'runner_log': '',
+            'error': None, 'path': ''}
+
+
+@activity.defn
 @trace_activity('snapshot-repository-tests', feature='verification', input_parameter='language')
 async def snapshot_repository_tests(session_id: str, language: str) -> dict[str, int]:
     """Copy the repository's tests aside, as the checkout holds them before any author has

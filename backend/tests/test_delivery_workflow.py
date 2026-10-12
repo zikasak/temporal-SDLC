@@ -1,5 +1,5 @@
 """The delivery pipeline, entered directly and through the requirements session that
-delivers a bugfix."""
+delivers a bugfix or a documentation task."""
 import asyncio
 import uuid
 from typing import Any
@@ -108,7 +108,8 @@ async def worker(env, monkeypatch):
         env.client, task_queue=TASK_QUEUE, workflows=[RequirementsWorkflow, DeliveryWorkflow],
         activities=[activities.requirements_turn, activities.write_requirements_document,
                     activities.read_requirements_document, activities.read_repository_contract,
-                    activities.checkout_repository, activities.publish_repository],
+                    activities.checkout_repository, activities.publish_repository,
+                    activities.publish_documentation],
     ), stage_workers(env, activities):
         yield activities
 
@@ -132,8 +133,10 @@ async def delivered(env, session_id: str) -> DeliveryProgress:
         delivery_id(session_id), result_type=DeliveryProgress).result()
 
 
-async def test_unverified_sources_are_not_pushed(env, worker, repository_selection):
-    worker.verification_result = "error"
+# Only a documentation task is pushed without a check of it.
+@pytest.mark.parametrize("outcome", ["error", "not_implemented"])
+async def test_unverified_sources_are_not_pushed(env, worker, outcome, repository_selection):
+    worker.verification_result = outcome
     state = await delivered(env, await deliver(env, repository_selection))
     assert state.publication_status == "skipped" and not worker.published
 
@@ -530,7 +533,49 @@ async def test_nothing_is_authored_when_the_repository_tests_cannot_be_recorded(
     assert (await delivered(env, session_id)).publication_status == "completed"
 
 
-@pytest.mark.parametrize("kind", ["bugfix", "api_change"])
+async def test_documentation_is_written_alone_and_pushed_as_unverified(env, worker, repository_selection):
+    worker.kind = "docs"
+    worker.fail_documentation = True
+    handle, state = await fixed(env, repository_selection)
+    # Without documentation there is nothing to push.
+    assert state.documentation_error and state.verification_status == "skipped"
+    assert state.publication_status == "skipped" and not worker.published_documentation
+    with pytest.raises(sessions.SessionBusy):
+        await requirements_service.retry_generation(handle.id, "tests")
+
+    worker.fail_documentation = False
+    await requirements_service.retry_generation(handle.id, "documentation")
+    state = await delivered(env, handle.id)
+    # One author and nothing else: no code, no tests, no service image, no test run.
+    assert worker.stages == ["documentation", "documentation"] and not worker.snapshots
+    assert FakeCodegenWorkflow.languages == [] and state.baseline_status == "not_applicable"
+    assert state.documentation_error is None
+    assert state.documentation["changed_files"] == ["README.md"]
+    # It works from the repository's contract and the interview's brief, whose
+    # requirements keep their IDs: they do not join the contract.
+    brief = {"requirements": (await handle.query(RequirementsWorkflow.get_state)).requirements,
+             "requirements_document": "# Brief", "retired": []}
+    assert [item["id"] for item in brief["requirements"]] == ["FR-1"]
+    assert state.documentation["context"] == {
+        "requirements": CONTRACT["requirements"], "api_design": API, "language": "java",
+        "requirements_document": CONTRACT["requirements_document"], "brief": brief,
+        "repository": repository_selection,
+    }
+    # Nothing checks documentation yet, and the result says so instead of passing.
+    assert state.verification_status == "completed"
+    assert state.verification["status"] == "not_implemented"
+    # It is pushed all the same, marked as unverified, and the contract is left alone.
+    assert state.publication_status == "completed" and state.publication["verified"] is False
+    assert worker.published_documentation == [(handle.id, repository_selection["full_name"], False)]
+    assert not worker.published
+
+    response = await requirements_service.get_session(handle.id)
+    assert response["delivery"]["publication"]["verified"] is False
+    with pytest.raises(sessions.SessionBusy, match="no API design"):
+        await api_design_service.start_session(handle.id)
+
+
+@pytest.mark.parametrize("kind", ["bugfix", "api_change", "docs"])
 async def test_change_needs_a_repository_this_pipeline_published(env, worker, kind, repository_selection):
     worker.has_contract = False
     worker.kind = kind

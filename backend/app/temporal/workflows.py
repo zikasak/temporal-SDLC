@@ -15,7 +15,8 @@ with workflow.unsafe.imports_passed_through():
     from app.github.models import RepositorySelection
     from app.requirements.document import render_requirements_markdown
     from app.requirements.models import (
-        CHANGE_KINDS, DIRECT_KINDS, KIND_PROBLEM, RequirementsState, numbered_after,
+        CHANGE_KINDS, CONTRACT_KINDS, DIRECT_KINDS, KIND_PROBLEM, RequirementsState,
+        numbered_after,
     )
     from app.requirements.prompt import OPENING_MESSAGE
     from app.temporal.activities import (
@@ -254,7 +255,7 @@ class RequirementsWorkflow:
         return ok
 
     async def _read_contract(self) -> bool:
-        """A change to the service a repository was published with starts from that
+        """A task on the service a repository was published with starts from that
         contract, so it cannot be specified for a repository without one."""
         try:
             self.state.contract = await workflow.execute_activity(
@@ -271,6 +272,9 @@ class RequirementsWorkflow:
                                 else "The repository's contract could not be read. Try again.")
             return False
         self.state.contract_commit = self.state.checkout["commit"]
+        if self.state.kind not in CHANGE_KINDS:
+            # A documentation task leaves the contract as it is.
+            return True
         # The task's requirements join the contract's when it is published. The interview
         # numbers them past the contract's already; this holds whatever it was given.
         self.state.requirements = numbered_after(
@@ -285,11 +289,12 @@ class RequirementsWorkflow:
     async def _write_document(self) -> bool:
         self.state.status = "finalizing"
         self.state.error = None
-        # Only a change to an existing service keeps a contract, whatever kind it was before.
+        # Only a task on an existing service keeps a contract, whatever kind it was before,
+        # and only a change to that service ends requirements of it.
         self.state.contract = None
         if self.state.kind not in CHANGE_KINDS:
             self.state.retired = []
-        elif not await self._read_contract():
+        if self.state.kind in CONTRACT_KINDS and not await self._read_contract():
             self.state.status = "interviewing"
             return False
         try:

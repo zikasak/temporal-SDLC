@@ -34,7 +34,9 @@ class StageSpec:
     workspace_name: str
     output_subdir: str
     heartbeat: str
-    image_label: str
+    # What the image built from the output is called; None for an output that is
+    # published as files only.
+    image_label: str | None
     image_build: docker_agents.AgentImageBuild
     prepare_inputs: Callable[[Path, dict[str, Any]], StageInputs]
     sanitize_output: Callable[[Path, Path], None]
@@ -135,16 +137,18 @@ async def _run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
             clean = work / 'build'
             stage.sanitize_output(output, clean)
             stage.validate_output(clean)
-            build_log = artifact_dir / 'image-build.log'
-            logger.info('%s stage building %s image (session=%s, log=%s)',
-                        stage.role, stage.image_label, session_id, build_log)
-            image_id = await build_image(clean, stage.image_label, build_log)
+            image = {}
+            if stage.image_label:
+                build_log = artifact_dir / 'image-build.log'
+                logger.info('%s stage building %s image (session=%s, log=%s)',
+                            stage.role, stage.image_label, session_id, build_log)
+                image = {'image_id': await build_image(clean, stage.image_label, build_log)}
             destination = artifact_dir / stage.output_subdir
             if destination.exists():
                 shutil.rmtree(destination)
             os.replace(clean, destination)
-            result = {'image_id': image_id, 'path': str(destination), 'session_id': session_id}
+            result = {**image, 'path': str(destination), 'session_id': session_id}
             publish_manifest(artifact_dir, result)
-            logger.info('%s stage published image (session=%s, image=%s, path=%s)',
-                        stage.role, session_id, image_id, destination)
+            logger.info('%s stage published its output (session=%s, image=%s, path=%s)',
+                        stage.role, session_id, image.get('image_id'), destination)
             return result

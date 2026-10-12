@@ -9,6 +9,8 @@ A bugfix skips the design and code generation and is delivered from its requirem
 session instead; see [Changing an existing service](#changing-an-existing-service-bugfix).
 An API change goes the whole way, starting from the contract its repository holds; see
 [Changing an existing API](#changing-an-existing-api).
+A documentation task has one author and no service, tests or check; see
+[Changing documentation only](#changing-documentation-only).
 The delivery keeps each stage's result or error in its own `DeliveryProgress`, which the
 session GET endpoint merges into the session it reports. The design session stays open
 until its delivery ends.
@@ -49,10 +51,11 @@ python -m app.implementation.worker
 python -m app.test_generation.worker
 python -m app.verification.worker
 python -m app.diagnosis.worker
+python -m app.documentation.worker
 ```
 
 Run each command in a separate terminal/process. `backend/tools/dev_stack.py` launches
-all six workers, and `.zed/debug.json` includes individual worker launch profiles.
+all seven workers, and `.zed/debug.json` includes individual worker launch profiles.
 Both coding workers need the Docker CLI, a running Docker daemon and writable
 `GENERATED_CODE_DIR`. The implementation worker also needs access to codegen's server
 tree. The test worker uses only contract inputs and the static test-suite template of the
@@ -64,6 +67,9 @@ not registry tags. It also builds the baseline image of a
 The diagnosis worker has the same Docker and `GENERATED_CODE_DIR` needs as the coding
 workers and reads the published service, test suite and verification artifacts.
 `TEMPORAL_DIAGNOSIS_TASK_QUEUE` defaults to `diagnosis`.
+The documentation worker needs Docker and `GENERATED_CODE_DIR` too, to run its author; it
+builds no image of the output. `TEMPORAL_DOCUMENTATION_TASK_QUEUE` defaults to
+`documentation`.
 
 Configure `OPENAI_API_KEY`, `OPENAI_MODEL`, and `OPENAI_BASE_URL` through the environment.
 Loopback provider URLs are translated to `host.docker.internal` inside Docker; remote
@@ -262,7 +268,8 @@ The API-design page offers **Retry server generation** and **Retry test generati
 next to a failed stage. Wait for the current pipeline to finish before retrying.
 The corresponding API is `POST /api/api-design/sessions/{session_id}/generation/retry`
 with `{"stage": "server"}`, `{"stage": "tests"}` or, after a failed push,
-`{"stage": "repository"}`. Invalid or successful stages
+`{"stage": "repository"}` (and `{"stage": "documentation"}` for a
+[documentation task](#changing-documentation-only)). Invalid or successful stages
 cannot be restarted; attempts while generation is active return HTTP 409.
 
 A retry starts a fresh `DeliveryWorkflow` run under the same delivery ID, preserving
@@ -312,7 +319,8 @@ to are not supported.
 
 `DeliveryWorkflow.get_state().progress` reports `publication_status` (`waiting`, `running`,
 `completed`, `skipped` when verification did not pass, `error`), `publication` and
-`publication_error`.
+`publication_error`. `publication.verified` is true for everything but a
+[documentation task](#changing-documentation-only).
 
 ## Changing an existing service (bugfix)
 
@@ -398,7 +406,8 @@ started from such a session.
 A change can contradict, replace or remove something the service was built to do. The
 contract must then lose that requirement, or later authors would be given both.
 
-- While the task kind is one of `CHANGE_KINDS` (`api_change`, `bugfix`), the interviewer's
+- While the task kind is one of `CHANGE_KINDS` (`api_change`, `bugfix`; not `docs`,
+  which leaves the service as it is), the interviewer's
   prompt lists the requirements of the repository's contract, and two tools change which
   of them the change ends: `retire_requirement(id)` and `keep_requirement(id)`
   (`app/tools/requirements.py`). Only an ID of the contract is accepted. To edit an
@@ -464,9 +473,53 @@ Two checks stand in for it:
   did not run there at all is refused too, since nothing shows it is unsupported. Retrying
   `tests` writes a new suite, which is judged the same way.
 
+## Changing documentation only
+
+A requirements session whose task kind is `docs` reads the repository's contract when it
+is finalized, like a change, and refuses a repository without one. Nothing of the
+contract changes: the interview's requirements keep their IDs, none can be retired, and
+they never join the contract. The session then starts the `DeliveryWorkflow` itself and
+stays open until it ends, as a bugfix session does. The `TaskSpec` has the same shape:
+the repository's contract, and the interview's requirements and document as `brief`.
+
+```mermaid
+flowchart LR
+    brief[Requirements session] --> author[DocumentationWorkflow]
+    author --> check[verify_documentation: not implemented]
+    check --> push[Push, marked as unverified]
+```
+
+1. **The author.** `DocumentationWorkflow` (`app/documentation/`, its own task queue) runs
+   an agent whose workspace, `/workspace/repository`, holds only the checkout's
+   documentation files at their paths: files ending in `.md`, `.markdown`, `.rst` or
+   `.adoc`, outside `contracts/`, `contract-tests/`, `.git` and the language's build
+   directories (`is_documentation_file`). It gets the contract and the brief as the
+   coding agents do, and no code. The same filter is applied to what it returns, so any
+   other file it writes is dropped. The stage fails when no documentation file differs
+   from the checkout's. It builds no image and publishes
+   `<GENERATED_CODE_DIR>/<session-id>/documentation/files/`; its result lists
+   `changed_files` (added, changed or removed).
+2. **Verification.** The `verify_documentation` activity on the verification queue is the
+   check of this kind of task. There is none yet: it starts no container and returns a
+   `VerificationResult` with `status: not_implemented`. The delivery treats the result
+   like any other, so a real check only has to replace the body of that activity:
+   `passed` publishes as verified, `failed` or `error` publishes nothing.
+3. **The push.** `publish_documentation` makes the documentation files of the checkout
+   equal to the author's (one it removed is deleted) and pushes the usual branch. The
+   service, `contract-tests/` and `contracts/` are not touched. After a
+   `not_implemented` check the commit subject ends in `(unverified)`, its message says
+   that nothing checked the change, and `publication.verified` is false, which the page
+   shows. For every other kind `_publish` still requires a passed verification.
+
+No tests are recorded, generated or run, and there is no baseline or repair loop.
+`DeliveryProgress` reports `documentation` and `documentation_error`. Retrying
+`documentation` writes the documentation again; it is offered after a failed author and
+after a check that could not complete.
+
 ## The snapshot of the repository's tests
 
-Before anything else, a delivery with a checkout runs `snapshot_repository_tests` on the
+Before anything else, a delivery with a checkout, unless it is a documentation task,
+runs `snapshot_repository_tests` on the
 verification queue. It copies `contract-tests/` from the checkout to
 `<GENERATED_CODE_DIR>/<session-id>/repository-tests/suite`, with the trusted runner files.
 The copy is made once: a retried delivery keeps the first one, whatever the checkout
@@ -565,7 +618,9 @@ cancellation all attempt bounded removal of both containers and their network.
 
 The verification child returns a summary with:
 
-- `status`: `passed`, `failed` (assertions/JUnit errors), or `error` (infrastructure);
+- `status`: `passed`, `failed` (assertions/JUnit errors), `error` (infrastructure), or
+  `not_implemented` (a [documentation task](#changing-documentation-only), which nothing
+  checks yet);
 - `tests`, `passed`, `failures`, `errors`, `skipped`, total `duration_seconds`, and runner
   `exit_code`;
 - up to 50 failed/error-test details (class/name, kind and a bounded message), with

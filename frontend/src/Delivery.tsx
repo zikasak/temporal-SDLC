@@ -6,6 +6,8 @@ type GeneratedCode = {
 };
 
 type ImageArtifact = { image_id: string };
+// What the author of a documentation task wrote, against the repository's files.
+type Documentation = { changed_files: string[] };
 // The test suite's image and, for a change, how its tests differ from the repository's.
 type TestSuite = ImageArtifact & { added_tests: string[]; changed_tests: string[]; removed_tests: string[] };
 type TestRef = { class_name: string; name: string };
@@ -17,7 +19,8 @@ type BaselineStatus = "not_applicable" | "waiting" | "running" | "reproduced" | 
 // `tests` are the failing tests the diagnosis found broken: the only ones a repair may change.
 type RepairRound = { attempt: number; target: "implementation" | "tests"; tests: TestRef[]; summary: string };
 type VerificationResult = {
-  status: "passed" | "failed" | "error";
+  // `not_implemented`: this kind of task has no check yet, so nothing was run.
+  status: "passed" | "failed" | "error" | "not_implemented";
   tests: number;
   passed: number;
   failures: number;
@@ -31,7 +34,7 @@ type VerificationResult = {
   error: string | null;
 };
 
-export type GenerationStage = "server" | "tests" | "repository";
+export type GenerationStage = "server" | "tests" | "documentation" | "repository";
 type PublicationStatus = "not_applicable" | "waiting" | "running" | "completed" | "skipped" | "error";
 
 /** What a session's delivery has produced so far, as the session API reports it. */
@@ -42,6 +45,8 @@ export type DeliveryProgress = {
   implementation_error: string | null;
   tests: TestSuite | null;
   tests_error: string | null;
+  documentation: Documentation | null;
+  documentation_error: string | null;
   baseline_status: BaselineStatus;
   baseline: VerificationResult | null;
   baseline_error: string | null;
@@ -86,7 +91,7 @@ function repairRounds(value: unknown): RepairRound[] {
 function verificationRecord(value: unknown): VerificationResult | null {
   if (!isObject(value)) return null;
   if (
-    !["passed", "failed", "error"].includes(String(value.status)) ||
+    !["passed", "failed", "error", "not_implemented"].includes(String(value.status)) ||
     !["tests", "passed", "failures", "errors", "skipped", "duration_seconds"].every((key) => {
       const count = value[key];
       return typeof count === "number" && Number.isFinite(count) && count >= 0;
@@ -128,6 +133,9 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     implementation_error: text(value.implementation_error),
     tests: testSuite(value.tests),
     tests_error: text(value.tests_error),
+    documentation: isObject(value.documentation)
+      ? { changed_files: strings(value.documentation.changed_files) } : null,
+    documentation_error: text(value.documentation_error),
     baseline_status: baselineStatuses.includes(value.baseline_status as BaselineStatus)
       ? value.baseline_status as BaselineStatus : "not_applicable",
     baseline: verificationRecord(value.baseline),
@@ -157,7 +165,8 @@ export function retriedProgress(progress: DeliveryProgress, stage: GenerationSta
     ...progress,
     ...(stage === "server"
       ? { code_error: null, implementation: null, implementation_error: null }
-      : stage === "tests" ? { tests: null, tests_error: null } : {}),
+      : stage === "tests" ? { tests: null, tests_error: null }
+      : stage === "documentation" ? { documentation: null, documentation_error: null } : {}),
     ...(stage === "tests" && change
       ? { baseline: null, baseline_error: null, baseline_status: "waiting" as const } : {}),
     // A repeated push keeps the verification it publishes.
@@ -242,12 +251,99 @@ function Baseline({ progress, retrying, disabled, onRetry }: {
   );
 }
 
-export function DeliveryResults({ progress, retrying, disabled, onRetry }: {
+/** The branch a delivery pushed, or why it pushed none. */
+function Publication({ progress, documentation, retrying, disabled, onRetry }: {
+  progress: DeliveryProgress;
+  documentation: boolean;
+  retrying: GenerationStage | null;
+  disabled: boolean;
+  onRetry: (stage: GenerationStage) => void;
+}) {
+  const publication = progress.publication;
+  if (progress.publication_status === "not_applicable") return null;
+  return <>
+    <h3>Repository branch</h3>
+    {progress.publication_status === "waiting" && <p>{documentation
+      ? "The documentation is pushed to a new branch once it is written."
+      : "Verified sources are pushed to a new branch once the tests pass."}</p>}
+    {progress.publication_status === "running" && <p role="status">{documentation
+      ? "Pushing the documentation to a new branch…" : "Pushing the verified sources to a new branch…"}</p>}
+    {progress.publication_status === "skipped" && <p>{documentation
+      ? "Nothing was pushed because the documentation was not completed."
+      : "Nothing was pushed because verification did not pass."}</p>}
+    {publication && <p className="verification-outcome verification-passed" role="status">
+      Pushed to <a href={publication.url} target="_blank" rel="noreferrer">{publication.branch}</a>
+      {" "}at <code>{publication.commit.slice(0, 7)}</code>
+    </p>}
+    {publication && !publication.verified && <p>
+      This branch is not verified: nothing checked the change. Review it before merging.
+    </p>}
+    {publication && publication.ignored_count > 0 && <p>
+      Not committed because the repository's .gitignore matches them ({publication.ignored_count}):
+      {" "}{publication.ignored.join(", ")}
+      {publication.ignored_count > publication.ignored.length && ", …"}
+    </p>}
+    {progress.publication_error && <div className="generation-failure">
+      <p role="alert">{progress.publication_error}</p>
+      <button type="button" className="generate-button" disabled={disabled}
+        onClick={() => onRetry("repository")}>
+        {retrying === "repository" ? "Pushing again…" : "Retry push"}
+      </button>
+    </div>}
+  </>;
+}
+
+/** A documentation task: one author limited to documentation files, and no check yet. */
+function DocumentationResults({ progress, retrying, disabled, onRetry }: {
   progress: DeliveryProgress;
   retrying: GenerationStage | null;
   disabled: boolean;
   onRetry: (stage: GenerationStage) => void;
 }) {
+  const result = progress.verification;
+  const stage = progress.verification_status;
+  const written = progress.documentation;
+  // A check that could not complete is retried by writing the documentation again.
+  const failed = progress.documentation_error ?? progress.verification_error ??
+    (result?.status === "error" ? result.error ?? "Documentation verification could not complete." : null);
+  return (
+    <section className="verification-results" aria-labelledby="documentation-title">
+      <h3 id="documentation-title">Documentation</h3>
+      {stage === "waiting" && !failed && <p role="status">Writing the documentation…</p>}
+      {stage === "running" && <p role="status">Checking the documentation…</p>}
+      {written && <p>Changed files: {written.changed_files.join(", ")}</p>}
+      {failed && <div className="generation-failure">
+        <p role="alert">{failed}</p>
+        <button type="button" className="generate-button" disabled={disabled}
+          onClick={() => onRetry("documentation")}>
+          {retrying === "documentation" ? "Writing the documentation again…" : "Write the documentation again"}
+        </button>
+      </div>}
+      {result?.status === "not_implemented" && <p className="verification-outcome verification-error" role="status">
+        Not verified: documentation changes are not checked yet
+      </p>}
+      {result?.status === "passed" && <p className="verification-outcome verification-passed" role="status">
+        Documentation verified
+      </p>}
+      {result?.status === "failed" && <p className="verification-outcome verification-failed" role="status">
+        Documentation did not pass verification
+      </p>}
+      <Publication progress={progress} documentation retrying={retrying} disabled={disabled} onRetry={onRetry} />
+    </section>
+  );
+}
+
+export function DeliveryResults({ progress, documentation = false, retrying, disabled, onRetry }: {
+  progress: DeliveryProgress;
+  // Whether the session's task changes documentation only.
+  documentation?: boolean;
+  retrying: GenerationStage | null;
+  disabled: boolean;
+  onRetry: (stage: GenerationStage) => void;
+}) {
+  if (documentation) {
+    return <DocumentationResults progress={progress} retrying={retrying} disabled={disabled} onRetry={onRetry} />;
+  }
   const result = progress.verification;
   const stage = progress.verification_status;
   const pending = stage === "waiting" || stage === "running";
@@ -319,28 +415,7 @@ export function DeliveryResults({ progress, retrying, disabled, onRetry }: {
           </ol>}
         </TestRun>
       </>}
-      {progress.publication_status !== "not_applicable" && <>
-        <h3>Repository branch</h3>
-        {progress.publication_status === "waiting" && <p>Verified sources are pushed to a new branch once the tests pass.</p>}
-        {progress.publication_status === "running" && <p role="status">Pushing the verified sources to a new branch…</p>}
-        {progress.publication_status === "skipped" && <p>Nothing was pushed because verification did not pass.</p>}
-        {progress.publication && <p className="verification-outcome verification-passed" role="status">
-          Pushed to <a href={progress.publication.url} target="_blank" rel="noreferrer">{progress.publication.branch}</a>
-          {" "}at <code>{progress.publication.commit.slice(0, 7)}</code>
-        </p>}
-        {progress.publication && progress.publication.ignored_count > 0 && <p>
-          Not committed because the repository's .gitignore matches them ({progress.publication.ignored_count}):
-          {" "}{progress.publication.ignored.join(", ")}
-          {progress.publication.ignored_count > progress.publication.ignored.length && ", …"}
-        </p>}
-        {progress.publication_error && <div className="generation-failure">
-          <p role="alert">{progress.publication_error}</p>
-          <button type="button" className="generate-button" disabled={disabled}
-            onClick={() => onRetry("repository")}>
-            {retrying === "repository" ? "Pushing again…" : "Retry push"}
-          </button>
-        </div>}
-      </>}
+      <Publication progress={progress} documentation={false} retrying={retrying} disabled={disabled} onRetry={onRetry} />
     </section>
   </>;
 }

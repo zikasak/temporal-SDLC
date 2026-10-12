@@ -1,6 +1,7 @@
 import asyncio
 import re
 import time
+from collections.abc import Callable
 from functools import partial
 from typing import Any
 
@@ -17,6 +18,7 @@ from app.api_design.openapi import api_problems, render_openapi
 from app.api_design.prompt import api_turn_messages
 from app.config import GENERATED_CODE_DIR
 from app.delivery.contract import ContractError, RepositoryContract, read_contract, write_contract
+from app.documentation.activities import is_documentation_file
 from app.documents import (
     DocumentConflict,
     DocumentNotFound,
@@ -54,6 +56,9 @@ COMMIT_SUBJECT = "Add generated service, contract tests and contract"
 # What the commit of a task that changes an existing service says instead.
 COMMIT_SUBJECTS = {"api_change": "Change the service's API, contract tests and contract",
                    "bugfix": "Fix the service and add regression tests"}
+DOCUMENTATION_SUBJECT = "Change the documentation"
+# Added to the commit of sources that were pushed without a check of them.
+UNVERIFIED_NOTE = "Not verified: no check exists for this kind of change yet."
 
 
 def _attached_document_ids(messages: list[dict[str, Any]]) -> list[str]:
@@ -141,6 +146,31 @@ async def checkout_repository(
     return result
 
 
+async def _publish(session_id: str, repository: RepositorySelection, subject: str,
+                   update: Callable[[], None], verified: bool = True) -> RepositoryPublication:
+    """Apply `update` to the session's checkout, commit it to a new branch and push it."""
+    target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
+    token, connection = await _github_token()
+    bot = f"{connection['app_slug']}[bot]"
+    try:
+        await asyncio.to_thread(update)
+        result = await repository_checkout.push(
+            target, repository, token,
+            branch=repository_checkout.publication_branch(session_id),
+            message=(f"{subject}\n\n"
+                     f"Generated from {repository['branch']} by session {session_id}."
+                     + ("" if verified else f"\n\n{UNVERIFIED_NOTE}")),
+            author=(bot, f"{connection['bot_user_id']}+{bot}@users.noreply.github.com"),
+            verified=verified,
+        )
+    except (repository_checkout.CheckoutError, GitHubError) as exc:
+        activity.logger.warning("Could not push %s: %s", repository["full_name"], exc)
+        raise ApplicationError(str(exc)) from exc
+    activity.logger.info("Pushed session %s to %s (%s)", session_id, result["branch"],
+                         result["commit"])
+    return result
+
+
 @activity.defn
 @trace_activity('publish-repository', feature='repository', input_parameter='repository')
 async def publish_repository(
@@ -156,26 +186,36 @@ async def publish_repository(
     if not all(item.is_dir() for item in (target, service, suite)):
         raise ApplicationError("The verified sources or the repository checkout are unavailable.",
                                non_retryable=True)
-    token, connection = await _github_token()
-    bot = f"{connection['app_slug']}[bot]"
-    try:
-        await asyncio.to_thread(repository_checkout.replace_files, service, target, service_files)
-        await asyncio.to_thread(repository_checkout.replace_files, suite,
-                                target / repository_checkout.TESTS_DIR, lambda relative: True)
-        await asyncio.to_thread(write_contract, target, contract)
-        result = await repository_checkout.push(
-            target, repository, token,
-            branch=repository_checkout.publication_branch(session_id),
-            message=(f"{COMMIT_SUBJECTS.get(kind, COMMIT_SUBJECT)}\n\n"
-                     f"Generated from {repository['branch']} by session {session_id}."),
-            author=(bot, f"{connection['bot_user_id']}+{bot}@users.noreply.github.com"),
-        )
-    except (repository_checkout.CheckoutError, GitHubError) as exc:
-        activity.logger.warning("Could not push %s: %s", repository["full_name"], exc)
-        raise ApplicationError(str(exc)) from exc
-    activity.logger.info("Pushed session %s to %s (%s)", session_id, result["branch"],
-                         result["commit"])
-    return result
+
+    def update() -> None:
+        repository_checkout.replace_files(service, target, service_files)
+        repository_checkout.replace_files(suite, target / repository_checkout.TESTS_DIR,
+                                          lambda relative: True)
+        write_contract(target, contract)
+
+    return await _publish(session_id, repository, COMMIT_SUBJECTS.get(kind, COMMIT_SUBJECT),
+                          update)
+
+
+@activity.defn
+@trace_activity('publish-documentation', feature='repository', input_parameter='repository')
+async def publish_documentation(
+    session_id: str, repository: RepositorySelection, language: str, verified: bool,
+) -> RepositoryPublication:
+    """Commit the documentation its author changed to a new branch and push it. Nothing
+    else of the repository changes: not the service, its tests or its contract. Without
+    `verified` the commit and the publication say that nothing checked the change."""
+    documentation_files = partial(is_documentation_file, session_language(language))
+    target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
+    written = target.parent / 'documentation/files'
+    if not all(item.is_dir() for item in (target, written)):
+        raise ApplicationError("The documentation or the repository checkout is unavailable.",
+                               non_retryable=True)
+    return await _publish(
+        session_id, repository,
+        DOCUMENTATION_SUBJECT if verified else f"{DOCUMENTATION_SUBJECT} (unverified)",
+        lambda: repository_checkout.replace_files(written, target, documentation_files),
+        verified)
 
 
 @activity.defn

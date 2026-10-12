@@ -1,8 +1,8 @@
 # Handover: tasks that are not "build a new service"
 
 Written on 2026-10-10 and updated on 2026-10-12 for whoever continues this work. It
-assumes you have not seen the system before. Steps 1 to 5 of six are done; the last is
-described below.
+assumes you have not seen the system before. All six steps are done; what is still open
+is listed under each step and in section 5.
 
 ## 1. What the system is
 
@@ -53,7 +53,7 @@ Vocabulary used below:
 | `backend/app/requirements/`, `backend/app/api_design/` | Prompts, state models and HTTP-facing services of the two chats |
 | `backend/app/tools/` | The tools the chat LLMs can call (`record_requirement`, `set_language`, …) |
 | `backend/app/delivery/` | `DeliveryWorkflow`, its `TaskSpec` / `DeliveryProgress` models, and the manual retry |
-| `backend/app/codegen/`, `implementation/`, `test_generation/`, `verification/`, `diagnosis/` | One delivery stage each: a child workflow, its activity, and (for the agents) the in-container `agent.py` with its prompt |
+| `backend/app/codegen/`, `implementation/`, `test_generation/`, `verification/`, `diagnosis/`, `documentation/` | One delivery stage each: a child workflow, its activity, and (for the agents) the in-container `agent.py` with its prompt |
 | `backend/app/agent_workflows/` | Machinery shared by the coding agents: container lifecycle, tool loop, contract files |
 | `backend/app/languages/` | The language registry; `java/` is the only entry |
 | `backend/app/github/checkout.py`, `backend/app/temporal/activities.py` | Clone and push (`checkout_repository`, `publish_repository`) |
@@ -71,7 +71,7 @@ cd backend
 /Users/zikasak/programming/temporal-project/backend/env/bin/python -m pytest tests -q
 ```
 
-The suite takes about 40 seconds: 312 passed, 11 skipped (the skipped ones need Docker).
+The suite takes about 40 seconds: 333 passed, 11 skipped (the skipped ones need Docker).
 If a run produces no output for more than a minute it is hanging, not slow; see
 "Traps" at the end. The frontend type-check is `npx tsc --noEmit -p .` in `frontend/`
 (it needs `node_modules`, which also exists only in the main checkout).
@@ -170,8 +170,9 @@ them, per decision 2.
   brief for the others.
 - `validate_finalize` refuses while the kind is unset, and an idle session without a kind
   fails instead of writing a document.
-- The kind is carried into `ApiDesignState.kind` and `TaskSpec.kind`. Only `bugfix` routes
-  on it (step 4): the other kinds are still built as a new service.
+- The kind is carried into `ApiDesignState.kind` and `TaskSpec.kind`. `bugfix` (step 4)
+  and `docs` (step 6) have their own paths through the delivery; an API change is built
+  as a new service inside the repository (step 5).
 - The requirements page shows the kind and disables "Generate document" until it is set.
 
 Not done: "without a selected repository only new service is valid". A requirements
@@ -204,9 +205,10 @@ The reference is "Changing an existing service (bugfix)" in
 `docs/service-implementation.md`. In short:
 
 - **Entry.** `RequirementsWorkflow` reads the repository's contract when a session of a
-  kind in `CHANGE_KINDS` (`backend/app/requirements/models.py`: `api_change` and `bugfix`)
-  is finalized and keeps it in `RequirementsState.contract`. For a kind in `DIRECT_KINDS`
-  (today only `bugfix`) it then starts the `DeliveryWorkflow` once the document is written
+  kind in `CONTRACT_KINDS` (`backend/app/requirements/models.py`: `api_change`, `bugfix`
+  and, since step 6, `docs`) is finalized and keeps it in `RequirementsState.contract`.
+  For a kind in `DIRECT_KINDS`
+  (`bugfix` and `docs`) it then starts the `DeliveryWorkflow` once the document is written
   and waits for it (`_deliver`). A repository without a
   contract refuses the finalize and the session shows why. An API design cannot be
   started from such a session.
@@ -307,19 +309,60 @@ Not done, and open:
 - The requirements session's own interview is not rechecked: a session left open while
   the branch moves still reads the contract of its first clone.
 
-## 5. What remains
-
 ### Step 6: the docs-only path
 
-- A coding agent whose workspace and output are limited to documentation files. Follow
-  "Add a future stage" in `docs/service-implementation.md`.
-- Give verification a strategy per kind. For docs it returns an explicit "not
-  implemented" result without starting any container, so the real check can be added
-  later without touching the workflow.
-- Publish despite that result, and mark the publication as unverified (in the commit
-  message and in `RepositoryPublication`), so the page can say so. Today `_publish` in
-  `DeliveryWorkflow` refuses anything that did not pass verification; that rule must stay
-  for every other kind.
+The reference is "Changing documentation only" in `docs/service-implementation.md`. In
+short:
+
+- **Entry.** A `docs` requirements session reads the contract at finalize (same refusal
+  as a change) and delivers itself, like a bugfix. `CHANGE_KINDS` still means "changes
+  the service": a docs task is not in it, so its requirements are not renumbered, it
+  retires nothing, and the contract is published by nobody.
+- **The author.** `backend/app/documentation/`: `DocumentationWorkflow`,
+  `write_documentation` and the in-container `agent.py`, on their own queue and worker
+  (`python -m app.documentation.worker`; added to the dev stack, the Zed profiles and
+  `docker-compose.coolify.yml`). `is_documentation_file` decides what the agent is shown
+  and what is taken back: `.md`, `.markdown`, `.rst` and `.adoc` files outside
+  `contracts/`, `contract-tests/` and build output. The stage fails if nothing changed.
+- **No image.** `StageSpec.image_label` may now be `None`: `run_stage` then publishes the
+  output as files and its result has no `image_id`.
+- **Verification.** `verify_documentation` in `verification/activities.py`, on the
+  verification queue, is the strategy for this kind. It starts nothing and returns a
+  `VerificationResult` with `status: not_implemented`. The real check replaces its body;
+  `DeliveryWorkflow._document` and `_publish` already handle `passed`, `failed` and
+  `error` from it.
+- **Publish.** `_publish` lets exactly one case through without a pass: kind `docs` with
+  a completed `not_implemented` result. `publish_documentation`
+  (`temporal/activities.py`) replaces the documentation files of the checkout and
+  nothing else. The commit subject ends in `(unverified)` and
+  `RepositoryPublication.verified` is false; it is true for every other publication.
+- **Retry.** The new retry stage `documentation`.
+- **Page.** `DeliveryResults` takes `documentation` (the requirements page passes it for
+  a docs session) and shows the changed files, "Not verified", and the note on the
+  branch.
+
+Not done, and open:
+
+- Like the other two paths, it has only run against fake stages and the stage's own unit
+  tests, never with a real agent and Docker.
+- The author sees no code. It documents the service from the contract, the brief and the
+  existing documentation, so a brief that needs facts found only in the code (a
+  configuration key, a build command) cannot be met accurately.
+- Documentation is recognised by file suffix alone. Images and other assets under
+  `docs/`, and plain-text files, are neither shown to the author nor publishable.
+- The author's image is the language's full toolchain image, which it does not need.
+- "Without a selected repository only new service is valid" still has nothing to
+  enforce (see step 2).
+
+## 5. What remains
+
+The six planned steps are done. What is left is the open items listed under steps 4, 5
+and 6. The two that matter most:
+
+- **Run each path end to end with real agents and Docker.** None of the bugfix, API
+  change and docs paths has run outside fake stages.
+- **Real verification for documentation.** Replace the body of `verify_documentation`.
+  When it returns `passed` the publication is marked verified with no other change.
 
 ## 6. Traps
 

@@ -108,6 +108,10 @@ services:
     <<: *sandbox-worker
     command: ["python", "-m", "app.diagnosis.worker"]
 
+  documentation-worker:
+    <<: *sandbox-worker
+    command: ["python", "-m", "app.documentation.worker"]
+
   sandbox:
     image: docker:29-dind
     restart: unless-stopped

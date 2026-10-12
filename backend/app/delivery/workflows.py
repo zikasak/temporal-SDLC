@@ -8,8 +8,8 @@ from temporalio.exceptions import ActivityError, ChildWorkflowError
 
 with workflow.unsafe.imports_passed_through():
     from app.config import (
-        CODEGEN_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, IMPLEMENTATION_TASK_QUEUE,
-        TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
+        CODEGEN_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, DOCUMENTATION_TASK_QUEUE,
+        IMPLEMENTATION_TASK_QUEUE, TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
     )
     from app.delivery.contract import with_requirements
     from app.delivery.models import (
@@ -18,7 +18,7 @@ with workflow.unsafe.imports_passed_through():
     from app.diagnosis.models import repair_request
     from app.github.checkout import SNAPSHOT_DIR
     from app.requirements.models import CHANGE_KINDS
-    from app.temporal.activities import publish_repository
+    from app.temporal.activities import publish_documentation, publish_repository
 
 # Each round is a diagnosis, a repair of one side and a new verification.
 MAX_REPAIR_ROUNDS = 5
@@ -34,8 +34,10 @@ class DeliveryWorkflow:
     A bugfix generates no code and goes red to green instead: regression tests, proof
     that they fail against the repository's service, then the fix and the same
     verification. The repository's tests are copied aside before any of this, and every
-    later comparison is with that copy. A stage that fails records its own error instead
-    of failing the run, so it can be retried on its own."""
+    later comparison is with that copy. A documentation task has one author, limited to
+    documentation files, and no check yet: what it wrote is pushed marked as unverified.
+    A stage that fails records its own error instead of failing the run, so it can be
+    retried on its own."""
 
     @workflow.init
     def __init__(self, state: DeliveryState) -> None:
@@ -54,6 +56,8 @@ class DeliveryWorkflow:
                 self.progress.publication_status = 'waiting'
             if self.spec.kind == 'bugfix':
                 await self._change()
+            elif self.spec.kind == 'docs':
+                await self._document()
             else:
                 await self._generate()
         await self._publish()
@@ -66,7 +70,8 @@ class DeliveryWorkflow:
     async def _snapshot(self) -> bool:
         """Record the repository's tests before any author runs; the activity keeps the
         first record, so a retried delivery compares with the same one."""
-        if not self.spec.checkout or not self.spec.language:
+        # A documentation task neither reads nor writes a test.
+        if not self.spec.checkout or not self.spec.language or self.spec.kind == 'docs':
             return True
         try:
             await workflow.execute_activity(
@@ -126,6 +131,39 @@ class DeliveryWorkflow:
             await self._implement_service()
         await self._verify_built()
 
+    async def _document(self) -> None:
+        """Change the repository's documentation: its author, then the check of what it
+        wrote. Which check that is, and whether there is one yet, is verification's own
+        matter; the result decides how the documentation is published."""
+        self.progress.verification_status = 'waiting'
+        try:
+            self.progress.documentation = await workflow.execute_child_workflow(
+                'DocumentationWorkflow',
+                args=[self.spec.session_id, self._stage_context(None)],
+                id=self._child_id('documentation'),
+                task_queue=DOCUMENTATION_TASK_QUEUE,
+                result_type=dict,
+            )
+        except ChildWorkflowError as exc:
+            workflow.logger.warning('Documentation failed: %s', exc.cause or exc)
+            self.progress.documentation_error = 'The documentation could not be written.'
+            self.progress.verification_status = 'skipped'
+            return
+        self.progress.verification_status = 'running'
+        try:
+            self.progress.verification = await workflow.execute_activity(
+                'verify_documentation', self.spec.session_id,
+                task_queue=VERIFICATION_TASK_QUEUE, result_type=dict,
+                start_to_close_timeout=timedelta(minutes=15),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except ActivityError as exc:
+            workflow.logger.warning('Documentation verification failed: %s', exc.cause or exc)
+            self.progress.verification_error = 'Documentation verification could not complete.'
+            self.progress.verification_status = 'error'
+        else:
+            self.progress.verification_status = 'completed'
+
     async def _reproduce(self, repair: int = 0) -> bool:
         """Run the changed suite against the service as the repository holds it: true
         when every added test fails there and every existing test passes, but for
@@ -175,6 +213,9 @@ class DeliveryWorkflow:
     async def _retry(self) -> None:
         if self.state.retry_stage == 'repository':
             # Generation and verification already succeeded; only the push is repeated.
+            return
+        if self.spec.kind == 'docs':
+            await self._document()
             return
         if self.spec.kind == 'bugfix':
             if self.state.retry_stage == 'tests':
@@ -340,11 +381,17 @@ class DeliveryWorkflow:
 
     async def _publish(self) -> None:
         """Push the sources that passed verification, with their contract, to a new branch
-        of the repository."""
+        of the repository. Documentation that no check exists for yet is pushed too, and
+        marked as unverified."""
         if not self.spec.checkout:
             return
-        if not (self.progress.verification_status == 'completed' and self.progress.verification
-                and self.progress.verification['status'] == 'passed'):
+        result = (self.progress.verification
+                  if self.progress.verification_status == 'completed' else None)
+        documentation = self.spec.kind == 'docs'
+        # Only a documentation task may go on without a check, and only when
+        # verification says it has none: a check that ran and did not pass stops it too.
+        unverified = bool(documentation and result and result['status'] == 'not_implemented')
+        if not (unverified or result and result['status'] == 'passed'):
             self.progress.publication_status = 'skipped'
             return
         if self.spec.kind in CHANGE_KINDS and (
@@ -357,20 +404,25 @@ class DeliveryWorkflow:
             return
         self.progress.publication_status = 'running'
         self.progress.publication_error = None
-        contract = {
-            'language': self.spec.language,
-            'requirements': self.spec.requirements,
-            'requirements_document': self.spec.requirements_document,
-            'api': self.spec.api,
-        }
-        if self.spec.brief:
-            # The repository's contract grows by what the change required of the service.
-            contract = with_requirements(contract, self.spec.brief['requirements'],
-                                         self.spec.brief['retired'])
+        if documentation:
+            # The documentation alone: the service, its tests and its contract stay.
+            push, args = publish_documentation, [self.spec.language, not unverified]
+        else:
+            contract = {
+                'language': self.spec.language,
+                'requirements': self.spec.requirements,
+                'requirements_document': self.spec.requirements_document,
+                'api': self.spec.api,
+            }
+            if self.spec.brief:
+                # The repository's contract grows by what the change required of the service.
+                contract = with_requirements(contract, self.spec.brief['requirements'],
+                                             self.spec.brief['retired'])
+            push, args = publish_repository, [contract, self.spec.kind]
         try:
             self.progress.publication = await workflow.execute_activity(
-                publish_repository,
-                args=[self.spec.session_id, self.spec.repository, contract, self.spec.kind],
+                push,
+                args=[self.spec.session_id, self.spec.repository, *args],
                 start_to_close_timeout=timedelta(minutes=10),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
@@ -378,12 +430,11 @@ class DeliveryWorkflow:
             workflow.logger.warning('Repository push failed: %s', exc.cause or exc)
             reason = str(getattr(exc.cause, 'message', '') or '')[-500:]
             self.progress.publication_error = (
-                'The verified sources could not be pushed to the repository.'
-                + (f' {reason}' if reason else ''))
+                f'The {"documentation" if documentation else "verified sources"} could not be '
+                'pushed to the repository.' + (f' {reason}' if reason else ''))
             self.progress.publication_status = 'error'
         else:
-            workflow.logger.info('Verified sources pushed to %s',
-                                 self.progress.publication['branch'])
+            workflow.logger.info('Sources pushed to %s', self.progress.publication['branch'])
             self.progress.publication_status = 'completed'
 
     async def _implement_service(self, repair: dict[str, Any] | None = None) -> None:

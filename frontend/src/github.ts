@@ -17,6 +17,8 @@ export type RepositoryCheckout = { commit: string };
 
 export type RepositoryPublication = {
   branch: string; commit: string; url: string; ignored: string[]; ignored_count: number;
+  // False when the sources were pushed without a check of them.
+  verified: boolean;
 };
 
 export type Connection = {
@@ -61,7 +63,8 @@ export function repositoryPublication(value: unknown, repository: RepositorySele
   const ignored = Array.isArray(value.ignored)
     ? value.ignored.filter((item): item is string => typeof item === "string") : [];
   return { branch: value.branch, commit: value.commit, url: value.url, ignored,
-    ignored_count: typeof value.ignored_count === "number" ? value.ignored_count : ignored.length };
+    ignored_count: typeof value.ignored_count === "number" ? value.ignored_count : ignored.length,
+    verified: value.verified !== false };
 }
 
 export function connectionRecord(value: unknown): Connection {
