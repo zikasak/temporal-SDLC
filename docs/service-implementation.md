@@ -97,8 +97,10 @@ context files are switched off, the application's tools are declared to it as an
 in-process MCP server, and the turn limit hands every tool call back to LangGraph or the
 coding-agent loop to run. Earlier messages are resumed as a native session transcript.
 Claude Code still adds its own short environment notes to each request, and a conversation
-that ends in tool results is resumed with a `Continue.` prompt, because Claude Code only
-starts a turn from a user message. `CLAUDE_MODEL` selects the model; without it Claude
+that ends in tool results is resumed with a short prompt to carry on, because Claude Code
+only starts a turn from a user message. Claude Code closes such a resumed conversation with
+a filler assistant turn, `No response requested.`; a reply that only repeats it is asked
+for once more, and a second one fails the call. `CLAUDE_MODEL` selects the model; without it Claude
 Code uses its default. On the host Claude Code signs in with its own login, or with
 `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) when set. A
 host login lives in the keychain or `~/.claude` and is not shared with containers: coding

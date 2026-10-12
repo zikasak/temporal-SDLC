@@ -75,7 +75,7 @@ def test_history_is_resumed_as_native_messages(fake_claude):
         {'type': 'tool_result', 'tool_use_id': 'call-2', 'content': 'unknown city',
          'is_error': True}])
     # Tool results cannot start a turn; the resumed conversation is only nudged on.
-    assert after_tools['prompt']['message']['content'] == 'Continue.'
+    assert after_tools['prompt']['message']['content'] == claude.CONTINUE_PROMPT
     # A closing user message is the prompt itself and stays out of the resumed history.
     assert after_question['prompt']['message']['content'] == 'And tomorrow?'
     assert [(item['role'], item['content']) for item in after_question['transcript'][3:]] == [
@@ -107,6 +107,34 @@ def test_bound_tools_are_declared_and_their_calls_returned(fake_claude):
     assert declared['name'] == 'lookup' and declared['description'] == 'Look a term up.'
     assert declared['inputSchema']['required'] == ['term']
     assert set(declared['inputSchema']['properties']) == {'term', 'limit'}
+
+
+AFTER_TOOLS = [HumanMessage('Weather in Paris?'),
+               AIMessage('', tool_calls=[
+                   {'name': 'get_weather', 'args': {'city': 'Paris'}, 'id': 'call-1'}]),
+               ToolMessage('17C', tool_call_id='call-1')]
+
+
+async def test_repeated_resume_filler_is_asked_for_once_more(fake_claude):
+    install, calls = fake_claude
+    model = ChatClaude(cli_path=install(
+        claude_reply('No response requested.'), claude_reply('17C.')))
+
+    reply = await model.ainvoke(AFTER_TOOLS)
+
+    assert reply.content == '17C.'
+    first, second = calls()
+    # The second run is the same request again.
+    assert [(item['role'], item['content']) for item in first['transcript']] == [
+        (item['role'], item['content']) for item in second['transcript']]
+    assert first['prompt']['message'] == second['prompt']['message']
+
+
+async def test_resume_filler_repeated_twice_raises(fake_claude):
+    install, _ = fake_claude
+    filler = claude_reply('No response requested.')
+    with pytest.raises(RuntimeError, match='resume filler'):
+        await ChatClaude(cli_path=install(filler, filler)).ainvoke(AFTER_TOOLS)
 
 
 async def test_failed_response_raises(fake_claude):
