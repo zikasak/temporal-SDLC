@@ -25,7 +25,11 @@ TOOL_SERVER = 'langchain'
 TOOL_PREFIX = f'mcp__{TOOL_SERVER}__'
 # Claude Code only starts a turn from a user prompt. A conversation ending in one sends
 # it as that prompt; one ending in tool results is resumed whole and nudged with this.
-CONTINUE_PROMPT = 'Continue.'
+CONTINUE_PROMPT = ('Carry on from the tool results above: call the next tool you need, or '
+                   'write your complete reply.')
+# Claude Code closes a resumed conversation that ends in a user message - tool results
+# included - with an assistant turn of this text, which the model sometimes repeats.
+RESUME_FILLER = 'No response requested.'
 
 
 class ChatClaude(BaseChatModel):
@@ -79,6 +83,36 @@ class ChatClaude(BaseChatModel):
         prompt = CONTINUE_PROMPT
         if isinstance(history[-1]['content'], str):
             prompt = history.pop()['content']
+        # A reply that only repeats the resume filler is asked for once more.
+        for _ in range(2):
+            blocks, model_name, result = await self._request(system, history, prompt, tools)
+            calls = [block for block in blocks if isinstance(block, ToolUseBlock)]
+            text = ''.join(block.text for block in blocks if isinstance(block, TextBlock))
+            if calls or text.strip() != RESUME_FILLER:
+                break
+        else:
+            raise RuntimeError("claude repeated Claude Code's resume filler instead of replying")
+        usage = result.usage or {}
+        cached = {'cache_read': usage.get('cache_read_input_tokens') or 0,
+                  'cache_creation': usage.get('cache_creation_input_tokens') or 0}
+        prompt_tokens = (usage.get('input_tokens') or 0) + sum(cached.values())
+        output_tokens = usage.get('output_tokens') or 0
+        message = AIMessage(
+            content=text,
+            tool_calls=[{'name': block.name.removeprefix(TOOL_PREFIX), 'args': block.input,
+                         'id': block.id, 'type': 'tool_call'} for block in calls],
+            usage_metadata={'input_tokens': prompt_tokens, 'output_tokens': output_tokens,
+                            'total_tokens': prompt_tokens + output_tokens,
+                            'input_token_details': cached},
+            response_metadata={'model_name': model_name, 'finish_reason': result.stop_reason,
+                               'total_cost_usd': result.total_cost_usd},
+        )
+        return ChatResult(generations=[ChatGeneration(message=message)],
+                          llm_output={'model_name': model_name})
+
+    async def _request(self, system: str, history: list[dict[str, Any]], prompt: str,
+                       tools: Sequence[dict[str, Any]]) -> tuple[list[Any], str | None, Any]:
+        """One Claude Code run: its content blocks, the model that answered, its result."""
         session = str(uuid.uuid4())
         blocks: list[Any] = []
         model_name = self.model
@@ -120,28 +154,12 @@ class ChatClaude(BaseChatModel):
                     raise
         if result is None:
             raise RuntimeError('claude produced no result')
-        calls = [block for block in blocks if isinstance(block, ToolUseBlock)]
-        if result.is_error and not (calls and result.subtype == 'error_max_turns'):
+        called = any(isinstance(block, ToolUseBlock) for block in blocks)
+        if result.is_error and not (called and result.subtype == 'error_max_turns'):
             raise RuntimeError('claude response failed: '
                                + ('; '.join(result.errors or []) or result.result
                                   or result.subtype))
-        usage = result.usage or {}
-        cached = {'cache_read': usage.get('cache_read_input_tokens') or 0,
-                  'cache_creation': usage.get('cache_creation_input_tokens') or 0}
-        prompt_tokens = (usage.get('input_tokens') or 0) + sum(cached.values())
-        output_tokens = usage.get('output_tokens') or 0
-        message = AIMessage(
-            content=''.join(block.text for block in blocks if isinstance(block, TextBlock)),
-            tool_calls=[{'name': block.name.removeprefix(TOOL_PREFIX), 'args': block.input,
-                         'id': block.id, 'type': 'tool_call'} for block in calls],
-            usage_metadata={'input_tokens': prompt_tokens, 'output_tokens': output_tokens,
-                            'total_tokens': prompt_tokens + output_tokens,
-                            'input_token_details': cached},
-            response_metadata={'model_name': model_name, 'finish_reason': result.stop_reason,
-                               'total_cost_usd': result.total_cost_usd},
-        )
-        return ChatResult(generations=[ChatGeneration(message=message)],
-                          llm_output={'model_name': model_name})
+        return blocks, model_name, result
 
 
 class _History(SessionStore):
