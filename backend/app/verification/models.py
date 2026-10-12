@@ -28,7 +28,8 @@ class TrackedTest(TypedDict):
 
 class VerificationResult(TypedDict):
     session_id: str
-    status: Literal['passed', 'failed', 'error']
+    # `not_implemented`: this kind of task has no check yet, so nothing was run.
+    status: Literal['passed', 'failed', 'error', 'not_implemented']
     tests: int
     passed: int
     failures: int

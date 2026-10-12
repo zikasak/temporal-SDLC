@@ -8,12 +8,14 @@ from temporalio.exceptions import ApplicationError
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from app.config import (
-    CODEGEN_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, IMPLEMENTATION_TASK_QUEUE,
-    TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
+    CODEGEN_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, DOCUMENTATION_TASK_QUEUE,
+    IMPLEMENTATION_TASK_QUEUE, TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
 )
 from app.diagnosis.workflows import DiagnosisWorkflow
+from app.documentation.workflows import DocumentationWorkflow
 from app.implementation.workflows import ImplementationWorkflow
 from app.test_generation.workflows import TestGenerationWorkflow as ServiceTestWorkflow
+from app.verification.activities import verify_documentation
 from app.verification.workflows import VerificationWorkflow
 
 CODE = {"server": {"path": "/generated/server", "files": 8}}
@@ -65,6 +67,9 @@ class FakeStages:
         self.published: list[tuple[str, str]] = []
         self.published_kind: str | None = None
         self.fail_publication = False
+        self.fail_documentation = False
+        # Each push of documentation alone, and whether it was pushed as verified.
+        self.published_documentation: list[tuple[str, str, bool]] = []
         # What had already run each time the repository's tests were recorded.
         self.snapshots: list[list[str]] = []
         self.fail_snapshot = False
@@ -93,6 +98,23 @@ class FakeStages:
         self.published_kind = kind
         return {"branch": "generated/abc", "commit": "2" * 40,
                 "url": repository["html_url"] + "/tree/generated/abc"}
+
+    @activity.defn(name="publish_documentation")
+    async def publish_documentation(self, session_id: str, repository: dict[str, Any],
+                                    language: str, verified: bool) -> dict[str, Any]:
+        if self.fail_publication:
+            raise ApplicationError("remote: Permission denied", non_retryable=True)
+        self.published_documentation.append((session_id, repository["full_name"], verified))
+        return {"branch": "generated/abc", "commit": "2" * 40, "verified": verified,
+                "url": repository["html_url"] + "/tree/generated/abc"}
+
+    @activity.defn(name="write_documentation")
+    async def write_documentation(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
+        self.stages.append('documentation')
+        if self.fail_documentation:
+            raise ApplicationError("the author changed nothing", non_retryable=True)
+        return {"path": "/documentation/files", "changed_files": ["README.md"],
+                "context": context}
 
     @activity.defn(name="implement_service")
     async def implement_service(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
@@ -244,8 +266,13 @@ async def stage_workers(env, stages: FakeStages):
         workflows=[ServiceTestWorkflow], activities=[stages.generate_service_tests],
     ), Worker(
         env.client, task_queue=VERIFICATION_TASK_QUEUE, workflows=[VerificationWorkflow],
+        # The check of documentation is the real one: it starts nothing.
         activities=[stages.verify_service, stages.build_baseline,
-                    stages.snapshot_repository_tests, stages.build_repository_tests],
+                    stages.snapshot_repository_tests, stages.build_repository_tests,
+                    verify_documentation],
+    ), Worker(
+        env.client, task_queue=DOCUMENTATION_TASK_QUEUE,
+        workflows=[DocumentationWorkflow], activities=[stages.write_documentation],
     ), Worker(
         env.client, task_queue=DIAGNOSIS_TASK_QUEUE,
         workflows=[DiagnosisWorkflow], activities=[stages.diagnose_failure],

@@ -108,5 +108,7 @@ async def get_session(session_id: str) -> dict[str, Any]:
     if _delivers(state):
         delivery = dataclasses.asdict(
             await delivery_service.get_progress(session_id)
-            or DeliveryProgress(verification_status='waiting', baseline_status='waiting'))
+            or DeliveryProgress(
+                verification_status='waiting',
+                baseline_status='waiting' if state.kind == 'bugfix' else 'not_applicable'))
     return {"session_id": session_id, **session, "delivery": delivery}

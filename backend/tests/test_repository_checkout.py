@@ -100,7 +100,7 @@ async def test_verified_sources_are_pushed_to_a_new_branch(tmp_path, remote, rep
                               CONTRACT)
     assert published == {"branch": BRANCH, "commit": git("rev-parse", BRANCH, cwd=remote),
                          "url": f"{repository_selection['html_url']}/tree/{BRANCH}",
-                         "ignored": ["build/"], "ignored_count": 1}
+                         "ignored": ["build/"], "ignored_count": 1, "verified": True}
     files = set(git("ls-tree", "-r", "--name-only", BRANCH, cwd=remote).splitlines())
     # The author's tree replaces what it was shown (Old.java and README.md are gone, as
     # it removed them); the unit tests it never saw stay, and the suite replaces the
@@ -149,6 +149,33 @@ async def test_bugfix_of_a_requirements_session_gets_its_own_branch(tmp_path, re
         "Fix the service and add regression tests")
     # The next task on that branch starts from the contract published with it.
     assert await environment.run(activities.read_repository_contract, session_id) == CONTRACT
+
+
+async def test_documentation_is_pushed_alone_and_marked_as_unverified(tmp_path, remote, repository_selection):
+    environment = ActivityEnvironment()
+    await environment.run(activities.checkout_repository, SESSION, repository_selection)
+    session = tmp_path / "generated" / SESSION
+    before = set(git("ls-tree", "-r", "--name-only", repository_selection["branch"],
+                     cwd=remote).splitlines())
+    for name, text in {"README.md": "rewritten", "docs/guide.md": "added",
+                       "src/main/Kept.java": "not documentation"}.items():
+        (session / "documentation/files" / name).parent.mkdir(parents=True, exist_ok=True)
+        (session / "documentation/files" / name).write_text(text)
+
+    published = await environment.run(activities.publish_documentation, SESSION,
+                                      repository_selection, "java", False)
+    assert published["branch"] == BRANCH and published["verified"] is False
+    # The commit itself says that nothing checked the change.
+    message = git("log", "-1", "--format=%B", BRANCH, cwd=remote)
+    assert message.startswith("Change the documentation (unverified)\n")
+    assert "Not verified" in message
+    # Only documentation changes: the service, its tests and the contract stay as
+    # the repository held them.
+    assert set(git("ls-tree", "-r", "--name-only", BRANCH, cwd=remote).splitlines()) == (
+        before | {"docs/guide.md"})
+    assert git("show", f"{BRANCH}:README.md", cwd=remote) == "rewritten"
+    assert git("show", f"{BRANCH}:src/main/Kept.java", cwd=remote) == "kept"
+    assert git("show", f"{BRANCH}:contracts/obsolete.json", cwd=remote) == "previous contract"
 
 
 @pytest.mark.parametrize("damage", [

@@ -19,11 +19,13 @@ class RepositoryCheckout(TypedDict):
 
 
 class RepositoryPublication(TypedDict):
-    """The new branch a session's verified sources were pushed to."""
+    """The new branch a session's sources were pushed to."""
 
     branch: str
     commit: str
     url: str
+    # False for sources pushed without a check of them, which their commit says too.
+    verified: bool
     # Verified paths left out because the repository's .gitignore matches them (first few).
     ignored: list[str]
     ignored_count: int

@@ -164,7 +164,8 @@ def replace_files(source: Path, target: Path, include: Callable[[Path], bool]) -
 
 
 async def push(target: Path, repository: RepositorySelection, token: str, *, branch: str,
-               message: str, author: tuple[str, str]) -> RepositoryPublication:
+               message: str, author: tuple[str, str],
+               verified: bool = True) -> RepositoryPublication:
     """Commit the working copy to `branch` and push it. Never forces: a remote branch
     of that name with other history is an error. Safe to repeat after a failure.
 
@@ -187,5 +188,5 @@ async def push(target: Path, repository: RepositorySelection, token: str, *, bra
     commit = await _git('rev-parse', 'HEAD', cwd=target)
     await _git('push', '--quiet', 'origin', f'HEAD:refs/heads/{branch}', cwd=target, token=token)
     return {'branch': branch, 'commit': commit,
-            'url': f'{repository["html_url"]}/tree/{branch}',
+            'url': f'{repository["html_url"]}/tree/{branch}', 'verified': verified,
             'ignored': ignored[:LISTED_IGNORED], 'ignored_count': len(ignored)}

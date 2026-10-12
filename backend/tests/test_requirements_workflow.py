@@ -180,14 +180,14 @@ async def test_kind_must_be_recorded_before_the_document_is_generated(env, worke
         await handle.execute_update(RequirementsWorkflow.finalize)
     assert "kind of task is not recorded" in str(refused.value.cause)
 
-    worker.kind = "docs"
-    await handle.execute_update(RequirementsWorkflow.send_message, "It is a documentation change")
+    worker.kind = "new_service"
+    await handle.execute_update(RequirementsWorkflow.send_message, "It is a new service")
     # A later turn that records nothing keeps the kind.
     worker.kind = None
     await handle.execute_update(RequirementsWorkflow.send_message, "Rooms double-book")
     await handle.execute_update(RequirementsWorkflow.finalize)
     assert await handle.result() == DOCUMENT
-    assert (await handle.query(RequirementsWorkflow.get_state)).kind == "docs"
+    assert (await handle.query(RequirementsWorkflow.get_state)).kind == "new_service"
 
 
 async def test_idle_session_without_kind_fails(env, worker):

@@ -17,3 +17,5 @@
 !app/implementation/agent.py
 !app/test_generation/
 !app/test_generation/agent.py
+!app/documentation/
+!app/documentation/agent.py

@@ -94,6 +94,16 @@
     "justMyCode": true
   },
   {
+    "label": "Documentation worker (Temporal)",
+    "adapter": "Debugpy",
+    "request": "launch",
+    "module": "app.documentation.worker",
+    "cwd": "$ZED_WORKTREE_ROOT/backend",
+    "python": "$ZED_WORKTREE_ROOT/backend/env/bin/python",
+    "env": { "PYTHONPATH": "$ZED_WORKTREE_ROOT/backend" },
+    "justMyCode": true
+  },
+  {
     "label": "Frontend (Vite dev server)",
     "adapter": "JavaScript",
     "type": "pwa-node",

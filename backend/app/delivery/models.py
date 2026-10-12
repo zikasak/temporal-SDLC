@@ -10,8 +10,8 @@ from app.github.models import (
 from app.requirements.models import Requirement, TaskKind
 from app.verification.models import VerificationResult, VerificationStatus
 
-RetryStage = Literal['server', 'tests', 'repository']
-RETRY_STAGES = ('server', 'tests', 'repository')
+RetryStage = Literal['server', 'tests', 'documentation', 'repository']
+RETRY_STAGES = ('server', 'tests', 'documentation', 'repository')
 NAMED_TESTS = 5
 # How the tests a change added fared against the service as the repository holds it.
 # `reproduced`: they all fail and the existing tests pass, so the change has something to
@@ -50,7 +50,8 @@ class TaskSpec:
     # leaves the API as it is generates none.
     document_id: str | None = None
     # What the user said the task is. A bugfix changes the repository's service for its
-    # brief; every other kind is still built as a new service.
+    # brief and a documentation task its documentation; every other kind is built as a
+    # new service.
     kind: TaskKind | None = None
     brief: Brief | None = None
     # Missing when the session expired before a language was chosen.
@@ -70,6 +71,9 @@ class DeliveryProgress:
     implementation_error: str | None = None
     tests: dict[str, Any] | None = None
     tests_error: str | None = None
+    # What the author of a documentation task wrote: the only stage such a task has.
+    documentation: dict[str, Any] | None = None
+    documentation_error: str | None = None
     # The run of a change's tests against the service as the repository holds it.
     baseline: VerificationResult | None = None
     baseline_error: str | None = None
@@ -82,7 +86,8 @@ class DeliveryProgress:
     existing_tests: VerificationResult | None = None
     # One entry per diagnosed verification failure: which side was sent back for repair.
     repairs: list[RepairRound] = field(default_factory=list)
-    # The new branch holding the sources that passed verification.
+    # The new branch holding the sources that passed verification, or documentation
+    # that no check exists for yet, which the publication then says.
     publication: RepositoryPublication | None = None
     publication_error: str | None = None
     publication_status: PublicationStatus = 'not_applicable'

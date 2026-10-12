@@ -34,7 +34,8 @@ async def get_progress(session_id: str) -> DeliveryProgress | None:
 async def retry(session_id: str, stage: RetryStage) -> None:
     """Restart a failed stage, retaining the task and the successful build artifacts."""
     if stage not in RETRY_STAGES:
-        raise SessionBusy('Choose server generation, tests generation or the push to retry.')
+        raise SessionBusy('Choose server generation, tests generation, the documentation '
+                          'or the push to retry.')
     client = await connect_temporal()
     try:
         description = await client.get_workflow_handle(delivery_id(session_id)).describe()
@@ -60,6 +61,10 @@ async def retry(session_id: str, stage: RetryStage) -> None:
               # and that retry is also the way on from a verification that proved nothing.
               'tests': (progress.tests_error or progress.baseline_error
                         or proved and unverified),
+              # A documentation task has one stage, which is also the way on from a check
+              # of it that could not complete.
+              'documentation': (progress.documentation_error
+                                or state.spec.kind == 'docs' and unverified),
               'repository': progress.publication_error}[stage]
     if not failed:
         raise SessionBusy('Only failed generation can be retried.')
@@ -84,6 +89,9 @@ async def retry(session_id: str, stage: RetryStage) -> None:
         progress.code_error = None
         progress.implementation = None
         progress.implementation_error = None
+    elif stage == 'documentation':
+        progress.documentation = None
+        progress.documentation_error = None
     elif stage == 'tests':
         progress.tests = None
         progress.tests_error = None

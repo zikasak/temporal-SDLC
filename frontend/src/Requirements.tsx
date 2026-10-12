@@ -62,7 +62,7 @@ const categories: [Category, string][] = [
   ["technical", "Technical"],
 ];
 // Kinds that leave the API as it is: the session delivers them without an API design.
-const directKinds: TaskKind[] = ["bugfix"];
+const directKinds: TaskKind[] = ["bugfix", "docs"];
 const kindLabels: Record<TaskKind, string> = {
   new_service: "New service",
   api_change: "API change",
@@ -597,6 +597,7 @@ export default function Requirements() {
                 )}
                 {session.delivery && (
                   <DeliveryResults progress={session.delivery} retrying={retryingGeneration}
+                    documentation={session.kind === "docs"}
                     disabled={submitting || deliveryPending(session.delivery)}
                     onRetry={(stage) => void retryGeneration(stage)} />
                 )}

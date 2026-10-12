@@ -41,6 +41,8 @@ def main() -> int:
              [sys.executable, "-m", "app.verification.worker"]),
             ("Diagnosis worker", BACKEND,
              [sys.executable, "-m", "app.diagnosis.worker"]),
+            ("Documentation worker", BACKEND,
+             [sys.executable, "-m", "app.documentation.worker"]),
             # Launch Vite directly so graceful shutdown does not leave npm's child alive.
             ("Frontend", ROOT / "frontend",
              ["node", str(ROOT / "frontend/node_modules/vite/bin/vite.js"), "--strictPort"]),

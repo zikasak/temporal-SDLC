@@ -29,11 +29,14 @@ TASK_KINDS: dict[str, str] = {
               "it is",
     "docs": "a change to documentation only",
 }
-# Kinds that change the service a repository was published with, and so start from the
-# contract it holds.
+# Kinds that change the service a repository was published with: their requirements
+# join its contract, and may end requirements of it.
 CHANGE_KINDS = ("api_change", "bugfix")
+# Kinds that work on a repository this pipeline published, and so start from the
+# contract it holds.
+CONTRACT_KINDS = (*CHANGE_KINDS, "docs")
 # Those of them that leave the API as it is and are delivered straight from the interview.
-DIRECT_KINDS = ("bugfix",)
+DIRECT_KINDS = ("bugfix", "docs")
 
 
 class Requirement(TypedDict):
@@ -63,7 +66,7 @@ class RequirementsState:
     repository: RepositorySelection | None = None
     # Set once the repository is on the worker's disk; forks check out their own.
     checkout: RepositoryCheckout | None = None
-    # The contract the repository was published with, read when a task that changes its
+    # The contract the repository was published with, read when a task on an existing
     # service is finalized. The delivery of a task that leaves the API as it is starts
     # from it here; the API design of any other starts from it.
     contract: dict[str, Any] | None = None
