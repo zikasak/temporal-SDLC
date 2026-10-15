@@ -45,6 +45,8 @@ class StageSpec:
 
 # The language's authoring instructions, placed beside the agent's project.
 LANGUAGE_FILENAME = 'language.json'
+# Context entry with the user's answers, which continues the stage's paused agent.
+ANSWERS_KEY = 'answers'
 
 
 def session_language(name: str | None) -> Language:
@@ -101,8 +103,15 @@ def publish_manifest(artifact_dir: Path, result: dict[str, Any]) -> None:
     os.replace(manifest, artifact_dir / 'image.json')
 
 
+def paused_result(session_id: str, paused: docker_agents.AgentPaused) -> dict[str, Any]:
+    """What a stage returns when its agent asked the user something."""
+    return {'session_id': session_id, 'questions': paused.questions}
+
+
 async def run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
                     generated_code_dir: Path) -> dict[str, Any]:
+    """The stage's published output, or `questions` the agent asked: then it is paused, and
+    the same call with ANSWERS_KEY in the context continues it."""
     with trace_operation(f'build-{stage.role.replace("_", "-")}', session_id=session_id,
                          feature=stage.role.replace('_', '-'), input=context,
                          metadata=activity_metadata()) as span:
@@ -116,23 +125,34 @@ async def _run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
                      generated_code_dir: Path) -> dict[str, Any]:
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
         raise ApplicationError('Invalid session ID', non_retryable=True)
+    answers = context.get(ANSWERS_KEY)
+    context = {key: value for key, value in context.items() if key != ANSWERS_KEY}
     logger.info('%s stage preparing inputs (session=%s)', stage.role, session_id)
     session_dir = generated_code_dir / session_id
     inputs = stage.prepare_inputs(session_dir, context)
     artifact_dir = session_dir / stage.artifact_subdir
     artifact_dir.mkdir(parents=True, exist_ok=True)
+    paused = artifact_dir / docker_agents.PAUSED_DIR
     async with docker_agents.keep_activity_alive(stage.heartbeat):
         with tempfile.TemporaryDirectory(dir=artifact_dir) as temporary:
             work = Path(temporary)
             workspace = work / 'workspace'
-            workspace.mkdir()
-            inputs.populate(workspace)
-            (workspace / 'input.json').write_text(json.dumps(inputs.context, ensure_ascii=False))
+            if answers:
+                # The paused agent continues in the workspace it left, inputs included.
+                docker_agents.resume_workspace(paused, workspace, answers)
+            else:
+                workspace.mkdir()
+                inputs.populate(workspace)
+                (workspace / 'input.json').write_text(
+                    json.dumps(inputs.context, ensure_ascii=False))
             output = work / 'output'
-            await docker_agents.run_agent(
-                stage.role, session_id, workspace, output, stage.workspace_name,
-                artifact_dir / 'agent.log', image_build=stage.image_build,
-            )
+            try:
+                await docker_agents.run_agent(
+                    stage.role, session_id, workspace, output, stage.workspace_name,
+                    artifact_dir / 'agent.log', image_build=stage.image_build, paused=paused,
+                )
+            except docker_agents.AgentPaused as exc:
+                return paused_result(session_id, exc)
             logger.info('%s stage sanitizing agent output (session=%s)', stage.role, session_id)
             clean = work / 'build'
             stage.sanitize_output(output, clean)

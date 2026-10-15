@@ -129,7 +129,7 @@ def created_container(tmp_path, monkeypatch):
         (work / 'workspace' / 'input.json').write_text('{}')
         await docker_agents.run_agent(
             'implementation', 'session-1', work / 'workspace', work / 'output', 'service',
-            tmp_path / 'agent.log',
+            tmp_path / 'agent.log', paused=tmp_path / 'paused',
             image_build=docker_agents.default_agent_image('implementation', 'service'))
         return created
 

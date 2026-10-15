@@ -15,7 +15,9 @@ from temporalio.exceptions import ApplicationError
 
 from app import docker_agents
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
-from app.agent_workflows.host import copy_regular_files, session_language, write_language
+from app.agent_workflows.host import (
+    ANSWERS_KEY, copy_regular_files, paused_result, session_language, write_language,
+)
 from app.config import GENERATED_CODE_DIR
 from app.diagnosis.agent import VERDICT
 from app.diagnosis.models import (
@@ -104,24 +106,38 @@ def read_verdict(output: Path, verification: dict[str, Any],
             'instructions': instructions[:INSTRUCTION_CHARS]}
 
 
-async def run_diagnosis(session_id: str, context: dict[str, Any]) -> Diagnosis:
+async def run_diagnosis(session_id: str, context: dict[str, Any]) -> dict[str, Any]:
+    """The diagnosis, or `questions` the agent asked: then it is paused, and the same call
+    with ANSWERS_KEY in the context continues it."""
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
         raise ApplicationError('Invalid session ID', non_retryable=True)
+    answers = context.get(ANSWERS_KEY)
+    context = {key: value for key, value in context.items() if key != ANSWERS_KEY}
     language = session_language(context.get('language'))
     session_dir = GENERATED_CODE_DIR / session_id
     artifact_dir = session_dir / 'diagnosis'
+    paused = artifact_dir / docker_agents.PAUSED_DIR
     with tempfile.TemporaryDirectory() as temporary:
         work = Path(temporary)
         workspace = work / 'workspace'
-        workspace.mkdir()
-        prepare_review(language, session_dir, context, workspace)
         artifact_dir.mkdir(exist_ok=True)
+        if answers:
+            # The paused review continues in the workspace it left.
+            docker_agents.resume_workspace(paused, workspace, answers)
+        else:
+            workspace.mkdir()
+            prepare_review(language, session_dir, context, workspace)
         async with docker_agents.keep_activity_alive('Diagnosing failed verification'):
             output = work / 'output'
-            await docker_agents.run_agent('diagnosis', session_id, workspace, output, 'review',
-                                          artifact_dir / 'agent.log', image_build=dataclasses.replace(
-                                              docker_agents.default_agent_image('diagnosis', 'review'),
-                                              dockerfile=language.agent_dockerfile))
+            try:
+                await docker_agents.run_agent(
+                    'diagnosis', session_id, workspace, output, 'review',
+                    artifact_dir / 'agent.log', paused=paused,
+                    image_build=dataclasses.replace(
+                        docker_agents.default_agent_image('diagnosis', 'review'),
+                        dockerfile=language.agent_dockerfile))
+            except docker_agents.AgentPaused as exc:
+                return paused_result(session_id, exc)
         verdict = read_verdict(output, context.get('verification') or {},
                                language.test_suite.case_id)
         result: Diagnosis = {'session_id': session_id, **verdict,
@@ -134,7 +150,7 @@ async def run_diagnosis(session_id: str, context: dict[str, Any]) -> Diagnosis:
 
 
 @activity.defn
-async def diagnose_failure(session_id: str, context: dict[str, Any]) -> Diagnosis:
+async def diagnose_failure(session_id: str, context: dict[str, Any]) -> dict[str, Any]:
     with trace_operation('diagnose-failure', session_id=session_id, feature='diagnosis',
                          input=context.get('verification'), metadata=activity_metadata()) as span:
         result = await run_diagnosis(session_id, context)

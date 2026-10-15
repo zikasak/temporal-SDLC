@@ -5,13 +5,26 @@ import json
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from app.conversations.models import ConversationMessage
+from app.llm.questions import message_text
 from app.requirements.models import TASK_KINDS, Requirement, TaskKind
+from app.tools.questions import GUIDANCE as QUESTIONS_GUIDANCE
 
-OPENING_MESSAGE = (
-    "Hi! I'll help you work out what needs to be done. First, what kind of task is "
-    "this: a new service, a change to an existing service's API, a bugfix or another "
-    "change that leaves the API as it is, or a change to documentation only?"
-)
+OPENING_MESSAGE = ("Hi! I'll help you work out what needs to be done. First, tell me what "
+                   "kind of task this is.")
+# The options name the kinds as TASK_KINDS describes them; the user may still write another.
+KIND_QUESTION = {
+    "question": "What kind of task is this?",
+    "options": ["A new service", "A change to an existing service's API",
+                "A bugfix or another change that leaves the API as it is",
+                "A change to documentation only"],
+}
+
+
+def opening_message() -> ConversationMessage:
+    """The first message of every interview: it asks what kind of task this is."""
+    return {"role": "assistant", "content": OPENING_MESSAGE,
+            "questions": [{**KIND_QUESTION, "options": list(KIND_QUESTION["options"])}]}
+
 
 INTERVIEWER_GUIDANCE = (
     "You are a business analyst interviewing a user to specify a software task. "
@@ -21,8 +34,8 @@ INTERVIEWER_GUIDANCE = (
     "description as one clear, testable statement and only record what the user "
     "actually said or confirmed. Choose the priority from the user's wording: must "
     "for anything mandatory or required, could for nice-to-haves, otherwise should. "
-    "When you infer a likely requirement, ask the user to confirm it before "
-    "recording it. Do not list the recorded requirements back "
+    "When you infer a likely requirement, ask the user with ask_user to confirm it "
+    "before recording it. Do not list the recorded requirements back "
     "to the user; they can see them."
 )
 
@@ -30,9 +43,9 @@ KIND_UNKNOWN = (
     "\nThe kind of task is not recorded yet, and the rest of the interview depends "
     "on it. The kinds are: {kinds}. Never assume the kind and never infer it from "
     "the conversation or the repository: record it with set_task_kind only when the "
-    "user has named it themselves. If they have not, or their answer could mean more "
-    "than one kind, ask them in this turn which it is, naming the options, and ask "
-    "nothing else."
+    "user has named it themselves, choosing its option included. If they have not, or "
+    "their answer could mean more than one kind, ask them with ask_user in this turn "
+    "which it is, with the kinds as its options, and ask nothing else."
 )
 
 KIND_KNOWN = (
@@ -123,7 +136,7 @@ DOCUMENT_GUIDANCE = (
 def _conversation(messages: list[ConversationMessage]) -> list[BaseMessage]:
     return [
         HumanMessage(content=item["content"]) if item["role"] == "user"
-        else AIMessage(content=item["content"])
+        else AIMessage(content=message_text(item))
         for item in messages
     ]
 
@@ -134,7 +147,7 @@ def interview_messages(
     published: list[Requirement] | None = None, retired: list[Requirement] | None = None,
 ) -> list[BaseMessage]:
     """`published` are the requirements of the service a change starts from."""
-    guidance = (INTERVIEWER_GUIDANCE + kind_guidance(kind) + extra_guidance
+    guidance = (INTERVIEWER_GUIDANCE + QUESTIONS_GUIDANCE + kind_guidance(kind) + extra_guidance
                 + service_guidance(published or [], retired or [])
                 + "\nRequirements recorded so far: "
                 + json.dumps(requirements, ensure_ascii=False))
@@ -146,7 +159,7 @@ def document_messages(
     retired: list[Requirement] | None = None,
 ) -> list[BaseMessage]:
     transcript = "\n\n".join(
-        f"{'User' if item['role'] == 'user' else 'Analyst'}: {item['content']}"
+        f"{'User' if item['role'] == 'user' else 'Analyst'}: {message_text(item)}"
         for item in messages
     )
     return [

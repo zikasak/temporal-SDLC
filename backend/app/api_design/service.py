@@ -113,6 +113,16 @@ async def send_message(session_id: str, message: str) -> None:
     logger.info("Sent message to API design session %s", session_id)
 
 
+async def answer_questions(session_id: str, answers: list[str]) -> None:
+    await start_update(session_id, "answer_questions", answers)
+    logger.info("Sent answers to API design session %s", session_id)
+
+
+async def answer_delivery_questions(session_id: str, workflow_id: str,
+                                    answers: list[str]) -> None:
+    await delivery_service.answer(session_id, workflow_id, answers)
+
+
 async def retry_message(session_id: str) -> None:
     await start_update(session_id, "retry_message")
     logger.info("Retrying message in API design session %s", session_id)

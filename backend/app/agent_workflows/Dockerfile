@@ -18,7 +18,7 @@ ARG AGENT_ROLE
 ARG WORKSPACE_NAME
 COPY app/__init__.py app/tracing.py /opt/app/
 COPY app/agent_workflows/__init__.py app/agent_workflows/runtime.py /opt/app/agent_workflows/
-COPY app/llm/__init__.py app/llm/factory.py app/llm/claude.py app/llm/pi.py app/llm/pi_extension.ts /opt/app/llm/
+COPY app/llm/__init__.py app/llm/factory.py app/llm/claude.py app/llm/pi.py app/llm/pi_extension.ts app/llm/questions.py /opt/app/llm/
 COPY app/${AGENT_ROLE}/agent.py /opt/agent.py
 RUN useradd --create-home --uid 10001 agent && mkdir -p /workspace/${WORKSPACE_NAME} && chown -R agent:agent /workspace
 USER agent

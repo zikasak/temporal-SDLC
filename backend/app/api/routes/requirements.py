@@ -8,7 +8,10 @@ from app.api.downloads import session_document_download
 from app.api.errors import http_error
 from app.api.routes.github import RepositoryInput
 from app.github.service import resolve_repository_selection
+from app.llm.questions import ANSWER_CHARS, MAX_QUESTIONS
 from app.requirements.service import (
+    answer_delivery_questions,
+    answer_questions,
     finalize_session,
     fork_session,
     get_session,
@@ -37,6 +40,24 @@ class MessageBody(BaseModel):
         if not value:
             raise ValueError("Message cannot be empty")
         return value
+
+
+class AnswersBody(BaseModel):
+    # One per question, in order: a chosen option or the user's own answer.
+    answers: list[str] = Field(min_length=1, max_length=MAX_QUESTIONS)
+
+    @field_validator("answers")
+    @classmethod
+    def require_answers(cls, value: list[str]) -> list[str]:
+        value = [item.strip() for item in value]
+        if not all(value) or any(len(item) > ANSWER_CHARS for item in value):
+            raise ValueError(f"Each answer must contain 1 to {ANSWER_CHARS} characters")
+        return value
+
+
+class AgentAnswersBody(AnswersBody):
+    # The stage workflow of the agent that asked.
+    workflow_id: str = Field(max_length=300)
 
 
 class RetryGenerationBody(BaseModel):
@@ -82,6 +103,26 @@ async def submit_message(session_id: str, body: MessageBody):
     except Exception as exc:
         raise http_error(exc) from exc
     return {"session_id": session_id, "status": "turn_running"}
+
+
+@router.post("/{session_id}/answers", status_code=202)
+async def submit_answers(session_id: str, body: AnswersBody):
+    _check_session_id(session_id)
+    try:
+        await answer_questions(session_id, body.answers)
+    except Exception as exc:
+        raise http_error(exc) from exc
+    return {"session_id": session_id, "status": "turn_running"}
+
+
+@router.post("/{session_id}/delivery/answers", status_code=202)
+async def submit_agent_answers(session_id: str, body: AgentAnswersBody):
+    _check_session_id(session_id)
+    try:
+        await answer_delivery_questions(session_id, body.workflow_id, body.answers)
+    except Exception as exc:
+        raise http_error(exc) from exc
+    return {"session_id": session_id}
 
 
 @router.post("/{session_id}/retry", status_code=202)

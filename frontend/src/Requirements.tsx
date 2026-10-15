@@ -2,10 +2,11 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import Markdown from "react-markdown";
 import { errorMessage, failure, readBody } from "./api";
 import {
-  DeliveryResults, deliveryPending, deliveryProgress, retriedProgress,
+  DeliveryResults, answeredProgress, deliveryPending, deliveryProgress, retriedProgress,
   type DeliveryProgress, type GenerationStage,
 } from "./Delivery";
 import ForkButton from "./ForkButton";
+import { AskedQuestions, QuestionForm, questionList, type Question } from "./Questions";
 import RepositoryPicker, { RepositorySummary } from "./RepositoryPicker";
 import { repositoryCheckout, repositorySelection, selectionInput, type RepositoryCheckout, type RepositorySelection } from "./github";
 import { markdownComponents, remarkPlugins } from "./markdown";
@@ -33,7 +34,8 @@ type RequirementsDocument = {
 type Session = {
   session_id: string;
   status: SessionStatus;
-  messages: { role: "user" | "assistant"; content: string }[];
+  // An assistant message's questions are answered by the next user message.
+  messages: { role: "user" | "assistant"; content: string; questions: Question[] }[];
   requirements: Requirement[];
   // Requirements of the existing service that this change ends.
   retired: Requirement[];
@@ -143,7 +145,9 @@ function sessionRecord(value: unknown): Session {
       ? deliveryProgress(delivery as Record<string, unknown>, repository) : null,
     session_id: value.session_id,
     status: value.status as SessionStatus,
-    messages: value.messages as Session["messages"],
+    messages: value.messages.map((item) => ({
+      role: item.role, content: item.content, questions: questionList(item.questions),
+    })),
     requirements: value.requirements as Requirement[],
     retired: value.retired as Requirement[],
     kind: "kind" in value && typeof value.kind === "string" && value.kind in kindLabels
@@ -272,11 +276,52 @@ export default function Requirements() {
         ...session,
         status: "turn_running",
         error: null,
-        messages: [...session.messages, { role: "user", content }],
+        messages: [...session.messages, { role: "user", content, questions: [] }],
       });
       setRefreshKey((value) => value + 1);
     } catch (caught) {
       setError(failure(caught, "Could not send the message."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function answerQuestions(answers: string[]) {
+    if (!session) return false;
+    setSubmitting(true);
+    setError("");
+    try {
+      await post(`/${encodeURIComponent(session.session_id)}/answers`, { answers });
+      const content = asked.map((item, index) => `${item.question}\n→ ${answers[index]}`).join("\n\n");
+      setSession({
+        ...session,
+        status: "turn_running",
+        error: null,
+        messages: [...session.messages, { role: "user", content, questions: [] }],
+      });
+      setRefreshKey((value) => value + 1);
+      return true;
+    } catch (caught) {
+      setError(failure(caught, "Could not send the answers."));
+      return false;
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function answerAgent(workflowId: string, answers: string[]) {
+    if (!session?.delivery) return false;
+    setSubmitting(true);
+    setError("");
+    try {
+      await post(`/${encodeURIComponent(session.session_id)}/delivery/answers`,
+        { workflow_id: workflowId, answers });
+      setSession({ ...session, delivery: answeredProgress(session.delivery, workflowId) });
+      setRefreshKey((value) => value + 1);
+      return true;
+    } catch (caught) {
+      setError(failure(caught, "Could not send the answers."));
+      return false;
     } finally {
       setSubmitting(false);
     }
@@ -376,6 +421,9 @@ export default function Requirements() {
 
   const unanswered = session?.messages.at(-1)?.role === "user" && session.status === "interviewing";
   const canCompose = session?.status === "interviewing" && !unanswered && !submitting;
+  // Questions of the last message are answered with the form, not with a message.
+  const last = session?.messages.at(-1);
+  const asked = last?.role === "assistant" ? last.questions : [];
   const forkedFrom = session?.forked_from ?? null;
   const canFinalize = canCompose && session.kind !== null && session.requirements.length > 0;
   const status = error ? "error" : session ? session.status : sessionId ? "loading" : "idle";
@@ -400,7 +448,21 @@ export default function Requirements() {
             <h2 id="interview-title">{session ? "Your answer" : "New session"}</h2>
           </div>
 
-          {session ? (
+          {session && asked.length > 0 ? (
+            <div className="message-form">
+              <QuestionForm key={session.messages.length} questions={asked}
+                disabled={!canCompose} submitting={submitting}
+                onSubmit={answerQuestions} />
+              <button
+                className="generate-button"
+                type="button"
+                onClick={generateDocument}
+                disabled={!canFinalize}
+              >
+                Generate document
+              </button>
+            </div>
+          ) : session ? (
             <form className="message-form" onSubmit={sendMessage}>
               <label htmlFor="requirements-message">Message</label>
               <textarea
@@ -545,6 +607,7 @@ export default function Requirements() {
                         <Markdown remarkPlugins={remarkPlugins} components={markdownComponents}>
                           {item.content}
                         </Markdown>
+                        <AskedQuestions questions={item.questions} />
                       </div>
                     ) : (
                       <p className="turn-content">{item.content}</p>
@@ -599,7 +662,8 @@ export default function Requirements() {
                   <DeliveryResults progress={session.delivery} retrying={retryingGeneration}
                     documentation={session.kind === "docs"}
                     disabled={submitting || deliveryPending(session.delivery)}
-                    onRetry={(stage) => void retryGeneration(stage)} />
+                    onRetry={(stage) => void retryGeneration(stage)}
+                    answering={submitting} onAnswer={answerAgent} />
                 )}
               </section>
             )}

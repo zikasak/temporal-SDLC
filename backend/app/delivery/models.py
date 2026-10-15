@@ -7,6 +7,7 @@ from app.diagnosis.models import RepairRound
 from app.github.models import (
     PublicationStatus, RepositoryCheckout, RepositoryPublication, RepositorySelection,
 )
+from app.llm.questions import Question
 from app.requirements.models import Requirement, TaskKind
 from app.verification.models import VerificationResult, VerificationStatus
 
@@ -33,6 +34,17 @@ class Brief(TypedDict):
     requirements_document: str
     # Requirements of the repository's contract that the change ends.
     retired: list[Requirement]
+
+
+class AgentQuestions(TypedDict):
+    """Questions a coding agent asked with ask_user. Its run is paused until they are
+    answered, and only it ever sees the answers."""
+
+    # The stage workflow that waits for the answers; they are sent to it.
+    workflow_id: str
+    # Which agent asked: implementation, tests, documentation or diagnosis.
+    stage: str
+    questions: list[Question]
 
 
 @dataclass
@@ -91,6 +103,8 @@ class DeliveryProgress:
     publication: RepositoryPublication | None = None
     publication_error: str | None = None
     publication_status: PublicationStatus = 'not_applicable'
+    # Open questions of the coding agents, which wait for their answers.
+    agent_questions: list[AgentQuestions] = field(default_factory=list)
 
 
 def judge_baseline(result: VerificationResult, added: list[str], changed: list[str],

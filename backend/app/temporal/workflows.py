@@ -10,7 +10,7 @@ from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflow
 with workflow.unsafe.imports_passed_through():
     from app.api_design.models import ApiDesignState
     from app.api_design.openapi import api_problems, design_problems
-    from app.api_design.prompt import CHANGE_OPENING_FALLBACK, OPENING_FALLBACK
+    from app.api_design.prompt import opening_fallback
     from app.delivery.models import DeliveryState, TaskSpec, delivery_id
     from app.github.models import RepositorySelection
     from app.requirements.document import render_requirements_markdown
@@ -18,7 +18,8 @@ with workflow.unsafe.imports_passed_through():
         CHANGE_KINDS, CONTRACT_KINDS, DIRECT_KINDS, KIND_PROBLEM, RequirementsState,
         numbered_after,
     )
-    from app.requirements.prompt import OPENING_MESSAGE
+    from app.llm.questions import answer_problem, answers_text
+    from app.requirements.prompt import opening_message
     from app.temporal.activities import (
         api_design_turn,
         checkout_repository,
@@ -38,6 +39,46 @@ REPOSITORY_CHECKOUT_TIMEOUT = timedelta(minutes=10)
 MAX_TRANSCRIPT_BYTES = 64 * 1024
 MAX_MESSAGE_CHARS = 10000
 OPEN_STATUSES = ("interviewing", "turn_running")
+INTERVIEW_TOO_LONG = "This interview is too long to continue. Generate the document."
+DISCUSSION_TOO_LONG = "This discussion is too long to continue. Generate the OpenAPI."
+
+
+def pending_questions(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The questions the last message asked with ask_user, which the next must answer."""
+    if not messages or messages[-1]["role"] != "assistant":
+        return []
+    return messages[-1].get("questions") or []
+
+
+def check_message(messages: list[dict[str, Any]], text: str, too_long: str) -> None:
+    """Raise ValueError unless `text` can be the session's next user message."""
+    if not text or len(text) > MAX_MESSAGE_CHARS:
+        raise ValueError(f"A message must contain 1 to {MAX_MESSAGE_CHARS} characters.")
+    encoded = json.dumps(
+        [*messages, {"role": "user", "content": text}],
+        ensure_ascii=False, separators=(",", ":"),
+    )
+    if len(encoded.encode("utf-8")) > MAX_TRANSCRIPT_BYTES:
+        raise ValueError(too_long)
+
+
+def check_answers(messages: list[dict[str, Any]], answers: list[str], too_long: str) -> None:
+    """Raise ValueError unless `answers` answer the questions the session waits for."""
+    questions = pending_questions(messages)
+    if not questions:
+        raise ValueError("There are no questions to answer.")
+    problem = answer_problem(questions, answers)
+    if problem:
+        raise ValueError(problem)
+    check_message(messages, answers_text(questions, answers), too_long)
+
+
+def assistant_message(result: dict[str, Any]) -> dict[str, Any]:
+    """The message a turn added: its reply and the questions it asked."""
+    message = {"role": "assistant", "content": result["reply"]}
+    if result.get("questions"):
+        message["questions"] = result["questions"]
+    return message
 
 
 def _await_checkout(state: RequirementsState | ApiDesignState) -> str:
@@ -131,9 +172,7 @@ class RequirementsWorkflow:
 
     @workflow.init
     def __init__(self, state: RequirementsState | None = None) -> None:
-        self.state = state or RequirementsState(
-            messages=[{"role": "assistant", "content": OPENING_MESSAGE}]
-        )
+        self.state = state or RequirementsState(messages=[opening_message()])
         # A session forked after a user message starts by answering it.
         if self.state.messages[-1]["role"] == "user":
             self.state.status = "turn_running"
@@ -188,15 +227,28 @@ class RequirementsWorkflow:
     def validate_send_message(self, message: str) -> None:
         if self.state.status != "interviewing" or self.state.messages[-1]["role"] == "user":
             raise ValueError("Retry the unanswered message before sending another.")
-        text = message.strip()
-        if not text or len(text) > MAX_MESSAGE_CHARS:
-            raise ValueError(f"A message must contain 1 to {MAX_MESSAGE_CHARS} characters.")
-        encoded = json.dumps(
-            [*self.state.messages, {"role": "user", "content": text}],
-            ensure_ascii=False, separators=(",", ":"),
-        )
-        if len(encoded.encode("utf-8")) > MAX_TRANSCRIPT_BYTES:
-            raise ValueError("This interview is too long to continue. Generate the document.")
+        if pending_questions(self.state.messages):
+            raise ValueError("Answer the analyst's questions first.")
+        check_message(self.state.messages, message.strip(), INTERVIEW_TOO_LONG)
+
+    @workflow.update
+    async def answer_questions(self, answers: list[str]) -> None:
+        """The user's answers to the questions of the last message, as their message."""
+        self._updates += 1
+        async with self._turn_lock:
+            if self.state.status != "interviewing":
+                raise ApplicationError("This session is no longer accepting messages.")
+            questions = pending_questions(self.state.messages)
+            workflow.logger.info("Answers received (%d questions)", len(questions))
+            self.state.messages.append(
+                {"role": "user", "content": answers_text(questions, answers)})
+            await self._turn()
+
+    @answer_questions.validator
+    def validate_answer_questions(self, answers: list[str]) -> None:
+        if self.state.status != "interviewing" or self.state.messages[-1]["role"] == "user":
+            raise ValueError("Retry the unanswered message before sending another.")
+        check_answers(self.state.messages, answers, INTERVIEW_TOO_LONG)
 
     @workflow.update
     async def retry_message(self) -> None:
@@ -246,7 +298,7 @@ class RequirementsWorkflow:
             self.state.error = "The LLM could not answer. Retry this message."
             ok = False
         else:
-            self.state.messages.append({"role": "assistant", "content": result["reply"]})
+            self.state.messages.append(assistant_message(result))
             self.state.requirements = result["requirements"]
             self.state.kind = result["kind"]
             self.state.retired = result["retired"]
@@ -398,10 +450,7 @@ class ApiDesignWorkflow:
             async with self._turn_lock:
                 if not await self._turn():
                     self.state.messages.append(
-                        {"role": "assistant",
-                         "content": (CHANGE_OPENING_FALLBACK if self.state.change_document
-                                     else OPENING_FALLBACK)}
-                    )
+                        opening_fallback(bool(self.state.change_document)))
                     self.state.error = None
         elif ready and self.state.messages[-1]["role"] == "user":
             async with self._turn_lock:
@@ -479,15 +528,28 @@ class ApiDesignWorkflow:
     def validate_send_message(self, message: str) -> None:
         if self.state.status != "interviewing" or self.state.messages[-1]["role"] == "user":
             raise ValueError("Retry the unanswered message before sending another.")
-        text = message.strip()
-        if not text or len(text) > MAX_MESSAGE_CHARS:
-            raise ValueError(f"A message must contain 1 to {MAX_MESSAGE_CHARS} characters.")
-        encoded = json.dumps(
-            [*self.state.messages, {"role": "user", "content": text}],
-            ensure_ascii=False, separators=(",", ":"),
-        )
-        if len(encoded.encode("utf-8")) > MAX_TRANSCRIPT_BYTES:
-            raise ValueError("This discussion is too long to continue. Generate the OpenAPI.")
+        if pending_questions(self.state.messages):
+            raise ValueError("Answer the designer's questions first.")
+        check_message(self.state.messages, message.strip(), DISCUSSION_TOO_LONG)
+
+    @workflow.update
+    async def answer_questions(self, answers: list[str]) -> None:
+        """The user's answers to the questions of the last message, as their message."""
+        self._updates += 1
+        async with self._turn_lock:
+            if self.state.status != "interviewing":
+                raise ApplicationError("This session is no longer accepting messages.")
+            questions = pending_questions(self.state.messages)
+            workflow.logger.info("Answers received (%d questions)", len(questions))
+            self.state.messages.append(
+                {"role": "user", "content": answers_text(questions, answers)})
+            await self._turn()
+
+    @answer_questions.validator
+    def validate_answer_questions(self, answers: list[str]) -> None:
+        if self.state.status != "interviewing" or self.state.messages[-1]["role"] == "user":
+            raise ValueError("Retry the unanswered message before sending another.")
+        check_answers(self.state.messages, answers, DISCUSSION_TOO_LONG)
 
     @workflow.update
     async def retry_message(self) -> None:
@@ -535,7 +597,7 @@ class ApiDesignWorkflow:
             self.state.error = "The LLM could not answer. Retry this message."
             ok = False
         else:
-            self.state.messages.append({"role": "assistant", "content": result["reply"]})
+            self.state.messages.append(assistant_message(result))
             self.state.api = result["api"]
             self.state.language = result["language"]
             ok = True

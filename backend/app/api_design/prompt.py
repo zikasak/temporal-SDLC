@@ -6,30 +6,39 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 
 from app.api_design.models import ApiDesignState
 from app.api_design.openapi import design_problems
+from app.conversations.models import ConversationMessage
 from app.languages import describe_supported
+from app.llm.questions import message_text
+from app.tools.questions import GUIDANCE as QUESTIONS_GUIDANCE
 
 OPENING_FALLBACK = (
-    "I've read the requirements document. Let's design the API of the system. "
-    "Who will call it (a web frontend, mobile apps, other services), and how "
-    "should callers authenticate?"
+    "I've read the requirements document. Let's design the API of the system, starting "
+    "with who calls it and how."
 )
+OPENING_QUESTIONS = [
+    {"question": "Who will call the API?",
+     "options": ["A web frontend", "Mobile apps", "Other services"]},
+    {"question": "How should callers authenticate?",
+     "options": ["No authentication", "Bearer tokens", "API keys", "HTTP basic authentication"]},
+]
 
 KICKOFF_MESSAGE = (
     "Here is my requirements document. Start the API design: set the API info, "
     "record a first draft of the schemas and endpoints that clearly follow from the "
-    "requirements, then briefly describe the draft and ask your first questions."
+    "requirements, then briefly describe the draft and ask your first questions with "
+    "ask_user."
 )
 
 CHANGE_OPENING_FALLBACK = (
-    "I've read the change you want and the API your service has now. Which endpoint "
-    "or field of the existing API should change first, and how?"
+    "I've read the change you want and the API your service has now. Tell me which "
+    "endpoint or field of the existing API should change first, and how."
 )
 
 CHANGE_KICKOFF_MESSAGE = (
     "Here are the requirements document of my existing service and the document of "
     "the change I want. The API model already holds the service's API as it is. "
     "Record what clearly follows from the change, then briefly say what you changed "
-    "and ask your first questions."
+    "and ask your first questions with ask_user."
 )
 
 DESIGNER_GUIDANCE = (
@@ -46,8 +55,8 @@ DESIGNER_GUIDANCE = (
     "schema that an endpoint or another schema refers to. Pass requirement_ids to "
     "link each endpoint to the requirements it serves.\n"
     "Each turn, first apply what the user decided with the tools, then ask one to "
-    "three focused questions about the least settled topics: callers and "
-    "authentication, resources and their fields, filtering, sorting and "
+    "three focused questions with ask_user about the least settled topics: callers "
+    "and authentication, resources and their fields, filtering, sorting and "
     "pagination, error responses, and requirements no endpoint covers yet. Record "
     "your own proposals only when they follow directly from the requirements, and "
     "tell the user what you assumed. When a tool call fails, fix the arguments and "
@@ -63,10 +72,10 @@ LANGUAGE_UNKNOWN = (
     "nothing can be generated without it. If the project's repository is available "
     "to you and its files clearly show the language it is written in, record that "
     "language with set_language and tell the user; otherwise ask the user in this "
-    "turn which language to use, naming the supported ones. Supported languages: "
-    "{supported}. Never assume a language. When the user or the repository names an "
-    "unsupported one, say that it is not supported yet and ask the user to choose a "
-    "supported language instead."
+    "turn with ask_user which language to use, with the supported ones as its "
+    "options. Supported languages: {supported}. Never assume a language. When the "
+    "user or the repository names an unsupported one, say that it is not supported "
+    "yet and ask the user to choose a supported language instead."
 )
 LANGUAGE_KNOWN = (
     "\nThe server code will be written in {language}. Change it with set_language "
@@ -94,6 +103,15 @@ CHANGE_GUIDANCE = (
 )
 
 
+def opening_fallback(change: bool) -> ConversationMessage:
+    """The first message of a session whose first turn failed."""
+    if change:
+        return {"role": "assistant", "content": CHANGE_OPENING_FALLBACK}
+    return {"role": "assistant", "content": OPENING_FALLBACK,
+            "questions": [{**item, "options": list(item["options"])}
+                          for item in OPENING_QUESTIONS]}
+
+
 def language_guidance(language: str | None, fixed: bool = False) -> str:
     template = LANGUAGE_FIXED if fixed else LANGUAGE_KNOWN if language else LANGUAGE_UNKNOWN
     return template.format(language=language, supported=describe_supported())
@@ -103,7 +121,7 @@ def api_turn_messages(state: ApiDesignState, extra_guidance: str = "") -> list[B
     problems = design_problems(state.api, state.language)
     change = bool(state.change_document)
     guidance = (
-        f"{DESIGNER_GUIDANCE}{CHANGE_GUIDANCE if change else ''}"
+        f"{DESIGNER_GUIDANCE}{QUESTIONS_GUIDANCE}{CHANGE_GUIDANCE if change else ''}"
         f"{language_guidance(state.language, fixed=change)}{extra_guidance}"
         f"\n\n<requirements_document>\n{state.requirements_document}"
         f"\n</requirements_document>\n\n"
@@ -118,7 +136,7 @@ def api_turn_messages(state: ApiDesignState, extra_guidance: str = "") -> list[B
         HumanMessage(content=CHANGE_KICKOFF_MESSAGE if change else KICKOFF_MESSAGE)]
     conversation += [
         HumanMessage(content=item["content"]) if item["role"] == "user"
-        else AIMessage(content=item["content"])
+        else AIMessage(content=message_text(item))
         for item in state.messages
     ]
     return [SystemMessage(content=guidance), *conversation]

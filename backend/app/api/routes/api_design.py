@@ -4,8 +4,12 @@ from pydantic import BaseModel, Field
 
 from app.api.downloads import session_document_download
 from app.api.errors import http_error
-from app.api.routes.requirements import ForkBody, MessageBody, RetryGenerationBody
+from app.api.routes.requirements import (
+    AgentAnswersBody, AnswersBody, ForkBody, MessageBody, RetryGenerationBody,
+)
 from app.api_design.service import (
+    answer_delivery_questions,
+    answer_questions,
     finalize_session,
     fork_session,
     get_session,
@@ -54,6 +58,26 @@ async def submit_message(session_id: str, body: MessageBody):
     except Exception as exc:
         raise http_error(exc) from exc
     return {"session_id": session_id, "status": "turn_running"}
+
+
+@router.post("/{session_id}/answers", status_code=202)
+async def submit_answers(session_id: str, body: AnswersBody):
+    _check_session_id(session_id)
+    try:
+        await answer_questions(session_id, body.answers)
+    except Exception as exc:
+        raise http_error(exc) from exc
+    return {"session_id": session_id, "status": "turn_running"}
+
+
+@router.post("/{session_id}/delivery/answers", status_code=202)
+async def submit_agent_answers(session_id: str, body: AgentAnswersBody):
+    _check_session_id(session_id)
+    try:
+        await answer_delivery_questions(session_id, body.workflow_id, body.answers)
+    except Exception as exc:
+        raise http_error(exc) from exc
+    return {"session_id": session_id}
 
 
 @router.post("/{session_id}/retry", status_code=202)

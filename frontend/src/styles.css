@@ -1706,3 +1706,78 @@ h2 {
     padding: 22px;
   }
 }
+
+/* Questions asked with ask_user: options to pick from, or an answer of the user's own. */
+.question-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+  width: 100%;
+}
+
+.question-form fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.question-form legend {
+  margin-bottom: 4px;
+  color: var(--ink);
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.question-form .question-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--ink);
+  font-size: 0.88rem;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.question-form .question-option input {
+  margin-top: 3px;
+  accent-color: var(--green);
+}
+
+.question-form textarea.question-other {
+  width: 100%;
+  min-height: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font: inherit;
+  font-size: 0.88rem;
+}
+
+.asked-questions {
+  margin-top: 10px;
+  padding-left: 18px;
+}
+
+.asked-questions li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+}
+
+.asked-questions span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.agent-questions > div {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 20px;
+}

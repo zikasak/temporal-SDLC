@@ -140,7 +140,7 @@ async def generate_service_tests(session_id: str, context: dict[str, Any]) -> di
         frozen = repository
     result = await run_stage(stage(language, frozen, must_add=change and not repair),
                              session_id, context, GENERATED_CODE_DIR)
-    if not continued:
+    if not continued or 'questions' in result:
         return result
     # What the suite now differs in from the repository's, for the runs that judge it.
     cases = suite.test_cases(Path(result['path']))

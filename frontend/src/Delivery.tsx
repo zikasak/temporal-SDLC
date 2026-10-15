@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { repositoryPublication, type RepositoryPublication, type RepositorySelection } from "./github";
+import { QuestionForm, questionList, type Question } from "./Questions";
 
 type GeneratedCode = {
   server: { path: string; files: number };
@@ -35,6 +36,9 @@ type VerificationResult = {
 };
 
 export type GenerationStage = "server" | "tests" | "documentation" | "repository";
+// Questions a coding agent asked; its run is paused until they are answered, and only
+// that agent sees the answers.
+type AgentQuestions = { workflow_id: string; stage: string; questions: Question[] };
 type PublicationStatus = "not_applicable" | "waiting" | "running" | "completed" | "skipped" | "error";
 
 /** What a session's delivery has produced so far, as the session API reports it. */
@@ -57,6 +61,7 @@ export type DeliveryProgress = {
   publication: RepositoryPublication | null;
   publication_error: string | null;
   publication_status: PublicationStatus;
+  agent_questions: AgentQuestions[];
 };
 
 const verificationStatuses: VerificationStatus[] = [
@@ -117,6 +122,14 @@ function imageArtifact(value: unknown): ImageArtifact | null {
   return isObject(value) && typeof value.image_id === "string" ? { image_id: value.image_id } : null;
 }
 
+function agentQuestions(value: unknown): AgentQuestions[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item) => isObject(item) && typeof item.workflow_id === "string" &&
+    typeof item.stage === "string").map((item) => ({
+    workflow_id: item.workflow_id, stage: item.stage, questions: questionList(item.questions),
+  })).filter((item) => item.questions.length > 0);
+}
+
 function text(value: unknown) {
   return typeof value === "string" ? value : null;
 }
@@ -149,7 +162,41 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     publication_error: text(value.publication_error),
     publication_status: publicationStatuses.includes(value.publication_status as PublicationStatus)
       ? value.publication_status as PublicationStatus : "not_applicable",
+    agent_questions: agentQuestions(value.agent_questions),
   };
+}
+
+/** What the page shows at once after answering an agent, until the next poll. */
+export function answeredProgress(progress: DeliveryProgress, workflowId: string): DeliveryProgress {
+  return { ...progress, agent_questions: progress.agent_questions.filter((item) => item.workflow_id !== workflowId) };
+}
+
+const agentLabels: Record<string, string> = {
+  implementation: "The implementation agent",
+  tests: "The test agent",
+  documentation: "The documentation agent",
+  diagnosis: "The reviewer of the failed tests",
+};
+
+/** Open questions of the coding agents; each waits, paused, for its own answers. */
+function AgentQuestionsPanel({ progress, answering, onAnswer }: {
+  progress: DeliveryProgress;
+  answering: boolean;
+  onAnswer: (workflowId: string, answers: string[]) => Promise<boolean>;
+}) {
+  if (progress.agent_questions.length === 0) return null;
+  return (
+    <section className="verification-results agent-questions" aria-labelledby="agent-questions-title">
+      <h3 id="agent-questions-title">Questions for you</h3>
+      {progress.agent_questions.map((item) => <div key={item.workflow_id}>
+        <p role="status">
+          {agentLabels[item.stage] ?? "An agent"} is paused until you answer. Only it sees your answers.
+        </p>
+        <QuestionForm questions={item.questions} disabled={answering} submitting={answering}
+          onSubmit={(answers) => onAnswer(item.workflow_id, answers)} />
+      </div>)}
+    </section>
+  );
 }
 
 /** Whether the delivery is still working, so its session should be polled again. */
@@ -333,16 +380,23 @@ function DocumentationResults({ progress, retrying, disabled, onRetry }: {
   );
 }
 
-export function DeliveryResults({ progress, documentation = false, retrying, disabled, onRetry }: {
+export function DeliveryResults({ progress, documentation = false, retrying, disabled, onRetry, answering, onAnswer }: {
   progress: DeliveryProgress;
   // Whether the session's task changes documentation only.
   documentation?: boolean;
   retrying: GenerationStage | null;
   disabled: boolean;
   onRetry: (stage: GenerationStage) => void;
+  // Whether answers to an agent are being sent.
+  answering: boolean;
+  onAnswer: (workflowId: string, answers: string[]) => Promise<boolean>;
 }) {
+  const questions = <AgentQuestionsPanel progress={progress} answering={answering} onAnswer={onAnswer} />;
   if (documentation) {
-    return <DocumentationResults progress={progress} retrying={retrying} disabled={disabled} onRetry={onRetry} />;
+    return <>
+      {questions}
+      <DocumentationResults progress={progress} retrying={retrying} disabled={disabled} onRetry={onRetry} />
+    </>;
   }
   const result = progress.verification;
   const stage = progress.verification_status;
@@ -356,6 +410,7 @@ export function DeliveryResults({ progress, documentation = false, retrying, dis
     (Boolean(progress.verification_error) || result?.status === "error");
   const service = progress.implementation ? "built" : progress.implementation_error ? "build failed" : "building";
   return <>
+    {questions}
     {change && <Baseline progress={progress} retrying={retrying} disabled={disabled} onRetry={onRetry} />}
     <section className="verification-results" aria-labelledby="verification-title">
       <h3 id="verification-title">Service verification</h3>

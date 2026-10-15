@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import tarfile
 import tempfile
 import time
@@ -17,11 +18,14 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
+from app.agent_workflows.runtime import ANSWERS_FILENAME, PAUSE_EXIT, STATE_FILENAME
 from app.config import (
     CLAUDE_MODEL, LLM_HARNESS, OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL,
     PI_CREDENTIALS_DIR, PI_MODEL,
 )
+from app.llm.questions import Question, normalize_questions
 from app.tracing import container_trace_environment
 
 logger = logging.getLogger(__name__)
@@ -33,6 +37,51 @@ PI_SHARED_DIR = 'containers'
 # Credentials Claude Code reads from its environment; a login kept in the host's
 # keychain or ~/.claude cannot follow it into a container.
 CLAUDE_CREDENTIALS = ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN')
+# Where a stage keeps the workspace of an agent that paused for the user's answers.
+PAUSED_DIR = 'paused'
+MAX_STATE_BYTES = 16 * 1024 * 1024
+
+
+class AgentPaused(Exception):
+    """The agent asked the user something and stopped; its workspace is kept until a new
+    container continues from it with the answers."""
+
+    def __init__(self, questions: list[Question]) -> None:
+        super().__init__(f'Agent paused for answers to {len(questions)} questions')
+        self.questions = questions
+
+
+def resume_workspace(paused: Path, workspace: Path, answers: list[str]) -> None:
+    """Fill `workspace` with the one a paused agent left, and the answers it waits for."""
+    if not (paused / STATE_FILENAME).is_file():
+        raise ApplicationError('The paused agent run is unavailable', non_retryable=True)
+    shutil.copytree(paused, workspace, symlinks=True)
+    (workspace / ANSWERS_FILENAME).write_text(json.dumps({'answers': answers},
+                                                         ensure_ascii=False))
+
+
+async def _keep_paused(name: str, paused: Path) -> list[Question]:
+    """Copy the paused container's workspace to `paused`; the questions it asked."""
+    staging = paused.parent / f'.{paused.name}-{uuid.uuid4().hex}'
+    staging.mkdir(parents=True)
+    try:
+        await docker('cp', name + ':/workspace/.', str(staging))
+        # The state is the agent's own output and is read as untrusted.
+        state = staging / STATE_FILENAME
+        if state.is_symlink() or not state.is_file() or state.stat().st_size > MAX_STATE_BYTES:
+            raise RuntimeError('The agent paused without saving its state')
+        try:
+            pending = json.loads(state.read_text())['pending']
+            questions = normalize_questions(pending['questions'])
+        except (ValueError, KeyError, TypeError) as exc:
+            raise RuntimeError(f'The agent paused with an unusable state: {exc}') from exc
+        if paused.exists():
+            shutil.rmtree(paused)
+        os.replace(staging, paused)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return questions
 
 
 @dataclass(frozen=True)
@@ -203,10 +252,11 @@ async def keep_activity_alive(message: str):
 
 async def run_agent(role: str, session_id: str, workspace: Path,
                     output: Path, output_name: str, log_path: Path, *,
-                    image_build: AgentImageBuild) -> None:
+                    image_build: AgentImageBuild, paused: Path) -> None:
     """Copy only prepared inputs in and a single output tree out. The only host mounts are
     the Pi credential files and their shared lock directory, when the Pi harness is
-    selected."""
+    selected. An agent that asks the user something raises AgentPaused once its whole
+    workspace is kept in `paused`; any other end discards what was kept there."""
     label = role.replace('_', '-')
     name = f'{label}-{uuid.uuid4().hex}'
     digest = hashlib.sha256(session_id.encode()).hexdigest()[:16]
@@ -222,6 +272,7 @@ async def run_agent(role: str, session_id: str, workspace: Path,
     setting_args = [argument for key in AGENT_SETTINGS if key in os.environ
                     for argument in ('-e', key)]
     logger.info('%s agent starting (session=%s, container=%s)', role, session_id, name)
+    kept = False
     try:
         build_args = ['build', '-t', agent_image, '-f', str(image_build.dockerfile)]
         for key, value in image_build.build_args.items():
@@ -260,6 +311,10 @@ async def run_agent(role: str, session_id: str, workspace: Path,
         log_path.write_text(agent_log, encoding='utf-8')
         logger.info('%s agent finished (session=%s, exit=%s, log=%s)',
                     role, session_id, state['ExitCode'], log_path)
+        if state['ExitCode'] == PAUSE_EXIT:
+            questions = await _keep_paused(name, paused)
+            kept = True
+            raise AgentPaused(questions)
         if state['ExitCode'] != 0:
             detail = ' (OOM killed)' if state.get('OOMKilled') else ''
             raise RuntimeError(
@@ -268,10 +323,15 @@ async def run_agent(role: str, session_id: str, workspace: Path,
             )
         output.mkdir()
         await docker('cp', name + f':/workspace/{output_name}/.', str(output))
+    except AgentPaused as exc:
+        logger.info('%s agent paused (session=%s): %s', role, session_id, exc)
+        raise
     except Exception:
         logger.exception('%s agent failed (session=%s, container=%s)', role, session_id, name)
         raise
     finally:
+        if not kept:
+            shutil.rmtree(paused, ignore_errors=True)
         try:
             await docker('rm', '-f', name, timeout=30)
         except Exception:

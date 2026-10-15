@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from app import docker_agents
@@ -60,6 +61,54 @@ def profile(tmp_path):
         max_turns_env='TEST_AGENT_MAX_TURNS', validate_completion=validate_implementation,
         completion_message='Completed', exhaustion_message='Tool-turn limit exceeded',
     )
+
+
+ASK = {'name': 'ask_user', 'id': 'ask', 'args': {'questions': [
+    {'question': 'Which currency?', 'options': ['EUR', 'USD']}]}}
+
+
+def test_agent_pauses_for_answers_and_resumes_where_it_stopped(tmp_path, profile, scripted_model):
+    profile = replace(profile, root=tmp_path / 'service')
+    profile.root.mkdir()
+    scripted_model([AIMessage(content='', tool_calls=[
+        {'name': 'write_file', 'args': {'path': 'Orders.java', 'content': 'class Orders {}'},
+         'id': 'orders'}, ASK])])
+    with pytest.raises(SystemExit) as paused:
+        runtime.run_agent(profile)
+    assert paused.value.code == runtime.PAUSE_EXIT
+    state = json.loads((tmp_path / runtime.STATE_FILENAME).read_text())
+    assert state['pending']['questions'] == ASK['args']['questions']
+
+    # The host hands the paused workspace and the answers to a new container.
+    (tmp_path / runtime.ANSWERS_FILENAME).write_text(json.dumps({'answers': ['EUR']}))
+    model = scripted_model([
+        AIMessage(content='', tool_calls=[
+            {'name': 'write_file', 'args': {'path': 'Dockerfile', 'content': 'FROM scratch'},
+             'id': 'dockerfile'}]),
+        AIMessage(content='Finished'),
+    ])
+    runtime.run_agent(profile)
+    system, inputs, call, written, answered = model.requests[0]
+    assert system.content == profile.prompt + runtime.ASK_GUIDANCE
+    assert [item['id'] for item in call.tool_calls] == ['orders', 'ask']
+    assert written.tool_call_id == 'orders'
+    assert answered.tool_call_id == 'ask' and json.loads(answered.content) == {
+        'answers': [{'question': 'Which currency?', 'answer': 'EUR'}]}
+    assert not (tmp_path / runtime.STATE_FILENAME).exists()
+    assert (profile.root / 'Orders.java').is_file()
+
+
+def test_agent_is_sent_back_when_it_asks_in_its_text(profile, scripted_model):
+    model = scripted_model([
+        AIMessage(content='Should the service store prices in cents?'),
+        AIMessage(content='', tool_calls=[
+            {'name': 'write_file', 'args': {'path': 'Dockerfile', 'content': 'FROM scratch'},
+             'id': 'written'}]),
+        AIMessage(content='Done: prices are stored in cents.'),
+    ])
+    runtime.run_agent(profile)
+    assert model.requests[1][-1].content == runtime.DIRECT_QUESTION_NOTICE
+    assert len(model.requests) == 3
 
 
 def test_agent_executes_tools_and_returns_correlated_errors(profile, scripted_model):
@@ -152,7 +201,7 @@ def test_stale_history_becomes_a_checkpoint_within_the_context_budget(
             (third_turn, 'Orders.java, Stock.java', 'Payments, Dockerfile'),
             (later[-1], 'Orders.java, Stock.java, Payments.java', 'Dockerfile')]:
         system, inputs, checkpoint, *recent = request
-        assert isinstance(system, SystemMessage) and system.content == profile.prompt
+        assert isinstance(system, SystemMessage) and system.content == profile.prompt + runtime.ASK_GUIDANCE
         assert isinstance(inputs, HumanMessage) and inputs.content == 'requirements'
         assert isinstance(checkpoint, HumanMessage)
         assert f'Files written or edited so far: {files}\n' in checkpoint.content
@@ -409,6 +458,65 @@ def test_long_shell_output_is_summarized_and_remains_retrievable(tmp_path, tools
     # Saved logs never surface in ordinary project discovery.
     assert tools['list_files'].invoke({}) == 'No files found'
     assert tools['search_files'].invoke({'regex': 'artifact'}) == 'No matches'
+
+
+async def test_paused_stage_keeps_its_workspace_until_a_new_container_continues(tmp_path, monkeypatch):
+    questions = ASK['args']['questions']
+    populated = []
+
+    def prepare_inputs(session_dir, context):
+        def populate(workspace):
+            populated.append(workspace)
+            (workspace / 'notes').mkdir()
+        return StageInputs(context={}, populate=populate)
+
+    def sanitize_output(source, target):
+        copy_regular_files(source, target, include=lambda relative: True)
+
+    stage = StageSpec(
+        role='documentation', artifact_subdir='docs-stage', workspace_name='notes',
+        output_subdir='published', heartbeat='Authoring docs', image_label=None,
+        image_build=docker_agents.AgentImageBuild(tmp_path, tmp_path / 'Dockerfile'),
+        prepare_inputs=prepare_inputs, sanitize_output=sanitize_output,
+        validate_output=lambda clean: None,
+    )
+    sent: list[dict[str, bytes]] = []
+    exit_codes = iter([runtime.PAUSE_EXIT, 0])
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'cp' and args[1] == '-a':
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.append({item.name: archive.extractfile(item).read()
+                             for item in archive.getmembers() if item.isfile()})
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': next(exit_codes)})
+        if args[0] == 'cp' and args[1].endswith(':/workspace/.'):
+            # What the agent left behind when it paused.
+            (Path(args[2]) / 'notes').mkdir()
+            (Path(args[2]) / 'notes/draft.md').write_text('# Draft')
+            (Path(args[2]) / runtime.STATE_FILENAME).write_text(
+                json.dumps({'pending': {'call_id': 'ask', 'questions': questions}}))
+        if args[0] == 'cp' and args[1].endswith(':/workspace/notes/.'):
+            (Path(args[2]) / 'index.md').write_text('# Published')
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    environment = ActivityEnvironment()
+    result = await environment.run(run_stage, stage, 'session', {}, tmp_path)
+    assert result == {'session_id': 'session', 'questions': questions}
+    paused = tmp_path / 'session/docs-stage' / docker_agents.PAUSED_DIR
+    assert (paused / 'notes/draft.md').read_text() == '# Draft'
+
+    result = await environment.run(run_stage, stage, 'session', {'answers': ['EUR']}, tmp_path)
+    assert len(populated) == 1
+    resumed = sent[1]
+    assert resumed['notes/draft.md'] == b'# Draft'
+    assert json.loads(resumed[runtime.ANSWERS_FILENAME]) == {'answers': ['EUR']}
+    assert (Path(result['path']) / 'index.md').read_text() == '# Published'
+    assert not paused.exists()
+    # Nothing is left to continue from.
+    with pytest.raises(ApplicationError, match='paused agent run is unavailable'):
+        await environment.run(run_stage, stage, 'session', {'answers': ['EUR']}, tmp_path)
 
 
 async def test_new_stage_uses_its_own_toolchain_workspace_and_artifact_names(tmp_path, monkeypatch):

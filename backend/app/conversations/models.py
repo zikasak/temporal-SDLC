@@ -1,6 +1,7 @@
 from typing import Literal, NotRequired, TypedDict
 
 from app.github.models import RepositorySelection
+from app.llm.questions import Question
 
 
 class AttachmentMetadata(TypedDict):
@@ -14,6 +15,8 @@ class ConversationMessage(TypedDict):
     role: Literal["user", "assistant"]
     content: str
     attachment: NotRequired[AttachmentMetadata]
+    # Asked with ask_user by an assistant message; the next user message answers them.
+    questions: NotRequired[list[Question]]
 
 
 class LLMRequestRecord(TypedDict):
