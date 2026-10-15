@@ -70,9 +70,10 @@ ASK = {'name': 'ask_user', 'id': 'ask', 'args': {'questions': [
 def test_agent_pauses_for_answers_and_resumes_where_it_stopped(tmp_path, profile, scripted_model):
     profile = replace(profile, root=tmp_path / 'service')
     profile.root.mkdir()
+    # Calls after ask_user still run before the pause.
     scripted_model([AIMessage(content='', tool_calls=[
-        {'name': 'write_file', 'args': {'path': 'Orders.java', 'content': 'class Orders {}'},
-         'id': 'orders'}, ASK])])
+        ASK, {'name': 'write_file', 'args': {'path': 'Orders.java', 'content': 'class Orders {}'},
+              'id': 'orders'}])])
     with pytest.raises(SystemExit) as paused:
         runtime.run_agent(profile)
     assert paused.value.code == runtime.PAUSE_EXIT
@@ -88,9 +89,10 @@ def test_agent_pauses_for_answers_and_resumes_where_it_stopped(tmp_path, profile
         AIMessage(content='Finished'),
     ])
     runtime.run_agent(profile)
-    system, inputs, call, written, answered = model.requests[0]
+    system, inputs, call, answered, written = model.requests[0]
     assert system.content == profile.prompt + runtime.ASK_GUIDANCE
-    assert [item['id'] for item in call.tool_calls] == ['orders', 'ask']
+    # The results follow the order of the calls.
+    assert [item['id'] for item in call.tool_calls] == ['ask', 'orders']
     assert written.tool_call_id == 'orders'
     assert answered.tool_call_id == 'ask' and json.loads(answered.content) == {
         'answers': [{'question': 'Which currency?', 'answer': 'EUR'}]}

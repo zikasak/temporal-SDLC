@@ -49,6 +49,10 @@ class AgentWorkflow:
 
     @workflow.update
     async def answer_questions(self, answers: list[str]) -> None:
+        # Validators of updates that arrive together all pass before either handler runs;
+        # only the first one answers.
+        if not self._questions:
+            raise ApplicationError('The agent is not waiting for answers.')
         self._answers = [answer.strip() for answer in answers]
         self._questions = []
 

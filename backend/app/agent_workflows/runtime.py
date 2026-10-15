@@ -364,8 +364,9 @@ def _resume(directory: Path) -> dict[str, Any] | None:
     answers_file.unlink()
     pending = state['pending']
     history = messages_from_dict(state['history'])
-    history.append(ToolMessage(content=answers_result(pending['questions'], answers),
-                               tool_call_id=pending['call_id'], name=ASK_USER))
+    history.insert(pending['position'], ToolMessage(
+        content=answers_result(pending['questions'], answers),
+        tool_call_id=pending['call_id'], name=ASK_USER))
     return {**state, 'history': history, 'checkpoint': messages_from_dict(state['checkpoint'])}
 
 
@@ -455,8 +456,10 @@ def _run_agent(profile: AgentProfile) -> bool:
                     history.append(ToolMessage(content=f'Tool failed: ValueError: {exc}',
                                                tool_call_id=call['id']))
                 else:
-                    # Its result is the user's answers, added when the run resumes.
-                    asked = {'call_id': call['id'], 'questions': questions}
+                    # Its result is the user's answers, added here when the run resumes,
+                    # so the results still follow the order of the calls.
+                    asked = {'call_id': call['id'], 'questions': questions,
+                             'position': len(history)}
                 continue
             try:
                 result = by_name[call['name']].invoke(

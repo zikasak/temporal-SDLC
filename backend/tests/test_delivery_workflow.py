@@ -654,3 +654,17 @@ async def test_agent_questions_wait_for_the_users_answers(env, worker):
     assert all("answers" not in context for context in worker.test_contexts)
     with pytest.raises(sessions.SessionBusy, match="no longer open"):
         await delivery_service.answer(session_id, asked["workflow_id"], ["MySQL"])
+
+
+async def test_only_the_first_of_answers_sent_together_resumes_the_agent():
+    """Updates delivered in one workflow task are all validated before any handler runs."""
+    from app.implementation.workflows import ImplementationWorkflow
+
+    agent = ImplementationWorkflow()
+    agent._questions = [{"question": "Which database?", "options": ["Postgres", "MySQL"]}]
+    agent.validate_answer_questions(["Postgres"])
+    agent.validate_answer_questions(["MySQL"])
+    await agent.answer_questions(["Postgres"])
+    with pytest.raises(ApplicationError, match="not waiting"):
+        await agent.answer_questions(["MySQL"])
+    assert agent._answers == ["Postgres"]
