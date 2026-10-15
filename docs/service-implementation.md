@@ -171,6 +171,36 @@ allowlist: only the pure runtime/factory, empty package initializers, and role e
 are build inputs. Each image copies only its selected entrypoint. Generated data, secrets,
 host orchestration/config, and the other role's code are not copied into an agent image.
 
+## Asking the user
+
+Every model that talks to the user or works for them can call `ask_user`
+(`backend/app/llm/questions.py`): one to five questions, each with two to six suggested
+answers. The page shows each question with its options and an **Other** field for an
+answer of the user's own. Questions are asked only this way. A reply that asks something
+in its own text is sent back to the model:
+
+- **Interviews** (requirements and API design): the call ends the turn. Its questions are
+  stored with the assistant message, and while they are open the session takes no message,
+  only the `answer_questions` update (`POST …/sessions/{id}/answers`), whose text becomes
+  the user's next message. A reply that still asks in its text after two corrections fails
+  the turn, which the user retries. Question sentences in the text that comes with a call
+  are dropped, since the call shows them.
+- **Coding agents** (implementation, tests, documentation, diagnosis): the runtime saves the
+  conversation beside the project and exits with code 75. The host copies the whole
+  workspace to `<stage artifacts>/paused/` and the activity returns the questions. This
+  frees the worker's only activity slot and removes the container. The stage workflow
+  (`AgentWorkflow`) tells its delivery (`DeliveryProgress.agent_questions`) and waits up to
+  seven days for its own `answer_questions` update
+  (`POST …/sessions/{id}/delivery/answers` with the stage's `workflow_id`). Then it runs
+  the activity again with `answers` in the context, and a new container continues from the
+  kept workspace with the answers as the result of its `ask_user` call. Each agent's
+  questions and answers stay with that agent, so the test author and the implementation
+  author still never see each other's. A final reply that asks in its text is sent back up
+  to twice.
+
+`GENERATED_CODE_DIR` must be shared by every worker of a stage, because the run that
+continues may land on another worker.
+
 ## Implementation
 
 The host worker builds the shared default with `AGENT_ROLE=implementation` and

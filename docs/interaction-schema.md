@@ -124,6 +124,8 @@ The browser uses `/api` in front of these backend routes. Vite removes that pref
 | `POST /api-design/sessions` | Start API design from a completed requirements session. |
 | `GET /{requirements,api-design}/sessions/{session_id}` | Retrieve session state. |
 | `POST /{requirements,api-design}/sessions/{session_id}/{messages,retry,finalize,fork}` | Update, retry, finalize, or branch a session. |
+| `POST /{requirements,api-design}/sessions/{session_id}/answers` | Answer the questions the model asked with `ask_user`. |
+| `POST /{requirements,api-design}/sessions/{session_id}/delivery/answers` | Answer a paused coding agent of the session's delivery. |
 | `GET /{requirements,api-design}/sessions/{session_id}/document` | Download the finalized document. |
 | `GET /workflows` | List workflow executions with optional type filter and pagination. |
 | `POST /start` | Run the greeting workflow and return its result. |

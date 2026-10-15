@@ -13,7 +13,8 @@ with workflow.unsafe.imports_passed_through():
     )
     from app.delivery.contract import with_requirements
     from app.delivery.models import (
-        DeliveryProgress, DeliveryState, judge_baseline, judge_kept, unproven_green,
+        AgentQuestions, DeliveryProgress, DeliveryState, judge_baseline, judge_kept,
+        unproven_green,
     )
     from app.diagnosis.models import repair_request
     from app.github.checkout import SNAPSHOT_DIR
@@ -66,6 +67,18 @@ class DeliveryWorkflow:
     @workflow.query
     def get_state(self) -> DeliveryState:
         return self.state
+
+    @workflow.signal
+    def agent_asked(self, asked: AgentQuestions) -> None:
+        """A stage's agent paused for the user's answers, which go to its workflow."""
+        self.progress.agent_questions = [
+            *(item for item in self.progress.agent_questions
+              if item['workflow_id'] != asked['workflow_id']), asked]
+
+    @workflow.signal
+    def agent_answered(self, workflow_id: str) -> None:
+        self.progress.agent_questions = [item for item in self.progress.agent_questions
+                                         if item['workflow_id'] != workflow_id]
 
     async def _snapshot(self) -> bool:
         """Record the repository's tests before any author runs; the activity keeps the

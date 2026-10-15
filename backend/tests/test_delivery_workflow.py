@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from temporalio import activity
+from temporalio.client import WorkflowUpdateFailedError
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
@@ -622,3 +623,48 @@ async def test_generation_retry_http_validation(env, worker, repository_selectio
             assert (await http.post(path, json={'stage': 'tests'})).status_code == 409
     finally:
         await handle.terminate()
+
+
+async def test_agent_questions_wait_for_the_users_answers(env, worker):
+    question = {"question": "Which database?", "options": ["Postgres", "MySQL"]}
+    worker.implementation_questions = [question]
+    session_id = await deliver(env)
+    for _ in range(200):
+        progress = await delivery_service.get_progress(session_id)
+        if progress and progress.agent_questions:
+            break
+        await asyncio.sleep(0.05)
+    asked, = progress.agent_questions
+    assert asked["stage"] == "implementation" and asked["questions"] == [question]
+    assert progress.verification_status == "waiting"
+
+    # Answers reach only the agent that asked, and only when they answer every question.
+    with pytest.raises(sessions.SessionBusy):
+        await delivery_service.answer(session_id, "implementation-other", ["Postgres"])
+    # The time-skipping server reports a rejected update only to its caller's result.
+    agent = env.client.get_workflow_handle(asked["workflow_id"])
+    with pytest.raises(WorkflowUpdateFailedError):
+        await agent.execute_update("answer_questions", ["Postgres", "MySQL"])
+    await delivery_service.answer(session_id, asked["workflow_id"], [" A managed Postgres "])
+
+    progress = await delivered(env, session_id)
+    assert progress.agent_questions == [] and progress.verification["status"] == "passed"
+    first, resumed = worker.implementation_contexts
+    assert "answers" not in first and resumed["answers"] == ["A managed Postgres"]
+    assert all("answers" not in context for context in worker.test_contexts)
+    with pytest.raises(sessions.SessionBusy, match="no longer open"):
+        await delivery_service.answer(session_id, asked["workflow_id"], ["MySQL"])
+
+
+async def test_only_the_first_of_answers_sent_together_resumes_the_agent():
+    """Updates delivered in one workflow task are all validated before any handler runs."""
+    from app.implementation.workflows import ImplementationWorkflow
+
+    agent = ImplementationWorkflow()
+    agent._questions = [{"question": "Which database?", "options": ["Postgres", "MySQL"]}]
+    agent.validate_answer_questions(["Postgres"])
+    agent.validate_answer_questions(["MySQL"])
+    await agent.answer_questions(["Postgres"])
+    with pytest.raises(ApplicationError, match="not waiting"):
+        await agent.answer_questions(["MySQL"])
+    assert agent._answers == ["Postgres"]

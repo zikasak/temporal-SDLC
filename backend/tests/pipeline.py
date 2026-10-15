@@ -58,6 +58,11 @@ class FakeStages:
         self.diagnosed: list[dict[str, Any]] = []
         self.fail_diagnosis = False
         self.repairs: list[tuple[str, dict[str, Any]]] = []
+        # Questions the implementation agent asks before it builds, once.
+        self.implementation_questions: list[dict[str, Any]] = []
+        # The context of each implementation run and of each test run.
+        self.implementation_contexts: list[dict[str, Any]] = []
+        self.test_contexts: list[dict[str, Any]] = []
         # Every stage in the order it started.
         self.stages: list[str] = []
         # What had already run when each repository was checked out.
@@ -119,6 +124,9 @@ class FakeStages:
     @activity.defn(name="implement_service")
     async def implement_service(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
         self.stages.append('implementation')
+        self.implementation_contexts.append(context)
+        if self.implementation_questions and 'answers' not in context:
+            return {"session_id": session_id, "questions": self.implementation_questions}
         self.implementation_started.set()
         await self.release_implementation.wait()
         if self.fail_implementation:
@@ -131,6 +139,7 @@ class FakeStages:
     @activity.defn(name="generate_service_tests")
     async def generate_service_tests(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
         self.stages.append('tests')
+        self.test_contexts.append(context)
         self.tests_started.set()
         await self.release_tests.wait()
         if self.fail_tests:

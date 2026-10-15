@@ -38,7 +38,7 @@ from app.github import storage as github_storage
 from app.github.errors import GitHubError
 from app.github.models import RepositoryCheckout, RepositoryPublication, RepositorySelection
 from app.implementation.activities import is_service_file
-from app.llm.graph import get_message_graph
+from app.llm.graph import get_message_graph, interview
 from app.llm.model import get_model
 from app.llm.prompt import INLINE_DOCUMENT_CHARS, MAX_REMEMBERED_CHARS, model_messages
 from app.temporal.tracing import trace_activity
@@ -48,6 +48,7 @@ from app.requirements.models import Requirement
 from app.requirements.prompt import document_messages, interview_messages
 from app.tools import ToolContext, build_tools
 from app.tools import api_design as api_design_tools
+from app.tools import questions as question_tools
 from app.tools import repository as repository_tools
 from app.tools import requirements as requirements_tools
 from app.tools.document_write import summarize_tool_results
@@ -312,30 +313,33 @@ async def requirements_turn(
     ctx = requirements_tools.RequirementsContext.from_list(
         requirements, kind, await asyncio.to_thread(_published_requirements), retired)
     repository = _repository_tools()
+    asked = question_tools.QuestionsContext()
     started = time.perf_counter()
     try:
-        graph = get_message_graph([*requirements_tools.build(ctx), *repository])
-        result = await graph.ainvoke(
-            {"messages": interview_messages(
+        graph = get_message_graph(
+            [*requirements_tools.build(ctx), *question_tools.build(asked), *repository],
+            until=lambda: bool(asked.questions))
+        reply = await interview(
+            graph, interview_messages(
                 messages, requirements, kind,
                 repository_tools.GUIDANCE if repository else "",
-                list(ctx.service_requirements()), ctx.retired_list())},
-            config=langchain_config(recursion_limit=20, run_name='interview-with-tools'),
-        )
-        reply = str(result["messages"][-1].text).strip()
+                list(ctx.service_requirements()), ctx.retired_list()),
+            langchain_config(recursion_limit=20, run_name='interview-with-tools'),
+            lambda: bool(asked.questions))
     except ValueError as exc:
         activity.logger.warning("Requirements turn failed: %s", exc)
         raise ApplicationError(str(exc), non_retryable=True) from exc
     updated = ctx.as_list()
     activity.logger.info("Requirements turn took %.1fs: %d -> %d requirements",
                          time.perf_counter() - started, len(requirements), len(updated))
-    if not reply:
+    if not reply and not asked.questions:
         if updated == requirements and ctx.kind == kind and ctx.retired_list() == retired:
             activity.logger.warning("Requirements turn returned no text and no changes")
             raise ApplicationError("The model returned no text", non_retryable=True)
-        reply = f"Noted. {len(updated)} requirements are recorded so far. What else should I know?"
-    return {"reply": reply, "requirements": updated, "kind": ctx.kind,
-            "retired": ctx.retired_list()}
+        reply = (f"Noted. {len(updated)} requirements are recorded so far. Tell me what "
+                 "else I should know.")
+    return {"reply": reply, "questions": asked.questions, "requirements": updated,
+            "kind": ctx.kind, "retired": ctx.retired_list()}
 
 
 async def _save_session_document(
@@ -404,15 +408,16 @@ async def api_design_turn(state: ApiDesignState) -> dict[str, Any]:
         language_fixed=bool(state.change_document),
     )
     repository = _repository_tools()
+    asked = question_tools.QuestionsContext()
     started = time.perf_counter()
     try:
-        graph = get_message_graph([*api_design_tools.build(ctx), *repository])
-        result = await graph.ainvoke(
-            {"messages": api_turn_messages(
-                state, repository_tools.GUIDANCE if repository else "")},
-            config=langchain_config(recursion_limit=40, run_name='draft-api-with-tools')
-        )
-        reply = str(result["messages"][-1].text).strip()
+        graph = get_message_graph(
+            [*api_design_tools.build(ctx), *question_tools.build(asked), *repository],
+            until=lambda: bool(asked.questions))
+        reply = await interview(
+            graph, api_turn_messages(state, repository_tools.GUIDANCE if repository else ""),
+            langchain_config(recursion_limit=40, run_name='draft-api-with-tools'),
+            lambda: bool(asked.questions))
     except GraphRecursionError:
         # Drafting can take many tool calls; keep what was recorded.
         activity.logger.warning("The API design turn hit the recursion limit")
@@ -424,14 +429,15 @@ async def api_design_turn(state: ApiDesignState) -> dict[str, Any]:
     activity.logger.info("API design turn took %.1fs: %d endpoints, %d schemas",
                          time.perf_counter() - started, len(updated["endpoints"]),
                          len(updated["schemas"]))
-    if not reply:
+    if not reply and not asked.questions:
         if updated == state.api and ctx.language == state.language:
             activity.logger.warning("API design turn returned no text and no changes")
             raise ApplicationError("The model returned no text", non_retryable=True)
         reply = (f"I've updated the API: it has {len(updated['endpoints'])} endpoints and "
                  f"{len(updated['schemas'])} schemas so far. Review them below and tell me "
                  "what to change or what else to cover.")
-    return {"reply": reply, "api": updated, "language": ctx.language}
+    return {"reply": reply, "questions": asked.questions, "api": updated,
+            "language": ctx.language}
 
 
 @activity.defn

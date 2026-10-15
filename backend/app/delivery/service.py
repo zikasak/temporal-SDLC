@@ -12,7 +12,7 @@ from app.delivery.models import (
 )
 from app.requirements.models import CHANGE_KINDS
 from app.temporal.client import connect_temporal
-from app.temporal.sessions import SessionBusy
+from app.temporal.sessions import SessionBusy, start_update
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,16 @@ async def get_progress(session_id: str) -> DeliveryProgress | None:
             raise
         return None
     return state.progress
+
+
+async def answer(session_id: str, workflow_id: str, answers: list[str]) -> None:
+    """Send the user's answers to the agent of this delivery that waits for them."""
+    progress = await get_progress(session_id)
+    if not progress or not any(item['workflow_id'] == workflow_id
+                               for item in progress.agent_questions):
+        raise SessionBusy('These questions are no longer open.')
+    await start_update(workflow_id, 'answer_questions', answers)
+    logger.info('Sent answers to %s of session %s', workflow_id, session_id)
 
 
 async def retry(session_id: str, stage: RetryStage) -> None:
@@ -75,6 +85,8 @@ async def retry(session_id: str, stage: RetryStage) -> None:
         raise SessionBusy('No implementation language was chosen for this session. '
                           'Fork it from a message and choose a language there.')
     state.retry_stage = stage
+    # A finished run waits for no agent.
+    progress.agent_questions = []
     if state.spec.checkout:
         progress.publication_error = None
         progress.publication_status = 'waiting'

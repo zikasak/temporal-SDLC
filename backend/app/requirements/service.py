@@ -10,7 +10,7 @@ from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, RetryStage
 from app.github.models import RepositorySelection
 from app.requirements.models import DIRECT_KINDS, RequirementsState
-from app.requirements.prompt import OPENING_MESSAGE
+from app.requirements.prompt import opening_message
 from app.temporal.client import connect_temporal
 from app.temporal.sessions import SessionBusy, fork_messages, start_update, state_at_message
 
@@ -24,9 +24,7 @@ async def start_session(
     if state is None:
         if repository is None:
             raise ValueError("A requirements session needs a repository.")
-        state = RequirementsState(
-            messages=[{"role": "assistant", "content": OPENING_MESSAGE}], repository=repository,
-        )
+        state = RequirementsState(messages=[opening_message()], repository=repository)
     session_id = f"requirements-session-{uuid.uuid4().hex}"
     client = await connect_temporal()
     handle = await client.start_workflow(
@@ -47,9 +45,7 @@ async def fork_session(session_id: str, message_index: int) -> str:
     requirements = await state_at_message(
         session_id, source.messages, message_index,
         input_type=RequirementsState | None,
-        default_input=RequirementsState(
-            messages=[{"role": "assistant", "content": OPENING_MESSAGE}]
-        ),
+        default_input=RequirementsState(messages=[opening_message()]),
         activity="requirements_turn",
         key="requirements",
     )
@@ -70,6 +66,18 @@ async def fork_session(session_id: str, message_index: int) -> str:
 async def send_message(session_id: str, message: str) -> None:
     await start_update(session_id, "send_message", message)
     logger.info("Sent message to requirements session %s", session_id)
+
+
+async def answer_questions(session_id: str, answers: list[str]) -> None:
+    await start_update(session_id, "answer_questions", answers)
+    logger.info("Sent answers to requirements session %s", session_id)
+
+
+async def answer_delivery_questions(session_id: str, workflow_id: str,
+                                    answers: list[str]) -> None:
+    if not _delivers(await get_state(session_id)):
+        raise SessionBusy("This session's delivery asked no questions.")
+    await delivery_service.answer(session_id, workflow_id, answers)
 
 
 async def retry_message(session_id: str) -> None:

@@ -7,7 +7,7 @@ import pytest
 from temporalio import activity, workflow
 from temporalio.exceptions import ApplicationError
 from temporalio.client import WorkflowUpdateFailedError, WorkflowUpdateStage
-from temporalio.testing import WorkflowEnvironment
+from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from app.requirements import service
@@ -49,7 +49,9 @@ class FakeActivities:
             "reply": f"Question {number}?",
             "requirements": [*requirements, {
                 "id": f"FR-{number}", "category": "functional",
-                "title": messages[-1]["content"], "description": "D", "priority": "must",
+                # An answer to the opening question is titled by its answer.
+                "title": messages[-1]["content"].split("→ ")[-1], "description": "D",
+                "priority": "must",
             }],
             "kind": self.kind or kind,
             "retired": retired,
@@ -79,6 +81,11 @@ async def worker(env):
                     activities.checkout_repository],
     ):
         yield activities
+
+
+def opening_answer(answer: str) -> str:
+    """The user message that answers the opening question with `answer`."""
+    return f"What kind of task is this?\n→ {answer}"
 
 
 async def start(env, state: RequirementsState | None = None):
@@ -113,13 +120,24 @@ async def test_interview_and_finalize(env, worker):
     assert state.status == "interviewing" and state.messages[0]["role"] == "assistant"
     assert state.repository is None
 
+    assert state.messages[0]["questions"][0]["question"] == "What kind of task is this?"
+
     with pytest.raises(WorkflowUpdateFailedError):
         await handle.execute_update(RequirementsWorkflow.finalize)
+    # The opening question is answered, not talked past.
+    with pytest.raises(WorkflowUpdateFailedError) as refused:
+        await handle.execute_update(RequirementsWorkflow.send_message, "Book rooms")
+    assert "Answer the analyst's questions first" in str(refused.value.cause)
+    for answers in ([], ["A", "B"], ["   "]):
+        with pytest.raises(WorkflowUpdateFailedError):
+            await handle.execute_update(RequirementsWorkflow.answer_questions, answers)
 
-    await handle.execute_update(RequirementsWorkflow.send_message, "  Book rooms  ")
+    await handle.execute_update(RequirementsWorkflow.answer_questions, ["  Book rooms  "])
     state: RequirementsState = await handle.query(RequirementsWorkflow.get_state)
     assert [item["role"] for item in state.messages] == ["assistant", "user", "assistant"]
-    assert state.messages[1]["content"] == "Book rooms"
+    assert state.messages[1]["content"] == opening_answer("Book rooms")
+    with pytest.raises(WorkflowUpdateFailedError):
+        await handle.execute_update(RequirementsWorkflow.answer_questions, ["Again"])
     assert state.requirements[0]["id"] == "FR-1"
     assert state.status == "interviewing"
 
@@ -134,7 +152,7 @@ async def test_rejects_message_while_turn_running(env, worker):
     handle = await start(env)
     worker.release_turn.clear()
     first = await handle.start_update(
-        RequirementsWorkflow.send_message, "First",
+        RequirementsWorkflow.answer_questions, ["First"],
         wait_for_stage=WorkflowUpdateStage.ACCEPTED,
     )
     with pytest.raises(WorkflowUpdateFailedError):
@@ -144,16 +162,18 @@ async def test_rejects_message_while_turn_running(env, worker):
     worker.release_turn.set()
     await first.result()
     state = await handle.query(RequirementsWorkflow.get_state)
-    assert [item["content"] for item in state.messages if item["role"] == "user"] == ["First"]
+    assert ([item["content"] for item in state.messages if item["role"] == "user"]
+            == [opening_answer("First")])
     await handle.terminate()
 
 
 async def test_failed_turn_keeps_message_and_can_retry(env, worker):
     handle = await start(env)
     worker.fail_turn = True
-    await handle.execute_update(RequirementsWorkflow.send_message, "Book rooms")
+    await handle.execute_update(RequirementsWorkflow.answer_questions, ["Book rooms"])
     state = await handle.query(RequirementsWorkflow.get_state)
-    assert [item["content"] for item in state.messages if item["role"] == "user"] == ["Book rooms"]
+    assert ([item["content"] for item in state.messages if item["role"] == "user"]
+            == [opening_answer("Book rooms")])
     assert state.error and state.status == "interviewing"
     with pytest.raises(WorkflowUpdateFailedError):
         await handle.execute_update(RequirementsWorkflow.send_message, "Another message")
@@ -167,7 +187,7 @@ async def test_failed_turn_keeps_message_and_can_retry(env, worker):
 
 async def test_idle_session_auto_finalizes(env, worker):
     handle = await start(env)
-    await handle.execute_update(RequirementsWorkflow.send_message, "Book rooms")
+    await handle.execute_update(RequirementsWorkflow.answer_questions, ["Book rooms"])
     await env.sleep(timedelta(hours=25))
     assert await handle.result() == DOCUMENT
 
@@ -175,7 +195,7 @@ async def test_idle_session_auto_finalizes(env, worker):
 async def test_kind_must_be_recorded_before_the_document_is_generated(env, worker):
     handle = await start(env)
     worker.kind = None
-    await handle.execute_update(RequirementsWorkflow.send_message, "Book rooms")
+    await handle.execute_update(RequirementsWorkflow.answer_questions, ["Book rooms"])
     with pytest.raises(WorkflowUpdateFailedError) as refused:
         await handle.execute_update(RequirementsWorkflow.finalize)
     assert "kind of task is not recorded" in str(refused.value.cause)
@@ -193,7 +213,7 @@ async def test_kind_must_be_recorded_before_the_document_is_generated(env, worke
 async def test_idle_session_without_kind_fails(env, worker):
     handle = await start(env)
     worker.kind = None
-    await handle.execute_update(RequirementsWorkflow.send_message, "Book rooms")
+    await handle.execute_update(RequirementsWorkflow.answer_questions, ["Book rooms"])
     await env.sleep(timedelta(hours=25))
     assert await handle.result() is None
     assert worker.documents == []
@@ -226,13 +246,13 @@ async def test_fork_keeps_requirements_as_they_were_at_the_message(env, worker, 
     source = env.client.get_workflow_handle(await service.start_session(repository=repository_selection))
     # No message is accepted until the repository is checked out.
     assert (await wait_for_status(source, "interviewing")).repository == repository_selection
-    await source.execute_update(RequirementsWorkflow.send_message, "A")
+    await source.execute_update(RequirementsWorkflow.answer_questions, ["A"])
     await source.execute_update(RequirementsWorkflow.send_message, "B")
     # opening, A, Question 1?, B, Question 2?
 
     fork = env.client.get_workflow_handle(await service.fork_session(source.id, 2))
     state = await wait_for_status(fork, "interviewing")
-    assert [item["content"] for item in state.messages][1:] == ["A", "Question 1?"]
+    assert [item["content"] for item in state.messages][1:] == [opening_answer("A"), "Question 1?"]
     assert titles(state) == ["A"]
     assert state.forked_from == {"session_id": source.id, "message_index": 2}
     assert (await service.get_session(fork.id))["repository"] == repository_selection
@@ -311,3 +331,51 @@ async def test_state_at_message_spans_continue_as_new_runs(env, worker, temporal
             default_input=None, activity="requirements_turn", key="requirements",
         )
         assert [item["title"] for item in requirements] == expected
+
+
+class InterviewModel:
+    """Stands in for the provider; the graph, tools and guardrail stay real."""
+
+    def __init__(self, replies):
+        self.replies = iter(replies)
+        self.requests = []
+
+    def bind_tools(self, tools):
+        return self
+
+    async def ainvoke(self, messages, config=None):
+        self.requests.append(list(messages))
+        return next(self.replies)
+
+
+ASKED = [{"question": "Which rooms can be booked?", "options": ["Meeting rooms", "Desks"]}]
+
+
+async def test_interviewer_asks_only_with_the_tool(monkeypatch):
+    from langchain_core.messages import AIMessage
+    from app.llm import graph
+    from app.temporal.activities import requirements_turn
+
+    model = InterviewModel([
+        AIMessage(content="Which rooms can be booked?"),
+        AIMessage(content="Noted. Which rooms can be booked?", tool_calls=[
+            {"name": "set_task_kind", "args": {"kind": "new_service"}, "id": "kind"},
+            {"name": "ask_user", "args": {"questions": ASKED}, "id": "ask"}]),
+    ])
+    monkeypatch.setattr(graph, "get_model", lambda: model)
+    opening = {"role": "assistant", "content": "Hi", "questions": [
+        {"question": "What kind of task is this?", "options": ["A new service", "Docs"]}]}
+    result = await ActivityEnvironment().run(
+        requirements_turn, [opening, {"role": "user", "content": "A new service"}], [])
+    # The reply that asked in its text was sent back, and the turn ended with ask_user.
+    assert len(model.requests) == 2
+    assert "only answer questions asked with the ask_user tool" in model.requests[1][-1].content
+    # The model reads back what the earlier message asked with ask_user.
+    assert "What kind of task is this? (options: A new service; Docs)" in model.requests[0][1].content
+    assert result["reply"] == "Noted." and result["questions"] == ASKED
+    assert result["kind"] == "new_service"
+
+    model.replies = iter([AIMessage(content="Who books them?")] * 3)
+    with pytest.raises(ApplicationError, match="instead of with ask_user"):
+        await ActivityEnvironment().run(
+            requirements_turn, [opening, {"role": "user", "content": "A new service"}], [])

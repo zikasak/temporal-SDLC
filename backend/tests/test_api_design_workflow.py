@@ -15,7 +15,7 @@ from temporalio.worker import Replayer, Worker
 from app.api.routes.api_design import router
 from app.api_design import service
 from app.api_design.models import ApiDesignState, empty_api
-from app.api_design.prompt import OPENING_FALLBACK
+from app.api_design.prompt import OPENING_FALLBACK, OPENING_QUESTIONS
 from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, delivery_id
 from app.delivery.workflows import DeliveryWorkflow
@@ -404,10 +404,19 @@ async def test_failed_draft_falls_back_to_opening_question(env, worker):
     worker.fail_draft = True
     handle = await start(env)
     state = await wait_for_status(handle, "interviewing")
-    assert state.messages == [{"role": "assistant", "content": OPENING_FALLBACK}]
+    assert state.messages == [{"role": "assistant", "content": OPENING_FALLBACK,
+                               "questions": OPENING_QUESTIONS}]
     assert state.error is None
     with pytest.raises(WorkflowUpdateFailedError):
         await handle.execute_update(ApiDesignWorkflow.finalize)
+    # Its questions are answered, as the user's next message.
+    with pytest.raises(WorkflowUpdateFailedError):
+        await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
+    await handle.execute_update(ApiDesignWorkflow.answer_questions, ["Mobile apps", "/rooms"])
+    state = await handle.query(ApiDesignWorkflow.get_state)
+    assert state.messages[1] == {
+        "role": "user", "content": "Who will call the API?\n→ Mobile apps\n\n"
+                                   "How should callers authenticate?\n→ /rooms"}
     await handle.terminate()
 
 

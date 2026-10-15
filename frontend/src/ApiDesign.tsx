@@ -2,9 +2,10 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import Markdown from "react-markdown";
 import { errorMessage, failure, readBody } from "./api";
 import ForkButton from "./ForkButton";
+import { AskedQuestions, QuestionForm, questionList, type Question } from "./Questions";
 import { RepositorySummary } from "./RepositoryPicker";
 import {
-  DeliveryResults, deliveryPending, deliveryProgress, retriedProgress,
+  DeliveryResults, answeredProgress, deliveryPending, deliveryProgress, retriedProgress,
   type DeliveryProgress, type GenerationStage,
 } from "./Delivery";
 import {
@@ -65,7 +66,8 @@ type Session = DeliveryProgress & {
   session_id: string;
   source_session_id: string;
   status: SessionStatus;
-  messages: { role: "user" | "assistant"; content: string }[];
+  // An assistant message's questions are answered by the next user message.
+  messages: { role: "user" | "assistant"; content: string; questions: Question[] }[];
   requirements: Requirement[];
   api: ApiModel;
   language: string | null;
@@ -152,7 +154,9 @@ function sessionRecord(value: unknown): Session {
     source_session_id:
       typeof value.source_session_id === "string" ? value.source_session_id : "",
     status: value.status as SessionStatus,
-    messages: value.messages as Session["messages"],
+    messages: value.messages.map((item) => ({
+      role: item.role, content: item.content, questions: questionList(item.questions),
+    })),
     requirements: value.requirements as Requirement[],
     api: value.api as ApiModel,
     language: typeof value.language === "string" ? value.language : null,
@@ -286,11 +290,52 @@ export default function ApiDesign() {
         ...session,
         status: "turn_running",
         error: null,
-        messages: [...session.messages, { role: "user", content }],
+        messages: [...session.messages, { role: "user", content, questions: [] }],
       });
       setRefreshKey((value) => value + 1);
     } catch (caught) {
       setError(failure(caught, "Could not send the message."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function answerQuestions(answers: string[]) {
+    if (!session) return false;
+    setSubmitting(true);
+    setError("");
+    try {
+      await post(`/${encodeURIComponent(session.session_id)}/answers`, { answers });
+      const content = asked.map((item, index) => `${item.question}\n→ ${answers[index]}`).join("\n\n");
+      setSession({
+        ...session,
+        status: "turn_running",
+        error: null,
+        messages: [...session.messages, { role: "user", content, questions: [] }],
+      });
+      setRefreshKey((value) => value + 1);
+      return true;
+    } catch (caught) {
+      setError(failure(caught, "Could not send the answers."));
+      return false;
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function answerAgent(workflowId: string, answers: string[]) {
+    if (!session) return false;
+    setSubmitting(true);
+    setError("");
+    try {
+      await post(`/${encodeURIComponent(session.session_id)}/delivery/answers`,
+        { workflow_id: workflowId, answers });
+      setSession({ ...session, ...answeredProgress(session, workflowId) });
+      setRefreshKey((value) => value + 1);
+      return true;
+    } catch (caught) {
+      setError(failure(caught, "Could not send the answers."));
+      return false;
     } finally {
       setSubmitting(false);
     }
@@ -383,6 +428,9 @@ export default function ApiDesign() {
 
   const unanswered = session?.messages.at(-1)?.role === "user" && session.status === "interviewing";
   const canCompose = session?.status === "interviewing" && !unanswered && !submitting;
+  // Questions of the last message are answered with the form, not with a message.
+  const last = session?.messages.at(-1);
+  const asked = last?.role === "assistant" ? last.questions : [];
   const forkedFrom = session?.forked_from ?? null;
   const canFinalize = canCompose && session.problems.length === 0;
   const status = error ? "error" : session ? session.status : sessionId ? "loading" : "idle";
@@ -412,7 +460,22 @@ export default function ApiDesign() {
             <h2 id="design-title">{session ? "Your answer" : "New session"}</h2>
           </div>
 
-          {session ? (
+          {session && asked.length > 0 ? (
+            <div className="message-form">
+              <QuestionForm key={session.messages.length} questions={asked}
+                disabled={!canCompose} submitting={submitting}
+                onSubmit={answerQuestions} />
+              <button
+                className="generate-button"
+                type="button"
+                onClick={generateDocument}
+                disabled={!canFinalize}
+                title={session.problems.length ? "Resolve the open problems first" : undefined}
+              >
+                Generate OpenAPI
+              </button>
+            </div>
+          ) : session ? (
             <form className="message-form" onSubmit={sendMessage}>
               <label htmlFor="design-message">Message</label>
               <textarea
@@ -558,6 +621,7 @@ export default function ApiDesign() {
                         <Markdown remarkPlugins={remarkPlugins} components={markdownComponents}>
                           {item.content}
                         </Markdown>
+                        <AskedQuestions questions={item.questions} />
                       </div>
                     ) : (
                       <p className="turn-content">{item.content}</p>
@@ -621,7 +685,8 @@ export default function ApiDesign() {
                 </div>}
                 <DeliveryResults progress={session} retrying={retryingGeneration}
                   disabled={submitting || pipelinePending(session)}
-                  onRetry={(stage) => void retryGeneration(stage)} />
+                  onRetry={(stage) => void retryGeneration(stage)}
+                  answering={submitting} onAnswer={answerAgent} />
               </section>
             )}
 

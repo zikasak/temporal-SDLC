@@ -93,5 +93,7 @@ async def write_documentation(session_id: str, context: dict[str, Any]) -> dict[
     language = session_language(context.get('language'))
     checkout = GENERATED_CODE_DIR / session_id / CHECKOUT_DIR
     result = await run_stage(stage(language, checkout), session_id, context, GENERATED_CODE_DIR)
+    if 'questions' in result:
+        return result
     return {**result,
             'changed_files': changed_files(language, checkout, Path(result['path']))}

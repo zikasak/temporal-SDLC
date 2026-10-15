@@ -13,6 +13,7 @@
 !app/llm/claude.py
 !app/llm/pi.py
 !app/llm/pi_extension.ts
+!app/llm/questions.py
 !app/implementation/
 !app/implementation/agent.py
 !app/test_generation/

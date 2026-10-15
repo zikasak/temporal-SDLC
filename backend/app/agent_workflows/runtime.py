@@ -6,17 +6,23 @@ import os
 import re
 import signal
 import subprocess
+import sys
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from langchain_core.messages import (
-    AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage,
+    AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage, messages_from_dict,
+    messages_to_dict,
 )
-from langchain_core.tools import BaseTool, tool
+from langchain_core.tools import BaseTool, StructuredTool, tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from app.llm.factory import create_model
+from app.llm.questions import (
+    ASK_USER, DESCRIPTION, AskUserInput, answers_result, asks_directly, normalize_questions,
+)
 from app.tracing import (
     container_trace_context, langchain_config, shutdown_tracing, trace_operation,
 )
@@ -72,6 +78,25 @@ Be specific and concise. Record only what the history shows; never guess.
 CHECKPOINT_NOTICE = ('[Checkpoint] Older tool calls and their results were removed to save '
                      'context. Files on disk are the source of truth: re-read the regions '
                      'you need before changing them.')
+# A run that asked the user something exits with this code once it has saved where it
+# stopped, beside its project: the host keeps the workspace and starts a new container
+# from it, with the answers, once they arrive.
+PAUSE_EXIT = 75
+STATE_FILENAME = '.agent-state.json'
+ANSWERS_FILENAME = '.agent-answers.json'
+ASK_GUIDANCE = """
+You can ask the user with the ask_user tool when the task leaves open a decision that
+changes the result and that neither the inputs nor the files settle. The run pauses until
+the user answers, which may take long, so ask only what you cannot reasonably decide
+yourself, and put every question you have into one call. Never ask a question in your
+text: nobody reads it, and a reply without a tool call ends the run.
+"""
+# How often a final reply that asks something in its text is sent back.
+DIRECT_QUESTION_NUDGES = 2
+DIRECT_QUESTION_NOTICE = ('[System] Your last message asked a question in its text, but '
+                          'nobody reads it: the run ends with a reply that calls no tool. To '
+                          'ask the user, call ask_user. Otherwise decide yourself, finish the '
+                          'work, and end with a summary that asks nothing.')
 DIAGNOSTIC = re.compile(r'\[ERROR\]|\berror\b|BUILD (SUCCESS|FAILURE)|Exception|FAILED|Tests run:')
 
 
@@ -312,21 +337,59 @@ def _transcript(messages: Sequence[BaseMessage]) -> str:
     return '\n'.join(lines)
 
 
+def ask_user_tool() -> BaseTool:
+    """Declared to the model only: the loop pauses the run instead of calling it."""
+    def ask_user(questions: list) -> str:
+        raise RuntimeError('ask_user pauses the run')
+
+    return StructuredTool.from_function(ask_user, name=ASK_USER, description=DESCRIPTION,
+                                        args_schema=AskUserInput)
+
+
+def _pause(directory: Path, state: dict[str, Any]) -> None:
+    """Save where the run stopped, for the run that continues it once the user answers."""
+    temporary = directory / f'{STATE_FILENAME}.tmp'
+    temporary.write_text(json.dumps(state, ensure_ascii=False))
+    os.replace(temporary, directory / STATE_FILENAME)
+
+
+def _resume(directory: Path) -> dict[str, Any] | None:
+    """The saved state of a paused run, its ask_user call answered; None for a new run."""
+    state_file, answers_file = directory / STATE_FILENAME, directory / ANSWERS_FILENAME
+    if not state_file.is_file():
+        return None
+    state = json.loads(state_file.read_text())
+    answers = json.loads(answers_file.read_text())['answers']
+    state_file.unlink()
+    answers_file.unlink()
+    pending = state['pending']
+    history = messages_from_dict(state['history'])
+    history.insert(pending['position'], ToolMessage(
+        content=answers_result(pending['questions'], answers),
+        tool_call_id=pending['call_id'], name=ASK_USER))
+    return {**state, 'history': history, 'checkpoint': messages_from_dict(state['checkpoint'])}
+
+
 def run_agent(profile: AgentProfile) -> None:
     role = os.getenv('APP_TRACE_AGENT_ROLE', profile.root.name).replace('_', '-')
+    paused = False
     try:
         with trace_operation(f'author-{role}', as_type='agent', feature=role,
                              session_id=os.getenv('APP_TRACE_SESSION_ID'),
                              input=list(profile.initial_messages),
                              trace_context=container_trace_context()) as span:
-            _run_agent(profile)
+            paused = _run_agent(profile)
             if span is not None:
-                span.update(output=profile.completion_message)
+                span.update(output='Paused for the user\'s answers' if paused
+                            else profile.completion_message)
     finally:
         shutdown_tracing()
+    if paused:
+        sys.exit(PAUSE_EXIT)
 
 
-def _run_agent(profile: AgentProfile) -> None:
+def _run_agent(profile: AgentProfile) -> bool:
+    """Work until the profile's task is done; True when the run paused for answers."""
     harness = os.getenv('LLM_HARNESS', '').lower()
     if harness == 'pi':
         from app.llm.pi import ChatPi
@@ -340,16 +403,25 @@ def _run_agent(profile: AgentProfile) -> None:
         provider = create_model(model_name=os.environ['OPENAI_MODEL'],
                                 api_key=os.environ['OPENAI_API_KEY'],
                                 base_url=os.environ['OPENAI_BASE_URL'])
-    tools = workspace_tools(profile.root, profile.contracts, profile.build_dirs)
+    tools = [*workspace_tools(profile.root, profile.contracts, profile.build_dirs),
+             ask_user_tool()]
     by_name = {item.name: item for item in tools}
     model = provider.bind_tools(tools)
     # The instructions and authoritative inputs are never compacted.
-    head = [SystemMessage(content=profile.prompt),
+    head = [SystemMessage(content=profile.prompt + ASK_GUIDANCE),
             *(HumanMessage(content=text) for text in profile.initial_messages)]
     checkpoint: list[BaseMessage] = []
     history: list[BaseMessage] = []
     notes = ''
     changed: dict[str, None] = {}
+    turns = int(os.getenv(profile.max_turns_env, str(profile.default_max_turns)))
+    nudges = 0
+    resumed = _resume(profile.root.parent)
+    if resumed:
+        checkpoint, history, notes = resumed['checkpoint'], resumed['history'], resumed['notes']
+        changed = dict.fromkeys(resumed['changed'])
+        turns, nudges = resumed['turns'], resumed['nudges']
+        print('Resumed with the user\'s answers', flush=True)
     budget = int(os.getenv(CONTEXT_TOKENS_ENV, str(DEFAULT_CONTEXT_TOKENS)))
     schemas = len(json.dumps([convert_to_openai_tool(item) for item in tools])) // TOKEN_CHARS
     fixed = schemas + sum(_tokens(message) for message in head)
@@ -358,7 +430,7 @@ def _run_agent(profile: AgentProfile) -> None:
     config = langchain_config(run_name='decide-next-action')
     # Disabled tracing leaves the invocation unchanged for custom model adapters.
     traced_config = {'config': config} if 'callbacks' in config else {}
-    for _ in range(int(os.getenv(profile.max_turns_env, str(profile.default_max_turns)))):
+    for turn in range(turns):
         response = model.invoke([*head, *checkpoint, *history], **traced_config)
         history.append(response)
         usage = getattr(response, 'usage_metadata', None) or {}
@@ -366,10 +438,29 @@ def _run_agent(profile: AgentProfile) -> None:
             measured = usage['input_tokens'] + usage.get('output_tokens', 0)
             counted = len(history)
         if not response.tool_calls:
+            if nudges < DIRECT_QUESTION_NUDGES and asks_directly(response.text):
+                nudges += 1
+                history.append(HumanMessage(content=DIRECT_QUESTION_NOTICE))
+                continue
             profile.validate_completion(profile.root)
             print(profile.completion_message, flush=True)
-            return
+            return False
+        asked = None
         for call in response.tool_calls:
+            if call['name'] == ASK_USER:
+                try:
+                    if asked:
+                        raise ValueError('ask every question in one ask_user call')
+                    questions = normalize_questions(call['args'].get('questions'))
+                except ValueError as exc:
+                    history.append(ToolMessage(content=f'Tool failed: ValueError: {exc}',
+                                               tool_call_id=call['id']))
+                else:
+                    # Its result is the user's answers, added here when the run resumes,
+                    # so the results still follow the order of the calls.
+                    asked = {'call_id': call['id'], 'questions': questions,
+                             'position': len(history)}
+                continue
             try:
                 result = by_name[call['name']].invoke(
                     call['args'], **({'config': {**config, 'run_name': call['name']}}
@@ -380,6 +471,13 @@ def _run_agent(profile: AgentProfile) -> None:
             except Exception as exc:
                 result = f'Tool failed: {type(exc).__name__}: {exc}'
             history.append(ToolMessage(content=str(result), tool_call_id=call['id']))
+        if asked:
+            _pause(profile.root.parent, {
+                'pending': asked, 'history': messages_to_dict(history),
+                'checkpoint': messages_to_dict(checkpoint), 'notes': notes,
+                'changed': list(changed), 'turns': turns - turn - 1, 'nudges': nudges})
+            print(f'Paused for answers to {len(asked["questions"])} questions', flush=True)
+            return True
         used = measured + sum(_tokens(message) for message in history[counted:])
         start = _recent_start(history, budget * KEEP_RECENT)
         if not budget or used <= budget * COMPACT_AT or not start:
