@@ -2,16 +2,24 @@ import { useEffect, useId, useRef, useState } from "react";
 import { failure } from "./api";
 import { branchPage, githubRequest, repositoryPage, type Repository, type RepositoryCheckout, type RepositorySelection } from "./github";
 
-export function RepositorySummary({ repository, checkout = null }: {
+export function RepositorySummary({ repository, checkout = null, onUpdate }: {
   repository: RepositorySelection | null;
   checkout?: RepositoryCheckout | null;
+  // Checks the branch out again at its latest commit; offered only while it may be.
+  onUpdate?: () => void;
 }) {
   if (!repository) return null;
   return <p className="repository-summary">
     <a href={repository.html_url} target="_blank" rel="noreferrer">{repository.full_name}</a>
     <span className="repository-branch">{repository.branch}</span>
     <small>Fixed for this session · inherited by derived sessions</small>
-    {checkout && <small>Checked out at <code>{checkout.commit.slice(0, 7)}</code></small>}
+    {checkout && <small>
+      Checked out at <code>{checkout.commit.slice(0, 7)}</code>
+      {onUpdate && <button type="button" onClick={onUpdate}
+        title={`Check ${repository.branch} out again at its latest commit`}>
+        Update to latest commit
+      </button>}
+    </small>}
   </p>;
 }
 

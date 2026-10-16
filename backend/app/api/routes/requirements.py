@@ -21,6 +21,7 @@ from app.requirements.service import (
     retry_message,
     send_message,
     start_session,
+    update_checkout,
 )
 
 router = APIRouter(prefix="/requirements")
@@ -190,6 +191,17 @@ async def finalize(session_id: str):
     except Exception as exc:
         raise http_error(exc) from exc
     return {"session_id": session_id, "status": "finalizing"}
+
+
+@router.post("/sessions/{session_id}/checkout", status_code=202)
+async def refresh_checkout(session_id: str):
+    """Check the session's branch out again at its latest commit."""
+    _check_session_id(session_id)
+    try:
+        await update_checkout(session_id)
+    except Exception as exc:
+        raise http_error(exc) from exc
+    return {"session_id": session_id, "status": "preparing"}
 
 
 @router.post("/sessions/{session_id}/fork", status_code=201)

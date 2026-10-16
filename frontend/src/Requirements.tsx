@@ -343,6 +343,21 @@ export default function Requirements() {
     }
   }
 
+  async function updateCheckout() {
+    if (!session || submitting) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      await post(`/${encodeURIComponent(session.session_id)}/checkout`);
+      setSession({ ...session, status: "preparing", error: null });
+      setRefreshKey((value) => value + 1);
+    } catch (caught) {
+      setError(failure(caught, "Could not update the checkout."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   async function generateDocument() {
     if (!session) return;
     setSubmitting(true);
@@ -427,6 +442,7 @@ export default function Requirements() {
   const asked = last?.role === "assistant" ? last.questions : [];
   const forkedFrom = session?.forked_from ?? null;
   const canFinalize = canCompose && session.kind !== null && session.requirements.length > 0;
+  const canUpdateCheckout = canCompose && Boolean(session.checkout);
   const status = error ? "error" : session ? session.status : sessionId ? "loading" : "idle";
   const documentUrl = session
     ? `/api/requirements/sessions/${encodeURIComponent(session.session_id)}/document`
@@ -561,7 +577,7 @@ export default function Requirements() {
           </div>
 
           <RepositorySummary repository={session?.repository ?? (submitting && !session ? repositoryChoice : null)}
-            checkout={session?.checkout} />
+            checkout={session?.checkout} onUpdate={canUpdateCheckout ? updateCheckout : undefined} />
 
           {sessionId && (
             <p className="request-id">

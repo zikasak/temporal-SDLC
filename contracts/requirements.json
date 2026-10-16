@@ -127,6 +127,13 @@
     "priority": "could"
   },
   {
+    "id": "FR-19",
+    "category": "functional",
+    "title": "Update a session's checkout",
+    "description": "While a requirements session waits for the user, its branch can be checked out again at its latest commit, which the interview reads and the task is finalized against from then on, such as a commit that added the contract the task needs. The session shows the commit it is checked out at. A failed update keeps the earlier checkout and says so.",
+    "priority": "must"
+  },
+  {
     "id": "NFR-1",
     "category": "non_functional",
     "title": "Limit sign-in attempts",

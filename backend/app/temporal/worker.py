@@ -23,6 +23,7 @@ with workflow.unsafe.imports_passed_through():
         read_requirements_document,
         requirements_turn,
         send_llm_message,
+        update_repository_checkout,
         write_openapi_document,
         write_requirements_document,
     )
@@ -52,7 +53,8 @@ async def main():
             greet, parse_document, send_llm_message,
             requirements_turn, write_requirements_document,
             api_design_turn, write_openapi_document,
-            checkout_repository, publish_repository, publish_documentation,
+            checkout_repository, update_repository_checkout, publish_repository,
+            publish_documentation,
             read_repository_contract, read_requirements_document,
         ],
     )

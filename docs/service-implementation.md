@@ -367,7 +367,12 @@ API in Python, its root `Dockerfile` builds the API with its own PostgreSQL, and
 A requirements session whose task kind is `bugfix` (a bugfix or any other change that
 leaves the API as it is) has no API design. When it is finalized it reads the
 repository's contract from `contracts/` in its checkout; a repository without one is
-refused there, with the reason shown in the session. Once the document is written the
+refused there, with the reason shown in the session. A session checks its branch out once, when it
+starts; **Update to latest commit** beside the checkout's commit (the `update_checkout`
+update, `POST /requirements/sessions/{id}/checkout`) clones the branch again as it is now,
+so a session refused for a missing contract can be finalized once a commit that adds one
+is on the branch. It is offered while the session waits for the user; the earlier working
+copy is replaced only once the new one is complete, and kept when the clone fails. Once the document is written the
 session starts the `DeliveryWorkflow` itself (`delivery-<requirements-session-id>`) and
 stays open until it ends. The `TaskSpec` holds the **repository's** contract as
 `requirements`, `requirements_document`, `api` and `language`, and the interview's own

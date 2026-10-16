@@ -220,6 +220,33 @@ async def test_a_diverged_remote_branch_is_reported_not_overwritten(tmp_path, re
     assert git("rev-parse", BRANCH, cwd=remote) == theirs
 
 
+async def test_a_session_checks_its_branch_out_again_at_its_latest_commit(tmp_path, remote, repository_selection):
+    environment = ActivityEnvironment()
+    before = await environment.run(activities.checkout_repository, SESSION, repository_selection)
+    working_copy = tmp_path / "generated" / SESSION / "repository"
+    (working_copy / "marker").write_text("local")
+    seed = tmp_path / "seed"
+    write_contract(seed, CONTRACT)
+    git("add", "--all", cwd=seed)
+    git("commit", "--quiet", "-m", "Publish the contract", cwd=seed)
+    git("push", "--quiet", "origin", "HEAD:refs/heads/" + repository_selection["branch"], cwd=seed)
+
+    # A plain checkout keeps the copy the session already has.
+    assert await environment.run(activities.checkout_repository, SESSION,
+                                 repository_selection) == before
+    with pytest.raises(ContractError):
+        read_contract(working_copy)
+
+    after = await environment.run(activities.update_repository_checkout, SESSION,
+                                  repository_selection)
+    assert after == {"commit": git("rev-parse", "HEAD", cwd=seed)} != before
+    assert read_contract(working_copy) == CONTRACT
+    assert not (working_copy / "marker").exists()
+    # It is what a later checkout of the session finds.
+    assert await environment.run(activities.checkout_repository, SESSION,
+                                 repository_selection) == after
+
+
 async def test_missing_connection_fails_the_checkout_without_retries(remote, monkeypatch, repository_selection):
     async def get_connection():
         return None

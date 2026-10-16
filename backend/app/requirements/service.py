@@ -95,6 +95,11 @@ async def finalize_session(session_id: str) -> None:
     logger.info("Finalizing requirements session %s", session_id)
 
 
+async def update_checkout(session_id: str) -> None:
+    await start_update(session_id, "update_checkout")
+    logger.info("Updating the checkout of requirements session %s", session_id)
+
+
 async def get_state(session_id: str) -> RequirementsState:
     client = await connect_temporal()
     handle = client.get_workflow_handle(session_id)
