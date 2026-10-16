@@ -2,4 +2,5 @@
 **
 !backend/requirements.txt
 !backend/app/
+!backend/app/**
 **/__pycache__/

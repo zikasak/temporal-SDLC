@@ -27,38 +27,140 @@ TEST_FUNCTION = re.compile(r"^test")
 TEST_CLASS = re.compile(r"^Test")
 
 
-def _collect(body: list[ast.stmt], owner: str, context: str, cases: dict[str, str]) -> None:
-    for node in body:
-        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and TEST_FUNCTION.match(node.name)):
-            # With its decorators, which can change whether or how it runs; layout and
-            # comments are not a change. A redefinition shares an identity.
-            source = f"{context} {ast.unparse(node)}".strip()
-            case = f"{owner}#{node.name}"
+# How many imports and bases deep a base class is looked for.
+MAX_DEPTH = 20
+TestMethod = ast.FunctionDef | ast.AsyncFunctionDef
+
+
+class _Modules:
+    """The suite's own modules by dotted path from the project, parsed when first needed,
+    and the classes their names refer to. Anything from outside the suite is unknown."""
+
+    def __init__(self, project: Path) -> None:
+        self.project = project
+        self.trees: dict[str, ast.Module | None] = {}
+
+    def tree(self, module: str) -> ast.Module | None:
+        if module not in self.trees:
+            file = self.project.joinpath(*module.split(".")).with_suffix(".py")
+            tree = None
+            if module and file.is_file() and not file.is_symlink():
+                try:
+                    tree = ast.parse(file.read_text(encoding="utf-8", errors="replace"))
+                except (SyntaxError, ValueError):
+                    # Collecting it fails the run; it holds no test until it parses.
+                    pass
+            self.trees[module] = tree
+        return self.trees[module]
+
+    @staticmethod
+    def _imported(module: str, statement: ast.ImportFrom) -> list[str]:
+        """Where `from … import` in `module` may import from: relative to its package,
+        or, as pytest puts the test file's directory on the path, beside it or from the
+        project's root."""
+        package = module.split(".")[:-1]
+        target = statement.module.split(".") if statement.module else []
+        if statement.level:
+            return [".".join([*package[:len(package) - statement.level + 1], *target])]
+        return [".".join([*package, *target]), ".".join(target)]
+
+    def resolve(self, module: str, name: ast.expr,
+                depth: int = 0) -> tuple[str, ast.ClassDef] | None:
+        """The class `name`, a base in `module`, refers to, and the module it is in."""
+        tree = self.tree(module)
+        if tree is None or depth > MAX_DEPTH:
+            return None
+        if isinstance(name, ast.Attribute) and isinstance(name.value, ast.Name):
+            # A class of an imported module: `import base` and `base.Shared`.
+            for statement in tree.body:
+                if isinstance(statement, ast.Import):
+                    for alias in statement.names:
+                        if (alias.asname or alias.name) == name.value.id:
+                            return self.resolve(alias.name, ast.Name(name.attr), depth + 1)
+            return None
+        if not isinstance(name, ast.Name):
+            return None
+        found = None
+        for statement in tree.body:
+            if isinstance(statement, ast.ClassDef) and statement.name == name.id:
+                found = module, statement
+            elif isinstance(statement, ast.ImportFrom):
+                for alias in statement.names:
+                    if (alias.asname or alias.name) == name.id:
+                        found = next(filter(None, (
+                            self.resolve(source, ast.Name(alias.name), depth + 1)
+                            for source in self._imported(module, statement))), None)
+        return found
+
+    def lineage(self, module: str, node: ast.ClassDef, depth: int = 0) -> str:
+        """The decorators and bases of a class and of every class of the suite it inherits
+        from: pytest applies a base's marks to its subclasses too."""
+        parents = [self.lineage(*parent, depth + 1) for base in node.bases
+                   if depth < MAX_DEPTH and (parent := self.resolve(module, base))]
+        header = " ".join(ast.unparse(item)
+                          for item in [*node.decorator_list, *node.bases, *node.keywords])
+        return " ".join([f"{node.name}({header})", *parents])
+
+    def members(self, module: str, node: ast.ClassDef,
+                depth: int = 0) -> tuple[dict[str, str], dict[str, tuple[str, ast.ClassDef]]]:
+        """What pytest collects of a class, its own before what it inherits from classes of
+        the suite: its test methods, each with its decorators (a redefinition shares an
+        identity), and its nested test classes with the module each is in."""
+        methods: dict[str, str] = {}
+        classes: dict[str, tuple[str, ast.ClassDef]] = {}
+        for item in node.body:
+            if isinstance(item, TestMethod) and TEST_FUNCTION.match(item.name):
+                source = ast.unparse(item)
+                methods[item.name] = (f"{methods[item.name]} {source}" if item.name in methods
+                                      else source)
+            elif isinstance(item, ast.ClassDef) and TEST_CLASS.match(item.name):
+                classes[item.name] = module, item
+        for base in node.bases if depth < MAX_DEPTH else []:
+            if parent := self.resolve(module, base):
+                inherited_methods, inherited_classes = self.members(*parent, depth + 1)
+                methods = {**inherited_methods, **methods}
+                classes = {**inherited_classes, **classes}
+        return methods, classes
+
+
+def _collect_class(modules: _Modules, module: str, node: ast.ClassDef, owner: str,
+                   context: str, cases: dict[str, str], depth: int = 0) -> None:
+    owner = f"{owner}.{node.name}"
+    # A nested class runs under its outer classes' decorators and bases too.
+    context = f"{context} {modules.lineage(module, node)}".strip()
+    methods, classes = modules.members(module, node)
+    for name, source in methods.items():
+        cases[f"{owner}#{name}"] = f"{context} {source}"
+    for inner in classes.values() if depth < MAX_DEPTH else []:
+        _collect_class(modules, *inner, owner, context, cases, depth + 1)
+
+
+def _collect(modules: _Modules, module: str, tree: ast.Module, cases: dict[str, str]) -> None:
+    """The tests of a module with the source each is compared by: the test with its
+    decorators, which can change whether or how it runs, after the decorators and bases of
+    the classes it runs in. Layout and comments are not a change."""
+    for node in tree.body:
+        if isinstance(node, TestMethod) and TEST_FUNCTION.match(node.name):
+            case = f"{module}#{node.name}"
+            source = ast.unparse(node)
             cases[case] = f"{cases[case]} {source}" if case in cases else source
         elif isinstance(node, ast.ClassDef) and TEST_CLASS.match(node.name):
-            # The class's decorators and bases apply to every test it holds.
-            header = " ".join(ast.unparse(item)
-                              for item in [*node.decorator_list, *node.bases, *node.keywords])
-            _collect(node.body, f"{owner}.{node.name}",
-                     f"{context} {node.name}({header})".strip(), cases)
+            _collect_class(modules, module, node, module, "", cases)
 
 
 def _test_cases(project: Path) -> dict[str, str]:
     """Every test of the project by `module.Class#test`, the identity pytest reports it
-    under: the module is its path from the project, as pytest's rootdir is there."""
+    under: the module is its path from the project, as pytest's rootdir is there. A class
+    holds the test methods it inherits from classes of the suite, as pytest runs them."""
     cases: dict[str, str] = {}
+    modules = _Modules(project)
     for file in sorted(project.glob(TEST_GLOB)):
         if file.is_symlink() or not file.is_file():
             continue
-        text = file.read_text(encoding="utf-8", errors="replace")
-        try:
-            tree = ast.parse(text)
-        except (SyntaxError, ValueError):
-            # Collecting it fails the run; it holds no test until it parses.
-            continue
         module = ".".join(file.relative_to(project).with_suffix("").parts)
-        _collect(tree.body, module, "", cases)
+        tree = modules.tree(module)
+        if tree is not None:
+            _collect(modules, module, tree, cases)
     return cases
 
 
