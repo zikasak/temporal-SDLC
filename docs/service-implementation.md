@@ -59,7 +59,8 @@ all seven workers, and `.zed/debug.json` includes individual worker launch profi
 Both coding workers need the Docker CLI, a running Docker daemon and writable
 `GENERATED_CODE_DIR`. The implementation worker also needs access to codegen's server
 tree. The test worker uses only contract inputs and the static test-suite template of the
-session's language (`backend/app/languages/<language>/test_suite`; today Java's Maven template).
+session's language (`backend/app/languages/<language>/test_suite`: Java's Maven/JUnit 5 or
+Python's pytest template).
 The verification worker also needs Docker and writable `GENERATED_CODE_DIR`, and must
 use the same Docker daemon as both authoring workers: images are local immutable IDs,
 not registry tags. It also builds the baseline image of a
@@ -146,7 +147,8 @@ agent, and automatic Temporal/model retries remain disabled.
   It has no Temporal, database, Docker, or host-config imports.
 - `workflows.py` and `worker.py`: deterministic activity execution and dedicated worker
   bootstrap, used by the existing named workflows and worker entrypoints.
-- `Dockerfile`: today's shared Java 21/Maven default. The role entrypoint and workspace
+- `Dockerfile`: the shared default for every registered language (Python 3.12, Java 21 and
+  Maven). The role entrypoint and workspace
   are selected through `AGENT_ROLE` and `WORKSPACE_NAME` build arguments.
 
 Provider construction lives in the pure `app/llm/factory.py`. Host `get_model()` retains
@@ -263,7 +265,8 @@ fields are discarded. History compaction and on-demand contracts work as for the
 implementation agent; on demand, the OpenAPI document is `/workspace/contracts/openapi.yaml`
 and is no longer embedded.
 
-`/workspace/tests` starts from the session language's static template (Java: Maven/JUnit 5),
+`/workspace/tests` starts from the session language's static template (Java: Maven/JUnit 5;
+Python: pytest),
 and `/workspace/language.json` carries that language's authoring instructions. No generated server
 sources, implementation sources, implementation image, logs, or test stubs are copied
 into this container. Neither coding container has a Docker socket or host mounts (other
@@ -271,7 +274,8 @@ than the Pi credential files under `LLM_HARNESS=pi`), and
 their filesystems are separate. Source isolation is enforced by the supplied filesystem
 and inputs as well as the agent instructions.
 
-The test agent writes HTTP tests with Java's `HttpClient`, JUnit assertions and Jackson,
+The test agent writes HTTP tests with the language's tools (Java: `HttpClient`, JUnit
+assertions and Jackson; Python: pytest and httpx),
 using only documented API behavior and business requirements. It uses `SERVICE_BASE_URL`
 to address a running service and reads any required credentials from environment
 variables documented in the suite's README. It compiles tests during authoring without
@@ -347,7 +351,11 @@ delivery's `TaskSpec`, never from an author's workspace, and replaces whatever w
 
 `read_contract` in `backend/app/delivery/contract.py` reads it back and raises
 `ContractError` for a repository without one: repositories this pipeline did not publish
-to are not supported.
+to are not supported until they hold a contract in this form, a root `Dockerfile` that
+serves the service on 8080 as a non-root user, and `contract-tests/` in the language's
+template layout. This repository is one such: its `contracts/` describes the backend's
+API in Python, its root `Dockerfile` builds the API with its own PostgreSQL, and
+`contract-tests/` is a pytest suite.
 
 `DeliveryWorkflow.get_state().progress` reports `publication_status` (`waiting`, `running`,
 `completed`, `skipped` when verification did not pass, `error`), `publication` and
@@ -569,7 +577,10 @@ over (`tests` for a bugfix, `server` otherwise).
 A test is identified by itself, not by its file: the language's `TestSuite.test_cases`
 reads every test of a suite with its source (Java: each `@Test`-like method as
 `package.Class#method`, from the first annotation or modifier of its declaration, so
-adding `@Disabled` changes it; nested classes counted with their file's class), and
+adding `@Disabled` changes it; nested classes counted with their file's class. Python:
+each `test*` function, or method of a `Test*` class, as `tests.module.Class#test`, the
+classname pytest reports, compared by its syntax tree with its decorators and those of its
+classes, so adding `@pytest.mark.skip` changes it and comments do not), and
 `TestSuite.case_id` gives the same identity for a report entry. Whitespace is not a
 change. Helpers, fixtures and build files are not tests and are not protected.
 

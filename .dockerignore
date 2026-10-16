@@ -1,0 +1,6 @@
+# Build context of the root Dockerfile: the backend's sources only.
+**
+!backend/requirements.txt
+!backend/app/
+!backend/app/**
+**/__pycache__/

@@ -104,4 +104,4 @@ def get_language(name: str | None) -> Language:
     return language
 
 
-from app.languages import java  # noqa: E402,F401
+from app.languages import java, python  # noqa: E402,F401

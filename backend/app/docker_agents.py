@@ -93,7 +93,7 @@ class AgentImageBuild:
 
 
 def default_agent_image(role: str, workspace_name: str) -> AgentImageBuild:
-    """The built-in Java 21/Maven image, shared by today's two coding stages."""
+    """The built-in agent image (Python 3.12, Java 21 and Maven), shared by the coding stages."""
     backend = Path(__file__).resolve().parent.parent
     return AgentImageBuild(
         context=backend, dockerfile=backend / 'app/agent_workflows/Dockerfile',
