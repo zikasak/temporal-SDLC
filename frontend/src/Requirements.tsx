@@ -6,6 +6,7 @@ import {
   type DeliveryProgress, type GenerationStage,
 } from "./Delivery";
 import ForkButton from "./ForkButton";
+import IntakeForm, { type Intake } from "./Intake";
 import { AskedQuestions, QuestionForm, questionList, type Question } from "./Questions";
 import RepositoryPicker, { RepositorySummary } from "./RepositoryPicker";
 import { repositoryCheckout, repositorySelection, selectionInput, type RepositoryCheckout, type RepositorySelection } from "./github";
@@ -240,13 +241,13 @@ export default function Requirements() {
     return parsed;
   }
 
-  async function startSession() {
+  async function startSession(intake: Intake) {
     if (!repositoryChoice?.branch) return;
     setSubmitting(true);
     setError("");
     setSession(null);
     try {
-      const body = await post("", { repository: selectionInput(repositoryChoice) });
+      const body = await post("", { repository: selectionInput(repositoryChoice), ...intake });
       if (
         typeof body !== "object" ||
         body === null ||
@@ -436,9 +437,10 @@ export default function Requirements() {
       <header className="page-heading">
         <h1>Requirements interview</h1>
         <p className="page-intro">
-          Say what kind of task this is and describe it. The LLM asks questions, records
-          requirements as you go, and writes them up as a document. A bugfix is then
-          delivered from here: regression tests, the fix, and a new branch.
+          Choose the kind of task, answer a few questions about it, and describe it. The
+          LLM then asks follow-up questions, records requirements as you go, and writes
+          them up as a document. A bugfix is then delivered from here: regression tests,
+          the fix, and a new branch.
         </p>
       </header>
 
@@ -498,18 +500,15 @@ export default function Requirements() {
               </button>
             </form>
           ) : (
-            <>
-              {!sessionId && <RepositoryPicker value={repositoryChoice} onChange={setRepositoryChoice} disabled={submitting} required />}
-              <button
-                className="run-button"
-                type="button"
-                onClick={startSession}
-                disabled={submitting || !repositoryChoice?.branch}
-              >
-                <span>{submitting ? "Starting" : "Start a session"}</span>
-                {submitting && <span className="spinner" aria-hidden="true" />}
-              </button>
-            </>
+            !sessionId && (
+              <IntakeForm
+                repository={<RepositoryPicker value={repositoryChoice} onChange={setRepositoryChoice} disabled={submitting} required />}
+                repositoryReady={Boolean(repositoryChoice?.branch)}
+                disabled={submitting}
+                submitting={submitting}
+                onSubmit={(intake) => void startSession(intake)}
+              />
+            )
           )}
 
           {session && (

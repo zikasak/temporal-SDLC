@@ -1,29 +1,102 @@
 """Prompts for the requirements interview and the final document."""
 
 import json
+from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from app.conversations.models import ConversationMessage
-from app.llm.questions import message_text
+from app.llm.questions import Question, answers_text, message_text
 from app.requirements.models import TASK_KINDS, Requirement, TaskKind
 from app.tools.questions import GUIDANCE as QUESTIONS_GUIDANCE
 
 OPENING_MESSAGE = ("Hi! I'll help you work out what needs to be done. First, tell me what "
                    "kind of task this is.")
-# The options name the kinds as TASK_KINDS describes them; the user may still write another.
-KIND_QUESTION = {
-    "question": "What kind of task is this?",
-    "options": ["A new service", "A change to an existing service's API",
-                "A bugfix or another change that leaves the API as it is",
-                "A change to documentation only"],
+INTAKE_MESSAGE = ("Hi! I'll help you work out what needs to be done. Every task starts with "
+                  "the same questions: its kind, a few questions about that kind, and what "
+                  "needs to be done.")
+# How the kinds are offered to the user; TASK_KINDS describes them to the model.
+KIND_OPTIONS: dict[TaskKind, str] = {
+    "new_service": "A new service",
+    "api_change": "A change to an existing service's API",
+    "bugfix": "A bugfix or another change that leaves the API as it is",
+    "docs": "A change to documentation only",
 }
+# The user may still write another kind in the interview.
+KIND_QUESTION: Question = {"question": "What kind of task is this?",
+                           "options": list(KIND_OPTIONS.values())}
+# The questions a new session asks once the kind is chosen, before the interview starts.
+INTAKE_QUESTIONS: dict[TaskKind, list[Question]] = {
+    "new_service": [
+        {"question": "Who will use the service?",
+         "options": ["Other services of ours (an internal API)",
+                     "External clients or partners (a public API)",
+                     "A front end or app of ours"]},
+        {"question": "How large is the service?",
+         "options": ["A small service with a few endpoints",
+                     "A service covering one business area",
+                     "A service covering several business areas"]},
+    ],
+    "api_change": [
+        {"question": "Which part of the API does the change touch?",
+         "options": ["One existing endpoint", "Several existing endpoints",
+                     "A new endpoint or resource",
+                     "Fields shared by several endpoints"]},
+        {"question": "What is the nature of the change?",
+         "options": ["Add new behaviour", "Change existing behaviour",
+                     "Remove or deprecate behaviour"]},
+        {"question": "Must existing clients keep working unchanged?",
+         "options": ["Yes, the change must be backward compatible",
+                     "No, breaking changes are acceptable"]},
+    ],
+    "bugfix": [
+        {"question": "Which area of the service is affected?",
+         "options": ["Request handling and validation", "Business rules and calculations",
+                     "Data storage and retrieval", "Calls to external systems",
+                     "Security and access control", "Performance and reliability"]},
+        {"question": "What is the nature of the change?",
+         "options": ["It returns a wrong result", "It fails with an error",
+                     "It accepts input it should reject",
+                     "It is not a bug: a refactoring, upgrade or clean-up"]},
+    ],
+    "docs": [
+        {"question": "Which documentation should change?",
+         "options": ["The README", "The API reference", "Usage guides and examples",
+                     "Code comments"]},
+        {"question": "What is the nature of the change?",
+         "options": ["Add missing documentation",
+                     "Correct wrong or outdated documentation",
+                     "Restructure or clarify existing documentation",
+                     "Remove obsolete documentation"]},
+    ],
+}
+TASK_QUESTION = "What needs to be done?"
 
 
 def opening_message() -> ConversationMessage:
-    """The first message of every interview: it asks what kind of task this is."""
+    """The first message of an interview that starts without the intake: it asks what
+    kind of task this is."""
     return {"role": "assistant", "content": OPENING_MESSAGE,
             "questions": [{**KIND_QUESTION, "options": list(KIND_QUESTION["options"])}]}
+
+
+def intake() -> dict[str, Any]:
+    """The questions every new session starts with, for the page to show up front."""
+    return {"kind_question": KIND_QUESTION["question"],
+            "kinds": [{"kind": kind, "label": label} for kind, label in KIND_OPTIONS.items()],
+            "questions": INTAKE_QUESTIONS, "task_question": TASK_QUESTION}
+
+
+def intake_messages(kind: TaskKind, answers: list[str], task: str) -> list[ConversationMessage]:
+    """The opening of a session started from the intake: the questions it asked, and the
+    user's answers to them with the task as the user's first message."""
+    questions = [KIND_QUESTION, *INTAKE_QUESTIONS[kind]]
+    reply = answers_text(questions, [KIND_OPTIONS[kind], *answers])
+    return [
+        {"role": "assistant", "content": INTAKE_MESSAGE,
+         "questions": [{**item, "options": list(item["options"])} for item in questions]},
+        {"role": "user", "content": f"{reply}\n\n{TASK_QUESTION}\n→ {task.strip()}"},
+    ]
 
 
 INTERVIEWER_GUIDANCE = (
@@ -36,7 +109,9 @@ INTERVIEWER_GUIDANCE = (
     "for anything mandatory or required, could for nice-to-haves, otherwise should. "
     "When you infer a likely requirement, ask the user with ask_user to confirm it "
     "before recording it. Do not list the recorded requirements back "
-    "to the user; they can see them."
+    "to the user; they can see them. The user's first message may answer the starting "
+    "questions every task is asked and say what needs to be done: build on those "
+    "answers and never ask them again."
 )
 
 KIND_UNKNOWN = (

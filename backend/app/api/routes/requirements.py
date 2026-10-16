@@ -2,13 +2,15 @@ import re
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.api.downloads import session_document_download
 from app.api.errors import http_error
 from app.api.routes.github import RepositoryInput
 from app.github.service import resolve_repository_selection
 from app.llm.questions import ANSWER_CHARS, MAX_QUESTIONS
+from app.requirements.models import TaskKind
+from app.requirements.prompt import INTAKE_QUESTIONS, intake
 from app.requirements.service import (
     answer_delivery_questions,
     answer_questions,
@@ -21,13 +23,45 @@ from app.requirements.service import (
     start_session,
 )
 
-router = APIRouter(prefix="/requirements/sessions")
+router = APIRouter(prefix="/requirements")
 SESSION_ID_PATTERN = re.compile(r"requirements-session-[0-9a-f]{32}")
+
+
+def _clean_answers(value: list[str]) -> list[str]:
+    value = [item.strip() for item in value]
+    if not all(value) or any(len(item) > ANSWER_CHARS for item in value):
+        raise ValueError(f"Each answer must contain 1 to {ANSWER_CHARS} characters")
+    return value
 
 
 class CreateBody(BaseModel):
     # Every session works in a repository; derived sessions inherit this one.
     repository: RepositoryInput
+    # The intake: the kind the user chose, their answers to its questions in order (a
+    # chosen option or their own), and what needs to be done.
+    kind: TaskKind
+    answers: list[str] = Field(max_length=MAX_QUESTIONS)
+    task: str = Field(max_length=10000)
+
+    @field_validator("answers")
+    @classmethod
+    def require_answers(cls, value: list[str]) -> list[str]:
+        return _clean_answers(value)
+
+    @field_validator("task")
+    @classmethod
+    def require_task(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Say what needs to be done")
+        return value
+
+    @model_validator(mode="after")
+    def answer_every_question(self) -> "CreateBody":
+        if len(self.answers) != len(INTAKE_QUESTIONS[self.kind]):
+            raise ValueError(f"Answer all {len(INTAKE_QUESTIONS[self.kind])} questions "
+                             "of this kind of task")
+        return self
 
 
 class MessageBody(BaseModel):
@@ -49,10 +83,7 @@ class AnswersBody(BaseModel):
     @field_validator("answers")
     @classmethod
     def require_answers(cls, value: list[str]) -> list[str]:
-        value = [item.strip() for item in value]
-        if not all(value) or any(len(item) > ANSWER_CHARS for item in value):
-            raise ValueError(f"Each answer must contain 1 to {ANSWER_CHARS} characters")
-        return value
+        return _clean_answers(value)
 
 
 class AgentAnswersBody(AnswersBody):
@@ -74,19 +105,25 @@ def _check_session_id(session_id: str) -> None:
         raise HTTPException(status_code=404, detail="Session not found")
 
 
-@router.post("", status_code=201)
+@router.get("/intake")
+async def retrieve_intake():
+    return intake()
+
+
+@router.post("/sessions", status_code=201)
 async def create_session(body: CreateBody):
     try:
         repository = await resolve_repository_selection(
             body.repository.full_name, body.repository.branch,
         )
-        session_id = await start_session(repository=repository)
+        session_id = await start_session(repository=repository, kind=body.kind,
+                                         answers=body.answers, task=body.task)
     except Exception as exc:
         raise http_error(exc) from exc
     return {"session_id": session_id}
 
 
-@router.get("/{session_id}")
+@router.get("/sessions/{session_id}")
 async def retrieve_session(session_id: str):
     _check_session_id(session_id)
     try:
@@ -95,7 +132,7 @@ async def retrieve_session(session_id: str):
         raise http_error(exc) from exc
 
 
-@router.post("/{session_id}/messages", status_code=202)
+@router.post("/sessions/{session_id}/messages", status_code=202)
 async def submit_message(session_id: str, body: MessageBody):
     _check_session_id(session_id)
     try:
@@ -105,7 +142,7 @@ async def submit_message(session_id: str, body: MessageBody):
     return {"session_id": session_id, "status": "turn_running"}
 
 
-@router.post("/{session_id}/answers", status_code=202)
+@router.post("/sessions/{session_id}/answers", status_code=202)
 async def submit_answers(session_id: str, body: AnswersBody):
     _check_session_id(session_id)
     try:
@@ -115,7 +152,7 @@ async def submit_answers(session_id: str, body: AnswersBody):
     return {"session_id": session_id, "status": "turn_running"}
 
 
-@router.post("/{session_id}/delivery/answers", status_code=202)
+@router.post("/sessions/{session_id}/delivery/answers", status_code=202)
 async def submit_agent_answers(session_id: str, body: AgentAnswersBody):
     _check_session_id(session_id)
     try:
@@ -125,7 +162,7 @@ async def submit_agent_answers(session_id: str, body: AgentAnswersBody):
     return {"session_id": session_id}
 
 
-@router.post("/{session_id}/retry", status_code=202)
+@router.post("/sessions/{session_id}/retry", status_code=202)
 async def retry(session_id: str):
     _check_session_id(session_id)
     try:
@@ -135,7 +172,7 @@ async def retry(session_id: str):
     return {"session_id": session_id, "status": "turn_running"}
 
 
-@router.post('/{session_id}/generation/retry', status_code=202)
+@router.post('/sessions/{session_id}/generation/retry', status_code=202)
 async def restart_generation(session_id: str, body: RetryGenerationBody):
     _check_session_id(session_id)
     try:
@@ -145,7 +182,7 @@ async def restart_generation(session_id: str, body: RetryGenerationBody):
     return {'session_id': session_id, 'verification_status': 'waiting'}
 
 
-@router.post("/{session_id}/finalize", status_code=202)
+@router.post("/sessions/{session_id}/finalize", status_code=202)
 async def finalize(session_id: str):
     _check_session_id(session_id)
     try:
@@ -155,7 +192,7 @@ async def finalize(session_id: str):
     return {"session_id": session_id, "status": "finalizing"}
 
 
-@router.post("/{session_id}/fork", status_code=201)
+@router.post("/sessions/{session_id}/fork", status_code=201)
 async def fork(session_id: str, body: ForkBody):
     _check_session_id(session_id)
     try:
@@ -165,7 +202,7 @@ async def fork(session_id: str, body: ForkBody):
     return {"session_id": fork_id}
 
 
-@router.get("/{session_id}/document")
+@router.get("/sessions/{session_id}/document")
 async def download_requirements(session_id: str):
     _check_session_id(session_id)
     try:
