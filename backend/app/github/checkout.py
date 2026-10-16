@@ -110,11 +110,13 @@ def _recorded(session_dir: Path, repository: RepositorySelection) -> RepositoryC
 
 
 async def checkout(session_dir: Path, repository: RepositorySelection,
-                   token: str) -> RepositoryCheckout:
+                   token: str, *, latest: bool = False) -> RepositoryCheckout:
     """Clone the selected branch into the session, once: a repeated call (an activity
-    retry, a restarted run) keeps the existing working copy and whatever it holds."""
+    retry, a restarted run) keeps the existing working copy and whatever it holds. With
+    `latest` the branch is cloned again as it is now, replacing that copy only once the
+    new one is complete."""
     validate_selection(repository['full_name'], repository['branch'])
-    recorded = _recorded(session_dir, repository)
+    recorded = None if latest else _recorded(session_dir, repository)
     if recorded:
         return recorded
     session_dir.mkdir(parents=True, exist_ok=True)

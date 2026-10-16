@@ -607,7 +607,8 @@ h2 {
 }
 
 .fork-note button,
-.fork-note a {
+.fork-note a,
+.repository-summary button {
   margin-left: 6px;
   padding: 0;
   border: 0;

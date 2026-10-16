@@ -1263,6 +1263,55 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-12
+  /requirements/sessions/{session_id}/checkout:
+    post:
+      operationId: postRequirementsSessionsBySessionIdCheckout
+      summary: Update the session's checkout
+      description: Checks the session's branch out again at its latest commit; the
+        session is preparing until it is. Refused while a message is unanswered or
+        once the session is finalized.
+      tags:
+      - requirements
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: requirements-session- followed by 32 hex digits.
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-19
   /api-design/sessions:
     post:
       operationId: postApiDesignSessions

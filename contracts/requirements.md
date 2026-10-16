@@ -28,6 +28,7 @@ Errors carry a `detail` string, except FastAPI's own request validation, which a
 | FR-16 | Chat with the LLM | A user sends a free-form request, optionally with one attached file and a repository to work in, follows it up, retries a failed answer or forks the conversation after one of their messages. Attachments and generated documents can be downloaded. | Must |  |
 | FR-17 | List workflow executions | Signed-in users list the workflow executions of the namespace, newest first, 50 per page, optionally of one workflow type, continuing with the returned page token. | Should |  |
 | FR-18 | Start the sample workflow | POST /start runs the sample greeting workflow and returns its result. | Could |  |
+| FR-19 | Update a session's checkout | While a requirements session waits for the user, its branch can be checked out again at its latest commit, which the interview reads and the task is finalized against from then on, such as a commit that added the contract the task needs. The session shows the commit it is checked out at. A failed update keeps the earlier checkout and says so. | Must |  |
 
 ## Non-functional requirements
 

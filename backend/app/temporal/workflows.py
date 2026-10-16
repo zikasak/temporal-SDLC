@@ -29,6 +29,7 @@ with workflow.unsafe.imports_passed_through():
         read_requirements_document,
         requirements_turn,
         send_llm_message,
+        update_repository_checkout,
         write_openapi_document,
         write_requirements_document,
     )
@@ -280,6 +281,42 @@ class RequirementsWorkflow:
             raise ValueError(KIND_PROBLEM)
         if not self.state.requirements:
             raise ValueError("No requirements have been recorded yet.")
+
+    @workflow.update
+    async def update_checkout(self) -> None:
+        """Check the session's branch out again at its latest commit: what the interview
+        reads and the task is finalized against from then on, such as a commit that added
+        the contract the task needs."""
+        self._updates += 1
+        async with self._turn_lock:
+            if self.state.status != "interviewing":
+                raise ApplicationError("This session is no longer accepting changes.")
+            self.state.status = "preparing"
+            self.state.error = None
+            try:
+                self.state.checkout = await workflow.execute_activity(
+                    update_repository_checkout,
+                    args=[workflow.info().workflow_id, self.state.repository],
+                    start_to_close_timeout=timedelta(minutes=10),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            except ActivityError as exc:
+                # The earlier working copy stays until a new one is complete.
+                workflow.logger.warning("Repository checkout update failed: %s",
+                                        exc.cause or exc)
+                self.state.error = ("The repository could not be checked out again. Check "
+                                    "the GitHub connection and try again.")
+            else:
+                workflow.logger.info("Checked out again at %s", self.state.checkout["commit"])
+            finally:
+                self.state.status = "interviewing"
+
+    @update_checkout.validator
+    def validate_update_checkout(self) -> None:
+        if not self.state.repository or not self.state.checkout:
+            raise ValueError("This session has no repository checkout to update.")
+        if self.state.status != "interviewing" or self.state.messages[-1]["role"] == "user":
+            raise ValueError("Retry the unanswered message before updating the checkout.")
 
     async def _turn(self) -> bool:
         self.state.status = "turn_running"

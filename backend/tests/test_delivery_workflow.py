@@ -83,6 +83,15 @@ class FakeActivities(FakeStages):
     async def read_requirements_document(self, session_id: str, document_id: str) -> str:
         return "# Brief"
 
+    @activity.defn(name="update_repository_checkout")
+    async def update_repository_checkout(self, session_id: str,
+                                         repository: dict[str, Any]) -> dict[str, Any]:
+        if self.fail_checkout:
+            raise ApplicationError("clone rejected", non_retryable=True)
+        # The branch's latest commit holds the contract.
+        self.has_contract = True
+        return {"commit": "2" * 40}
+
     @activity.defn(name="read_repository_contract")
     async def read_repository_contract(self, session_id: str) -> dict[str, Any]:
         if not self.has_contract:
@@ -109,8 +118,8 @@ async def worker(env, monkeypatch):
         env.client, task_queue=TASK_QUEUE, workflows=[RequirementsWorkflow, DeliveryWorkflow],
         activities=[activities.requirements_turn, activities.write_requirements_document,
                     activities.read_requirements_document, activities.read_repository_contract,
-                    activities.checkout_repository, activities.publish_repository,
-                    activities.publish_documentation],
+                    activities.checkout_repository, activities.update_repository_checkout,
+                    activities.publish_repository, activities.publish_documentation],
     ), stage_workers(env, activities):
         yield activities
 
@@ -330,6 +339,15 @@ async def test_failed_code_generation_can_be_retried(env, worker):
     assert state.code == CODE and state.code_error is None
     assert state.implementation and state.tests
     assert state.verification_status == 'completed'
+
+
+async def wait_until(handle, condition) -> RequirementsState:
+    for _ in range(100):
+        state = await handle.query(RequirementsWorkflow.get_state)
+        if condition(state):
+            return state
+        await asyncio.sleep(0.05)
+    raise AssertionError("the session never reached the expected state")
 
 
 async def specify_bugfix(env, repository) -> Any:
@@ -590,6 +608,32 @@ async def test_change_needs_a_repository_this_pipeline_published(env, worker, ki
         assert (await requirements_service.get_session(handle.id))["delivery"] is None
     finally:
         await handle.terminate()
+
+
+async def test_a_session_blocked_on_its_contract_goes_on_from_the_latest_commit(env, worker, repository_selection):
+    worker.has_contract = False
+    worker.kind = "docs"
+    handle = await specify_bugfix(env, repository_selection)
+    await handle.execute_update(RequirementsWorkflow.finalize)
+    assert (await handle.query(RequirementsWorkflow.get_state)).error == NO_CONTRACT
+
+    # A failed update keeps the working copy the session had, and says so.
+    worker.fail_checkout = True
+    await requirements_service.update_checkout(handle.id)
+    state = await wait_until(handle, lambda state: state.status == "interviewing")
+    assert state.checkout == {"commit": "1" * 40} and "checked out again" in state.error
+
+    worker.fail_checkout = False
+    await requirements_service.update_checkout(handle.id)
+    state = await wait_until(handle, lambda state: state.checkout["commit"] == "2" * 40)
+    assert state.status == "interviewing" and state.error is None
+    await handle.execute_update(RequirementsWorkflow.finalize)
+    state = await handle.query(RequirementsWorkflow.get_state)
+    assert state.status == "completed" and state.contract_commit == "2" * 40
+    await handle.result()
+    # Nothing can change what a finished session was finalized against.
+    with pytest.raises(sessions.SessionBusy):
+        await requirements_service.update_checkout(handle.id)
 
 
 async def test_api_change_keeps_the_contract_for_its_design_and_delivers_nothing(env, worker, repository_selection):

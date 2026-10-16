@@ -135,10 +135,26 @@ async def _github_token() -> tuple[str, dict[str, Any]]:
 async def checkout_repository(
     session_id: str, repository: RepositorySelection
 ) -> RepositoryCheckout:
+    return await _checkout(session_id, repository, latest=False)
+
+
+@activity.defn
+@trace_activity('update-repository-checkout', feature='repository', input_parameter='repository')
+async def update_repository_checkout(
+    session_id: str, repository: RepositorySelection
+) -> RepositoryCheckout:
+    """Check the session's branch out again at its latest commit, such as one that added
+    the contract the session's task needs."""
+    return await _checkout(session_id, repository, latest=True)
+
+
+async def _checkout(session_id: str, repository: RepositorySelection,
+                    latest: bool) -> RepositoryCheckout:
     target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
     token, _ = await _github_token()
     try:
-        result = await repository_checkout.checkout(target.parent, repository, token)
+        result = await repository_checkout.checkout(target.parent, repository, token,
+                                                    latest=latest)
     except (repository_checkout.CheckoutError, GitHubError) as exc:
         activity.logger.warning("Could not check out %s: %s", repository["full_name"], exc)
         raise ApplicationError(str(exc)) from exc

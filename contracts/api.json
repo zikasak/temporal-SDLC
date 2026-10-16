@@ -1837,6 +1837,35 @@
     },
     {
       "method": "POST",
+      "path": "/requirements/sessions/{session_id}/checkout",
+      "summary": "Update the session's checkout",
+      "description": "Checks the session's branch out again at its latest commit; the session is preparing until it is. Refused while a message is unanswered or once the session is finalized.",
+      "tag": "requirements",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "requirements-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": null,
+      "response_status": 202,
+      "response_schema": "SessionStatusChange",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409
+      ],
+      "requirement_ids": [
+        "FR-19"
+      ]
+    },
+    {
+      "method": "POST",
       "path": "/api-design/sessions",
       "summary": "Start an API design session",
       "description": "Continues a completed requirements session of a new service or an API change.",
