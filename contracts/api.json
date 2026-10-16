@@ -1,0 +1,2273 @@
+{
+  "info": {
+    "title": "Temporal project API",
+    "version": "1.0.0",
+    "description": "Turns tasks described in conversation into requirements, API designs and verified code published to GitHub.",
+    "auth": "bearer"
+  },
+  "schemas": [
+    {
+      "name": "Credentials",
+      "description": "A login and a password.",
+      "properties": [
+        {
+          "name": "login",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "description": "An email address or a username, case-insensitive."
+        },
+        {
+          "name": "password",
+          "type": "string",
+          "required": true,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "Session",
+      "description": "A signed-in session.",
+      "properties": [
+        {
+          "name": "access_token",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "description": "Bearer token, also set as the access_token cookie."
+        },
+        {
+          "name": "token_type",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "enum": [
+            "bearer"
+          ]
+        },
+        {
+          "name": "login",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "expires_at",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "format": "date-time"
+        },
+        {
+          "name": "admin",
+          "type": "boolean",
+          "required": true,
+          "array": false,
+          "description": "Whether the user is the first user."
+        }
+      ]
+    },
+    {
+      "name": "Profile",
+      "description": "The signed-in user.",
+      "properties": [
+        {
+          "name": "login",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "expires_at",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "format": "date-time"
+        },
+        {
+          "name": "admin",
+          "type": "boolean",
+          "required": true,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "RegistrationStatus",
+      "description": "Whether the first account can still be registered.",
+      "properties": [
+        {
+          "name": "open",
+          "type": "boolean",
+          "required": true,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "Account",
+      "description": "A user account.",
+      "properties": [
+        {
+          "name": "login",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "created_at",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "format": "date-time"
+        }
+      ]
+    },
+    {
+      "name": "GitHubAppCredentials",
+      "description": "A GitHub App to connect.",
+      "properties": [
+        {
+          "name": "app_id",
+          "type": "integer",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "private_key",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "description": "The app's private key in PEM format."
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false,
+          "array": false,
+          "description": "The account the app is installed on, when it is installed on several."
+        }
+      ]
+    },
+    {
+      "name": "ManifestCode",
+      "description": "The code GitHub returned after creating an app from a manifest.",
+      "properties": [
+        {
+          "name": "code",
+          "type": "string",
+          "required": true,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "EmptyObject",
+      "description": "An empty JSON object.",
+      "properties": []
+    },
+    {
+      "name": "GitHubApp",
+      "description": "A GitHub App.",
+      "properties": [
+        {
+          "name": "id",
+          "type": "integer",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "slug",
+          "type": "string",
+          "required": true,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "GitHubInstallation",
+      "description": "Where the GitHub App is installed.",
+      "properties": [
+        {
+          "name": "id",
+          "type": "integer",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": true,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "GitHubConnection",
+      "description": "The shared GitHub connection; never its private key.",
+      "properties": [
+        {
+          "name": "configured",
+          "type": "boolean",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "encryption_ready",
+          "type": "boolean",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "app",
+          "type": "GitHubApp",
+          "required": false,
+          "array": false,
+          "description": "Null when not configured."
+        },
+        {
+          "name": "installation",
+          "type": "GitHubInstallation",
+          "required": false,
+          "array": false,
+          "description": "Null until the app is installed."
+        },
+        {
+          "name": "validated_at",
+          "type": "string",
+          "required": false,
+          "array": false,
+          "format": "date-time"
+        }
+      ]
+    },
+    {
+      "name": "Repository",
+      "description": "A repository the GitHub App can access.",
+      "properties": [
+        {
+          "name": "repository_id",
+          "type": "integer",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "full_name",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "html_url",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "private",
+          "type": "boolean",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "default_branch",
+          "type": "string",
+          "required": true,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "RepositoryPage",
+      "description": "A page of repositories.",
+      "properties": [
+        {
+          "name": "repositories",
+          "type": "Repository",
+          "required": true,
+          "array": true
+        },
+        {
+          "name": "next_page",
+          "type": "integer",
+          "required": false,
+          "array": false,
+          "description": "Null on the last page."
+        }
+      ]
+    },
+    {
+      "name": "BranchPage",
+      "description": "A page of branch names.",
+      "properties": [
+        {
+          "name": "branches",
+          "type": "string",
+          "required": true,
+          "array": true
+        },
+        {
+          "name": "next_page",
+          "type": "integer",
+          "required": false,
+          "array": false,
+          "description": "Null on the last page."
+        }
+      ]
+    },
+    {
+      "name": "RepositoryInput",
+      "description": "A repository and branch to work in.",
+      "properties": [
+        {
+          "name": "full_name",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "description": "owner/name"
+        },
+        {
+          "name": "branch",
+          "type": "string",
+          "required": true,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "RepositorySelection",
+      "description": "The repository a session works in.",
+      "properties": [
+        {
+          "name": "provider",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "enum": [
+            "github"
+          ]
+        },
+        {
+          "name": "repository_id",
+          "type": "integer",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "full_name",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "html_url",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "private",
+          "type": "boolean",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "branch",
+          "type": "string",
+          "required": true,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "Question",
+      "description": "A question asked of the user, with options to choose from.",
+      "properties": [
+        {
+          "name": "question",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "options",
+          "type": "string",
+          "required": true,
+          "array": true
+        }
+      ]
+    },
+    {
+      "name": "Message",
+      "description": "A message of a conversation.",
+      "properties": [
+        {
+          "name": "role",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "enum": [
+            "user",
+            "assistant"
+          ]
+        },
+        {
+          "name": "content",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "attachment",
+          "type": "object",
+          "required": false,
+          "array": false
+        },
+        {
+          "name": "questions",
+          "type": "Question",
+          "required": false,
+          "array": true,
+          "description": "Asked by an assistant message; the next user message answers them."
+        }
+      ]
+    },
+    {
+      "name": "TaskKindOption",
+      "description": "A kind of task.",
+      "properties": [
+        {
+          "name": "kind",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "enum": [
+            "new_service",
+            "api_change",
+            "bugfix",
+            "docs"
+          ]
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "required": true,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "Intake",
+      "description": "The questions every requirements session starts with.",
+      "properties": [
+        {
+          "name": "kind_question",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "kinds",
+          "type": "TaskKindOption",
+          "required": true,
+          "array": true
+        },
+        {
+          "name": "questions",
+          "type": "object",
+          "required": true,
+          "array": false,
+          "description": "The questions of each kind, by kind, as Question lists."
+        },
+        {
+          "name": "task_question",
+          "type": "string",
+          "required": true,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "CreateRequirementsSession",
+      "description": "The intake of a new requirements session.",
+      "properties": [
+        {
+          "name": "repository",
+          "type": "RepositoryInput",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "enum": [
+            "new_service",
+            "api_change",
+            "bugfix",
+            "docs"
+          ]
+        },
+        {
+          "name": "answers",
+          "type": "string",
+          "required": true,
+          "array": true,
+          "description": "One answer per question of the kind, in order."
+        },
+        {
+          "name": "task",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "description": "What needs to be done; at most 10000 characters."
+        }
+      ]
+    },
+    {
+      "name": "SessionCreated",
+      "description": "A session that was started.",
+      "properties": [
+        {
+          "name": "session_id",
+          "type": "string",
+          "required": true,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "MessageInput",
+      "description": "A user message.",
+      "properties": [
+        {
+          "name": "message",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "description": "1 to 10000 characters after trimming."
+        }
+      ]
+    },
+    {
+      "name": "AnswersInput",
+      "description": "Answers to the questions of the last assistant message.",
+      "properties": [
+        {
+          "name": "answers",
+          "type": "string",
+          "required": true,
+          "array": true,
+          "description": "One per question, in order."
+        }
+      ]
+    },
+    {
+      "name": "AgentAnswersInput",
+      "description": "Answers to the questions of a paused delivery agent.",
+      "properties": [
+        {
+          "name": "workflow_id",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "description": "The stage workflow of the agent that asked."
+        },
+        {
+          "name": "answers",
+          "type": "string",
+          "required": true,
+          "array": true
+        }
+      ]
+    },
+    {
+      "name": "RetryStageInput",
+      "description": "The delivery stage to retry.",
+      "properties": [
+        {
+          "name": "stage",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "enum": [
+            "server",
+            "tests",
+            "documentation",
+            "repository"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ForkInput",
+      "description": "Where a fork starts.",
+      "properties": [
+        {
+          "name": "message_index",
+          "type": "integer",
+          "required": true,
+          "array": false,
+          "description": "The last message the fork keeps."
+        }
+      ]
+    },
+    {
+      "name": "SessionStatusChange",
+      "description": "A session after an accepted request.",
+      "properties": [
+        {
+          "name": "session_id",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "required": false,
+          "array": false,
+          "enum": [
+            "preparing",
+            "interviewing",
+            "turn_running",
+            "finalizing",
+            "completed",
+            "failed"
+          ]
+        },
+        {
+          "name": "verification_status",
+          "type": "string",
+          "required": false,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "Requirement",
+      "description": "A requirement of the task.",
+      "properties": [
+        {
+          "name": "id",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "category",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "enum": [
+            "functional",
+            "non_functional",
+            "technical"
+          ]
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "priority",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "enum": [
+            "must",
+            "should",
+            "could"
+          ]
+        },
+        {
+          "name": "rationale",
+          "type": "string",
+          "required": false,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "RequirementsSession",
+      "description": "A requirements session and its delivery.",
+      "properties": [
+        {
+          "name": "session_id",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "enum": [
+            "preparing",
+            "interviewing",
+            "turn_running",
+            "finalizing",
+            "completed",
+            "failed"
+          ]
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "required": false,
+          "array": false,
+          "enum": [
+            "new_service",
+            "api_change",
+            "bugfix",
+            "docs"
+          ]
+        },
+        {
+          "name": "messages",
+          "type": "Message",
+          "required": true,
+          "array": true
+        },
+        {
+          "name": "requirements",
+          "type": "Requirement",
+          "required": true,
+          "array": true
+        },
+        {
+          "name": "retired",
+          "type": "Requirement",
+          "required": true,
+          "array": true,
+          "description": "Requirements of the repository's contract the change ends."
+        },
+        {
+          "name": "document",
+          "type": "object",
+          "required": false,
+          "array": false,
+          "description": "The requirements document, once written."
+        },
+        {
+          "name": "error",
+          "type": "string",
+          "required": false,
+          "array": false
+        },
+        {
+          "name": "forked_from",
+          "type": "object",
+          "required": false,
+          "array": false
+        },
+        {
+          "name": "repository",
+          "type": "RepositorySelection",
+          "required": false,
+          "array": false
+        },
+        {
+          "name": "checkout",
+          "type": "object",
+          "required": false,
+          "array": false
+        },
+        {
+          "name": "contract_commit",
+          "type": "string",
+          "required": false,
+          "array": false
+        },
+        {
+          "name": "delivery",
+          "type": "object",
+          "required": false,
+          "array": false,
+          "description": "Progress of the delivery of a bugfix or documentation task."
+        }
+      ]
+    },
+    {
+      "name": "StartApiDesignSession",
+      "description": "The requirements session an API design continues.",
+      "properties": [
+        {
+          "name": "requirements_session_id",
+          "type": "string",
+          "required": true,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "ApiDesignSession",
+      "description": "An API design session and its delivery.",
+      "properties": [
+        {
+          "name": "session_id",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "enum": [
+            "preparing",
+            "interviewing",
+            "turn_running",
+            "finalizing",
+            "completed",
+            "failed"
+          ]
+        },
+        {
+          "name": "source_session_id",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "required": false,
+          "array": false,
+          "enum": [
+            "new_service",
+            "api_change",
+            "bugfix",
+            "docs"
+          ]
+        },
+        {
+          "name": "messages",
+          "type": "Message",
+          "required": true,
+          "array": true
+        },
+        {
+          "name": "requirements",
+          "type": "Requirement",
+          "required": true,
+          "array": true
+        },
+        {
+          "name": "api",
+          "type": "object",
+          "required": true,
+          "array": false,
+          "description": "The designed endpoints and schemas."
+        },
+        {
+          "name": "language",
+          "type": "string",
+          "required": false,
+          "array": false,
+          "description": "The implementation language, once chosen."
+        },
+        {
+          "name": "document",
+          "type": "object",
+          "required": false,
+          "array": false,
+          "description": "The OpenAPI document, once rendered."
+        },
+        {
+          "name": "error",
+          "type": "string",
+          "required": false,
+          "array": false
+        },
+        {
+          "name": "forked_from",
+          "type": "object",
+          "required": false,
+          "array": false
+        },
+        {
+          "name": "repository",
+          "type": "RepositorySelection",
+          "required": false,
+          "array": false
+        },
+        {
+          "name": "checkout",
+          "type": "object",
+          "required": false,
+          "array": false
+        },
+        {
+          "name": "problems",
+          "type": "string",
+          "required": true,
+          "array": true,
+          "description": "What must be settled before the design can be finalized."
+        },
+        {
+          "name": "verification_status",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "publication_status",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "verification",
+          "type": "object",
+          "required": false,
+          "array": false
+        },
+        {
+          "name": "publication",
+          "type": "object",
+          "required": false,
+          "array": false,
+          "description": "The branch the delivery pushed."
+        },
+        {
+          "name": "agent_questions",
+          "type": "object",
+          "required": false,
+          "array": true,
+          "description": "Questions of paused delivery agents. The other delivery progress fields (code, implementation, tests, repairs and their errors) are returned alongside."
+        }
+      ]
+    },
+    {
+      "name": "LLMRequestInput",
+      "description": "A chat request. Also accepted as multipart form data with one file.",
+      "properties": [
+        {
+          "name": "message",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "parent_request_id",
+          "type": "string",
+          "required": false,
+          "array": false
+        },
+        {
+          "name": "fork_after",
+          "type": "integer",
+          "required": false,
+          "array": false
+        },
+        {
+          "name": "repository",
+          "type": "RepositoryInput",
+          "required": false,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "LLMRequestStarted",
+      "description": "A chat request that is running.",
+      "properties": [
+        {
+          "name": "request_id",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "enum": [
+            "running"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LLMRequest",
+      "description": "A chat request and its conversation.",
+      "properties": [
+        {
+          "name": "request_id",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "result",
+          "type": "string",
+          "required": false,
+          "array": false
+        },
+        {
+          "name": "error",
+          "type": "string",
+          "required": false,
+          "array": false
+        },
+        {
+          "name": "messages",
+          "type": "Message",
+          "required": true,
+          "array": true
+        },
+        {
+          "name": "parent_request_id",
+          "type": "string",
+          "required": false,
+          "array": false
+        },
+        {
+          "name": "generated_documents",
+          "type": "object",
+          "required": true,
+          "array": true
+        },
+        {
+          "name": "repository",
+          "type": "RepositorySelection",
+          "required": false,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "WorkflowExecution",
+      "description": "A workflow execution.",
+      "properties": [
+        {
+          "name": "workflow_id",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "run_id",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "workflow_type",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "task_queue",
+          "type": "string",
+          "required": true,
+          "array": false
+        },
+        {
+          "name": "parent_workflow_id",
+          "type": "string",
+          "required": false,
+          "array": false
+        },
+        {
+          "name": "start_time",
+          "type": "string",
+          "required": true,
+          "array": false,
+          "format": "date-time"
+        },
+        {
+          "name": "close_time",
+          "type": "string",
+          "required": false,
+          "array": false,
+          "format": "date-time"
+        }
+      ]
+    },
+    {
+      "name": "WorkflowPage",
+      "description": "A page of workflow executions.",
+      "properties": [
+        {
+          "name": "workflows",
+          "type": "WorkflowExecution",
+          "required": true,
+          "array": true
+        },
+        {
+          "name": "next_page_token",
+          "type": "string",
+          "required": false,
+          "array": false
+        }
+      ]
+    },
+    {
+      "name": "WorkflowResult",
+      "description": "The result of the sample workflow.",
+      "properties": [
+        {
+          "name": "result",
+          "type": "string",
+          "required": true,
+          "array": false
+        }
+      ]
+    }
+  ],
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/auth/login",
+      "summary": "Sign in",
+      "description": "No sign-in required. Returns a session and sets the access_token cookie.",
+      "tag": "auth",
+      "parameters": [],
+      "request_schema": "Credentials",
+      "response_status": 200,
+      "response_schema": "Session",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        422,
+        429,
+        503
+      ],
+      "requirement_ids": [
+        "FR-2",
+        "NFR-1",
+        "NFR-3"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/auth/registration",
+      "summary": "Registration status",
+      "description": "No sign-in required. Whether the first account can still be registered.",
+      "tag": "auth",
+      "parameters": [],
+      "request_schema": null,
+      "response_status": 200,
+      "response_schema": "RegistrationStatus",
+      "response_array": false,
+      "error_statuses": [
+        503
+      ],
+      "requirement_ids": [
+        "FR-1"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/auth/register",
+      "summary": "Register the first account",
+      "description": "No sign-in required. Registers and signs in the first account; 403 once any account exists.",
+      "tag": "auth",
+      "parameters": [],
+      "request_schema": "Credentials",
+      "response_status": 201,
+      "response_schema": "Session",
+      "response_array": false,
+      "error_statuses": [
+        403,
+        422,
+        429,
+        503
+      ],
+      "requirement_ids": [
+        "FR-1",
+        "FR-7",
+        "NFR-1"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/auth/logout",
+      "summary": "Sign out",
+      "description": "No sign-in required. Clears the session cookie.",
+      "tag": "auth",
+      "parameters": [],
+      "request_schema": null,
+      "response_status": 204,
+      "response_schema": null,
+      "response_array": false,
+      "error_statuses": [],
+      "requirement_ids": [
+        "FR-5"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/auth/me",
+      "summary": "Current user",
+      "description": "The signed-in user.",
+      "tag": "auth",
+      "parameters": [],
+      "request_schema": null,
+      "response_status": 200,
+      "response_schema": "Profile",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503
+      ],
+      "requirement_ids": [
+        "FR-3",
+        "FR-4"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/auth/users",
+      "summary": "List accounts",
+      "description": "Administrator only.",
+      "tag": "auth",
+      "parameters": [],
+      "request_schema": null,
+      "response_status": 200,
+      "response_schema": "Account",
+      "response_array": true,
+      "error_statuses": [
+        401,
+        503,
+        403
+      ],
+      "requirement_ids": [
+        "FR-6"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/auth/users",
+      "summary": "Create an account",
+      "description": "Administrator only.",
+      "tag": "auth",
+      "parameters": [],
+      "request_schema": "Credentials",
+      "response_status": 201,
+      "response_schema": "Account",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        403,
+        409,
+        422
+      ],
+      "requirement_ids": [
+        "FR-6",
+        "FR-7"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/start",
+      "summary": "Start the sample workflow",
+      "description": "Runs the sample greeting workflow and returns its result.",
+      "tag": "workflows",
+      "parameters": [],
+      "request_schema": null,
+      "response_status": 200,
+      "response_schema": "WorkflowResult",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503
+      ],
+      "requirement_ids": [
+        "FR-18"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/workflows",
+      "summary": "List workflow executions",
+      "description": "Newest first, 50 per page.",
+      "tag": "workflows",
+      "parameters": [
+        {
+          "name": "type",
+          "location": "query",
+          "type": "string",
+          "required": false,
+          "description": "A workflow type to list only."
+        },
+        {
+          "name": "page_token",
+          "location": "query",
+          "type": "string",
+          "required": false,
+          "description": "next_page_token of the last page."
+        }
+      ],
+      "request_schema": null,
+      "response_status": 200,
+      "response_schema": "WorkflowPage",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        422
+      ],
+      "requirement_ids": [
+        "FR-17"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/connectors/github/connection",
+      "summary": "GitHub connection status",
+      "description": "The shared connection, without its private key.",
+      "tag": "github",
+      "parameters": [],
+      "request_schema": null,
+      "response_status": 200,
+      "response_schema": "GitHubConnection",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503
+      ],
+      "requirement_ids": [
+        "FR-8",
+        "NFR-2"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/connectors/github/connection",
+      "summary": "Connect a GitHub App",
+      "description": "Saves the app after GitHub confirms its key and installation. The request must be application/json and come from an allowed origin, if any.",
+      "tag": "github",
+      "parameters": [],
+      "request_schema": "GitHubAppCredentials",
+      "response_status": 200,
+      "response_schema": "GitHubConnection",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        403,
+        404,
+        409,
+        413,
+        415,
+        422
+      ],
+      "requirement_ids": [
+        "FR-8",
+        "NFR-2",
+        "NFR-5"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/connectors/github/connection",
+      "summary": "Disconnect GitHub",
+      "description": "Removes the shared connection. The body is an empty JSON object.",
+      "tag": "github",
+      "parameters": [],
+      "request_schema": "EmptyObject",
+      "response_status": 204,
+      "response_schema": null,
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        403,
+        415,
+        422
+      ],
+      "requirement_ids": [
+        "FR-8"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/connectors/github/connection/manifest",
+      "summary": "Connect a created GitHub App",
+      "description": "Saves the app GitHub created from this instance's manifest.",
+      "tag": "github",
+      "parameters": [],
+      "request_schema": "ManifestCode",
+      "response_status": 200,
+      "response_schema": "GitHubConnection",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        403,
+        413,
+        415,
+        422
+      ],
+      "requirement_ids": [
+        "FR-8"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/connectors/github/connection/check",
+      "summary": "Check the GitHub connection",
+      "description": "Validates the saved app against GitHub and picks up its installation. The body is an empty JSON object.",
+      "tag": "github",
+      "parameters": [],
+      "request_schema": "EmptyObject",
+      "response_status": 200,
+      "response_schema": "GitHubConnection",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        403,
+        409,
+        415,
+        422
+      ],
+      "requirement_ids": [
+        "FR-8"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/connectors/github/repositories",
+      "summary": "List repositories",
+      "description": "Repositories the installation can access.",
+      "tag": "github",
+      "parameters": [
+        {
+          "name": "page",
+          "location": "query",
+          "type": "integer",
+          "required": false,
+          "description": "Page number, 1 to 10000; 1 by default."
+        }
+      ],
+      "request_schema": null,
+      "response_status": 200,
+      "response_schema": "RepositoryPage",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        409,
+        422
+      ],
+      "requirement_ids": [
+        "FR-9"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/connectors/github/repositories/{owner}/{repo}/branches",
+      "summary": "List branches",
+      "description": "Branch names of a repository the installation can access.",
+      "tag": "github",
+      "parameters": [
+        {
+          "name": "owner",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "Repository owner."
+        },
+        {
+          "name": "repo",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "Repository name."
+        },
+        {
+          "name": "page",
+          "location": "query",
+          "type": "integer",
+          "required": false,
+          "description": "Page number, 1 to 10000; 1 by default."
+        }
+      ],
+      "request_schema": null,
+      "response_status": 200,
+      "response_schema": "BranchPage",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409,
+        422
+      ],
+      "requirement_ids": [
+        "FR-9"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/requirements/intake",
+      "summary": "Requirements intake",
+      "description": "The questions a requirements session starts with.",
+      "tag": "requirements",
+      "parameters": [],
+      "request_schema": null,
+      "response_status": 200,
+      "response_schema": "Intake",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503
+      ],
+      "requirement_ids": [
+        "FR-11"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/requirements/sessions",
+      "summary": "Start a requirements session",
+      "description": "Starts the interview in the repository from the intake's answers.",
+      "tag": "requirements",
+      "parameters": [],
+      "request_schema": "CreateRequirementsSession",
+      "response_status": 201,
+      "response_schema": "SessionCreated",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409,
+        422
+      ],
+      "requirement_ids": [
+        "FR-10",
+        "NFR-5"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/requirements/sessions/{session_id}",
+      "summary": "Get a requirements session",
+      "description": "The session's conversation, state and delivery progress.",
+      "tag": "requirements",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "requirements-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": null,
+      "response_status": 200,
+      "response_schema": "RequirementsSession",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404
+      ],
+      "requirement_ids": [
+        "FR-10"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/requirements/sessions/{session_id}/messages",
+      "summary": "Send a message",
+      "description": "Starts the interviewer's turn on the message.",
+      "tag": "requirements",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "requirements-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": "MessageInput",
+      "response_status": 202,
+      "response_schema": "SessionStatusChange",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409,
+        413,
+        422
+      ],
+      "requirement_ids": [
+        "FR-10"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/requirements/sessions/{session_id}/answers",
+      "summary": "Answer the interviewer's questions",
+      "description": "Answers the questions of the last assistant message and starts a turn.",
+      "tag": "requirements",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "requirements-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": "AnswersInput",
+      "response_status": 202,
+      "response_schema": "SessionStatusChange",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409,
+        422
+      ],
+      "requirement_ids": [
+        "FR-10"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/requirements/sessions/{session_id}/delivery/answers",
+      "summary": "Answer a delivery agent's questions",
+      "description": "Resumes the paused coding agent of the named stage workflow.",
+      "tag": "requirements",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "requirements-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": "AgentAnswersInput",
+      "response_status": 202,
+      "response_schema": "SessionCreated",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409,
+        422
+      ],
+      "requirement_ids": [
+        "FR-14"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/requirements/sessions/{session_id}/retry",
+      "summary": "Retry the last turn",
+      "description": "Runs the failed interviewer turn again.",
+      "tag": "requirements",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "requirements-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": null,
+      "response_status": 202,
+      "response_schema": "SessionStatusChange",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409
+      ],
+      "requirement_ids": [
+        "FR-10"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/requirements/sessions/{session_id}/generation/retry",
+      "summary": "Retry a delivery stage",
+      "description": "Starts the named stage of the delivery over.",
+      "tag": "requirements",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "requirements-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": "RetryStageInput",
+      "response_status": 202,
+      "response_schema": "SessionStatusChange",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409,
+        422
+      ],
+      "requirement_ids": [
+        "FR-14"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/requirements/sessions/{session_id}/finalize",
+      "summary": "Finalize the requirements session",
+      "description": "Writes the requirements document; the session is completed once it is ready.",
+      "tag": "requirements",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "requirements-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": null,
+      "response_status": 202,
+      "response_schema": "SessionStatusChange",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409
+      ],
+      "requirement_ids": [
+        "FR-12"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/requirements/sessions/{session_id}/fork",
+      "summary": "Fork the session",
+      "description": "Starts a new session with the conversation up to the given message.",
+      "tag": "requirements",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "requirements-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": "ForkInput",
+      "response_status": 201,
+      "response_schema": "SessionCreated",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409,
+        422
+      ],
+      "requirement_ids": [
+        "FR-10"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/requirements/sessions/{session_id}/document",
+      "summary": "Download the requirements document",
+      "description": "The requirements document as a file attachment; 404 until it is ready.",
+      "tag": "requirements",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "requirements-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": null,
+      "response_status": 200,
+      "response_schema": null,
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404
+      ],
+      "requirement_ids": [
+        "FR-12"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api-design/sessions",
+      "summary": "Start an API design session",
+      "description": "Continues a completed requirements session of a new service or an API change.",
+      "tag": "api-design",
+      "parameters": [],
+      "request_schema": "StartApiDesignSession",
+      "response_status": 201,
+      "response_schema": "SessionCreated",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409,
+        422
+      ],
+      "requirement_ids": [
+        "FR-13"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api-design/sessions/{session_id}",
+      "summary": "Get a API design session",
+      "description": "The session's conversation, state and delivery progress.",
+      "tag": "api-design",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "api-design-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": null,
+      "response_status": 200,
+      "response_schema": "ApiDesignSession",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404
+      ],
+      "requirement_ids": [
+        "FR-13"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api-design/sessions/{session_id}/messages",
+      "summary": "Send a message",
+      "description": "Starts the interviewer's turn on the message.",
+      "tag": "api-design",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "api-design-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": "MessageInput",
+      "response_status": 202,
+      "response_schema": "SessionStatusChange",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409,
+        413,
+        422
+      ],
+      "requirement_ids": [
+        "FR-13"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api-design/sessions/{session_id}/answers",
+      "summary": "Answer the interviewer's questions",
+      "description": "Answers the questions of the last assistant message and starts a turn.",
+      "tag": "api-design",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "api-design-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": "AnswersInput",
+      "response_status": 202,
+      "response_schema": "SessionStatusChange",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409,
+        422
+      ],
+      "requirement_ids": [
+        "FR-13"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api-design/sessions/{session_id}/delivery/answers",
+      "summary": "Answer a delivery agent's questions",
+      "description": "Resumes the paused coding agent of the named stage workflow.",
+      "tag": "api-design",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "api-design-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": "AgentAnswersInput",
+      "response_status": 202,
+      "response_schema": "SessionCreated",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409,
+        422
+      ],
+      "requirement_ids": [
+        "FR-14"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api-design/sessions/{session_id}/retry",
+      "summary": "Retry the last turn",
+      "description": "Runs the failed interviewer turn again.",
+      "tag": "api-design",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "api-design-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": null,
+      "response_status": 202,
+      "response_schema": "SessionStatusChange",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409
+      ],
+      "requirement_ids": [
+        "FR-13"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api-design/sessions/{session_id}/generation/retry",
+      "summary": "Retry a delivery stage",
+      "description": "Starts the named stage of the delivery over.",
+      "tag": "api-design",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "api-design-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": "RetryStageInput",
+      "response_status": 202,
+      "response_schema": "SessionStatusChange",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409,
+        422
+      ],
+      "requirement_ids": [
+        "FR-14"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api-design/sessions/{session_id}/finalize",
+      "summary": "Finalize the API design session",
+      "description": "Writes the OpenAPI document; the session is completed once it is ready.",
+      "tag": "api-design",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "api-design-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": null,
+      "response_status": 202,
+      "response_schema": "SessionStatusChange",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409
+      ],
+      "requirement_ids": [
+        "FR-13"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api-design/sessions/{session_id}/fork",
+      "summary": "Fork the session",
+      "description": "Starts a new session with the conversation up to the given message.",
+      "tag": "api-design",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "api-design-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": "ForkInput",
+      "response_status": 201,
+      "response_schema": "SessionCreated",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409,
+        422
+      ],
+      "requirement_ids": [
+        "FR-13"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api-design/sessions/{session_id}/document",
+      "summary": "Download the OpenAPI document",
+      "description": "The OpenAPI document as a file attachment; 404 until it is ready.",
+      "tag": "api-design",
+      "parameters": [
+        {
+          "name": "session_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "api-design-session- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": null,
+      "response_status": 200,
+      "response_schema": null,
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404
+      ],
+      "requirement_ids": [
+        "FR-13"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/llm/requests",
+      "summary": "Send a chat request",
+      "description": "JSON, or multipart form data with at most one file.",
+      "tag": "chat",
+      "parameters": [],
+      "request_schema": "LLMRequestInput",
+      "response_status": 202,
+      "response_schema": "LLMRequestStarted",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        400,
+        409,
+        413,
+        415,
+        422
+      ],
+      "requirement_ids": [
+        "FR-16",
+        "NFR-5"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/llm/requests/{request_id}/retry",
+      "summary": "Retry a chat request",
+      "description": "Answers the failed request again.",
+      "tag": "chat",
+      "parameters": [
+        {
+          "name": "request_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "llm-request- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": null,
+      "response_status": 202,
+      "response_schema": "LLMRequestStarted",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409
+      ],
+      "requirement_ids": [
+        "FR-16"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/llm/requests/{request_id}/fork",
+      "summary": "Fork a chat conversation",
+      "description": "Branches after one of the user's messages and answers it again.",
+      "tag": "chat",
+      "parameters": [
+        {
+          "name": "request_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "llm-request- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": "ForkInput",
+      "response_status": 202,
+      "response_schema": "LLMRequestStarted",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404,
+        409,
+        422
+      ],
+      "requirement_ids": [
+        "FR-16"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/llm/requests/{request_id}",
+      "summary": "Get a chat request",
+      "description": "The request's status and conversation.",
+      "tag": "chat",
+      "parameters": [
+        {
+          "name": "request_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "llm-request- followed by 32 hex digits."
+        }
+      ],
+      "request_schema": null,
+      "response_status": 200,
+      "response_schema": "LLMRequest",
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404
+      ],
+      "requirement_ids": [
+        "FR-16"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/llm/requests/{request_id}/documents/{document_id}",
+      "summary": "Download a document",
+      "description": "An attachment of the conversation or a document it generated, as a file.",
+      "tag": "chat",
+      "parameters": [
+        {
+          "name": "request_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "llm-request- followed by 32 hex digits."
+        },
+        {
+          "name": "document_id",
+          "location": "path",
+          "type": "string",
+          "required": true,
+          "description": "32 hex digits."
+        }
+      ],
+      "request_schema": null,
+      "response_status": 200,
+      "response_schema": null,
+      "response_array": false,
+      "error_statuses": [
+        401,
+        503,
+        404
+      ],
+      "requirement_ids": [
+        "FR-16"
+      ]
+    }
+  ]
+}
