@@ -9,8 +9,8 @@ from app.config import TASK_QUEUE
 from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, RetryStage
 from app.github.models import RepositorySelection
-from app.requirements.models import DIRECT_KINDS, RequirementsState
-from app.requirements.prompt import opening_message
+from app.requirements.models import DIRECT_KINDS, RequirementsState, TaskKind
+from app.requirements.prompt import intake_messages, opening_message
 from app.temporal.client import connect_temporal
 from app.temporal.sessions import SessionBusy, fork_messages, start_update, state_at_message
 
@@ -19,12 +19,17 @@ logger = logging.getLogger(__name__)
 
 async def start_session(
     state: RequirementsState | None = None, *, repository: RepositorySelection | None = None,
+    kind: TaskKind | None = None, answers: list[str] | None = None, task: str = "",
 ) -> str:
-    """Start a new interview in `repository`, or a prepared `state` such as a fork."""
+    """Start a new interview in `repository` from the user's answers to the intake
+    questions of `kind` and their `task`, or a prepared `state` such as a fork."""
     if state is None:
         if repository is None:
             raise ValueError("A requirements session needs a repository.")
-        state = RequirementsState(messages=[opening_message()], repository=repository)
+        if kind is None or answers is None or not task.strip():
+            raise ValueError("A requirements session starts from the intake questions.")
+        state = RequirementsState(messages=intake_messages(kind, answers, task), kind=kind,
+                                  repository=repository)
     session_id = f"requirements-session-{uuid.uuid4().hex}"
     client = await connect_temporal()
     handle = await client.start_workflow(

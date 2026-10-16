@@ -225,3 +225,32 @@ def test_requirements_creation_requires_a_repository(http, monkeypatch, body):
 
     monkeypatch.setattr(requirements, "start_session", start)
     assert http.post("/requirements/sessions", json=body).status_code == 422
+
+
+INTAKE = {"kind": "api_change", "answers": ["One existing endpoint", "Add new behaviour", "Yes"],
+          "task": "Add paging to the room list"}
+
+
+@pytest.mark.parametrize("change", [
+    {"kind": "maintenance"},
+    {"answers": ["One existing endpoint", "Add new behaviour"]},
+    {"answers": ["One existing endpoint", "  ", "Yes"]},
+    {"task": "   "},
+])
+def test_requirements_creation_requires_the_intake(http, monkeypatch, change):
+    async def start(**kwargs):
+        pytest.fail("A session must not start without the intake")
+
+    monkeypatch.setattr(requirements, "start_session", start)
+    body = {"repository": {"full_name": "octocat/private-project", "branch": "main"},
+            **INTAKE, **change}
+    assert http.post("/requirements/sessions", json=body).status_code == 422
+
+
+def test_intake_lists_the_questions_of_every_kind(http):
+    from app.llm.questions import normalize_questions
+
+    intake = http.get("/requirements/intake").json()
+    assert [item["kind"] for item in intake["kinds"]] == list(intake["questions"])
+    for questions in intake["questions"].values():
+        assert normalize_questions(questions) == questions

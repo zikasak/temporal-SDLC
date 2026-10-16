@@ -38,55 +38,70 @@ export function QuestionForm({ questions, disabled, submitting, label = "Send an
   label?: string;
   onSubmit: (answers: string[]) => Promise<boolean>;
 }) {
-  const [choices, setChoices] = useState<string[]>(() => questions.map(() => ""));
-  const [others, setOthers] = useState<string[]>(() => questions.map(() => ""));
-  const answers = choices.map((choice, index) => (choice === OTHER ? others[index] : choice).trim());
+  const [choices, setChoices] = useState<Choice[]>(() => questions.map(() => noChoice));
+  const answers = choices.map(choiceAnswer);
   const complete = answers.length === questions.length && answers.every(Boolean);
-
-  function update(list: string[], index: number, value: string) {
-    return list.map((item, position) => (position === index ? value : item));
-  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!complete || disabled) return;
-    if (await onSubmit(answers)) {
-      setChoices(questions.map(() => ""));
-      setOthers(questions.map(() => ""));
-    }
+    if (await onSubmit(answers)) setChoices(questions.map(() => noChoice));
   }
 
   return (
     <form className="question-form" onSubmit={submit}>
       {questions.map((item, index) => (
-        <fieldset key={index} disabled={disabled}>
-          <legend>{item.question}</legend>
-          {item.options.map((option) => (
-            <label key={option} className="question-option">
-              <input type="radio" name={`question-${index}`} value={option}
-                checked={choices[index] === option}
-                onChange={() => setChoices(update(choices, index, option))} />
-              <span>{option}</span>
-            </label>
-          ))}
-          <label className="question-option">
-            <input type="radio" name={`question-${index}`} value={OTHER}
-              checked={choices[index] === OTHER}
-              onChange={() => setChoices(update(choices, index, OTHER))} />
-            <span>Other</span>
-          </label>
-          {choices[index] === OTHER && (
-            <textarea className="question-other" rows={2} maxLength={2000} autoFocus
-              aria-label={`Your answer to: ${item.question}`} value={others[index]}
-              placeholder="Write your own answer…"
-              onChange={(event) => setOthers(update(others, index, event.target.value))} />
-          )}
-        </fieldset>
+        <QuestionField key={index} name={`question-${index}`} question={item} disabled={disabled}
+          value={choices[index]}
+          onChange={(choice) => setChoices(choices.map((old, position) => (position === index ? choice : old)))} />
       ))}
       <button className="run-button" type="submit" disabled={disabled || !complete}>
         <span>{submitting ? "Sending" : label}</span>
         {submitting && <span className="spinner" aria-hidden="true" />}
       </button>
     </form>
+  );
+}
+
+/** What the user picked for one question: an option, or "Other" with their own text. */
+export type Choice = { option: string; other: string };
+
+export const noChoice: Choice = { option: "", other: "" };
+
+/** The answer a choice gives; empty while it gives none. */
+export function choiceAnswer(choice: Choice) {
+  return (choice.option === OTHER ? choice.other : choice.option).trim();
+}
+
+/** One question with its options and "Other"; the parent holds the choice. */
+export function QuestionField({ name, question, value, disabled, onChange }: {
+  name: string;
+  question: Question;
+  value: Choice;
+  disabled: boolean;
+  onChange: (choice: Choice) => void;
+}) {
+  return (
+    <fieldset disabled={disabled}>
+      <legend>{question.question}</legend>
+      {question.options.map((option) => (
+        <label key={option} className="question-option">
+          <input type="radio" name={name} value={option} checked={value.option === option}
+            onChange={() => onChange({ ...value, option })} />
+          <span>{option}</span>
+        </label>
+      ))}
+      <label className="question-option">
+        <input type="radio" name={name} value={OTHER} checked={value.option === OTHER}
+          onChange={() => onChange({ ...value, option: OTHER })} />
+        <span>Other</span>
+      </label>
+      {value.option === OTHER && (
+        <textarea className="question-other" rows={2} maxLength={2000} autoFocus
+          aria-label={`Your answer to: ${question.question}`} value={value.other}
+          placeholder="Write your own answer…"
+          onChange={(event) => onChange({ ...value, other: event.target.value })} />
+      )}
+    </fieldset>
   );
 }

@@ -242,17 +242,41 @@ def titles(state: RequirementsState) -> list[str]:
     return [item["title"] for item in state.requirements]
 
 
+async def start_from_intake(env, repository, task: str):
+    return env.client.get_workflow_handle(await service.start_session(
+        repository=repository, kind="bugfix",
+        answers=["Data storage and retrieval", "Rooms vanish"], task=task))
+
+
+async def test_session_starts_from_the_intake(env, worker, temporal, repository_selection):
+    worker.kind = None
+    handle = await start_from_intake(env, repository_selection, "  Keep booked rooms  ")
+    state = await wait_for_status(handle, "interviewing")
+    # The intake is the opening of the transcript, and the analyst answers it at once.
+    assert [item["role"] for item in state.messages] == ["assistant", "user", "assistant"]
+    assert [item["question"] for item in state.messages[0]["questions"]] == [
+        "What kind of task is this?", "Which area of the service is affected?",
+        "What is the nature of the change?"]
+    assert state.messages[1]["content"] == (
+        "What kind of task is this?\n→ A bugfix or another change that leaves the API as it is"
+        "\n\nWhich area of the service is affected?\n→ Data storage and retrieval"
+        "\n\nWhat is the nature of the change?\n→ Rooms vanish"
+        "\n\nWhat needs to be done?\n→ Keep booked rooms")
+    # The user chose the kind, so the session records it without asking.
+    assert state.kind == "bugfix" and titles(state) == ["Keep booked rooms"]
+    await handle.terminate()
+
+
 async def test_fork_keeps_requirements_as_they_were_at_the_message(env, worker, temporal, repository_selection):
-    source = env.client.get_workflow_handle(await service.start_session(repository=repository_selection))
+    source = await start_from_intake(env, repository_selection, "A")
     # No message is accepted until the repository is checked out.
     assert (await wait_for_status(source, "interviewing")).repository == repository_selection
-    await source.execute_update(RequirementsWorkflow.answer_questions, ["A"])
     await source.execute_update(RequirementsWorkflow.send_message, "B")
-    # opening, A, Question 1?, B, Question 2?
+    # intake, A, Question 1?, B, Question 2?
 
     fork = env.client.get_workflow_handle(await service.fork_session(source.id, 2))
     state = await wait_for_status(fork, "interviewing")
-    assert [item["content"] for item in state.messages][1:] == [opening_answer("A"), "Question 1?"]
+    assert [item["content"] for item in state.messages][2:] == ["Question 1?"]
     assert titles(state) == ["A"]
     assert state.forked_from == {"session_id": source.id, "message_index": 2}
     assert (await service.get_session(fork.id))["repository"] == repository_selection

@@ -1781,3 +1781,53 @@ h2 {
   gap: 12px;
   margin-bottom: 20px;
 }
+
+/* The fixed start of a requirements session: numbered steps, all shown up front. */
+.intake-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+  width: 100%;
+  margin-top: 18px;
+}
+
+.intake-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  width: 100%;
+  margin: 0;
+  padding-left: 22px;
+}
+
+.intake-steps > li::marker {
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.intake-steps .repository-picker {
+  margin: 0;
+}
+
+.intake-step-title {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--ink);
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.intake-steps textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--ink);
+  background: #fff;
+  font: inherit;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  resize: vertical;
+}
