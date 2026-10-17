@@ -1,13 +1,20 @@
 # The API as one self-contained service, which the pipeline builds from the repository root
 # and verifies with contract-tests/: its own PostgreSQL, no Temporal, LLM or GitHub, served
 # on 8080 by a non-root user. Deployments use backend/Dockerfile instead.
+
+# Build stage: the dependencies, installed apart from the runtime image. No tests run here.
+FROM python:3.12-slim AS build
+WORKDIR /build
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# Runtime stage.
 FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends postgresql \
     && rm -rf /var/lib/apt/lists/* \
     && ln -s "$(ls -d /usr/lib/postgresql/*/bin)" /opt/postgresql
+COPY --from=build /install /usr/local
 WORKDIR /app
-COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/app app
 RUN useradd --create-home --uid 10001 app && mkdir /data && chown app:app /data
 USER app

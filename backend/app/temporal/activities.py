@@ -46,6 +46,7 @@ from app.tracing import langchain_config
 from app.requirements.document import DOCUMENT_FILENAME, render_requirements_markdown
 from app.requirements.models import Requirement
 from app.requirements.prompt import document_messages, interview_messages
+from app.review.models import COMMIT_FINDINGS, ReviewFinding, commit_findings
 from app.tools import ToolContext, build_tools
 from app.tools import api_design as api_design_tools
 from app.tools import questions as question_tools
@@ -60,6 +61,9 @@ COMMIT_SUBJECTS = {"api_change": "Change the service's API, contract tests and c
 DOCUMENTATION_SUBJECT = "Change the documentation"
 # Added to the commit of sources that were pushed without a check of them.
 UNVERIFIED_NOTE = "Not verified: no check exists for this kind of change yet."
+# Added to the commit of sources whose tests pass but whose code review left findings.
+FINDINGS_NOTE = ("Not verified: the tests pass, but code review findings remained after "
+                 "the last review round.")
 
 
 def _attached_document_ids(messages: list[dict[str, Any]]) -> list[str]:
@@ -164,7 +168,8 @@ async def _checkout(session_id: str, repository: RepositorySelection,
 
 
 async def _publish(session_id: str, repository: RepositorySelection, subject: str,
-                   update: Callable[[], None], verified: bool = True) -> RepositoryPublication:
+                   update: Callable[[], None], verified: bool = True,
+                   note: str = UNVERIFIED_NOTE) -> RepositoryPublication:
     """Apply `update` to the session's checkout, commit it to a new branch and push it."""
     target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
     token, connection = await _github_token()
@@ -176,7 +181,7 @@ async def _publish(session_id: str, repository: RepositorySelection, subject: st
             branch=repository_checkout.publication_branch(session_id),
             message=(f"{subject}\n\n"
                      f"Generated from {repository['branch']} by session {session_id}."
-                     + ("" if verified else f"\n\n{UNVERIFIED_NOTE}")),
+                     + ("" if verified else f"\n\n{note}")),
             author=(bot, f"{connection['bot_user_id']}+{bot}@users.noreply.github.com"),
             verified=verified,
         )
@@ -192,10 +197,11 @@ async def _publish(session_id: str, repository: RepositorySelection, subject: st
 @trace_activity('publish-repository', feature='repository', input_parameter='repository')
 async def publish_repository(
     session_id: str, repository: RepositorySelection, contract: RepositoryContract,
-    kind: str | None = None,
+    kind: str | None = None, findings: list[ReviewFinding] | None = None,
 ) -> RepositoryPublication:
     """Commit the verified service, its contract tests and the contract they were built
-    from to a new branch and push it."""
+    from to a new branch and push it. With open review `findings` the tests pass but the
+    code review was not satisfied: the commit is marked as unverified and lists them."""
     service_files = partial(is_service_file, session_language(contract['language']))
     target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
     service = target.parent / 'implementation/service'
@@ -210,8 +216,14 @@ async def publish_repository(
                                           lambda relative: True)
         write_contract(target, contract)
 
-    return await _publish(session_id, repository, COMMIT_SUBJECTS.get(kind, COMMIT_SUBJECT),
-                          update)
+    subject = COMMIT_SUBJECTS.get(kind, COMMIT_SUBJECT)
+    if not findings:
+        result = await _publish(session_id, repository, subject, update)
+        return {**result, 'findings': [], 'findings_count': 0}
+    result = await _publish(
+        session_id, repository, f"{subject} (unverified)", update, verified=False,
+        note=f"{FINDINGS_NOTE}\n\n{commit_findings(findings)}")
+    return {**result, 'findings': findings[:COMMIT_FINDINGS], 'findings_count': len(findings)}
 
 
 @activity.defn

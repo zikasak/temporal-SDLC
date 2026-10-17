@@ -108,6 +108,10 @@ services:
     <<: *sandbox-worker
     command: ["python", "-m", "app.diagnosis.worker"]
 
+  review-worker:
+    <<: *sandbox-worker
+    command: ["python", "-m", "app.review.worker"]
+
   documentation-worker:
     <<: *sandbox-worker
     command: ["python", "-m", "app.documentation.worker"]

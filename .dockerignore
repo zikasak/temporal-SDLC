@@ -1,6 +1,16 @@
-# Build context of the root Dockerfile: the backend's sources only.
+# Build context of the root Dockerfile: the backend's sources only. Everything else,
+# including tests, contract tests, build output and local environments, stays out.
 **
 !backend/requirements.txt
 !backend/app/
 !backend/app/**
 **/__pycache__/
+**/*.pyc
+**/tests/
+**/test_*.py
+**/*_test.py
+**/.pytest_cache/
+**/build/
+**/dist/
+**/*.egg-info/
+**/.env

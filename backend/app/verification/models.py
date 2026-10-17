@@ -1,8 +1,10 @@
 """Bounded verification payloads stored in Temporal and exposed by the session API."""
 from typing import Literal, TypedDict
 
+# `reviewing` while the code review runs; `findings_open` when the tests pass but review
+# findings remained after the last review round.
 VerificationStatus = Literal['not_applicable', 'waiting', 'running', 'diagnosing', 'repairing',
-                             'completed', 'skipped', 'error']
+                             'reviewing', 'completed', 'findings_open', 'skipped', 'error']
 
 
 class TestFailure(TypedDict):

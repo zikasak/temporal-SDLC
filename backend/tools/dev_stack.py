@@ -41,6 +41,8 @@ def main() -> int:
              [sys.executable, "-m", "app.verification.worker"]),
             ("Diagnosis worker", BACKEND,
              [sys.executable, "-m", "app.diagnosis.worker"]),
+            ("Review worker", BACKEND,
+             [sys.executable, "-m", "app.review.worker"]),
             ("Documentation worker", BACKEND,
              [sys.executable, "-m", "app.documentation.worker"]),
             # Launch Vite directly so graceful shutdown does not leave npm's child alive.

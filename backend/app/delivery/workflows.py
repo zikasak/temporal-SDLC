@@ -9,16 +9,20 @@ from temporalio.exceptions import ActivityError, ChildWorkflowError
 with workflow.unsafe.imports_passed_through():
     from app.config import (
         CODEGEN_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, DOCUMENTATION_TASK_QUEUE,
-        IMPLEMENTATION_TASK_QUEUE, TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
+        IMPLEMENTATION_TASK_QUEUE, REVIEW_TASK_QUEUE, TEST_GENERATION_TASK_QUEUE,
+        VERIFICATION_TASK_QUEUE,
     )
     from app.delivery.contract import with_requirements
     from app.delivery.models import (
         AgentQuestions, DeliveryProgress, DeliveryState, judge_baseline, judge_kept,
-        unproven_green,
+        open_review_findings, unproven_green,
     )
     from app.diagnosis.models import repair_request
     from app.github.checkout import SNAPSHOT_DIR
     from app.requirements.models import CHANGE_KINDS
+    from app.review.models import (
+        MAX_REVIEW_ROUNDS, ReviewFinding, ReviewRound, for_worker, review_request,
+    )
     from app.temporal.activities import publish_documentation, publish_repository
 
 # Each round is a diagnosis, a repair of one side and a new verification.
@@ -45,11 +49,19 @@ class DeliveryWorkflow:
         self.state = state
         self.spec = state.spec
         self.progress = state.progress
+        # How often each child workflow ID was used in this run, to keep them unique.
+        self._child_ids: dict[str, int] = {}
 
     @workflow.run
     async def run(self, state: DeliveryState) -> DeliveryProgress:
+        if self.state.record_only:
+            # A decision of the user's, such as accepting open findings, is recorded as it
+            # is: nothing runs and nothing is pushed.
+            return self.progress
         if not await self._snapshot():
             self.progress.verification_status = 'skipped'
+        elif self.state.instructions:
+            await self._instructed()
         elif self.state.retry_stage:
             await self._retry()
         else:
@@ -217,15 +229,22 @@ class DeliveryWorkflow:
 
     def _child_id(self, stage: str, repair: int = 0) -> str:
         child_id = f'{stage}-{self.spec.session_id}'
-        if self.state.retry_stage:
+        if self.state.retry_stage or self.state.instructions:
             child_id += f'-{workflow.info().run_id}'
         if repair:
             child_id += f'-repair-{repair}'
-        return child_id
+        count = self._child_ids.get(child_id, 0) + 1
+        self._child_ids[child_id] = count
+        # Review rounds verify again, with repair rounds of their own.
+        return child_id if count == 1 else f'{child_id}-{count}'
 
     async def _retry(self) -> None:
         if self.state.retry_stage == 'repository':
             # Generation and verification already succeeded; only the push is repeated.
+            return
+        if self.state.retry_stage == 'review':
+            # The verified delivery is reviewed again; a new run of review rounds.
+            await self._review_rounds()
             return
         if self.spec.kind == 'docs':
             await self._document()
@@ -252,8 +271,115 @@ class DeliveryWorkflow:
             await self._verify_and_repair()
             if self.spec.kind == 'api_change':
                 await self._prove_kept()
+            if self._passed():
+                await self._review_rounds()
         else:
             self.progress.verification_status = 'skipped'
+
+    def _passed(self) -> bool:
+        """Whether verification showed the implementation and the tests passing against
+        each other, with everything a change needs proved."""
+        return bool(self.progress.verification_status == 'completed'
+                    and self.progress.verification
+                    and self.progress.verification['status'] == 'passed'
+                    and not self.progress.verification_error
+                    and not self.progress.implementation_error
+                    and not self.progress.tests_error
+                    and (self.spec.kind != 'bugfix'
+                         or self.progress.baseline_status == 'reproduced'))
+
+    async def _review_rounds(self, instructions: str | None = None) -> None:
+        """Review the verified delivery's changes; while findings remain, send them to the
+        worker they concern, verify again and review again, at most MAX_REVIEW_ROUNDS
+        times. Findings left after the last round are open: the delivery is pushed as
+        unverified and the user decides about them."""
+        for count in range(1, MAX_REVIEW_ROUNDS + 1):
+            findings = await self._review(instructions)
+            # Only the first round reviews fixes made from the user's instructions.
+            instructions = None
+            if findings is None:
+                return
+            if not findings:
+                self.progress.verification_status = 'completed'
+                return
+            if count == MAX_REVIEW_ROUNDS:
+                break
+            if not await self._correct(findings, self.progress.reviews[-1]['round']):
+                return
+        workflow.logger.info('Review findings remain after %d rounds', MAX_REVIEW_ROUNDS)
+        self.progress.verification_status = 'findings_open'
+
+    async def _review(self, instructions: str | None) -> list[ReviewFinding] | None:
+        """One review round; None when the review could not run."""
+        self.progress.verification_status = 'reviewing'
+        number = len(self.progress.reviews) + 1
+        context = self._coding_context()
+        if instructions:
+            context['instructions'] = instructions
+        try:
+            result = await workflow.execute_child_workflow(
+                'ReviewWorkflow', args=[self.spec.session_id, context],
+                id=self._child_id('review', number),
+                task_queue=REVIEW_TASK_QUEUE,
+                result_type=dict,
+            )
+        except ChildWorkflowError as exc:
+            workflow.logger.warning('Code review failed: %s', exc.cause or exc)
+            self.progress.review_error = 'The code review could not run.'
+            self.progress.verification_status = 'error'
+            return None
+        self.progress.review_error = None
+        findings: list[ReviewFinding] = list(result.get('findings') or [])
+        round_: ReviewRound = {'round': number, 'findings': findings}
+        if instructions:
+            round_['instructions'] = instructions
+        self.progress.reviews.append(round_)
+        workflow.logger.info('Review round %d: %d findings', number, len(findings))
+        return findings
+
+    async def _correct(self, findings: list[ReviewFinding], number: int,
+                       instructions: str | None = None) -> bool:
+        """Have each worker the findings concern correct them, or with the user's
+        instructions both, then verify again. True when verification passed again."""
+        self.progress.verification_status = 'repairing'
+        workers = [worker for worker in ('implementation', 'tests')
+                   if instructions or for_worker(findings, worker)]
+        await asyncio.gather(*(
+            (self._implement_service if worker == 'implementation' else self._generate_tests)(
+                review_request(findings, worker, number, instructions))
+            for worker in workers))
+        if self.progress.implementation_error or self.progress.tests_error:
+            self.progress.verification_status = 'error'
+            return False
+        if ('tests' in workers and self.spec.kind == 'bugfix'
+                and not await self._reproduce(number)):
+            # Corrected added tests that no longer fail without the fix prove nothing.
+            self.progress.verification_status = 'error'
+            return False
+        self.progress.verification = None
+        self.progress.verification_error = None
+        await self._verify_and_repair()
+        if self.spec.kind == 'api_change':
+            await self._prove_kept()
+        if self._passed():
+            return True
+        if self.progress.verification_status == 'completed':
+            # The tests no longer pass: the delivery is not pushed this way.
+            self.progress.verification_status = 'error'
+            self.progress.verification_error = (
+                self.progress.verification_error
+                or 'Verification failed after correcting the review findings.')
+        return False
+
+    async def _instructed(self) -> None:
+        """The user's instructions about the open review findings: a round of fixes from
+        them, verification, and a new run of review rounds. If verification fails for
+        good the earlier unverified push stays and the flag stays raised."""
+        findings = open_review_findings(self.progress)
+        number = len(self.progress.reviews) + 1
+        instructions = self.state.instructions
+        if await self._correct(findings, number, instructions):
+            await self._review_rounds(instructions)
 
     def _tests_failed(self) -> bool:
         return bool(self.progress.verification_status == 'completed'
@@ -398,25 +524,35 @@ class DeliveryWorkflow:
         marked as unverified."""
         if not self.spec.checkout:
             return
+        # Tests that pass with review findings left after the last round are pushed too,
+        # marked as unverified, with the findings in the commit message.
+        open_findings = self.progress.verification_status == 'findings_open'
         result = (self.progress.verification
-                  if self.progress.verification_status == 'completed' else None)
+                  if self.progress.verification_status == 'completed' or open_findings
+                  else None)
         documentation = self.spec.kind == 'docs'
         # Only a documentation task may go on without a check, and only when
         # verification says it has none: a check that ran and did not pass stops it too.
         unverified = bool(documentation and result and result['status'] == 'not_implemented')
-        if not (unverified or result and result['status'] == 'passed'):
-            self.progress.publication_status = 'skipped'
-            return
-        if self.spec.kind in CHANGE_KINDS and (
+        skip = not (unverified or result and result['status'] == 'passed')
+        if not skip and self.spec.kind in CHANGE_KINDS and (
                 self.progress.verification_error
                 or self.spec.kind == 'bugfix' and self.progress.baseline_status != 'reproduced'):
             # Green alone is not enough for a change: all of its tests must have run, a
             # bugfix's must have been red without the fix, and an API change must have
             # kept the repository's tests its service still passes.
-            self.progress.publication_status = 'skipped'
+            skip = True
+        if skip:
+            if self.progress.open_findings and self.progress.publication:
+                # A run started by the user's instructions that did not pass leaves the
+                # earlier unverified push on the branch, and the flag raised.
+                self.progress.publication_status = 'completed'
+            else:
+                self.progress.publication_status = 'skipped'
             return
         self.progress.publication_status = 'running'
         self.progress.publication_error = None
+        findings = open_review_findings(self.progress) if open_findings else []
         if documentation:
             # The documentation alone: the service, its tests and its contract stay.
             push, args = publish_documentation, [self.spec.language, not unverified]
@@ -431,7 +567,7 @@ class DeliveryWorkflow:
                 # The repository's contract grows by what the change required of the service.
                 contract = with_requirements(contract, self.spec.brief['requirements'],
                                              self.spec.brief['retired'])
-            push, args = publish_repository, [contract, self.spec.kind]
+            push, args = publish_repository, [contract, self.spec.kind, findings]
         try:
             self.progress.publication = await workflow.execute_activity(
                 push,
@@ -449,13 +585,24 @@ class DeliveryWorkflow:
         else:
             workflow.logger.info('Sources pushed to %s', self.progress.publication['branch'])
             self.progress.publication_status = 'completed'
+            if not documentation:
+                # Raised for the user to accept the delivery or give instructions.
+                self.progress.open_findings = open_findings
+                if open_findings:
+                    self.progress.findings_acceptance = None
+
+    @staticmethod
+    def _stage_name(stage: str, repair: dict[str, Any] | None) -> str:
+        """Corrections of review findings are told apart from repairs of failed tests."""
+        return f'{stage}-review' if repair and 'review' in repair else stage
 
     async def _implement_service(self, repair: dict[str, Any] | None = None) -> None:
         try:
             self.progress.implementation = await workflow.execute_child_workflow(
                 "ImplementationWorkflow",
                 args=[self.spec.session_id, self._stage_context(repair)],
-                id=self._child_id('implementation', repair['attempt'] if repair else 0),
+                id=self._child_id(self._stage_name('implementation', repair),
+                                  repair['attempt'] if repair else 0),
                 task_queue=IMPLEMENTATION_TASK_QUEUE,
                 result_type=dict,
             )
@@ -468,7 +615,8 @@ class DeliveryWorkflow:
             self.progress.tests = await workflow.execute_child_workflow(
                 "TestGenerationWorkflow",
                 args=[self.spec.session_id, self._stage_context(repair)],
-                id=self._child_id('test-generation', repair['attempt'] if repair else 0),
+                id=self._child_id(self._stage_name('test-generation', repair),
+                                  repair['attempt'] if repair else 0),
                 task_queue=TEST_GENERATION_TASK_QUEUE,
                 result_type=dict,
             )

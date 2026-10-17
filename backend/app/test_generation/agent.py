@@ -110,6 +110,26 @@ them, follow the contract. The implementation stays unavailable.
 """
 
 
+REVIEW_PROMPT = """
+This is a correction run after a code review. /workspace/tests already holds your previous
+suite, which passes against the service. A code review of the delivery's changes found
+problems the tests must correct. The `repair.review` entry of the input holds the
+`findings` sent to you (each with its summary, the file it is about, when it is about one,
+and why it was sent to you) and, when present, the user's `instructions` about them, which
+take precedence over the findings. Correct each finding with targeted edits; do not start
+over or change tests the findings do not concern. Never weaken a test to make it pass. The
+requirements and OpenAPI contract remain the authority. The implementation stays
+unavailable.
+"""
+
+
+def repair_prompt(inputs: dict) -> str:
+    repair = inputs.get('repair')
+    if not repair:
+        return ''
+    return REVIEW_PROMPT if repair.get('review') else REPAIR_PROMPT
+
+
 def validate_completion(test_glob: str, root: Path) -> None:
     if not any(root.glob(test_glob)):
         raise RuntimeError('Agent finished without test files')
@@ -125,7 +145,7 @@ def main() -> None:
                             if inputs.get('brief')
                             else PROMPT.format(instructions=language['instructions'])
                             + (REPOSITORY_PROMPT if inputs.get('repository') else ''))
-                           + (REPAIR_PROMPT if inputs.get('repair') else '')),
+                           + repair_prompt(inputs)),
         initial_messages=[context,
                           *(['OpenAPI contract:\n' + OPENAPI.read_text()]
                             if OPENAPI.is_file() else [])],

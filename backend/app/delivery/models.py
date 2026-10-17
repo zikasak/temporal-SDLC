@@ -9,10 +9,12 @@ from app.github.models import (
 )
 from app.llm.questions import Question
 from app.requirements.models import Requirement, TaskKind
+from app.review.models import FindingsAcceptance, ReviewRound
 from app.verification.models import VerificationResult, VerificationStatus
 
-RetryStage = Literal['server', 'tests', 'documentation', 'repository']
-RETRY_STAGES = ('server', 'tests', 'documentation', 'repository')
+# `review` runs a failed code review again on the verified delivery.
+RetryStage = Literal['server', 'tests', 'documentation', 'repository', 'review']
+RETRY_STAGES = ('server', 'tests', 'documentation', 'repository', 'review')
 NAMED_TESTS = 5
 # How the tests a change added fared against the service as the repository holds it.
 # `reproduced`: they all fail and the existing tests pass, so the change has something to
@@ -105,6 +107,14 @@ class DeliveryProgress:
     publication_status: PublicationStatus = 'not_applicable'
     # Open questions of the coding agents, which wait for their answers.
     agent_questions: list[AgentQuestions] = field(default_factory=list)
+    # Every code review round of the delivery, oldest first.
+    reviews: list[ReviewRound] = field(default_factory=list)
+    # Why the last code review failed to run; cleared when a review completes.
+    review_error: str | None = None
+    # Raised when findings remained after the last review round and the delivery was
+    # pushed as unverified; the user accepts it or gives instructions.
+    open_findings: bool = False
+    findings_acceptance: FindingsAcceptance | None = None
 
 
 def judge_baseline(result: VerificationResult, added: list[str], changed: list[str],
@@ -181,3 +191,14 @@ class DeliveryState:
     spec: TaskSpec
     progress: DeliveryProgress = field(default_factory=DeliveryProgress)
     retry_stage: RetryStage | None = None
+    # The user's instructions about open review findings, which start a new run of fix
+    # rounds, verification and code review on the delivered sources.
+    instructions: str | None = None
+    # A run that only records the progress as it is given, such as the user's acceptance
+    # of open review findings.
+    record_only: bool = False
+
+
+def open_review_findings(progress: DeliveryProgress) -> list:
+    """The findings of the last review round: those still open after it."""
+    return list(progress.reviews[-1]['findings']) if progress.reviews else []

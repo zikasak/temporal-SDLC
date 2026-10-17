@@ -1,6 +1,6 @@
 """Non-secret session metadata; safe to import in Temporal workflows."""
 
-from typing import Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 
 class RepositorySelection(TypedDict):
@@ -29,6 +29,10 @@ class RepositoryPublication(TypedDict):
     # Verified paths left out because the repository's .gitignore matches them (first few).
     ignored: list[str]
     ignored_count: int
+    # The first open review findings, as the commit's message lists them, and the number
+    # of all of them; empty and 0 for a commit pushed without open findings.
+    findings: NotRequired[list[dict[str, Any]]]
+    findings_count: NotRequired[int]
 
 
 PublicationStatus = Literal['not_applicable', 'waiting', 'running', 'completed', 'skipped',

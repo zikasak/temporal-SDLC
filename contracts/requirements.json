@@ -1,199 +1,311 @@
 [
   {
-    "id": "FR-1",
     "category": "functional",
-    "title": "Register the first account",
     "description": "While no account exists, anyone can register one with a login and a password and is signed in as its administrator. Once any account exists, registration is closed and answers 403. GET /auth/registration tells whether it is still open.",
+    "id": "FR-1",
     "priority": "must",
-    "rationale": "The first user sets up the instance without an operator."
+    "rationale": "The first user sets up the instance without an operator.",
+    "title": "Register the first account"
   },
   {
-    "id": "FR-2",
     "category": "functional",
-    "title": "Sign in",
     "description": "A user signs in with login and password and receives a bearer token, which is also set as an HttpOnly, SameSite=Strict session cookie. An unknown login or a wrong password answers 401 without saying which. Logins are compared case-insensitively and surrounding whitespace is ignored.",
-    "priority": "must"
+    "id": "FR-2",
+    "priority": "must",
+    "title": "Sign in"
   },
   {
-    "id": "FR-3",
     "category": "functional",
-    "title": "Require a signed-in user",
     "description": "Every endpoint other than sign-in, registration, its status and sign-out requires a valid, unexpired token, sent as a bearer token or the session cookie, and answers 401 with WWW-Authenticate: Bearer otherwise.",
-    "priority": "must"
+    "id": "FR-3",
+    "priority": "must",
+    "title": "Require a signed-in user"
   },
   {
-    "id": "FR-4",
     "category": "functional",
-    "title": "Current user",
     "description": "GET /auth/me returns the signed-in user's login, when the session expires and whether the user is the administrator.",
-    "priority": "must"
+    "id": "FR-4",
+    "priority": "must",
+    "title": "Current user"
   },
   {
-    "id": "FR-5",
     "category": "functional",
-    "title": "Sign out",
     "description": "POST /auth/logout clears the session cookie and answers 204, signed in or not.",
-    "priority": "must"
+    "id": "FR-5",
+    "priority": "must",
+    "title": "Sign out"
   },
   {
-    "id": "FR-6",
     "category": "functional",
-    "title": "Administer accounts",
     "description": "Only the first user, the administrator, lists accounts (login and creation time) and creates new ones; any other user receives 403. Creating a login that already exists answers 409.",
-    "priority": "must"
+    "id": "FR-6",
+    "priority": "must",
+    "title": "Administer accounts"
   },
   {
-    "id": "FR-7",
     "category": "functional",
-    "title": "Validate account details",
     "description": "A login is an email address or a username of letters, digits and . _ % + -, 3 to 254 characters. A password has 8 to 1024 characters. Anything else answers 422 when an account is created.",
-    "priority": "must"
+    "id": "FR-7",
+    "priority": "must",
+    "title": "Validate account details"
   },
   {
-    "id": "FR-8",
     "category": "functional",
-    "title": "Connect GitHub",
     "description": "All users share one GitHub App connection. It is created from an app ID, its PEM private key and optionally the account it is installed on, or from the code GitHub returns after creating an app from this instance's manifest. It can be checked against GitHub and removed. Its status shows whether it is configured, whether the key can be encrypted, the app, the installation and when it was last validated.",
-    "priority": "must"
+    "id": "FR-8",
+    "priority": "must",
+    "title": "Connect GitHub"
   },
   {
-    "id": "FR-9",
     "category": "functional",
-    "title": "Browse repositories",
     "description": "Signed-in users list the repositories the GitHub App installation can access and the branches of one of them, a page at a time with the number of the next page.",
-    "priority": "must"
+    "id": "FR-9",
+    "priority": "must",
+    "title": "Browse repositories"
   },
   {
-    "id": "FR-10",
     "category": "functional",
-    "title": "Specify a task in a requirements session",
     "description": "A requirements session starts in a chosen repository and branch from the intake: the kind of task (new service, API change, bugfix or documentation), the answers to that kind's questions and what needs to be done. An LLM interviewer then records requirements while the user sends messages or answers its questions. A failed turn can be retried, and a session can be forked after any message.",
-    "priority": "must"
+    "id": "FR-10",
+    "priority": "must",
+    "title": "Specify a task in a requirements session"
   },
   {
-    "id": "FR-11",
     "category": "functional",
-    "title": "Requirements intake",
     "description": "GET /requirements/intake returns the kind question, the kinds of task, the questions asked for each kind and the task question, for the page to show before a session starts.",
-    "priority": "must"
+    "id": "FR-11",
+    "priority": "must",
+    "title": "Requirements intake"
   },
   {
-    "id": "FR-12",
     "category": "functional",
-    "title": "Finalize requirements",
     "description": "Finalizing a session writes its requirements document, available for download once ready. A task on an existing service (API change, bugfix or documentation) is specified against the contract the repository holds in contracts/; a repository without a readable contract cannot be finalized for one.",
-    "priority": "must"
+    "id": "FR-12",
+    "priority": "must",
+    "title": "Finalize requirements"
   },
   {
-    "id": "FR-13",
     "category": "functional",
-    "title": "Design the API",
     "description": "A new service or an API change continues in an API design session started from its completed requirements session. Its conversation records the endpoints, schemas and implementation language, and finalizing it renders the OpenAPI document.",
-    "priority": "must"
+    "id": "FR-13",
+    "priority": "must",
+    "title": "Design the API"
   },
   {
-    "id": "FR-14",
     "category": "functional",
-    "title": "Deliver the task",
     "description": "A finalized task is delivered: code is generated or changed, the service and its contract tests are written by separate coding agents, and verification runs the tests against the built service, repairing the failing side a bounded number of times. A bugfix's new tests must first fail against the service as the repository holds it. The session shows the delivery's progress, its agents' questions can be answered, and a failed stage can be retried.",
-    "priority": "must"
+    "id": "FR-14",
+    "priority": "must",
+    "title": "Deliver the task"
   },
   {
-    "id": "FR-15",
     "category": "functional",
-    "title": "Publish verified work",
     "description": "Only a delivery that passed verification is pushed, with the repository's updated contract and contract tests, to a new branch of the session's repository. A documentation change, which has no check yet, is pushed and marked as unverified.",
-    "priority": "must"
+    "id": "FR-15",
+    "priority": "must",
+    "title": "Publish verified work"
   },
   {
-    "id": "FR-16",
     "category": "functional",
-    "title": "Chat with the LLM",
     "description": "A user sends a free-form request, optionally with one attached file and a repository to work in, follows it up, retries a failed answer or forks the conversation after one of their messages. Attachments and generated documents can be downloaded.",
-    "priority": "must"
+    "id": "FR-16",
+    "priority": "must",
+    "title": "Chat with the LLM"
   },
   {
-    "id": "FR-17",
     "category": "functional",
-    "title": "List workflow executions",
     "description": "Signed-in users list the workflow executions of the namespace, newest first, 50 per page, optionally of one workflow type, continuing with the returned page token.",
-    "priority": "should"
+    "id": "FR-17",
+    "priority": "should",
+    "title": "List workflow executions"
   },
   {
-    "id": "FR-18",
     "category": "functional",
-    "title": "Start the sample workflow",
     "description": "POST /start runs the sample greeting workflow and returns its result.",
-    "priority": "could"
+    "id": "FR-18",
+    "priority": "could",
+    "title": "Start the sample workflow"
   },
   {
-    "id": "FR-19",
     "category": "functional",
-    "title": "Update a session's checkout",
     "description": "While a requirements session waits for the user, its branch can be checked out again at its latest commit, which the interview reads and the task is finalized against from then on, such as a commit that added the contract the task needs. The session shows the commit it is checked out at. A failed update keeps the earlier checkout and says so.",
-    "priority": "must"
+    "id": "FR-19",
+    "priority": "must",
+    "title": "Update a session's checkout"
   },
   {
-    "id": "NFR-1",
     "category": "non_functional",
-    "title": "Limit sign-in attempts",
     "description": "Sign-in and registration attempts are limited per client address per minute (AUTH_LOGIN_ATTEMPTS_PER_MINUTE, default 10); further attempts answer 429 with Retry-After.",
-    "priority": "must"
+    "id": "NFR-1",
+    "priority": "must",
+    "title": "Limit sign-in attempts"
   },
   {
-    "id": "NFR-2",
     "category": "non_functional",
-    "title": "Never echo secrets",
     "description": "Passwords, private keys and tokens are never part of a response or a validation error. Passwords are stored as salted scrypt hashes and the GitHub App key is stored encrypted.",
-    "priority": "must"
+    "id": "NFR-2",
+    "priority": "must",
+    "title": "Never echo secrets"
   },
   {
-    "id": "NFR-3",
     "category": "non_functional",
-    "title": "Expiring sessions",
     "description": "Session tokens are HS256 JWTs signed with AUTH_JWT_SECRET (at least 32 characters) that expire after AUTH_TOKEN_TTL_HOURS, 12 by default. Without a usable secret, sign-in and authenticated endpoints answer 503.",
-    "priority": "must"
+    "id": "NFR-3",
+    "priority": "must",
+    "title": "Expiring sessions"
   },
   {
-    "id": "NFR-4",
     "category": "non_functional",
-    "title": "Report unavailable dependencies",
     "description": "When Temporal answers a request with an error or the request storage cannot be reached, an endpoint answers 503 with a detail saying which.",
-    "priority": "must"
+    "id": "NFR-4",
+    "priority": "must",
+    "title": "Report unavailable dependencies"
   },
   {
-    "id": "NFR-5",
     "category": "non_functional",
-    "title": "Bound request sizes",
     "description": "Messages and tasks have at most 10000 characters, an attachment at most 20 MiB and GitHub configuration input at most 16 KiB; larger input answers 413 or 422.",
-    "priority": "must"
+    "id": "NFR-5",
+    "priority": "must",
+    "title": "Bound request sizes"
   },
   {
-    "id": "NFR-6",
     "category": "non_functional",
-    "title": "Validation errors",
     "description": "Malformed input answers 422 with a detail; an unknown session or request ID answers 404; an action the session's state does not allow answers 409.",
-    "priority": "must"
+    "id": "NFR-6",
+    "priority": "must",
+    "title": "Validation errors"
   },
   {
-    "id": "TR-1",
     "category": "technical",
-    "title": "Stack",
     "description": "The backend is a Python 3.12 FastAPI application with Temporal workflows and PostgreSQL storage, in backend/. The web client is a React application in frontend/.",
-    "priority": "must"
+    "id": "TR-1",
+    "priority": "must",
+    "title": "Stack"
   },
   {
-    "id": "TR-2",
     "category": "technical",
-    "title": "Isolated coding agents",
     "description": "Coding agents run in Docker containers built by the workers, without access to Temporal, the database or Docker.",
-    "priority": "must"
+    "id": "TR-2",
+    "priority": "must",
+    "title": "Isolated coding agents"
   },
   {
-    "id": "TR-3",
     "category": "technical",
-    "title": "Verifiable service image",
     "description": "The Dockerfile at the repository root builds the API as a self-contained service with its own PostgreSQL database, served on port 8080 by a non-root user, so that contract tests can run against it alone.",
-    "priority": "must"
+    "id": "TR-3",
+    "priority": "must",
+    "title": "Verifiable service image"
+  },
+  {
+    "category": "functional",
+    "description": "The delivery pipeline runs a code review step only once both the implementation and the tests exist and verification has shown that they pass against each other.",
+    "id": "FR-20",
+    "priority": "must",
+    "rationale": "User asked for a review step that runs after implementation and tests are ready and verified against each other.",
+    "title": "Code review step after successful verification"
+  },
+  {
+    "category": "functional",
+    "description": "The code review step examines only the changes made by the current delivery and reports no findings about code that the delivery did not change.",
+    "id": "FR-21",
+    "priority": "must",
+    "rationale": "User: the step should verify the changes, and only them.",
+    "title": "Review covers only the delivery's changes"
+  },
+  {
+    "category": "functional",
+    "description": "The code review step looks for potential issues in the changes that the passing test suite does not cover.",
+    "id": "FR-22",
+    "priority": "must",
+    "rationale": "User: verify the changes for potential issues not covered by tests.",
+    "title": "Review targets issues the tests do not cover"
+  },
+  {
+    "category": "functional",
+    "description": "The reviewing LLM's instructions state that not every observation is worth reporting, so that it reports only findings significant enough to need a correction.",
+    "id": "FR-23",
+    "priority": "must",
+    "rationale": "User: the LLM should know that not everything is worth mentioning.",
+    "title": "Reviewer told not every observation is worth reporting"
+  },
+  {
+    "category": "functional",
+    "description": "When the code review step reports findings, they are passed as input to the next repair cycle.",
+    "id": "FR-24",
+    "priority": "must",
+    "rationale": "User: findings should be passed to the next cycle.",
+    "title": "Review findings passed to the next repair cycle"
+  },
+  {
+    "category": "functional",
+    "description": "Whether the next cycle runs the implementation worker, the test generation worker, or both is decided by the nature of the review findings.",
+    "id": "FR-25",
+    "priority": "must",
+    "rationale": "User: whether the implementation or testing worker runs depends on the nature of the findings.",
+    "title": "Findings decide which worker runs"
+  },
+  {
+    "category": "functional",
+    "description": "The code review step runs for new service, API change and bugfix deliveries, and does not run for documentation-only deliveries.",
+    "id": "FR-26",
+    "priority": "must",
+    "rationale": "User: all kinds touching the code.",
+    "title": "Review applies to every code-producing task kind"
+  },
+  {
+    "category": "functional",
+    "description": "After a round that corrects review findings, the pipeline runs verification again and, once verification passes, runs the code review step again.",
+    "id": "FR-27",
+    "priority": "must",
+    "rationale": "User chose: verify again, then review again.",
+    "title": "Verify and review again after fixing findings"
+  },
+  {
+    "category": "functional",
+    "description": "The number of review-driven correction rounds is capped at 5 by a limit of its own, separate from the existing limit of 5 test repair rounds, and review rounds do not use up test repair rounds.",
+    "id": "FR-28",
+    "priority": "must",
+    "rationale": "User chose a separate limit of review rounds, set to 5 like test repairs.",
+    "title": "Separate limit of 5 review rounds"
+  },
+  {
+    "category": "functional",
+    "description": "When review findings remain after the review round limit is reached and the tests pass, the delivery is still pushed to the repository, marked as unverified, and a flag that asks a human for attention is raised in the delivery progress.",
+    "id": "FR-29",
+    "priority": "must",
+    "rationale": "User: push as unverified, raise a flag to the human.",
+    "title": "Push as unverified when review findings remain"
+  },
+  {
+    "category": "functional",
+    "description": "When the open-findings flag is raised, the user can either accept the delivery as it is, which clears the flag, or give instructions on what to do about the findings.",
+    "id": "FR-30",
+    "priority": "must",
+    "rationale": "User: ability to tell what to do or accept as is.",
+    "title": "Human decides on open review findings"
+  },
+  {
+    "category": "functional",
+    "description": "When the user gives instructions about open review findings, the instructions are passed to a new round of fixes, followed by verification and code review, and the result is pushed to the same branch as the unverified delivery.",
+    "id": "FR-31",
+    "priority": "must",
+    "rationale": "User chose: instructions go into a new round of fixes, then verification, review and push to the same branch.",
+    "title": "Human instructions start a new fix round on the same branch"
+  },
+  {
+    "category": "functional",
+    "description": "When a delivery is pushed with open review findings, the commit message of the pushed commit lists those findings.",
+    "id": "FR-32",
+    "priority": "must",
+    "rationale": "User: findings should also be visible in the pushed branch, in the commit message.",
+    "title": "Open review findings recorded in the commit message"
+  },
+  {
+    "category": "functional",
+    "description": "For every code review round, the delivery progress shows the findings reported and, for each finding, the worker it was sent to (implementation, test generation, or both).",
+    "id": "FR-33",
+    "priority": "must",
+    "rationale": "User confirmed: show findings for every review round, with the worker each was sent to.",
+    "title": "Review findings shown in delivery progress"
   }
 ]
