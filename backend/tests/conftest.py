@@ -45,7 +45,8 @@ for line in sys.stdin:
     item = json.loads(line)
     if item['type'] == 'control_request':
         send({'type': 'control_response', 'response': {
-            'subtype': 'success', 'request_id': item['request_id'], 'response': {}}})
+            'subtype': 'success', 'request_id': item['request_id'],
+            'response': SERVER_INFO if item['request']['subtype'] == 'initialize' else {}}})
     if item['type'] != 'user':
         continue
     tools = []
@@ -96,10 +97,11 @@ def fake_claude(tmp_path):
     nth list of events; calls() is what every turn received."""
     log = tmp_path / 'claude-calls.json'
 
-    def install(*runs):
+    def install(*runs, server_info=None):
         script = tmp_path / 'claude'
         script.write_text(f'#!{sys.executable}\nimport json, pathlib\n'
                           f'LOG = pathlib.Path({str(log)!r})\n'
+                          f'SERVER_INFO = json.loads({json.dumps(server_info or {})!r})\n'
                           f'RUNS = json.loads({json.dumps(runs)!r})\n' + FAKE_CLAUDE)
         script.chmod(0o755)
         return str(script)
