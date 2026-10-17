@@ -59,6 +59,19 @@ provider's: it carries the model Claude Code actually used, and prompt-cache rea
 writes are reported as `input_cache_read` / `input_cache_creation` beside the uncached
 input. Claude Code's own telemetry is not enabled.
 
+Coding agents keep one native Claude SDK conversation open across ordinary tool turns.
+The agent loop still executes and traces workspace tools; a SDK hook waits for their
+real results before Claude continues. The CLI retains thinking blocks and its injected
+context, and its working directory stays stable. Each generation reports that request's
+streaming token usage, rather than the session's cumulative result counters. This keeps
+prompt prefixes reusable by Anthropic's cache.
+
+Application history compaction deliberately starts a new native conversation from the
+checkpoint, in the same directory. A run paused for user answers closes its CLI and seeds
+a new conversation from the saved application history on resume. Completion, errors,
+timeouts and turn limits also close the CLI; pending tool turns are interrupted first.
+Ordinary host chat calls and checkpoint summarization remain independent requests.
+
 Feature tags, environment, release and session attributes propagate to children.
 Host roots include Temporal workflow/run/activity IDs and attempt numbers. API
 design roots also identify their source requirements session.

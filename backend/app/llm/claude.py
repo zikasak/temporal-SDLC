@@ -3,6 +3,7 @@ import asyncio
 import tempfile
 import uuid
 from collections.abc import Sequence
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
@@ -11,6 +12,8 @@ from claude_agent_sdk import (
     AssistantMessage, ClaudeAgentOptions, ClaudeSDKError, ResultMessage, SessionStore,
     TextBlock, ToolUseBlock, create_sdk_mcp_server, query, tool,
 )
+from pydantic import PrivateAttr
+
 from langchain_core.callbacks import (
     AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun,
 )
@@ -33,8 +36,8 @@ RESUME_FILLER = 'No response requested.'
 
 
 class ChatClaude(BaseChatModel):
-    """Each call is one fresh Claude Code process making one model request, with none of
-    its built-in tools and none of the user's settings, skills or project context files.
+    """A bare Claude model, with an optional native session for coding-agent tool loops.
+    No built-in tools, user settings, skills or project context files are loaded.
     Credentials come from Claude Code itself: its own login, or `ANTHROPIC_API_KEY` /
     `CLAUDE_CODE_OAUTH_TOKEN` in the environment."""
 
@@ -44,6 +47,22 @@ class ChatClaude(BaseChatModel):
     cli_path: str | None = None
     # Bounds the whole generation: the process is stopped when it runs longer.
     timeout: float = 600
+
+    _session: Any = PrivateAttr(default=None)
+
+    @contextmanager
+    def session(self):
+        """Use one native conversation for a coding run, closing it on every exit."""
+        from app.llm.claude_session import ClaudeSession
+
+        if self._session is not None:
+            raise RuntimeError('Claude session is already open')
+        self._session = ClaudeSession(self)
+        try:
+            yield self
+        finally:
+            self._session.close()
+            self._session = None
 
     @property
     def _llm_type(self) -> str:
@@ -65,6 +84,8 @@ class ChatClaude(BaseChatModel):
     def _generate(self, messages: list[BaseMessage], stop: list[str] | None = None,
                   run_manager: CallbackManagerForLLMRun | None = None,
                   **kwargs: Any) -> ChatResult:
+        if self._session is not None and kwargs.get('tools'):
+            return self._session.invoke(messages, kwargs['tools'])
         call = self._agenerate(messages, stop, **kwargs)
         try:
             asyncio.get_running_loop()
@@ -77,6 +98,8 @@ class ChatClaude(BaseChatModel):
     async def _agenerate(self, messages: list[BaseMessage], stop: list[str] | None = None,
                          run_manager: AsyncCallbackManagerForLLMRun | None = None, *,
                          tools: Sequence[dict[str, Any]] = (), **kwargs: Any) -> ChatResult:
+        if self._session is not None and tools:
+            return await asyncio.to_thread(self._session.invoke, messages, tools)
         system = '\n\n'.join(message.text for message in messages
                              if isinstance(message, SystemMessage))
         history = _claude_messages(messages)
@@ -92,23 +115,8 @@ class ChatClaude(BaseChatModel):
                 break
         else:
             raise RuntimeError("claude repeated Claude Code's resume filler instead of replying")
-        usage = result.usage or {}
-        cached = {'cache_read': usage.get('cache_read_input_tokens') or 0,
-                  'cache_creation': usage.get('cache_creation_input_tokens') or 0}
-        prompt_tokens = (usage.get('input_tokens') or 0) + sum(cached.values())
-        output_tokens = usage.get('output_tokens') or 0
-        message = AIMessage(
-            content=text,
-            tool_calls=[{'name': block.name.removeprefix(TOOL_PREFIX), 'args': block.input,
-                         'id': block.id, 'type': 'tool_call'} for block in calls],
-            usage_metadata={'input_tokens': prompt_tokens, 'output_tokens': output_tokens,
-                            'total_tokens': prompt_tokens + output_tokens,
-                            'input_token_details': cached},
-            response_metadata={'model_name': model_name, 'finish_reason': result.stop_reason,
-                               'total_cost_usd': result.total_cost_usd},
-        )
-        return ChatResult(generations=[ChatGeneration(message=message)],
-                          llm_output={'model_name': model_name})
+        return _chat_result(blocks, model_name, result.usage or {},
+                            result.stop_reason, result.total_cost_usd)
 
     async def _request(self, system: str, history: list[dict[str, Any]], prompt: str,
                        tools: Sequence[dict[str, Any]]) -> tuple[list[Any], str | None, Any]:
@@ -162,6 +170,27 @@ class ChatClaude(BaseChatModel):
         return blocks, model_name, result
 
 
+def _chat_result(blocks, model_name, usage, stop_reason, cost=None):
+    """Normalize native request usage, including both prompt-cache buckets."""
+    cached = {'cache_read': usage.get('cache_read_input_tokens') or 0,
+              'cache_creation': usage.get('cache_creation_input_tokens') or 0}
+    prompt_tokens = (usage.get('input_tokens') or 0) + sum(cached.values())
+    output_tokens = usage.get('output_tokens') or 0
+    message = AIMessage(
+        content=''.join(block.text for block in blocks if isinstance(block, TextBlock)),
+        tool_calls=[{'name': block.name.removeprefix(TOOL_PREFIX), 'args': block.input,
+                     'id': block.id, 'type': 'tool_call'}
+                    for block in blocks if isinstance(block, ToolUseBlock)],
+        usage_metadata={'input_tokens': prompt_tokens, 'output_tokens': output_tokens,
+                        'total_tokens': prompt_tokens + output_tokens,
+                        'input_token_details': cached},
+        response_metadata={'model_name': model_name, 'finish_reason': stop_reason,
+                           'total_cost_usd': cost},
+    )
+    return ChatResult(generations=[ChatGeneration(message=message)],
+                      llm_output={'model_name': model_name})
+
+
 class _History(SessionStore):
     """Serves one prepared transcript; nothing Claude Code writes is kept."""
 
@@ -176,8 +205,8 @@ class _History(SessionStore):
 
 
 def _handed_back(spec: dict[str, Any]):
-    """Declares a bound tool to Claude Code. The turn limit stops the run before this
-    empty result reaches the model: the caller - not Claude Code - does the work."""
+    """Declare a tool whose work belongs to the caller. Single requests stop at the
+    turn limit; native sessions replace this placeholder in their PostToolUse hook."""
     @tool(spec['name'], spec.get('description', ''), spec['parameters'])
     async def handler(arguments: dict[str, Any]) -> dict[str, Any]:
         return {'content': [{'type': 'text', 'text': ''}]}

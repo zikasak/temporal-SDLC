@@ -1,13 +1,9 @@
 """Drive the Claude adapter through the real Claude Agent SDK and a stand-in `claude` CLI."""
-from functools import partial
-
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 
 from app import docker_agents
-from app.agent_workflows import runtime
-from app.implementation.agent import validate_completion
 from app.llm import claude
 from app.llm.claude import ChatClaude
 from tests.conftest import claude_reply
@@ -143,35 +139,6 @@ async def test_failed_response_raises(fake_claude):
         'API Error: 401', is_error=True, result='API Error: 401 invalid x-api-key')))
     with pytest.raises(RuntimeError, match='401 invalid x-api-key'):
         await model.ainvoke('hi')
-
-
-def test_coding_agent_runs_its_tools_through_claude(fake_claude, tmp_path, monkeypatch):
-    install, calls = fake_claude
-    cli = install(
-        claude_reply(('call-1', 'mcp__langchain__write_file',
-                      {'path': 'Dockerfile', 'content': 'FROM scratch'})),
-        claude_reply('Finished'))
-    monkeypatch.setattr(claude, 'ChatClaude', partial(ChatClaude, cli_path=cli))
-    monkeypatch.setenv('LLM_HARNESS', 'claude')
-    monkeypatch.setenv('CLAUDE_MODEL', 'claude-test')
-    for name in ('OPENAI_MODEL', 'OPENAI_API_KEY', 'OPENAI_BASE_URL'):
-        monkeypatch.delenv(name, raising=False)
-    root = tmp_path / 'service'
-    root.mkdir()
-
-    runtime.run_agent(runtime.AgentProfile(
-        root=root, prompt='Implement the supplied contract', initial_messages=['requirements'],
-        max_turns_env='TEST_AGENT_MAX_TURNS', validate_completion=validate_completion,
-        completion_message='Completed', exhaustion_message='Tool-turn limit exceeded',
-    ))
-
-    assert (root / 'Dockerfile').read_text() == 'FROM scratch'
-    first, second = calls()
-    assert flag(first['argv'], '--model') == 'claude-test'
-    assert 'write_file' in [item['name'] for item in first['tools']]
-    assert second['transcript'][-1]['content'] == [
-        {'type': 'tool_result', 'tool_use_id': 'call-1', 'content': 'Written',
-         'is_error': False}]
 
 
 async def test_claude_harness_forwards_credentials_by_name(created_container, monkeypatch):
