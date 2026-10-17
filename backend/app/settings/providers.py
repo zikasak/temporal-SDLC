@@ -30,6 +30,10 @@ class ProviderOptions(BaseModel):
     hint: str | None = None
 
 
+class ProviderDiscoveryError(RuntimeError):
+    """An actionable, credential-free discovery error safe to show in settings."""
+
+
 async def _openai_models() -> list[ModelOption]:
     headers = {'Authorization': f'Bearer {OPENAI_API_KEY}'} if OPENAI_API_KEY else {}
     async with httpx.AsyncClient(timeout=10) as client:
@@ -76,13 +80,22 @@ async def _claude_models() -> list[ModelOption]:
 
 
 async def _pi_models() -> list[ModelOption]:
-    process = await asyncio.create_subprocess_exec(
-        'pi', '--mode', 'rpc', '--no-session', '--no-tools', '--no-extensions',
-        '--no-skills', '--no-prompt-templates', '--no-context-files', '--no-themes',
-        '--no-approve', '--no-mcp',
-        env={**os.environ, 'PI_CODING_AGENT_DIR': str(PI_CREDENTIALS_DIR)},
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL, limit=4 * 1024 * 1024)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            'pi', '--mode', 'rpc', '--no-session', '--no-tools', '--no-extensions',
+            '--no-skills', '--no-prompt-templates', '--no-context-files', '--no-themes',
+            '--no-approve',
+            env={**os.environ, 'PI_CODING_AGENT_DIR': str(PI_CREDENTIALS_DIR)},
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL, limit=4 * 1024 * 1024)
+    except FileNotFoundError as exc:
+        raise ProviderDiscoveryError(
+            'Pi is not installed or is not on the API server PATH. Install Pi on the '
+            'server running the API, then restart the API and refresh provider options.') from exc
+    except PermissionError as exc:
+        raise ProviderDiscoveryError(
+            'The API server cannot execute Pi. Check the Pi executable permissions '
+            'for the API user, then refresh provider options.') from exc
 
     async def command(kind: str, **params):
         process.stdin.write((json.dumps({'id': kind, 'type': kind, **params}) + '\n').encode())
@@ -91,9 +104,14 @@ async def _pi_models() -> list[ModelOption]:
             event = json.loads(line)
             if event.get('type') == 'response' and event.get('id') == kind:
                 if not event.get('success'):
-                    raise RuntimeError('Pi model discovery failed')
+                    raise ProviderDiscoveryError(
+                        'Pi rejected a model discovery command. Check its credentials '
+                        'and update Pi on the API server, then refresh provider options.')
                 return event['data'] if 'data' in event else {}
-        raise RuntimeError('Pi exited during model discovery')
+        code = await process.wait()
+        raise ProviderDiscoveryError(
+            f'Pi exited during model discovery (exit code {code}). Check that Pi starts '
+            'for the API user and that PI_CREDENTIALS_DIR points to its configuration.')
 
     try:
         models = []
@@ -105,7 +123,15 @@ async def _pi_models() -> list[ModelOption]:
             models.append(ModelOption(id=f'{item["provider"]}/{item["id"]}',
                                       label=f'{item["name"]} ({item["provider"]})',
                                       thinking_levels=list(dict.fromkeys(['default', *levels]))))
+        if not models:
+            raise ProviderDiscoveryError(
+                'Pi has no selectable models. Sign in to Pi as the API user and check '
+                'PI_CREDENTIALS_DIR, then refresh provider options.')
         return models
+    except (json.JSONDecodeError, KeyError) as exc:
+        raise ProviderDiscoveryError(
+            'Pi returned an incompatible model discovery response. Update Pi on the '
+            'API server, then refresh provider options.') from exc
     finally:
         if process.returncode is None:
             process.terminate()
@@ -134,6 +160,12 @@ async def get_provider_options(adapters: Iterable[Adapter] | None = None) -> dic
                 error=None if models else f'{label} reported no available models.',
                 hint=('This endpoint does not report supported thinking levels; only Model default is available.'
                       if adapter == 'openai' else None))
+        except ProviderDiscoveryError as exc:
+            return adapter, ProviderOptions(label=label, error=str(exc))
+        except TimeoutError:
+            return adapter, ProviderOptions(
+                label=label, error=f'{label} model discovery timed out. Check that the '
+                'provider starts for the API user, then refresh provider options.')
         except Exception:
             # Provider errors can contain credentials or private endpoint URLs.
             return adapter, ProviderOptions(label=label, error=f'Could not load {label} models. Check the provider connection and retry.')

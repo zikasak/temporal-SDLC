@@ -93,6 +93,8 @@ async def test_pi_catalog_queries_levels_for_each_exact_model(client, tmp_path, 
     cli.write_text(f'#!{sys.executable}\n' + f'LOG = {str(log)!r}\n' + '''
 import json, os, sys
 selected = None
+if '--no-mcp' in sys.argv:
+    sys.exit('Error: Unknown option: --no-mcp')  # Pi 1.0.0, pinned in the Docker images.
 assert os.environ['PI_CODING_AGENT_DIR'].endswith('provider-config')
 assert '--no-session' in sys.argv and '--no-extensions' in sys.argv
 for line in sys.stdin:
@@ -124,3 +126,14 @@ for line in sys.stdin:
     assert [json.loads(line)['type'] for line in log.read_text().splitlines()] == [
         'get_available_models', 'set_model', 'get_available_thinking_levels',
         'set_model', 'get_available_thinking_levels']
+
+
+async def test_missing_pi_executable_identifies_the_api_server_setup(client, tmp_path, monkeypatch):
+    monkeypatch.setenv('PATH', str(tmp_path))
+    monkeypatch.setattr(providers, 'PROVIDERS', {'pi': ('Pi', providers._pi_models)})
+    response = await client.get('/settings/providers')
+    assert response.status_code == 200
+    catalog = response.json()['pi']
+    assert catalog['models'] == []
+    assert 'not installed' in catalog['error']
+    assert 'API server PATH' in catalog['error']

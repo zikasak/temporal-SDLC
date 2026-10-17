@@ -14,8 +14,9 @@
 #
 # Set in Coolify: the credentials and service URL for the adapters selected in Settings,
 # GITHUB_TOKEN_ENCRYPTION_KEY and GITHUB_ALLOWED_ORIGINS (the public origin, such as
-# https://app.example.com). The Pi adapter is not supported here: its credential files
-# are bind-mounted from the worker's filesystem, which the sandbox daemon cannot see.
+# https://app.example.com). Pi uses OPENAI_API_KEY for openai/* models and
+# ANTHROPIC_API_KEY for anthropic/* models. File-based Pi logins are not supported
+# here: the sandbox daemon cannot see credential files on the worker's filesystem.
 # Provider and Langfuse URLs must be reachable from the sandbox, so not localhost.
 
 x-app: &app
