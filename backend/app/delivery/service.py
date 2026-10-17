@@ -108,6 +108,9 @@ async def instruct_findings(session_id: str, instructions: str) -> DeliveryProgr
     progress = state.progress
     progress.agent_questions = []
     progress.review_error = None
+    # A failed earlier fix round keeps its images; its errors would stop this round.
+    progress.implementation_error = None
+    progress.tests_error = None
     progress.verification_status = 'repairing'
     # The flag stays raised and the earlier push stays until a new push replaces it.
     state.retry_stage = None
