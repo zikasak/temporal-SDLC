@@ -1,6 +1,7 @@
 """Exercise the bundled Claude CLI against a loopback Anthropic endpoint."""
 import copy
 import json
+import time
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -69,6 +70,9 @@ def claude_http(monkeypatch, tmp_path):
                     send('content_block_delta', index=i,
                          delta={'type': 'text_delta', 'text': block['text']})
                 send('content_block_stop', index=i)
+                if block['type'] == 'tool_use' and i < len(blocks) - 1:
+                    # The CLI runs a streamed call before the response ends.
+                    time.sleep(0.5)
             send('message_delta', delta={
                 'stop_reason': 'tool_use' if called else 'end_turn', 'stop_sequence': None},
                 usage={'output_tokens': 5})

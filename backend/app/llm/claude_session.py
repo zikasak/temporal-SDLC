@@ -84,6 +84,13 @@ class ClaudeSession:
                 raise ValueError('Claude needs a text follow-up')
             await self.client.query('\n\n'.join(message.text for message in added))
 
+    def _pending(self, identifier):
+        # The CLI runs each call as soon as its block has streamed, so a hook can ask for
+        # a result before the response ends and the caller learns of the call.
+        if identifier not in self.waiting_tools:
+            self.waiting_tools[identifier] = self.loop.create_future()
+        return self.waiting_tools[identifier]
+
     def _worker(self, messages, tools):
         try:
             asyncio.run(self._run(messages, tools))
@@ -113,7 +120,7 @@ class ClaudeSession:
                              if isinstance(message, SystemMessage))
 
         async def tool_result(data, tool_use_id, context):
-            message = await self.waiting_tools[data['tool_use_id']]
+            message = await self._pending(data['tool_use_id'])
             event = data['hook_event_name']
             field = 'updatedToolOutput' if event == 'PostToolUse' else 'additionalContext'
             return {'hookSpecificOutput': {'hookEventName': event, field: message.text}}
@@ -156,7 +163,7 @@ class ClaudeSession:
                         elif raw['type'] == 'message_stop':
                             calls = [block for block in blocks if isinstance(block, ToolUseBlock)]
                             if calls:
-                                self.waiting_tools = {block.id: self.loop.create_future()
+                                self.waiting_tools = {block.id: self._pending(block.id)
                                                       for block in calls}
                                 self.reply.set_result(_chat_result(
                                     blocks, model_name, usage, 'tool_use'))
