@@ -36,6 +36,9 @@ PI_SHARED_DIR = 'containers'
 # Credentials Claude Code reads from its environment; a login kept in the host's
 # keychain or ~/.claude cannot follow it into a container.
 CLAUDE_CREDENTIALS = ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN')
+# These providers can also run in a separate sandbox daemon using environment
+# credentials, without bind-mounting a worker-local Pi login into that daemon.
+PI_API_KEYS = {'openai': 'OPENAI_API_KEY', 'anthropic': 'ANTHROPIC_API_KEY'}
 # Where a stage keeps the workspace of an agent that paused for the user's answers.
 PAUSED_DIR = 'paused'
 MAX_STATE_BYTES = 16 * 1024 * 1024
@@ -182,12 +185,19 @@ def _container_url(base_url: str) -> str:
 
 
 def pi_container_args(settings: ModelSettings) -> list[str]:
-    """Mount the credentials required by a saved Pi adapter selection."""
+    """Supply the credentials required by a saved Pi adapter selection."""
     if settings.adapter != 'pi':
         return []
+    credential = PI_API_KEYS.get(settings.model.partition('/')[0])
+    if credential and os.getenv(credential) and not (PI_CREDENTIALS_DIR / 'models.json').is_file():
+        # API keys need no worker-local files, even if Pi created an empty auth.json
+        # while starting. Custom model configurations still use the file mounts below.
+        # Forward the variable name so its value never enters Docker arguments.
+        return ['-e', credential]
     if not (PI_CREDENTIALS_DIR / 'auth.json').is_file():
         raise RuntimeError(f'Pi credentials not found: {PI_CREDENTIALS_DIR / "auth.json"}. '
-                           'Sign in with pi or set PI_CREDENTIALS_DIR.')
+                           'Sign in with pi, set PI_CREDENTIALS_DIR, or configure the '
+                           'selected provider API key (OPENAI_API_KEY or ANTHROPIC_API_KEY).')
     # Pi serializes token refreshes with a lock directory created beside auth.json, so
     # the containers' Pi directory is one host directory: agents running in parallel then
     # contend for the same lock instead of each refreshing the token on its own.

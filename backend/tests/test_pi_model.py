@@ -246,5 +246,29 @@ async def test_pi_harness_requires_credentials(created_container, tmp_path, monk
     from app.settings.models import ModelSettings
     saved_model_settings['implementation'] = ModelSettings(adapter='pi', model='openai/test')
     monkeypatch.setattr(docker_agents, 'PI_CREDENTIALS_DIR', tmp_path / 'absent')
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
     with pytest.raises(RuntimeError, match='Pi credentials not found'):
         await created_container()
+
+
+@pytest.mark.parametrize(('model', 'credential'), [
+    ('openai/test', 'OPENAI_API_KEY'), ('anthropic/test', 'ANTHROPIC_API_KEY'),
+])
+@pytest.mark.parametrize('existing_auth_file', [False, True])
+async def test_pi_harness_uses_api_keys_without_host_mounts(
+        created_container, tmp_path, monkeypatch, saved_model_settings, model, credential,
+        existing_auth_file):
+    from app.settings.models import ModelSettings
+
+    saved_model_settings['implementation'] = ModelSettings(adapter='pi', model=model)
+    credentials = tmp_path / 'pi'
+    if existing_auth_file:
+        credentials.mkdir()
+        (credentials / 'auth.json').write_text('{}')
+    monkeypatch.setattr(docker_agents, 'PI_CREDENTIALS_DIR', credentials)
+    monkeypatch.setenv(credential, 'private-pi-api-key')
+    args, settings = await created_container()
+    assert '-v' not in args
+    assert credential in [args[index + 1] for index, arg in enumerate(args) if arg == '-e']
+    assert 'private-pi-api-key' not in ' '.join(args)
+    assert settings == saved_model_settings['implementation']

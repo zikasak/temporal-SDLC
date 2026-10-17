@@ -28,7 +28,9 @@ Set `AUTH_JWT_SECRET` (at least 32 random characters) in `backend/.env` first; w
 
 ## Model settings
 
-The **Settings** tab stores the adapter, model, and thinking level for each workflow in PostgreSQL. Choices are discovered from the configured providers: Pi's RPC model list and per-model thinking levels (using `PI_CREDENTIALS_DIR`), Claude Agent SDK initialization metadata, or the configured `OPENAI_BASE_URL` model endpoint. The Google endpoint uses its native model list. Discovery sends no model prompts. Pi must be installed on the API host and support `get_available_thinking_levels`; Claude uses the SDK's bundled CLI.
+The **Settings** tab stores the adapter, model, and thinking level for each workflow in PostgreSQL. Choices are discovered from the configured providers: Pi's RPC model list and per-model thinking levels (using `PI_CREDENTIALS_DIR`), Claude Agent SDK initialization metadata, or the configured `OPENAI_BASE_URL` model endpoint. The Google endpoint uses its native model list. Discovery sends no model prompts. Both Docker application images include Pi; a local API needs Pi installed on its PATH, with support for `get_available_thinking_levels`. Claude uses the SDK's bundled CLI.
+
+In Coolify, configure `OPENAI_API_KEY` for Pi's `openai/*` models or `ANTHROPIC_API_KEY` for its `anthropic/*` models. These keys reach the API, workers, and isolated coding agents without host credential mounts. Pi OAuth/file-based logins still require a deployment where the workers and sandbox daemon share access to `PI_CREDENTIALS_DIR`. Rebuild and redeploy the application image after upgrading from an image without Pi.
 
 Model and thinking selectors show only provider-reported choices. Endpoints without thinking capability metadata offer **Model default**, which omits explicit reasoning options. **Refresh provider options** reloads the catalog without discarding edits. Unavailable saved selections stay visible for correction; saves recheck provider availability and the model/level combination before writing any workflow. Changes apply to the next model run.
 

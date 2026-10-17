@@ -3,6 +3,7 @@
 # belongs to the agent images, which the coding workers build from this directory at run time.
 FROM eclipse-temurin:21-jre AS java
 FROM docker:29-cli AS docker
+FROM node:24-slim AS node
 FROM python:3.12-slim
 # The codegen worker runs openapi-generator, which needs a JRE.
 COPY --from=java /opt/java/openjdk /opt/java/openjdk
@@ -21,6 +22,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 ADD --chmod=644 --checksum=sha256:3f1e6ce5c6ad4f15242c6170ab43aad4bad771622617eeece4a7d4f72ffaf329 \
     https://repo1.maven.org/maven2/org/openapitools/openapi-generator-cli/7.22.0/openapi-generator-cli-7.22.0.jar \
     tools/openapi-generator-cli-7.22.0.jar
+# The API discovers Pi models and the workers run Pi for conversation workflows.
+# Keep this version aligned with the isolated coding-agent image.
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && npm install --global @earendil-works/pi-coding-agent@1.0.0 && npm cache clean --force
 COPY . .
 # UID/GID 10001 is also the group of the sandbox daemon's socket.
 RUN useradd --create-home --uid 10001 app && mkdir /data && chown app:app /data
