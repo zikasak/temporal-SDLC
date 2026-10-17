@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -403,6 +404,11 @@ def _run_agent(profile: AgentProfile) -> bool:
         provider = create_model(model_name=os.environ['OPENAI_MODEL'],
                                 api_key=os.environ['OPENAI_API_KEY'],
                                 base_url=os.environ['OPENAI_BASE_URL'])
+    with provider.session() if harness == 'claude' else nullcontext():
+        return _run_with_provider(profile, provider)
+
+
+def _run_with_provider(profile: AgentProfile, provider) -> bool:
     tools = [*workspace_tools(profile.root, profile.contracts, profile.build_dirs),
              ask_user_tool()]
     by_name = {item.name: item for item in tools}
