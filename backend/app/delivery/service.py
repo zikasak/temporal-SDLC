@@ -143,6 +143,8 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
         if state.spec.checkout and not progress.open_findings:
             progress.publication_error = None
             progress.publication_status = 'waiting'
+            progress.pull_request_error = None
+            progress.pull_request_status = 'waiting'
         state.retry_stage = stage
         await _restart(client, task_queue, session_id, state)
         logger.info('Restarted the code review for session %s', session_id)
@@ -162,7 +164,8 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
               # of it that could not complete.
               'documentation': (progress.documentation_error
                                 or state.spec.kind == 'docs' and unverified),
-              'repository': progress.publication_error}[stage]
+              # A pull request step that ended in error is retried with a new push.
+              'repository': progress.publication_error or progress.pull_request_error}[stage]
     if not failed:
         raise SessionBusy('Only failed generation can be retried.')
     if stage == 'tests' and not progress.code and not change:
@@ -177,6 +180,8 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
     if state.spec.checkout:
         progress.publication_error = None
         progress.publication_status = 'waiting'
+        progress.pull_request_error = None
+        progress.pull_request_status = 'waiting'
     if stage != 'repository':
         # A repeated push keeps the verification it publishes.
         progress.verification = None

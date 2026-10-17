@@ -307,5 +307,61 @@
     "priority": "must",
     "rationale": "User confirmed: show findings for every review round, with the worker each was sent to.",
     "title": "Review findings shown in delivery progress"
+  },
+  {
+    "category": "functional",
+    "description": "After a delivery's branch has been pushed, the workflow opens a pull request from that branch to the repository's default branch, and the pull request's description says what the delivery changed.",
+    "id": "FR-34",
+    "priority": "must",
+    "rationale": "User: at the end of the workflow, after code is pushed, create a PR to the default branch with a description of what changed.",
+    "title": "Open a pull request after the push"
+  },
+  {
+    "category": "functional",
+    "description": "A pull request is opened for every pushed delivery, including unverified ones: documentation changes and deliveries pushed with open review findings.",
+    "id": "FR-35",
+    "priority": "must",
+    "rationale": "User chose: every pushed delivery, including unverified ones.",
+    "title": "Pull request for every pushed delivery"
+  },
+  {
+    "category": "functional",
+    "description": "When the pull request cannot be opened because the GitHub App installation lacks the pull request permission, the pushed branch remains, the delivery does not fail, and the delivery progress reports that the permission is missing.",
+    "id": "FR-36",
+    "priority": "must",
+    "rationale": "User chose: report it in the delivery progress without failing the push.",
+    "title": "Missing pull request permission does not fail the push"
+  },
+  {
+    "category": "functional",
+    "description": "When a later push goes to a branch that already has an open pull request (after the user's instructions on open review findings), no new pull request is opened; the existing pull request is kept and its description is updated to say what the delivery changed.",
+    "id": "FR-37",
+    "priority": "must",
+    "rationale": "User chose: keep the existing pull request and update its description.",
+    "title": "Update the existing pull request on a later push"
+  },
+  {
+    "category": "functional",
+    "description": "A pull request for an unverified delivery is opened as a draft, and when the delivery has open review findings, the pull request's description lists them.",
+    "id": "FR-38",
+    "priority": "must",
+    "rationale": "User chose: draft pull request with the open findings in the description.",
+    "title": "Unverified deliveries open draft pull requests"
+  },
+  {
+    "category": "functional",
+    "description": "Once the pull request is opened, the delivery progress shows a link to it.",
+    "id": "FR-39",
+    "priority": "must",
+    "rationale": "User chose: show the pull request link once it is opened.",
+    "title": "Pull request link in delivery progress"
+  },
+  {
+    "category": "technical",
+    "description": "The GitHub App manifest this instance offers requests the pull_requests: write permission in addition to its existing permissions.",
+    "id": "TR-4",
+    "priority": "must",
+    "rationale": "Opening pull requests requires pull_requests: write; the manifest currently grants only contents and metadata.",
+    "title": "Pull request permission in the app manifest"
   }
 ]

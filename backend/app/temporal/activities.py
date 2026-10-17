@@ -32,11 +32,15 @@ from app.documents import (
     parse_stored_document,
     read_document_text,
 )
+from app.delivery.pull_request import describe as pull_request_description
 from app.github import checkout as repository_checkout
+from app.github import client as github_client
 from app.github import service as github_service
 from app.github import storage as github_storage
 from app.github.errors import GitHubError
-from app.github.models import RepositoryCheckout, RepositoryPublication, RepositorySelection
+from app.github.models import (
+    PullRequest, RepositoryCheckout, RepositoryPublication, RepositorySelection,
+)
 from app.implementation.activities import is_service_file
 from app.llm.graph import get_message_graph, interview
 from app.llm.model import get_model
@@ -245,6 +249,48 @@ async def publish_documentation(
         DOCUMENTATION_SUBJECT if verified else f"{DOCUMENTATION_SUBJECT} (unverified)",
         lambda: repository_checkout.replace_files(written, target, documentation_files),
         verified)
+
+
+@activity.defn
+@trace_activity('open-pull-request', feature='repository', input_parameter='repository')
+async def open_pull_request(
+    session_id: str, repository: RepositorySelection, publication: RepositoryPublication,
+    change: dict[str, Any],
+) -> PullRequest:
+    """Open a pull request from the pushed branch to the repository's default branch, or
+    update the open one of that branch: its description says what the delivery changed.
+    An unverified delivery opens a draft; a verified push marks a draft ready for review."""
+    kind = change.get('kind')
+    subject = (DOCUMENTATION_SUBJECT if kind == 'docs'
+               else COMMIT_SUBJECTS.get(kind, COMMIT_SUBJECT))
+    title, body = pull_request_description(subject, change, publication, session_id,
+                                           repository['branch'])
+    verified = bool(publication['verified'])
+    token, _ = await _github_token()
+    full_name, branch = repository['full_name'], publication['branch']
+    try:
+        base = await github_client.get_default_branch(token, full_name)
+        pull = await github_client.find_open_pull_request(token, full_name, branch, base)
+        if pull:
+            pull = await github_client.update_pull_request(
+                token, full_name, pull['number'], title, body)
+            if verified and pull['draft']:
+                pull['draft'] = await github_client.set_pull_request_draft(
+                    token, pull['node_id'], False)
+            action = 'Updated'
+        else:
+            pull = await github_client.create_pull_request(
+                token, full_name, branch, base, title, body, draft=not verified)
+            action = 'Opened'
+    except GitHubError as exc:
+        activity.logger.warning("Could not open or update the pull request of %s: %s",
+                                branch, exc)
+        # Missing permissions, a removed installation or a rejected request need a person.
+        raise ApplicationError(
+            str(exc), type='PullRequestError',
+            non_retryable=exc.status_code in (401, 403, 404, 409, 422)) from exc
+    activity.logger.info("%s pull request #%d of %s", action, pull['number'], branch)
+    return {key: pull[key] for key in ('number', 'title', 'url', 'draft', 'base')}
 
 
 @activity.defn

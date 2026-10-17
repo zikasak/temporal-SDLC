@@ -85,20 +85,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
         '404':
           description: Not Found
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-13
+      - FR-34
+      - FR-35
+      - FR-36
+      - FR-37
+      - FR-38
+      - FR-39
   /api-design/sessions/{session_id}/answers:
     post:
       operationId: postApiDesignSessionsBySessionIdAnswers
@@ -486,7 +492,9 @@ paths:
       operationId: postApiDesignSessionsBySessionIdGenerationRetry
       summary: Retry a delivery stage
       description: Starts the named stage of the delivery over. The review stage runs
-        a failed code review again; 409 when the delivery has no failed review.
+        a failed code review again; 409 when the delivery has no failed review. The
+        repository stage pushes again and then opens or updates the pull request,
+        which also recovers a pull request step that ended in error.
       tags:
       - api-design
       parameters:
@@ -543,6 +551,9 @@ paths:
       - FR-14
       - FR-20
       - FR-26
+      - FR-34
+      - FR-36
+      - FR-37
   /api-design/sessions/{session_id}/messages:
     post:
       operationId: postApiDesignSessionsBySessionIdMessages
@@ -1645,20 +1656,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
         '404':
           description: Not Found
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-10
+      - FR-34
+      - FR-35
+      - FR-36
+      - FR-37
+      - FR-38
+      - FR-39
   /requirements/sessions/{session_id}/answers:
     post:
       operationId: postRequirementsSessionsBySessionIdAnswers
@@ -2096,7 +2113,9 @@ paths:
       operationId: postRequirementsSessionsBySessionIdGenerationRetry
       summary: Retry a delivery stage
       description: Starts the named stage of the delivery over. The review stage runs
-        a failed code review again; 409 when the delivery has no failed review.
+        a failed code review again; 409 when the delivery has no failed review. The
+        repository stage pushes again and then opens or updates the pull request,
+        which also recovers a pull request step that ended in error.
       tags:
       - requirements
       parameters:
@@ -2153,6 +2172,9 @@ paths:
       - FR-14
       - FR-20
       - FR-26
+      - FR-34
+      - FR-36
+      - FR-37
   /requirements/sessions/{session_id}/messages:
     post:
       operationId: postRequirementsSessionsBySessionIdMessages
@@ -2721,6 +2743,8 @@ components:
           - repository
           - review
           description: review runs a failed code review again on the verified delivery.
+            repository pushes the delivery again and then opens or updates its pull
+            request, such as after pull_request_status became error.
       required:
       - stage
     ForkInput:
@@ -2837,7 +2861,10 @@ components:
             the open_findings flag, findings_acceptance (FindingsAcceptance), the
             reviewing and findings_open verification_status values and the publication
             (RepositoryPublication) with its verified flag, the first 20 open findings
-            its commit message lists and findings_count, as in ApiDesignSession.
+            its commit message lists and findings_count, as in ApiDesignSession. Every
+            delivery's progress also holds pull_request_status and, once a pushed
+            delivery's pull request is open, pull_request (PullRequest), and pull_request_error,
+            as in ApiDesignSession.
       required:
       - session_id
       - status
@@ -2960,6 +2987,38 @@ components:
           $ref: '#/components/schemas/FindingsAcceptance'
           description: Set when the user accepted the delivery with its open review
             findings as it is.
+        pull_request_status:
+          type: string
+          enum:
+          - not_applicable
+          - waiting
+          - running
+          - completed
+          - skipped
+          - error
+          description: 'The pull request step after the push, with the same values
+            as publication_status: waiting until the branch is pushed, running while
+            the pull request is opened or updated, completed once it is open or updated,
+            skipped when nothing was pushed, error when it could not be opened or
+            updated (see pull_request_error). An error never fails the push or the
+            delivery; retrying the repository stage pushes again and retries the pull
+            request.'
+        pull_request:
+          $ref: '#/components/schemas/PullRequest'
+          description: The pull request opened from the pushed branch to the default
+            branch, once it is open. A later push to the same branch keeps an open
+            pull request and updates its description, and marks a draft ready for
+            review when that push is verified. If the earlier pull request was closed
+            or merged, the later push opens a new one and this field links to it.
+            When updating it fails, this field keeps the existing pull request.
+        pull_request_error:
+          type: string
+          description: 'Why the pull request could not be opened or updated, such
+            as the GitHub App installation lacking the pull_requests: write permission,
+            or a network or GitHub API error. Reported the same way whether opening
+            or updating failed. The push and the delivery do not fail because of it;
+            retrying the repository stage tries again. Cleared when the pull request
+            step completes.'
       required:
       - session_id
       - status
@@ -2970,6 +3029,7 @@ components:
       - problems
       - verification_status
       - publication_status
+      - pull_request_status
     LLMRequestInput:
       type: object
       description: A chat request. Also accepted as multipart form data with one file.
@@ -3185,6 +3245,36 @@ components:
       - verified
       - ignored
       - ignored_count
+    PullRequest:
+      type: object
+      description: The pull request opened from a delivery's pushed branch to the
+        repository's default branch.
+      properties:
+        number:
+          type: integer
+          description: The pull request's number in the repository.
+        title:
+          type: string
+          description: The pull request's title on GitHub.
+        url:
+          type: string
+          format: uri
+          description: Link to the pull request on GitHub.
+        draft:
+          type: boolean
+          description: 'True while the last push to its branch was an unverified delivery:
+            documentation without a check or code pushed with open review findings.
+            A later verified push to the same branch marks the pull request ready
+            for review, and draft becomes false.'
+        base:
+          type: string
+          description: The default branch the pull request targets.
+      required:
+      - number
+      - title
+      - url
+      - draft
+      - base
     Error:
       type: object
       properties:

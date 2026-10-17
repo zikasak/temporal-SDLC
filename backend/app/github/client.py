@@ -48,7 +48,8 @@ def app_token(app_id: int, private_key: str) -> str:
 
 
 async def _request(method: str, token: str | None, path: str,
-                   params: dict[str, Any] | None = None) -> tuple[Any, bool]:
+                   params: dict[str, Any] | None = None,
+                   json: dict[str, Any] | None = None) -> tuple[Any, bool]:
     headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -57,7 +58,7 @@ async def _request(method: str, token: str | None, path: str,
             base_url=API_URL, timeout=httpx.Timeout(15, connect=5), follow_redirects=False,
             headers=headers,
         ) as client:
-            response = await client.request(method, path, params=params)
+            response = await client.request(method, path, params=params, json=json)
     except httpx.RequestError:
         raise GitHubError(503, "Could not reach GitHub. Try again later.") from None
     if response.status_code == 401:
@@ -74,6 +75,9 @@ async def _request(method: str, token: str | None, path: str,
         raise GitHubError(403, "GitHub denied access. Check the GitHub App's permissions and the repositories it is installed on.")
     if response.status_code == 404:
         raise GitHubError(404, "The repository or branch is unavailable to the GitHub App installation.")
+    if response.status_code == 422 and json is not None:
+        # Callers that send a body can act on its rejection, apart from other failures.
+        raise GitHubError(422, "GitHub could not process the request.")
     if not 200 <= response.status_code < 300:
         raise GitHubError(502, "GitHub could not complete the request. Refresh the repository list and try again.")
     try:
@@ -220,3 +224,112 @@ async def resolve_selection(token: str, full_name: str, branch: str) -> Reposito
     return {"provider": "github", "repository_id": repository["repository_id"],
             "full_name": repository["full_name"], "html_url": repository["html_url"],
             "private": repository["private"], "branch": branch}
+
+
+# The pull request permission the installation needs; reported when it is missing.
+PULL_REQUEST_PERMISSION = (
+    "The GitHub App installation lacks the pull_requests: write permission, so the pull "
+    "request could not be opened or updated. Grant the permission to the app, accept it "
+    "for the installation, then retry the repository stage.")
+TITLE_CHARS = 256
+BODY_CHARS = 65000
+
+
+def _pull_request_denied(exc: GitHubError) -> GitHubError:
+    return GitHubError(403, PULL_REQUEST_PERMISSION) if exc.status_code == 403 else exc
+
+
+def _pull_request(value: Any, full_name: str) -> dict[str, Any]:
+    base = value.get("base") if isinstance(value, dict) else None
+    if (not isinstance(value, dict) or not _positive(value.get("number"))
+            or not isinstance(value.get("title"), str)
+            or type(value.get("draft")) is not bool
+            or not isinstance(value.get("node_id"), str) or not value["node_id"]
+            or not isinstance(base, dict) or not isinstance(base.get("ref"), str)):
+        raise _invalid_response()
+    # Built from validated parts, never taken from the response as a link to follow.
+    return {"number": value["number"], "title": value["title"][:TITLE_CHARS],
+            "url": f"https://github.com/{full_name}/pull/{value['number']}",
+            "draft": value["draft"], "base": base["ref"], "node_id": value["node_id"]}
+
+
+async def get_default_branch(token: str, full_name: str) -> str:
+    validate_selection(full_name, "main")
+    data, _ = await _request("GET", token, _repo_path(full_name))
+    return _repository(data)["default_branch"]
+
+
+async def find_open_pull_request(token: str, full_name: str, branch: str,
+                                 base: str) -> dict[str, Any] | None:
+    """The open pull request from `branch` of the repository itself to `base`, if any."""
+    validate_selection(full_name, branch)
+    owner = full_name.split("/")[0]
+    try:
+        data, _ = await _request("GET", token, _repo_path(full_name) + "/pulls", {
+            "head": f"{owner}:{branch}", "base": base, "state": "open", "per_page": 10})
+    except GitHubError as exc:
+        raise _pull_request_denied(exc) from None
+    if not isinstance(data, list):
+        raise _invalid_response()
+    items = [_pull_request(item, full_name) for item in data]
+    return items[0] if items else None
+
+
+async def create_pull_request(token: str, full_name: str, branch: str, base: str,
+                              title: str, body: str, draft: bool) -> dict[str, Any]:
+    validate_selection(full_name, branch)
+    payload = {"title": title[:TITLE_CHARS], "head": branch, "base": base,
+               "body": body[:BODY_CHARS], "draft": draft}
+    try:
+        data, _ = await _request("POST", token, _repo_path(full_name) + "/pulls",
+                                 json=payload)
+    except GitHubError as exc:
+        if exc.status_code != 422 or not draft:
+            raise _pull_request_denied(exc) from None
+        # Repositories on some plans support no draft pull requests: open a ready one,
+        # whose description still says that the delivery is unverified.
+        try:
+            data, _ = await _request("POST", token, _repo_path(full_name) + "/pulls",
+                                     json={**payload, "draft": False})
+        except GitHubError as retried:
+            raise _pull_request_denied(retried) from None
+    return _pull_request(data, full_name)
+
+
+async def update_pull_request(token: str, full_name: str, number: int, title: str,
+                              body: str) -> dict[str, Any]:
+    validate_selection(full_name, "main")
+    try:
+        data, _ = await _request(
+            "PATCH", token, f"{_repo_path(full_name)}/pulls/{number}",
+            json={"title": title[:TITLE_CHARS], "body": body[:BODY_CHARS]})
+    except GitHubError as exc:
+        raise _pull_request_denied(exc) from None
+    return _pull_request(data, full_name)
+
+
+async def set_pull_request_draft(token: str, node_id: str, draft: bool) -> bool:
+    """Mark a pull request ready for review, or convert it back to a draft; the REST API
+    has no call for either. Returns the pull request's draft flag afterwards."""
+    mutation = "convertPullRequestToDraft" if draft else "markPullRequestReadyForReview"
+    query = (f"mutation($id: ID!) {{ {mutation}(input: {{pullRequestId: $id}}) "
+             "{ pullRequest { isDraft } } }")
+    try:
+        data, _ = await _request("POST", token, "/graphql",
+                                 json={"query": query, "variables": {"id": node_id}})
+    except GitHubError as exc:
+        raise _pull_request_denied(exc) from None
+    if not isinstance(data, dict):
+        raise _invalid_response()
+    errors = data.get("errors")
+    if errors:
+        if isinstance(errors, list) and any(
+                isinstance(item, dict) and item.get("type") == "FORBIDDEN" for item in errors):
+            raise GitHubError(403, PULL_REQUEST_PERMISSION)
+        raise GitHubError(502, "GitHub could not change the pull request's draft state.")
+    payload = data.get("data")
+    result = payload.get(mutation) if isinstance(payload, dict) else None
+    pull = result.get("pullRequest") if isinstance(result, dict) else None
+    if not isinstance(pull, dict) or type(pull.get("isDraft")) is not bool:
+        raise _invalid_response()
+    return pull["isDraft"]

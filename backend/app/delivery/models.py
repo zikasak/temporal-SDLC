@@ -5,7 +5,8 @@ from typing import Any, Literal, TypedDict
 from app.api_design.models import ApiModel
 from app.diagnosis.models import RepairRound
 from app.github.models import (
-    PublicationStatus, RepositoryCheckout, RepositoryPublication, RepositorySelection,
+    PublicationStatus, PullRequest, RepositoryCheckout, RepositoryPublication,
+    RepositorySelection,
 )
 from app.llm.questions import Question
 from app.requirements.models import Requirement, TaskKind
@@ -119,6 +120,12 @@ class DeliveryProgress:
     # pushed as unverified; the user accepts it or gives instructions.
     open_findings: bool = False
     findings_acceptance: FindingsAcceptance | None = None
+    # The pull request step after the push, with the values of publication_status. Its
+    # error never fails the push or the delivery; retrying the repository stage pushes
+    # again and retries it. The pull request stays when updating it fails.
+    pull_request: PullRequest | None = None
+    pull_request_error: str | None = None
+    pull_request_status: PublicationStatus = 'not_applicable'
 
 
 def judge_baseline(result: VerificationResult, added: list[str], changed: list[str],
