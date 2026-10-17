@@ -97,7 +97,8 @@ class AgentAnswersBody(AnswersBody):
 
 
 class RetryGenerationBody(BaseModel):
-    # review runs a failed code review again on the verified delivery.
+    # review runs a failed code review again on the verified delivery, or goes on from a
+    # correction of review findings that did not pass verification.
     stage: Literal['server', 'tests', 'documentation', 'repository', 'review']
 
 
@@ -196,11 +197,10 @@ async def retry(session_id: str):
 async def restart_generation(session_id: str, body: RetryGenerationBody):
     _check_session_id(session_id)
     try:
-        await retry_generation(session_id, body.stage)
+        progress = await retry_generation(session_id, body.stage)
     except Exception as exc:
         raise http_error(exc) from exc
-    return {'session_id': session_id,
-            'verification_status': 'reviewing' if body.stage == 'review' else 'waiting'}
+    return {'session_id': session_id, 'verification_status': progress.verification_status}
 
 
 @router.post('/sessions/{session_id}/delivery/findings/accept')

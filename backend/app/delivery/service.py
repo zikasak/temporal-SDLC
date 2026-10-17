@@ -108,6 +108,7 @@ async def instruct_findings(session_id: str, instructions: str) -> DeliveryProgr
     progress = state.progress
     progress.agent_questions = []
     progress.review_error = None
+    progress.correction_failed = False
     # A failed earlier fix round keeps its images; its errors would stop this round.
     progress.implementation_error = None
     progress.tests_error = None
@@ -132,12 +133,13 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
     state.instructions = None
     state.record_only = False
     if stage == 'review':
-        if not progress.review_error or state.spec.kind == 'docs':
-            raise SessionBusy('The delivery has no failed code review.')
-        # The verified delivery is reviewed again; its verification stays.
-        progress.review_error = None
+        if not (progress.review_error or progress.correction_failed) or state.spec.kind == 'docs':
+            raise SessionBusy('The delivery has no failed code review or correction.')
+        # The verified delivery is reviewed again, its verification staying, or the failed
+        # correction of review findings goes on.
         progress.agent_questions = []
-        progress.verification_status = 'reviewing'
+        progress.verification_status = 'repairing' if progress.correction_failed else 'reviewing'
+        progress.review_error = None
         if state.spec.checkout and not progress.open_findings:
             progress.publication_error = None
             progress.publication_status = 'waiting'
@@ -183,6 +185,7 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
         progress.verification_status = 'waiting'
         progress.repairs = []
         progress.review_error = None
+        progress.correction_failed = False
     if stage == 'server':
         progress.code_error = None
         progress.implementation = None

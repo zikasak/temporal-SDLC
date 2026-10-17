@@ -9,11 +9,13 @@ from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from app.config import (
     CODEGEN_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, DOCUMENTATION_TASK_QUEUE,
-    IMPLEMENTATION_TASK_QUEUE, TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
+    IMPLEMENTATION_TASK_QUEUE, REVIEW_TASK_QUEUE, TEST_GENERATION_TASK_QUEUE,
+    VERIFICATION_TASK_QUEUE,
 )
 from app.diagnosis.workflows import DiagnosisWorkflow
 from app.documentation.workflows import DocumentationWorkflow
 from app.implementation.workflows import ImplementationWorkflow
+from app.review.workflows import ReviewWorkflow
 from app.test_generation.workflows import TestGenerationWorkflow as ServiceTestWorkflow
 from app.verification.activities import verify_documentation
 from app.verification.workflows import VerificationWorkflow
@@ -85,6 +87,9 @@ class FakeStages:
         # Those the runner of the repository's tests leaves out of its reports.
         self.not_run: list[str] = []
         self.existing_runs: list[tuple[str, list[str]]] = []
+        # The findings of successive code reviews; the last one repeats.
+        self.review_findings: list[list[dict[str, Any]]] = [[]]
+        self.reviewed: list[dict[str, Any]] = []
 
     @activity.defn(name="checkout_repository")
     async def checkout_repository(self, session_id: str, repository: dict[str, Any]) -> dict[str, Any]:
@@ -95,12 +100,14 @@ class FakeStages:
 
     @activity.defn(name="publish_repository")
     async def publish_repository(self, session_id: str, repository: dict[str, Any],
-                                 contract: dict[str, Any], kind: str | None) -> dict[str, Any]:
+                                 contract: dict[str, Any], kind: str | None,
+                                 findings: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         if self.fail_publication:
             raise ApplicationError("remote: Permission denied", non_retryable=True)
         self.published.append((session_id, repository["full_name"]))
         self.contract = contract
         self.published_kind = kind
+        self.published_findings = findings
         return {"branch": "generated/abc", "commit": "2" * 40,
                 "url": repository["html_url"] + "/tree/generated/abc"}
 
@@ -180,6 +187,12 @@ class FakeStages:
         return {'session_id': session_id, 'target': target, 'summary': f'The {target} is wrong.',
                 'tests': [BROKEN_TEST] if target == 'tests' else [],
                 'instructions': f'Correct the {target}.', 'path': '/diagnosis'}
+
+    @activity.defn(name='review_changes')
+    async def review_changes(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
+        findings = self.review_findings[min(len(self.reviewed), len(self.review_findings) - 1)]
+        self.reviewed.append(context)
+        return {'session_id': session_id, 'findings': findings, 'path': '/review'}
 
     def _baseline(self, service_image: str, test_image: str, tracked: list[str]) -> dict[str, Any]:
         outcome = self.baseline_results[min(len(self.baselines), len(self.baseline_results) - 1)]
@@ -285,6 +298,9 @@ async def stage_workers(env, stages: FakeStages):
     ), Worker(
         env.client, task_queue=DIAGNOSIS_TASK_QUEUE,
         workflows=[DiagnosisWorkflow], activities=[stages.diagnose_failure],
+    ), Worker(
+        env.client, task_queue=REVIEW_TASK_QUEUE,
+        workflows=[ReviewWorkflow], activities=[stages.review_changes],
     ):
         FakeCodegenWorkflow.fail = False
         FakeCodegenWorkflow.languages = []

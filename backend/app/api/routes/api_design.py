@@ -98,11 +98,10 @@ async def retry(session_id: str):
 async def restart_generation(session_id: str, body: RetryGenerationBody):
     _check_session_id(session_id)
     try:
-        await retry_generation(session_id, body.stage)
+        progress = await retry_generation(session_id, body.stage)
     except Exception as exc:
         raise http_error(exc) from exc
-    return {'session_id': session_id,
-            'verification_status': 'reviewing' if body.stage == 'review' else 'waiting'}
+    return {'session_id': session_id, 'verification_status': progress.verification_status}
 
 
 @router.post('/{session_id}/delivery/findings/accept')

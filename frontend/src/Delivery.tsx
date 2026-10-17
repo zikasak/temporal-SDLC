@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { repositoryPublication, type RepositoryPublication, type RepositorySelection } from "./github";
 import { QuestionForm, questionList, type Question } from "./Questions";
 
@@ -12,8 +12,9 @@ type Documentation = { changed_files: string[] };
 // The test suite's image and, for a change, how its tests differ from the repository's.
 type TestSuite = ImageArtifact & { added_tests: string[]; changed_tests: string[]; removed_tests: string[] };
 type TestRef = { class_name: string; name: string };
+// `findings_open`: review findings remained after the last review round.
 type VerificationStatus = "not_applicable" | "waiting" | "running" | "diagnosing" | "repairing" |
-  "completed" | "skipped" | "error";
+  "reviewing" | "completed" | "findings_open" | "skipped" | "error";
 // How the tests a change added fared against the service as the repository holds it.
 type BaselineStatus = "not_applicable" | "waiting" | "running" | "reproduced" | "not_reproduced" |
   "skipped" | "error";
@@ -35,7 +36,10 @@ type VerificationResult = {
   error: string | null;
 };
 
-export type GenerationStage = "server" | "tests" | "documentation" | "repository";
+// `review` runs a failed code review again, or goes on from a failed correction of its findings.
+export type GenerationStage = "server" | "tests" | "documentation" | "repository" | "review";
+type ReviewFinding = { summary: string; path?: string; target: "implementation" | "tests" | "both"; reason: string };
+type ReviewRound = { round: number; findings: ReviewFinding[]; instructions?: string };
 // Questions a coding agent asked; its run is paused until they are answered, and only
 // that agent sees the answers.
 type AgentQuestions = { workflow_id: string; stage: string; questions: Question[] };
@@ -62,10 +66,17 @@ export type DeliveryProgress = {
   publication_error: string | null;
   publication_status: PublicationStatus;
   agent_questions: AgentQuestions[];
+  reviews: ReviewRound[];
+  review_error: string | null;
+  // The correction of a review round's findings did not pass verification.
+  correction_failed: boolean;
+  // Pushed as unverified with findings left; the user accepts them or gives instructions.
+  open_findings: boolean;
 };
 
 const verificationStatuses: VerificationStatus[] = [
-  "not_applicable", "waiting", "running", "diagnosing", "repairing", "completed", "skipped", "error",
+  "not_applicable", "waiting", "running", "diagnosing", "repairing", "reviewing", "completed",
+  "findings_open", "skipped", "error",
 ];
 const baselineStatuses: BaselineStatus[] = [
   "not_applicable", "waiting", "running", "reproduced", "not_reproduced", "skipped", "error",
@@ -91,6 +102,18 @@ function repairRounds(value: unknown): RepairRound[] {
     tests: Array.isArray(item.tests) ? item.tests.filter((test: unknown): test is TestRef =>
       isObject(test) && typeof test.class_name === "string" && typeof test.name === "string") : [],
   }) as RepairRound);
+}
+
+function reviewRounds(value: unknown): ReviewRound[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item) => isObject(item) && typeof item.round === "number").map((item) => ({
+    round: item.round as number,
+    findings: Array.isArray(item.findings) ? item.findings.filter((finding: unknown): finding is ReviewFinding =>
+      isObject(finding) && typeof finding.summary === "string" && typeof finding.reason === "string" &&
+      ["implementation", "tests", "both"].includes(String(finding.target)) &&
+      (finding.path === undefined || typeof finding.path === "string")) : [],
+    ...(typeof item.instructions === "string" ? { instructions: item.instructions } : {}),
+  }));
 }
 
 function verificationRecord(value: unknown): VerificationResult | null {
@@ -163,6 +186,10 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     publication_status: publicationStatuses.includes(value.publication_status as PublicationStatus)
       ? value.publication_status as PublicationStatus : "not_applicable",
     agent_questions: agentQuestions(value.agent_questions),
+    reviews: reviewRounds(value.reviews),
+    review_error: text(value.review_error),
+    correction_failed: value.correction_failed === true,
+    open_findings: value.open_findings === true,
   };
 }
 
@@ -201,15 +228,35 @@ function AgentQuestionsPanel({ progress, answering, onAnswer }: {
 
 /** Whether the delivery is still working, so its session should be polled again. */
 export function deliveryPending(progress: DeliveryProgress) {
-  return ["waiting", "running", "diagnosing", "repairing"].includes(progress.verification_status) ||
+  return ["waiting", "running", "diagnosing", "repairing", "reviewing"].includes(progress.verification_status) ||
     ["waiting", "running"].includes(progress.publication_status);
+}
+
+/** What the page shows at once after deciding about open review findings, until the next
+ * poll: accepted, or a fix round from the user's instructions. */
+export function decidedProgress(progress: DeliveryProgress, instructions: string | null): DeliveryProgress {
+  return instructions === null ? { ...progress, open_findings: false } : {
+    ...progress, review_error: null, correction_failed: false, verification_status: "repairing",
+  };
 }
 
 /** What the page shows at once after asking to retry a stage, until the next poll. */
 export function retriedProgress(progress: DeliveryProgress, stage: GenerationStage, checkedOut: boolean): DeliveryProgress {
   const change = progress.baseline_status !== "not_applicable";
+  if (stage === "review") {
+    // The verified delivery is reviewed again, or the failed correction goes on.
+    return {
+      ...progress,
+      review_error: null,
+      correction_failed: false,
+      verification_status: progress.correction_failed ? "repairing" : "reviewing",
+      ...(checkedOut && !progress.open_findings
+        ? { publication_error: null, publication_status: "waiting" as const } : {}),
+    };
+  }
   return {
     ...progress,
+    correction_failed: false,
     ...(stage === "server"
       ? { code_error: null, implementation: null, implementation_error: null }
       : stage === "tests" ? { tests: null, tests_error: null }
@@ -340,6 +387,68 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
   </>;
 }
 
+const findingTargets: Record<ReviewFinding["target"], string> = {
+  implementation: "implementation", tests: "tests", both: "implementation and tests",
+};
+
+/** The code review rounds of a verified delivery, and what the user may do when they end
+ * without passing: run a failed review or correction again, or decide about open findings. */
+function CodeReview({ progress, retrying, disabled, onRetry, onFindings }: {
+  progress: DeliveryProgress;
+  retrying: GenerationStage | null;
+  disabled: boolean;
+  onRetry: (stage: GenerationStage) => void;
+  onFindings: (instructions: string | null) => Promise<boolean>;
+}) {
+  const [instructions, setInstructions] = useState("");
+  const last = progress.reviews[progress.reviews.length - 1];
+  const stage = progress.verification_status;
+  if (!last && !progress.review_error && stage !== "reviewing") return null;
+  const open = progress.open_findings || progress.correction_failed;
+  return <>
+    <h3>Code review</h3>
+    {stage === "reviewing" && <p role="status">Reviewing the changes…</p>}
+    {last && <p>
+      Round {last.round}: {last.findings.length === 0 ? "no findings" :
+        `${last.findings.length} finding${last.findings.length === 1 ? "" : "s"}`}
+    </p>}
+    {last && last.findings.length > 0 && (open || stage === "repairing") && <ul className="verification-failures">
+      {last.findings.map((item, index) => <li key={index}>
+        <strong>{item.path ?? "General"} ({findingTargets[item.target]})</strong>
+        <span>{item.summary}</span>
+      </li>)}
+    </ul>}
+    {progress.review_error && <div className="generation-failure">
+      <p role="alert">{progress.review_error}</p>
+      <button type="button" className="generate-button" disabled={disabled} onClick={() => onRetry("review")}>
+        {retrying === "review" ? "Reviewing again…" : "Run the code review again"}
+      </button>
+    </div>}
+    {progress.correction_failed && <div className="generation-failure">
+      <p role="alert">The corrections of these findings did not pass verification.</p>
+      <button type="button" className="generate-button" disabled={disabled} onClick={() => onRetry("review")}>
+        {retrying === "review" ? "Going on…" : "Retry the correction and verify again"}
+      </button>
+    </div>}
+    {progress.open_findings && <form className="generation-failure" onSubmit={(event) => {
+      event.preventDefault();
+      void onFindings(instructions.trim()).then((sent) => { if (sent) setInstructions(""); });
+    }}>
+      <p role="alert">These findings remained after the last review round, so the branch was pushed as unverified.</p>
+      <label htmlFor="findings-instructions">How should they be fixed?</label>
+      <textarea id="findings-instructions" rows={3} maxLength={10000} value={instructions}
+        disabled={disabled} onChange={(event) => setInstructions(event.target.value)} />
+      <button type="submit" className="generate-button" disabled={disabled || !instructions.trim()}>
+        Fix them with these instructions
+      </button>
+      <button type="button" className="generate-button" disabled={disabled}
+        onClick={() => void onFindings(null)}>
+        Accept the branch as it is
+      </button>
+    </form>}
+  </>;
+}
+
 /** A documentation task: one author limited to documentation files, and no check yet. */
 function DocumentationResults({ progress, retrying, disabled, onRetry }: {
   progress: DeliveryProgress;
@@ -380,7 +489,7 @@ function DocumentationResults({ progress, retrying, disabled, onRetry }: {
   );
 }
 
-export function DeliveryResults({ progress, documentation = false, retrying, disabled, onRetry, answering, onAnswer }: {
+export function DeliveryResults({ progress, documentation = false, retrying, disabled, onRetry, answering, onAnswer, onFindings }: {
   progress: DeliveryProgress;
   // Whether the session's task changes documentation only.
   documentation?: boolean;
@@ -390,6 +499,8 @@ export function DeliveryResults({ progress, documentation = false, retrying, dis
   // Whether answers to an agent are being sent.
   answering: boolean;
   onAnswer: (workflowId: string, answers: string[]) => Promise<boolean>;
+  // The user's decision about open review findings: instructions, or null to accept them.
+  onFindings: (instructions: string | null) => Promise<boolean>;
 }) {
   const questions = <AgentQuestionsPanel progress={progress} answering={answering} onAnswer={onAnswer} />;
   if (documentation) {
@@ -470,6 +581,8 @@ export function DeliveryResults({ progress, documentation = false, retrying, dis
           </ol>}
         </TestRun>
       </>}
+      <CodeReview progress={progress} retrying={retrying} disabled={disabled} onRetry={onRetry}
+        onFindings={onFindings} />
       <Publication progress={progress} documentation={false} retrying={retrying} disabled={disabled} onRetry={onRetry} />
     </section>
   </>;

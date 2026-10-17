@@ -190,6 +190,43 @@ async def test_repair_stops_after_the_round_limit_with_the_last_failure(env, wor
     assert state.verification_error == 'Tests still fail after 5 automatic repair rounds.'
 
 
+async def test_a_run_that_could_not_complete_runs_once_more(env, worker):
+    worker.verification_results = ['error', 'passed']
+    state = await delivered(env, await deliver(env))
+    assert state.verification['status'] == 'passed' and state.verification_status == 'completed'
+    assert worker.verified_images == [ORIGINAL, ORIGINAL] and not worker.diagnosed
+
+
+async def test_a_correction_that_did_not_pass_goes_on_when_retried(env, worker):
+    finding = {'summary': 'Rooms are listed unsorted.', 'target': 'implementation',
+               'reason': 'The service orders them.'}
+    worker.review_findings = [[finding], []]
+    # Verified, reviewed, corrected; then the corrected delivery cannot be verified twice.
+    worker.verification_results = ['passed', 'error', 'error', 'passed']
+    session_id = await deliver(env)
+    state = await delivered(env, session_id)
+    assert state.correction_failed and state.verification_status == 'error'
+    assert state.verification_error == 'Verification failed after correcting the review findings.'
+    assert [stage for stage, _ in worker.repairs] == ['implementation']
+
+    await delivery_service.retry(session_id, 'review')
+    state = await delivered(env, session_id)
+    # Only verified again, not corrected again, and then reviewed again.
+    assert [stage for stage, _ in worker.repairs] == ['implementation']
+    assert len(worker.verified_images) == 4 and worker.verified_images[-1] == (REPAIRED[0], ORIGINAL[1])
+    assert not state.correction_failed and state.verification_error is None
+    assert state.verification_status == 'completed'
+    assert [item['findings'] for item in state.reviews] == [[finding], []]
+
+
+async def test_only_a_failed_review_or_correction_is_retried(env, worker):
+    session_id = await deliver(env)
+    state = await delivered(env, session_id)
+    assert state.verification_status == 'completed'
+    with pytest.raises(delivery_service.SessionBusy):
+        await delivery_service.retry(session_id, 'review')
+
+
 @pytest.mark.parametrize('broken', ['diagnosis', 'implementation'])
 async def test_failed_diagnosis_or_repair_keeps_the_published_images(env, worker, broken):
     worker.verification_results = ['failed', 'passed']
@@ -448,8 +485,8 @@ async def test_nothing_is_fixed_unless_the_added_tests_fail_alone(env, worker, b
 @pytest.mark.parametrize('outcome', ['skipped', 'error'])
 async def test_bugfix_is_not_published_until_every_test_is_seen_to_pass(env, worker, outcome, repository_selection):
     # Red on the unchanged service, then skipped rather than green on the changed one,
-    # or a run that could not complete at all.
-    worker.verification_results = [outcome, 'passed']
+    # or a run that could not complete at all, nor when it ran once more.
+    worker.verification_results = [outcome, *([outcome] if outcome == 'error' else []), 'passed']
     handle, state = await fixed(env, repository_selection)
     assert state.baseline_status == 'reproduced'
     if outcome == 'skipped':
@@ -459,7 +496,7 @@ async def test_bugfix_is_not_published_until_every_test_is_seen_to_pass(env, wor
         assert state.verification['status'] == 'error' and state.verification_error is None
     assert state.publication_status == 'skipped' and not worker.published
     # The run answers for the tests the change added.
-    assert worker.verified_tracked == [ADDED_TESTS]
+    assert worker.verified_tracked == [ADDED_TESTS] * (2 if outcome == 'error' else 1)
 
     await requirements_service.retry_generation(handle.id, 'tests')
     state = await delivered(env, handle.id)
