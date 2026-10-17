@@ -14,9 +14,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 # Set before application imports/.env loading. Tracing transport tests opt in
 # explicitly in isolated child processes with disposable local credentials.
 os.environ['LANGFUSE_TRACING_ENABLED'] = 'false'
-# A developer's harness would route scripted agents to the real Pi or Claude CLI; tests
-# of those harnesses select them explicitly.
-os.environ['LLM_HARNESS'] = ''
 
 # Stands in for the Claude Code CLI behind the real Claude Agent SDK: answers the SDK's
 # control requests, lists the tools the SDK serves, records what the turn was given and
@@ -110,9 +107,24 @@ def fake_claude(tmp_path):
     return install, lambda: json.loads(log.read_text())
 
 
+@pytest.fixture(autouse=True)
+def saved_model_settings(monkeypatch):
+    """Replace the external settings store for tests of the Docker lifecycle."""
+    from app import docker_agents
+    from app.settings.models import ModelSettings, WORKFLOW_LABELS
+
+    settings = {key: ModelSettings(model='test-model') for key in WORKFLOW_LABELS}
+
+    async def load(workflow_type):
+        return settings[workflow_type]
+
+    monkeypatch.setattr(docker_agents, 'get_workflow_settings', load)
+    return settings
+
+
 @pytest.fixture
 def created_container(tmp_path, monkeypatch):
-    """Runs the agent lifecycle against a stand-in Docker; returns `docker create` args."""
+    """Run the lifecycle against stand-in Docker; return create args and settings input."""
     async def run():
         created = []
 
@@ -131,7 +143,9 @@ def created_container(tmp_path, monkeypatch):
             'implementation', 'session-1', work / 'workspace', work / 'output', 'service',
             tmp_path / 'agent.log', paused=tmp_path / 'paused',
             image_build=docker_agents.default_agent_image('implementation', 'service'))
-        return created
+        from app.settings.models import ModelSettings, SETTINGS_FILENAME
+        return created, ModelSettings.model_validate_json(
+            (work / 'workspace' / SETTINGS_FILENAME).read_text())
 
     return run
 

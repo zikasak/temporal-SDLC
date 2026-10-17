@@ -360,7 +360,8 @@ async def send_llm_message(
     started = time.perf_counter()
     try:
         graph = get_message_graph(
-            [*build_tools(ToolContext(session_id, document_ids)), *repository_files])
+            [*build_tools(ToolContext(session_id, document_ids)), *repository_files],
+            model=await get_model('chat'))
         result = await graph.ainvoke(
             {"messages": prompt}, config=langchain_config(recursion_limit=20, run_name='respond-with-tools')
         )
@@ -392,7 +393,7 @@ async def requirements_turn(
     try:
         graph = get_message_graph(
             [*requirements_tools.build(ctx), *question_tools.build(asked), *repository],
-            until=lambda: bool(asked.questions))
+            until=lambda: bool(asked.questions), model=await get_model('requirements'))
         reply = await interview(
             graph, interview_messages(
                 messages, requirements, kind,
@@ -452,7 +453,8 @@ async def write_requirements_document(
     retired: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     try:
-        answer = await get_model().ainvoke(
+        model = await get_model('requirements')
+        answer = await model.ainvoke(
             document_messages(messages, requirements, retired),
             config=langchain_config(run_name='write-requirements-overview'),
         )
@@ -487,7 +489,7 @@ async def api_design_turn(state: ApiDesignState) -> dict[str, Any]:
     try:
         graph = get_message_graph(
             [*api_design_tools.build(ctx), *question_tools.build(asked), *repository],
-            until=lambda: bool(asked.questions))
+            until=lambda: bool(asked.questions), model=await get_model('api_design'))
         reply = await interview(
             graph, api_turn_messages(state, repository_tools.GUIDANCE if repository else ""),
             langchain_config(recursion_limit=40, run_name='draft-api-with-tools'),

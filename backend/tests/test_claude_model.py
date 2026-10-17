@@ -13,9 +13,11 @@ def flag(argv, name):
     return argv[argv.index(name) + 1]
 
 
-def test_returns_final_text_and_usage(fake_claude):
+@pytest.mark.parametrize('thinking_level', ['default', 'off', 'high'])
+def test_returns_final_text_and_usage(fake_claude, thinking_level):
     install, calls = fake_claude
-    model = ChatClaude(model='claude-test', cli_path=install(claude_reply('line one', ' line two')))
+    model = ChatClaude(model='claude-test', thinking_level=thinking_level,
+                       cli_path=install(claude_reply('line one', ' line two')))
 
     reply = model.invoke([SystemMessage('Be brief.'), HumanMessage('@notes.md /help question')])
 
@@ -29,6 +31,12 @@ def test_returns_final_text_and_usage(fake_claude):
     argv = call['argv']
     assert flag(argv, '--system-prompt') == 'Be brief.'
     assert flag(argv, '--model') == 'claude-test'
+    if thinking_level == 'default':
+        assert '--thinking' not in argv and '--effort' not in argv
+    elif thinking_level == 'off':
+        assert flag(argv, '--thinking') == 'disabled' and '--effort' not in argv
+    else:
+        assert flag(argv, '--thinking') == 'adaptive' and flag(argv, '--effort') == 'high'
     # A bare model: one request, no built-in tools, no user or project settings.
     assert (flag(argv, '--max-turns'), flag(argv, '--tools')) == ('1', '')
     assert '--setting-sources=' in argv
@@ -141,26 +149,29 @@ async def test_failed_response_raises(fake_claude):
         await model.ainvoke('hi')
 
 
-async def test_claude_harness_forwards_credentials_by_name(created_container, monkeypatch):
-    monkeypatch.setattr(docker_agents, 'LLM_HARNESS', 'claude')
-    monkeypatch.setattr(docker_agents, 'CLAUDE_MODEL', 'claude-test')
+async def test_claude_harness_forwards_credentials_by_name(created_container, monkeypatch, saved_model_settings):
+    from app.settings.models import ModelSettings
+    saved_model_settings['implementation'] = ModelSettings(
+        adapter='claude', model='claude-test', thinking_level='high')
     monkeypatch.setenv('CLAUDE_CODE_OAUTH_TOKEN', 'oauth-secret')
     monkeypatch.setenv('ANTHROPIC_BASE_URL', 'http://localhost:4000')
     monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
     monkeypatch.delenv('ANTHROPIC_AUTH_TOKEN', raising=False)
 
-    args = await created_container()
+    args, settings = await created_container()
 
     variables = [args[index + 1] for index, arg in enumerate(args) if arg == '-e']
-    assert {'LLM_HARNESS=claude', 'CLAUDE_MODEL=claude-test', 'CLAUDE_CODE_OAUTH_TOKEN',
+    assert {'CLAUDE_CODE_OAUTH_TOKEN',
             'ANTHROPIC_BASE_URL=http://host.docker.internal:4000'} <= set(variables)
     assert 'ANTHROPIC_API_KEY' not in variables
     # The secret travels in docker's environment, never on its command line.
     assert not any('oauth-secret' in arg for arg in args)
+    assert settings == saved_model_settings['implementation']
 
 
-async def test_claude_harness_requires_credentials(created_container, monkeypatch):
-    monkeypatch.setattr(docker_agents, 'LLM_HARNESS', 'claude')
+async def test_claude_harness_requires_credentials(created_container, monkeypatch, saved_model_settings):
+    from app.settings.models import ModelSettings
+    saved_model_settings['implementation'] = ModelSettings(adapter='claude', model='sonnet')
     for name in docker_agents.CLAUDE_CREDENTIALS:
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(RuntimeError, match='Claude credentials not found'):

@@ -4,10 +4,10 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
+from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from app.llm.model import get_model
 from app.llm.questions import asks_directly, without_questions
 
 logger = logging.getLogger(__name__)
@@ -37,11 +37,12 @@ async def _log_tool_call(request, execute):
     return result
 
 
-def get_message_graph(tools: list[BaseTool], until: Callable[[], bool] | None = None):
+def get_message_graph(tools: list[BaseTool], until: Callable[[], bool] | None = None,
+                      *, model: BaseChatModel):
     """The model ↔ tool loop. `until` ends it after a round of tool calls, such as the
     one that asked the user something; the model then gets no further turn."""
     graph = StateGraph(MessagesState)
-    bound_model = get_model().bind_tools(tools)
+    bound_model = model.bind_tools(tools)
 
     async def call_model(state: MessagesState):
         return {"messages": [await bound_model.ainvoke(

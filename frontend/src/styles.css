@@ -1832,3 +1832,128 @@ h2 {
   line-height: 1.5;
   resize: vertical;
 }
+
+.workflow-settings {
+  padding: 28px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+}
+
+.settings-heading h2 {
+  margin-bottom: 8px;
+  font-size: 1.1rem;
+}
+
+.settings-heading p,
+.settings-hint {
+  max-width: 75ch;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+
+.settings-column-labels,
+.settings-row {
+  display: grid;
+  grid-template-columns: minmax(145px, 1fr) minmax(95px, 0.8fr) minmax(0, 1.6fr) minmax(130px, 1fr);
+  gap: 20px;
+}
+
+.settings-column-labels {
+  padding: 16px 0 10px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.settings-row {
+  position: relative;
+  min-width: 0;
+  margin: 0;
+  padding: 16px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.settings-row legend {
+  position: absolute;
+  top: 28px;
+  left: 0;
+  max-width: 145px;
+  font-size: 0.87rem;
+  font-weight: 650;
+}
+
+.settings-fields {
+  display: grid;
+  grid-template-columns: subgrid;
+  gap: 20px;
+  grid-column: 2 / -1;
+}
+
+.settings-fields label { min-width: 0; }
+.settings-field-label { display: none; }
+
+.settings-fields input,
+.settings-fields select {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--ink);
+  background: #fff;
+  caret-color: var(--green);
+  font-size: 0.83rem;
+}
+
+.settings-fields input { font-family: var(--mono); }
+.settings-fields select { cursor: pointer; }
+.settings-fields input:hover,
+.settings-fields select:hover { border-color: var(--green); }
+.settings-fields :disabled { opacity: 0.65; cursor: not-allowed; }
+.settings-hint { margin: 16px 0 24px; }
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+}
+
+.settings-actions .submit-button {
+  min-height: 42px;
+  padding: 9px 16px;
+  border: 1px solid var(--green);
+  border-radius: 3px;
+  color: #fff;
+  background: var(--green);
+  font-size: 0.85rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+.settings-actions .submit-button:hover:not(:disabled) { background: var(--green-dark); }
+.settings-actions .submit-button:disabled { opacity: 0.55; cursor: not-allowed; }
+.settings-load-error button { margin-top: 16px; }
+
+@media (max-width: 900px) {
+  .settings-column-labels { display: none; }
+  .settings-row { display: block; padding: 20px 0; }
+  .settings-row legend { position: static; padding: 0; }
+  .settings-field-label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 0.78rem; }
+  .settings-fields {
+    grid-template-columns: minmax(95px, 0.8fr) minmax(0, 1.6fr) minmax(130px, 1fr);
+    gap: 14px;
+  }
+}
+
+@media (max-width: 600px) {
+  .workflow-settings { padding: 22px; }
+  .settings-fields { grid-template-columns: 1fr 1fr; }
+  .settings-fields label:nth-child(2) { grid-column: 1 / -1; grid-row: 2; }
+  .settings-actions { align-items: flex-start; flex-direction: column; }
+}

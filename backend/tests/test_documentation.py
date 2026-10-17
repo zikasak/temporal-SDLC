@@ -57,6 +57,7 @@ async def test_documentation_author_sees_and_returns_documentation_only(tmp_path
     result = await ActivityEnvironment().run(activities.write_documentation, 'session', CONTEXT)
     assert json.loads(sent.pop('input.json'))['brief'] == CONTEXT['brief']
     del sent['language.json']
+    sent.pop('llm-settings.json')
     # Never the service, its build output, the contract tests or the published contract.
     assert sent == {'repository/README.md': 'project', 'repository/docs/guide.md': 'guide'}
     # Documentation is published as files: nothing is built from it.

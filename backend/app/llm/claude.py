@@ -43,12 +43,20 @@ class ChatClaude(BaseChatModel):
 
     # Model ID or alias such as `claude-opus-5-5` or `sonnet`; None uses the CLI default.
     model: str | None = None
+    thinking_level: str = 'default'
     # Claude Code executable; None uses the one bundled with the SDK.
     cli_path: str | None = None
     # Bounds the whole generation: the process is stopped when it runs longer.
     timeout: float = 600
 
     _session: Any = PrivateAttr(default=None)
+
+    def thinking_options(self) -> dict[str, Any]:
+        if self.thinking_level == 'default':
+            return {}
+        if self.thinking_level == 'off':
+            return {'thinking': {'type': 'disabled'}}
+        return {'thinking': {'type': 'adaptive'}, 'effort': self.thinking_level}
 
     @contextmanager
     def session(self):
@@ -130,6 +138,7 @@ class ChatClaude(BaseChatModel):
         with tempfile.TemporaryDirectory(prefix='claude-model-') as cwd:
             options = ClaudeAgentOptions(
                 model=self.model, cli_path=self.cli_path, cwd=cwd, system_prompt=system,
+                **self.thinking_options(),
                 # One request per call: the turn limit ends the run before a second one,
                 # which hands any tool calls back to the caller.
                 max_turns=1, tools=[], setting_sources=[], skills=[], strict_mcp_config=True,

@@ -97,7 +97,8 @@ def tracing_server():
                    'LANGFUSE_BASE_URL': f'http://127.0.0.1:{server.server_port}',
                    'LANGFUSE_TRACING_ENABLED': 'true', 'LANGFUSE_SAMPLE_RATE': '1',
                    'LANGFUSE_TRACING_ENVIRONMENT': 'test', 'LANGFUSE_RELEASE': 'test-release',
-                   'OPENAI_API_KEY': SECRET, 'OPENAI_MODEL': 'test-model',
+                   'OPENAI_API_KEY': SECRET,
+                   'TEST_MODEL_SETTINGS': json.dumps({'adapter': 'openai', 'model': 'test-model'}),
                    'OPENAI_BASE_URL': f'http://127.0.0.1:{server.server_port}/v1',
                    'APP_TRACE_CONTENT_ENABLED': 'true'}
     # Do not inherit a developer's upstream context or exporter configuration.
@@ -113,6 +114,14 @@ def tracing_server():
 
 
 def run_script(script, environment):
+    script = '''
+import os
+from app.llm import model
+from app.settings.models import ModelSettings
+async def saved_settings(workflow_type):
+    return ModelSettings.model_validate_json(os.environ['TEST_MODEL_SETTINGS'])
+model.get_workflow_settings = saved_settings
+''' + script
     result = subprocess.run([sys.executable, '-c', script], env=environment,
                             cwd=Path(__file__).resolve().parents[1], text=True,
                             capture_output=True, timeout=30)
@@ -206,7 +215,7 @@ def test_claude_harness_turn_exports_generations_with_model_and_cached_usage(
         tracing_server, fake_claude):
     environment, spans = tracing_server
     install, _ = fake_claude
-    environment.update(LLM_HARNESS='claude', CLAUDE_MODEL='claude-test', FAKE_CLAUDE=install(
+    environment.update(TEST_MODEL_SETTINGS=json.dumps({'adapter': 'claude', 'model': 'claude-test'}), FAKE_CLAUDE=install(
         claude_reply(('call_1', 'mcp__langchain__record_requirement', {
             'category': 'functional', 'title': 'Search', 'description': 'Search listings',
             'priority': 'must'})),
@@ -252,6 +261,8 @@ def test_agent_process_nests_under_host_stage_and_flushes_before_exit(tracing_se
     environment, spans = tracing_server
     run_script('''
 import os, subprocess, sys, tempfile
+from pathlib import Path
+from app.settings.models import SETTINGS_FILENAME
 from app.tracing import trace_operation, container_trace_environment, shutdown_tracing
 child = """
 from pathlib import Path
@@ -266,7 +277,10 @@ with trace_operation('build-implementation', session_id='pipeline', feature='imp
     env={**os.environ, **container_trace_environment('pipeline', 'implementation')}
     env['PYTHONPATH']=os.getcwd()
     with tempfile.TemporaryDirectory() as root:
-        subprocess.run([sys.executable, '-c', child], cwd=root, env=env, check=True)
+        Path(root, SETTINGS_FILENAME).write_text(os.environ['TEST_MODEL_SETTINGS'])
+        project = Path(root, 'service')
+        project.mkdir()
+        subprocess.run([sys.executable, '-c', child], cwd=project, env=env, check=True)
     span.update(output='Built')
 shutdown_tracing()
 ''', environment)

@@ -142,23 +142,26 @@ def test_bound_tools_are_declared_and_their_calls_returned(fake_pi):
     assert set(declared['parameters']['properties']) == {'term', 'limit'}
 
 
-def test_host_model_runs_pi_against_the_configured_directory(fake_pi, tmp_path, monkeypatch):
+async def test_host_model_runs_pi_against_the_configured_directory(fake_pi, tmp_path, monkeypatch):
     install, calls = fake_pi
     monkeypatch.setenv('PI_CODING_AGENT_DIR', str(tmp_path / 'inherited'))
-    monkeypatch.setattr(llm_model, 'LLM_HARNESS', 'pi')
+    from app.settings.models import ModelSettings
+    async def load(workflow_type):
+        return ModelSettings(adapter='pi', model='openai/gpt-test', thinking_level='high')
+    monkeypatch.setattr(llm_model, 'get_workflow_settings', load)
     monkeypatch.setattr(llm_model, 'PI_CREDENTIALS_DIR', tmp_path / 'configured')
-    llm_model.get_model.cache_clear()
     install([assistant('ok')], [assistant('ok')])
     monkeypatch.setenv('PATH', str(tmp_path) + os.pathsep + os.environ['PATH'])
-    try:
-        llm_model.get_model().invoke('hi')
-    finally:
-        llm_model.get_model.cache_clear()
+    model = await llm_model.get_model('chat')
+    model.invoke('hi')
     # Without a directory of its own the adapter leaves Pi's environment alone.
     ChatPi().invoke('hi')
 
     assert [call['agent_dir'] for call in calls()] == [
         str(tmp_path / 'configured'), str(tmp_path / 'inherited')]
+    argv = calls()[0]['argv']
+    assert argv[argv.index('--model') + 1] == 'openai/gpt-test'
+    assert argv[argv.index('--thinking') + 1] == 'high'
 
 
 def test_failed_response_raises(fake_pi):
@@ -186,8 +189,9 @@ def test_coding_agent_runs_its_tools_through_pi(fake_pi, tmp_path, monkeypatch):
                         {'path': 'Dockerfile', 'content': 'FROM scratch'}), stop='toolUse')],
             [assistant('Finished')])
     monkeypatch.setenv('PATH', str(tmp_path) + os.pathsep + os.environ['PATH'])
-    monkeypatch.setenv('LLM_HARNESS', 'pi')
-    monkeypatch.setenv('PI_MODEL', 'openai/gpt-test')
+    from app.settings.models import ModelSettings, SETTINGS_FILENAME
+    (tmp_path / SETTINGS_FILENAME).write_text(ModelSettings(
+        adapter='pi', model='openai/gpt-test', thinking_level='high').model_dump_json())
     for name in ('OPENAI_MODEL', 'OPENAI_API_KEY', 'OPENAI_BASE_URL'):
         monkeypatch.delenv(name, raising=False)
     root = tmp_path / 'service'
@@ -202,13 +206,15 @@ def test_coding_agent_runs_its_tools_through_pi(fake_pi, tmp_path, monkeypatch):
     assert (root / 'Dockerfile').read_text() == 'FROM scratch'
     first, second = calls()
     assert first['argv'][first['argv'].index('--model') + 1] == 'openai/gpt-test'
+    assert first['argv'][first['argv'].index('--thinking') + 1] == 'high'
     assert 'write_file' in first['argv'][first['argv'].index('--tools') + 1].split(',')
     assert [item['role'] for item in second['input']['messages']] == [
         'user', 'assistant', 'toolResult']
     assert second['input']['messages'][-1]['content'] == [{'type': 'text', 'text': 'Written'}]
 
 
-async def test_pi_harness_mounts_credential_files_in_a_shared_directory(created_container, tmp_path, monkeypatch):
+async def test_pi_harness_mounts_credential_files_in_a_shared_directory(
+        created_container, tmp_path, monkeypatch, saved_model_settings):
     credentials = tmp_path / 'pi'
     (credentials / 'extensions').mkdir(parents=True)
     for name in ('auth.json', 'models.json'):
@@ -216,30 +222,29 @@ async def test_pi_harness_mounts_credential_files_in_a_shared_directory(created_
     (credentials / 'settings.json').write_text(json.dumps({
         'packages': ['npm:some-extension'], 'defaultProvider': 'openai',
         'defaultModel': 'gpt-test', 'defaultThinkingLevel': 'high'}))
-    monkeypatch.setattr(docker_agents, 'LLM_HARNESS', 'pi')
-    monkeypatch.setattr(docker_agents, 'PI_MODEL', None)
+    from app.settings.models import ModelSettings
+    saved_model_settings['implementation'] = ModelSettings(
+        adapter='pi', model='openai/gpt-test', thinking_level='high')
     monkeypatch.setattr(docker_agents, 'PI_CREDENTIALS_DIR', credentials)
 
-    args = await created_container()
+    args, settings = await created_container()
 
     mounts = [args[index + 1] for index, arg in enumerate(args) if arg == '-v']
     # Every container gets the same host directory, so Pi's auth.json.lock is shared.
     assert mounts == [f'{credentials}/containers:/home/agent/.pi/agent',
                       f'{credentials}/auth.json:/home/agent/.pi/agent/auth.json',
                       f'{credentials}/models.json:/home/agent/.pi/agent/models.json:ro']
-    assert mounts == [args[index + 1] for index, arg in enumerate(await created_container())
+    repeated, _ = await created_container()
+    assert mounts == [repeated[index + 1] for index, arg in enumerate(repeated)
                       if arg == '-v']
     assert sorted(item.name for item in (credentials / 'containers').iterdir()) == [
         'auth.json', 'models.json']
-    # The host's default model is passed by name, as its settings file is not mounted.
-    assert 'LLM_HARNESS=pi' in args and 'PI_MODEL=openai/gpt-test:high' in args
-
-    monkeypatch.setattr(docker_agents, 'PI_MODEL', 'anthropic/sonnet')
-    assert 'PI_MODEL=anthropic/sonnet' in await created_container()
+    assert settings == saved_model_settings['implementation']
 
 
-async def test_pi_harness_requires_credentials(created_container, tmp_path, monkeypatch):
-    monkeypatch.setattr(docker_agents, 'LLM_HARNESS', 'pi')
+async def test_pi_harness_requires_credentials(created_container, tmp_path, monkeypatch, saved_model_settings):
+    from app.settings.models import ModelSettings
+    saved_model_settings['implementation'] = ModelSettings(adapter='pi', model='openai/test')
     monkeypatch.setattr(docker_agents, 'PI_CREDENTIALS_DIR', tmp_path / 'absent')
     with pytest.raises(RuntimeError, match='Pi credentials not found'):
         await created_container()

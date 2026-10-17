@@ -54,7 +54,7 @@ The SDK automatically calculates cost only for recognized model pricing; configu
 custom model pricing in Langfuse for the local Qwen model if cost accounting is
 needed. No fabricated user IDs or token/cost estimates are added.
 
-Under `LLM_HARNESS=claude` each Claude Code request is one generation like any other
+With the Claude adapter selected in Settings, each Claude Code request is one generation like any other
 provider's: it carries the model Claude Code actually used, and prompt-cache reads and
 writes are reported as `input_cache_read` / `input_cache_creation` beside the uncached
 input. Claude Code's own telemetry is not enabled.

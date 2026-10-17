@@ -15,9 +15,16 @@
 !app/llm/pi.py
 !app/llm/pi_extension.ts
 !app/llm/questions.py
+!app/settings/
+!app/settings/__init__.py
+!app/settings/models.py
 !app/implementation/
 !app/implementation/agent.py
 !app/test_generation/
 !app/test_generation/agent.py
 !app/documentation/
 !app/documentation/agent.py
+!app/diagnosis/
+!app/diagnosis/agent.py
+!app/review/
+!app/review/agent.py

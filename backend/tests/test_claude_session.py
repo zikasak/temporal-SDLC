@@ -89,8 +89,9 @@ def claude_http(monkeypatch, tmp_path):
     monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-config'))
     monkeypatch.setenv('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', '1')
     monkeypatch.setenv('CLAUDE_CODE_MAX_RETRIES', '0')
-    monkeypatch.setenv('LLM_HARNESS', 'claude')
-    monkeypatch.setenv('CLAUDE_MODEL', 'claude-opus-5-5')
+    from app.settings.models import ModelSettings, SETTINGS_FILENAME
+    (tmp_path / SETTINGS_FILENAME).write_text(ModelSettings(
+        adapter='claude', model='claude-opus-5-5', thinking_level='high').model_dump_json())
     monkeypatch.setattr(claude, 'ChatClaude', partial(ChatClaude, timeout=10))
     try:
         yield replies, requests
@@ -150,6 +151,8 @@ def test_authoring_keeps_native_history_through_many_tool_turns(claude_http, tmp
 
     assert (root / 'Dockerfile').read_text() == 'FROM scratch'
     assert len(requests) == 14
+    assert requests[0]['thinking']['type'] == 'adaptive'
+    assert requests[0]['output_config']['effort'] == 'high'
     assert len(usages) == 14
     assert all(usage == {
         'input_tokens': 30, 'output_tokens': 5, 'total_tokens': 35,

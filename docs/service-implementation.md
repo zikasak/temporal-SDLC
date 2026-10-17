@@ -72,13 +72,30 @@ The documentation worker needs Docker and `GENERATED_CODE_DIR` too, to run its a
 builds no image of the output. `TEMPORAL_DOCUMENTATION_TASK_QUEUE` defaults to
 `documentation`.
 
-Configure `OPENAI_API_KEY`, `OPENAI_MODEL`, and `OPENAI_BASE_URL` through the environment.
+Choose each LLM workflow's adapter, model ID, and thinking level in the **Settings** tab
+(`?mode=settings`). `GET /settings` returns the saved values and supported thinking
+levels; `PUT /settings` validates and atomically saves the complete workflow map.
+Settings are shared application-wide in PostgreSQL's `app.workflow_settings` table.
+Startup seeds missing rows with the local Qwen model, OpenAI adapter, and model-default
+thinking. Saved rows are preserved across restarts. The supported types are chat,
+requirements (including its document overview), API design, implementation, test
+generation, diagnosis, documentation, and review. Delivery, code generation, verification,
+and greetings have no model calls of their own.
+
+Every host turn reloads its workflow's settings. Coding containers receive a validated
+snapshot in `/workspace/llm-settings.json` at launch, including on a resumed run.
+An agent already running keeps its snapshot. Pi receives `--thinking`, OpenAI receives
+`reasoning_effort`, and Claude receives SDK thinking/effort options in both standalone
+requests and native coding sessions. `default` leaves the provider's reasoning default
+unchanged. Model support for individual thinking levels is provider-dependent.
+
+Configure `OPENAI_API_KEY` and `OPENAI_BASE_URL` through the environment.
 Loopback provider URLs are translated to `host.docker.internal` inside Docker; remote
 URLs are preserved. `TEMPORAL_IMPLEMENTATION_TASK_QUEUE` defaults to `implementation`
 and `TEMPORAL_TEST_GENERATION_TASK_QUEUE` defaults to `test-generation`. The containers
 require outbound access to the LLM provider and Maven repositories.
 
-Setting `LLM_HARNESS=pi` routes model calls through the Pi CLI instead: the host chat
+Selecting the **Pi** adapter routes model calls through the Pi CLI: the host chat
 uses the `pi` on its `PATH`, and the coding-agent image installs its own. Pi signs in with
 the credentials in `PI_CREDENTIALS_DIR` (default: Pi's own `PI_CODING_AGENT_DIR`, else
 `~/.pi/agent`). Host calls run Pi with that directory as its configuration directory, and
@@ -87,10 +104,9 @@ that directory's `auth.json` mounted read-write, so a refreshed token is kept, a
 `models.json` read-only, inside a `containers/` subdirectory of it that all containers share
 as their Pi directory. Pi locks `auth.json` through a lock directory beside it, so sharing
 that directory lets parallel agents take turns refreshing an OAuth token instead of each
-rotating it. `PI_MODEL` selects the model; without it containers use the
-default model named in the directory's `settings.json`.
+rotating it. The saved workflow settings select the model and thinking level.
 
-Setting `LLM_HARNESS=claude` routes model calls through Claude Code instead, driven by the
+Selecting the **Claude** adapter routes model calls through Claude Code, driven by the
 Claude Agent SDK (`app/llm/claude.py`). The `claude-agent-sdk` package bundles the CLI, so
 neither the host nor the coding-agent image installs anything else. Each model call is one
 Claude Code process making one request: its built-in tools, settings, skills and project
@@ -101,8 +117,8 @@ Claude Code still adds its own short environment notes to each request, and a co
 that ends in tool results is resumed with a short prompt to carry on, because Claude Code
 only starts a turn from a user message. Claude Code closes such a resumed conversation with
 a filler assistant turn, `No response requested.`; a reply that only repeats it is asked
-for once more, and a second one fails the call. `CLAUDE_MODEL` selects the model; without it Claude
-Code uses its default. On the host Claude Code signs in with its own login, or with
+for once more, and a second one fails the call. The saved workflow settings select the model.
+On the host Claude Code signs in with its own login, or with
 `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) when set. A
 host login lives in the keychain or `~/.claude` and is not shared with containers: coding
 agents require one of those variables (or `ANTHROPIC_AUTH_TOKEN`), which is forwarded by
@@ -151,8 +167,8 @@ agent, and automatic Temporal/model retries remain disabled.
   Maven). The role entrypoint and workspace
   are selected through `AGENT_ROLE` and `WORKSPACE_NAME` build arguments.
 
-Provider construction lives in the pure `app/llm/factory.py`. Host `get_model()` retains
-its cached configuration wrapper; containers pass their environment settings explicitly.
+Provider construction lives in the pure `app/llm/factory.py`. Host `get_model(workflow_type)`
+loads saved settings without caching; containers use their supplied JSON snapshot.
 Prompts, input visibility, completion checks, and output policies remain role-local.
 The generic lifecycle does not assume Maven, Java filenames, or access to sibling artifacts.
 
@@ -270,7 +286,7 @@ Python: pytest),
 and `/workspace/language.json` carries that language's authoring instructions. No generated server
 sources, implementation sources, implementation image, logs, or test stubs are copied
 into this container. Neither coding container has a Docker socket or host mounts (other
-than the Pi credential files under `LLM_HARNESS=pi`), and
+than the credential files when the Pi adapter is selected), and
 their filesystems are separate. Source isolation is enforced by the supplied filesystem
 and inputs as well as the agent instructions.
 
@@ -773,7 +789,7 @@ daemon needs an image registry or `docker save`/`docker load`.
 ## Trust boundary
 
 No host directories or Docker socket are mounted into the coding container. Credentials
-are provided at container creation, not baked into images. Under `LLM_HARNESS=pi` those
+are provided at container creation, not baked into images. With the Pi adapter those
 are the host's Pi `auth.json` (writable) and `models.json` as single-file mounts; the
 agent can read the sign-in tokens and overwrite that one file. The agent can nevertheless
 see its LLM key, execute arbitrary code and make outbound requests. Run this worker on

@@ -3,6 +3,7 @@
 .env
 .env.*
 env/
+.venv/
 data/
 tests/
 tools/*.jar
