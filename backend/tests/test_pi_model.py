@@ -242,6 +242,25 @@ async def test_pi_harness_mounts_credential_files_in_a_shared_directory(
     assert settings == saved_model_settings['implementation']
 
 
+async def test_pi_oauth_agents_mount_the_shared_login_directory(
+        created_container, tmp_path, monkeypatch, saved_model_settings):
+    from app.settings.models import ModelSettings
+
+    credentials = tmp_path / 'pi-credentials'
+    credentials.mkdir()
+    (credentials / 'auth.json').write_text('{}')
+    monkeypatch.setattr(docker_agents, 'PI_CREDENTIALS_DIR', credentials)
+    monkeypatch.setattr(docker_agents, 'PI_CREDENTIALS_SHARED', True, raising=False)
+    saved_model_settings['implementation'] = ModelSettings(adapter='pi', model='openai-codex/test')
+
+    args, _ = await created_container()
+    mounts = [args[index + 1] for index, arg in enumerate(args) if arg == '-v']
+    # The auth file and its sibling refresh lock must share the same parent on
+    # the API, workers, and daemon; a second containers/ directory splits the lock.
+    assert mounts == [f'{credentials}:/home/agent/.pi/agent']
+    assert not (credentials / 'containers').exists()
+
+
 async def test_pi_harness_requires_credentials(created_container, tmp_path, monkeypatch, saved_model_settings):
     from app.settings.models import ModelSettings
     saved_model_settings['implementation'] = ModelSettings(adapter='pi', model='openai/test')
