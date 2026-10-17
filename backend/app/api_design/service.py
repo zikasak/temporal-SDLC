@@ -15,14 +15,23 @@ from app.documents import DocumentNotFound, get_generated_document
 from app.requirements import service as requirements_service
 from app.requirements.document import render_requirements_markdown
 from app.requirements.models import DIRECT_KINDS
-from app.temporal.client import connect_temporal
-from app.temporal.sessions import SessionBusy, fork_messages, start_update, state_at_message
+from app.temporal.client import TemporalUnavailable, connect_temporal
+from app.temporal.registry import is_registered, register
+from app.temporal.sessions import (
+    SessionBusy, SessionNotFound, fork_messages, start_update, state_at_message,
+)
 
 logger = logging.getLogger(__name__)
 
 
 async def start_session(requirements_session_id: str) -> str:
-    source = await requirements_service.get_state(requirements_session_id)
+    try:
+        source = await requirements_service.get_state(requirements_session_id)
+    except TemporalUnavailable:
+        # An unknown source session is reported as such even without Temporal.
+        if not await is_registered(requirements_session_id):
+            raise SessionNotFound("Requirements session not found") from None
+        raise
     if source.status != "completed" or not source.document:
         raise SessionBusy("Generate the requirements document before designing the API.")
     if source.kind in DIRECT_KINDS:
@@ -72,6 +81,7 @@ async def _start(state: ApiDesignState) -> str:
         id=session_id,
         task_queue=TASK_QUEUE,
     )
+    await register(handle.id)
     logger.info("Started API design session %s from %s", session_id, state.source_session_id)
     return handle.id
 
@@ -138,6 +148,22 @@ async def retry_generation(session_id: str, stage: RetryStage) -> None:
     if state.status != 'completed' or not state.document:
         raise SessionBusy('Only failed generation can be retried.')
     await delivery_service.retry(session_id, stage)
+
+
+async def _check_delivered(session_id: str) -> None:
+    state = await get_state(session_id)
+    if state.status != 'completed' or not state.document:
+        raise SessionBusy('The delivery has no open review findings.')
+
+
+async def accept_findings(session_id: str, login: str) -> DeliveryProgress:
+    await _check_delivered(session_id)
+    return await delivery_service.accept_findings(session_id, login)
+
+
+async def instruct_findings(session_id: str, instructions: str) -> DeliveryProgress:
+    await _check_delivered(session_id)
+    return await delivery_service.instruct_findings(session_id, instructions)
 
 
 async def get_state(session_id: str) -> ApiDesignState:

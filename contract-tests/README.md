@@ -27,11 +27,25 @@ service that already has accounts, supply the first user's credentials as
 `CONTRACT_TESTS_ADMIN_LOGIN` and `CONTRACT_TESTS_ADMIN_PASSWORD`.
 
 The API allows 10 sign-in and registration attempts per client address per minute by
-default. The suite makes 5; keep new tests within that budget or sign in once through
+default. The suite makes 6; keep new tests within that budget or sign in once through
 the shared fixtures.
 
 Endpoints that need Temporal, an LLM or GitHub are covered only as far as the service
 answers without them: authentication, input validation and unknown IDs.
+
+Contract ambiguities and how the suite reads them:
+
+- Code review (findings accept/instructions, the `review` retry stage) needs a finished
+  delivery, which can't be built without Temporal, an LLM and GitHub. So the suite covers
+  only sign-in, input validation (instructions of 1 to 10000 characters after trimming,
+  `stage` from the documented enum) and unknown sessions (404).
+- When the input is invalid, it is rejected (422, or 413 for too-long text) before
+  the session is looked up, the way FastAPI validates requests. So invalid bodies are
+  sent to unknown session IDs.
+- Text over 10000 characters may answer 413 or 422 (NFR-5); both are accepted.
+- `/start` answers 503 with a `detail`, because the service image has no Temporal (NFR-4).
+- Unknown IDs are well formed (prefix and 32 hex digits) so that they are treated as
+  unknown rather than malformed.
 
 Collect the tests without contacting the service:
 

@@ -130,7 +130,14 @@ async def generate_service_tests(session_id: str, context: dict[str, Any]) -> di
     continued = bool(context.get('repository'))
     repository = (suite.test_cases(session_dir / SNAPSHOT_DIR / 'suite') if continued else {})
     frozen = None
-    if repair:
+    if repair and repair.get('review'):
+        # Code review findings concern the delivery's own tests: the repository's tests
+        # it left as they were stay so for a change.
+        if change:
+            published = suite.test_cases(session_dir / 'tests/suite')
+            frozen = {case: source for case, source in repository.items()
+                      if published.get(case) == source}
+    elif repair:
         # Only the tests the diagnosis found broken may differ from the published suite.
         broken = {suite.case_id(item['class_name'], item['name'])
                   for item in repair.get('broken_tests', [])}

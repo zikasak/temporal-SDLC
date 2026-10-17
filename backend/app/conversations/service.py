@@ -26,6 +26,7 @@ from app.documents import (
 from app.github.models import RepositorySelection
 from app.github.errors import GitHubError
 from app.temporal.client import connect_temporal
+from app.temporal.registry import register
 from app.temporal.sessions import InvalidForkPoint, fork_messages
 
 logger = logging.getLogger(__name__)
@@ -170,6 +171,7 @@ async def _start(
         memo={"messages": messages, "parent_request_id": parent_request_id or "",
               "session_id": session_id, "repository": repository},
     )
+    await register(handle.id)
     logger.info("Started LLM request %s (session %s, parent %s, attachment %s)",
                 request_id, session_id, parent_request_id,
                 attachment["document_id"] if attachment else None)

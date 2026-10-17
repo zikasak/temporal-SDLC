@@ -5,1313 +5,6 @@ info:
   description: Turns tasks described in conversation into requirements, API designs
     and verified code published to GitHub.
 paths:
-  /auth/login:
-    post:
-      operationId: postAuthLogin
-      summary: Sign in
-      description: No sign-in required. Returns a session and sets the access_token
-        cookie.
-      tags:
-      - auth
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/Credentials'
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Session'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '429':
-          description: Too Many Requests
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-2
-      - NFR-1
-      - NFR-3
-  /auth/registration:
-    get:
-      operationId: getAuthRegistration
-      summary: Registration status
-      description: No sign-in required. Whether the first account can still be registered.
-      tags:
-      - auth
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/RegistrationStatus'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-1
-  /auth/register:
-    post:
-      operationId: postAuthRegister
-      summary: Register the first account
-      description: No sign-in required. Registers and signs in the first account;
-        403 once any account exists.
-      tags:
-      - auth
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/Credentials'
-      responses:
-        '201':
-          description: Created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Session'
-        '403':
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '429':
-          description: Too Many Requests
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-1
-      - FR-7
-      - NFR-1
-  /auth/logout:
-    post:
-      operationId: postAuthLogout
-      summary: Sign out
-      description: No sign-in required. Clears the session cookie.
-      tags:
-      - auth
-      responses:
-        '204':
-          description: No Content
-      x-requirements:
-      - FR-5
-  /auth/me:
-    get:
-      operationId: getAuthMe
-      summary: Current user
-      description: The signed-in user.
-      tags:
-      - auth
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Profile'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-3
-      - FR-4
-  /auth/users:
-    get:
-      operationId: getAuthUsers
-      summary: List accounts
-      description: Administrator only.
-      tags:
-      - auth
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/Account'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '403':
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-6
-    post:
-      operationId: postAuthUsers
-      summary: Create an account
-      description: Administrator only.
-      tags:
-      - auth
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/Credentials'
-      responses:
-        '201':
-          description: Created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Account'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '403':
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-6
-      - FR-7
-  /start:
-    post:
-      operationId: postStart
-      summary: Start the sample workflow
-      description: Runs the sample greeting workflow and returns its result.
-      tags:
-      - workflows
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/WorkflowResult'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-18
-  /workflows:
-    get:
-      operationId: getWorkflows
-      summary: List workflow executions
-      description: Newest first, 50 per page.
-      tags:
-      - workflows
-      parameters:
-      - name: type
-        in: query
-        required: false
-        schema:
-          type: string
-        description: A workflow type to list only.
-      - name: page_token
-        in: query
-        required: false
-        schema:
-          type: string
-        description: next_page_token of the last page.
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/WorkflowPage'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-17
-  /connectors/github/connection:
-    get:
-      operationId: getConnectorsGithubConnection
-      summary: GitHub connection status
-      description: The shared connection, without its private key.
-      tags:
-      - github
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GitHubConnection'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-8
-      - NFR-2
-    put:
-      operationId: putConnectorsGithubConnection
-      summary: Connect a GitHub App
-      description: Saves the app after GitHub confirms its key and installation. The
-        request must be application/json and come from an allowed origin, if any.
-      tags:
-      - github
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GitHubAppCredentials'
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GitHubConnection'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '403':
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '413':
-          description: Content Too Large
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '415':
-          description: Unsupported Media Type
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-8
-      - NFR-2
-      - NFR-5
-    delete:
-      operationId: deleteConnectorsGithubConnection
-      summary: Disconnect GitHub
-      description: Removes the shared connection. The body is an empty JSON object.
-      tags:
-      - github
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/EmptyObject'
-      responses:
-        '204':
-          description: No Content
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '403':
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '415':
-          description: Unsupported Media Type
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-8
-  /connectors/github/connection/manifest:
-    post:
-      operationId: postConnectorsGithubConnectionManifest
-      summary: Connect a created GitHub App
-      description: Saves the app GitHub created from this instance's manifest.
-      tags:
-      - github
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ManifestCode'
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GitHubConnection'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '403':
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '413':
-          description: Content Too Large
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '415':
-          description: Unsupported Media Type
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-8
-  /connectors/github/connection/check:
-    post:
-      operationId: postConnectorsGithubConnectionCheck
-      summary: Check the GitHub connection
-      description: Validates the saved app against GitHub and picks up its installation.
-        The body is an empty JSON object.
-      tags:
-      - github
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/EmptyObject'
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GitHubConnection'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '403':
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '415':
-          description: Unsupported Media Type
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-8
-  /connectors/github/repositories:
-    get:
-      operationId: getConnectorsGithubRepositories
-      summary: List repositories
-      description: Repositories the installation can access.
-      tags:
-      - github
-      parameters:
-      - name: page
-        in: query
-        required: false
-        schema:
-          type: integer
-        description: Page number, 1 to 10000; 1 by default.
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/RepositoryPage'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-9
-  /connectors/github/repositories/{owner}/{repo}/branches:
-    get:
-      operationId: getConnectorsGithubRepositoriesByOwnerByRepoBranches
-      summary: List branches
-      description: Branch names of a repository the installation can access.
-      tags:
-      - github
-      parameters:
-      - name: owner
-        in: path
-        required: true
-        schema:
-          type: string
-        description: Repository owner.
-      - name: repo
-        in: path
-        required: true
-        schema:
-          type: string
-        description: Repository name.
-      - name: page
-        in: query
-        required: false
-        schema:
-          type: integer
-        description: Page number, 1 to 10000; 1 by default.
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/BranchPage'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-9
-  /requirements/intake:
-    get:
-      operationId: getRequirementsIntake
-      summary: Requirements intake
-      description: The questions a requirements session starts with.
-      tags:
-      - requirements
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Intake'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-11
-  /requirements/sessions:
-    post:
-      operationId: postRequirementsSessions
-      summary: Start a requirements session
-      description: Starts the interview in the repository from the intake's answers.
-      tags:
-      - requirements
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateRequirementsSession'
-      responses:
-        '201':
-          description: Created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionCreated'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-10
-      - NFR-5
-  /requirements/sessions/{session_id}:
-    get:
-      operationId: getRequirementsSessionsBySessionId
-      summary: Get a requirements session
-      description: The session's conversation, state and delivery progress.
-      tags:
-      - requirements
-      parameters:
-      - name: session_id
-        in: path
-        required: true
-        schema:
-          type: string
-        description: requirements-session- followed by 32 hex digits.
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/RequirementsSession'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-10
-  /requirements/sessions/{session_id}/messages:
-    post:
-      operationId: postRequirementsSessionsBySessionIdMessages
-      summary: Send a message
-      description: Starts the interviewer's turn on the message.
-      tags:
-      - requirements
-      parameters:
-      - name: session_id
-        in: path
-        required: true
-        schema:
-          type: string
-        description: requirements-session- followed by 32 hex digits.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/MessageInput'
-      responses:
-        '202':
-          description: Accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionStatusChange'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '413':
-          description: Content Too Large
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-10
-  /requirements/sessions/{session_id}/answers:
-    post:
-      operationId: postRequirementsSessionsBySessionIdAnswers
-      summary: Answer the interviewer's questions
-      description: Answers the questions of the last assistant message and starts
-        a turn.
-      tags:
-      - requirements
-      parameters:
-      - name: session_id
-        in: path
-        required: true
-        schema:
-          type: string
-        description: requirements-session- followed by 32 hex digits.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/AnswersInput'
-      responses:
-        '202':
-          description: Accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionStatusChange'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-10
-  /requirements/sessions/{session_id}/delivery/answers:
-    post:
-      operationId: postRequirementsSessionsBySessionIdDeliveryAnswers
-      summary: Answer a delivery agent's questions
-      description: Resumes the paused coding agent of the named stage workflow.
-      tags:
-      - requirements
-      parameters:
-      - name: session_id
-        in: path
-        required: true
-        schema:
-          type: string
-        description: requirements-session- followed by 32 hex digits.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/AgentAnswersInput'
-      responses:
-        '202':
-          description: Accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionCreated'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-14
-  /requirements/sessions/{session_id}/retry:
-    post:
-      operationId: postRequirementsSessionsBySessionIdRetry
-      summary: Retry the last turn
-      description: Runs the failed interviewer turn again.
-      tags:
-      - requirements
-      parameters:
-      - name: session_id
-        in: path
-        required: true
-        schema:
-          type: string
-        description: requirements-session- followed by 32 hex digits.
-      responses:
-        '202':
-          description: Accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionStatusChange'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-10
-  /requirements/sessions/{session_id}/generation/retry:
-    post:
-      operationId: postRequirementsSessionsBySessionIdGenerationRetry
-      summary: Retry a delivery stage
-      description: Starts the named stage of the delivery over.
-      tags:
-      - requirements
-      parameters:
-      - name: session_id
-        in: path
-        required: true
-        schema:
-          type: string
-        description: requirements-session- followed by 32 hex digits.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RetryStageInput'
-      responses:
-        '202':
-          description: Accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionStatusChange'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-14
-  /requirements/sessions/{session_id}/finalize:
-    post:
-      operationId: postRequirementsSessionsBySessionIdFinalize
-      summary: Finalize the requirements session
-      description: Writes the requirements document; the session is completed once
-        it is ready.
-      tags:
-      - requirements
-      parameters:
-      - name: session_id
-        in: path
-        required: true
-        schema:
-          type: string
-        description: requirements-session- followed by 32 hex digits.
-      responses:
-        '202':
-          description: Accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionStatusChange'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-12
-  /requirements/sessions/{session_id}/fork:
-    post:
-      operationId: postRequirementsSessionsBySessionIdFork
-      summary: Fork the session
-      description: Starts a new session with the conversation up to the given message.
-      tags:
-      - requirements
-      parameters:
-      - name: session_id
-        in: path
-        required: true
-        schema:
-          type: string
-        description: requirements-session- followed by 32 hex digits.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ForkInput'
-      responses:
-        '201':
-          description: Created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionCreated'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-10
-  /requirements/sessions/{session_id}/document:
-    get:
-      operationId: getRequirementsSessionsBySessionIdDocument
-      summary: Download the requirements document
-      description: The requirements document as a file attachment; 404 until it is
-        ready.
-      tags:
-      - requirements
-      parameters:
-      - name: session_id
-        in: path
-        required: true
-        schema:
-          type: string
-        description: requirements-session- followed by 32 hex digits.
-      responses:
-        '200':
-          description: OK
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-12
-  /requirements/sessions/{session_id}/checkout:
-    post:
-      operationId: postRequirementsSessionsBySessionIdCheckout
-      summary: Update the session's checkout
-      description: Checks the session's branch out again at its latest commit; the
-        session is preparing until it is. Refused while a message is unanswered or
-        once the session is finalized.
-      tags:
-      - requirements
-      parameters:
-      - name: session_id
-        in: path
-        required: true
-        schema:
-          type: string
-        description: requirements-session- followed by 32 hex digits.
-      responses:
-        '202':
-          description: Accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionStatusChange'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-19
   /api-design/sessions:
     post:
       operationId: postApiDesignSessions
@@ -1358,7 +51,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '422':
-          description: Unprocessable Content
+          description: Unprocessable Entity
           content:
             application/json:
               schema:
@@ -1400,71 +93,6 @@ paths:
                 $ref: '#/components/schemas/Error'
         '404':
           description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-13
-  /api-design/sessions/{session_id}/messages:
-    post:
-      operationId: postApiDesignSessionsBySessionIdMessages
-      summary: Send a message
-      description: Starts the interviewer's turn on the message.
-      tags:
-      - api-design
-      parameters:
-      - name: session_id
-        in: path
-        required: true
-        schema:
-          type: string
-        description: api-design-session- followed by 32 hex digits.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/MessageInput'
-      responses:
-        '202':
-          description: Accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionStatusChange'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '413':
-          description: Content Too Large
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
           content:
             application/json:
               schema:
@@ -1524,7 +152,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '422':
-          description: Unprocessable Content
+          description: Unprocessable Entity
           content:
             application/json:
               schema:
@@ -1583,18 +211,20 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '422':
-          description: Unprocessable Content
+          description: Unprocessable Entity
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-14
-  /api-design/sessions/{session_id}/retry:
+  /api-design/sessions/{session_id}/delivery/findings/accept:
     post:
-      operationId: postApiDesignSessionsBySessionIdRetry
-      summary: Retry the last turn
-      description: Runs the failed interviewer turn again.
+      operationId: postApiDesignSessionsBySessionIdDeliveryFindingsAccept
+      summary: Accept the delivery with open review findings
+      description: Clears the open-findings flag, keeps the pushed delivery as it
+        is and records findings_acceptance (when and by whom) in the delivery progress.
+        The publication stays marked as unverified. 409 while no flag is raised.
       tags:
       - api-design
       parameters:
@@ -1605,20 +235,14 @@ paths:
           type: string
         description: api-design-session- followed by 32 hex digits.
       responses:
-        '202':
-          description: Accepted
+        '200':
+          description: OK
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/SessionStatusChange'
         '401':
           description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
           content:
             application/json:
               schema:
@@ -1635,13 +259,23 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
       x-requirements:
-      - FR-13
-  /api-design/sessions/{session_id}/generation/retry:
+      - FR-30
+  /api-design/sessions/{session_id}/delivery/findings/instructions:
     post:
-      operationId: postApiDesignSessionsBySessionIdGenerationRetry
-      summary: Retry a delivery stage
-      description: Starts the named stage of the delivery over.
+      operationId: postApiDesignSessionsBySessionIdDeliveryFindingsInstructions
+      summary: Give instructions about open review findings
+      description: Starts a fix round from the instructions, then verification and
+        code review, pushing the result to the same branch. The instructions are recorded
+        on the review round they start. If verification fails for good, verification_status
+        becomes error, the branch keeps the earlier unverified push and the flag stays
+        raised. 409 while no flag is raised.
       tags:
       - api-design
       parameters:
@@ -1656,7 +290,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/RetryStageInput'
+              $ref: '#/components/schemas/FindingsInstructionsInput'
       responses:
         '202':
           description: Accepted
@@ -1664,6 +298,62 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Request Entity Too Large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-30
+      - FR-31
+  /api-design/sessions/{session_id}/document:
+    get:
+      operationId: getApiDesignSessionsBySessionIdDocument
+      summary: Download the OpenAPI document
+      description: The OpenAPI document as a file attachment; 404 until it is ready.
+      tags:
+      - api-design
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: api-design-session- followed by 32 hex digits.
+      responses:
+        '200':
+          description: OK
         '401':
           description: Unauthorized
           content:
@@ -1682,20 +372,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
       x-requirements:
-      - FR-14
+      - FR-13
   /api-design/sessions/{session_id}/finalize:
     post:
       operationId: postApiDesignSessionsBySessionIdFinalize
@@ -1796,18 +474,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '422':
-          description: Unprocessable Content
+          description: Unprocessable Entity
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-13
-  /api-design/sessions/{session_id}/document:
-    get:
-      operationId: getApiDesignSessionsBySessionIdDocument
-      summary: Download the OpenAPI document
-      description: The OpenAPI document as a file attachment; 404 until it is ready.
+  /api-design/sessions/{session_id}/generation/retry:
+    post:
+      operationId: postApiDesignSessionsBySessionIdGenerationRetry
+      summary: Retry a delivery stage
+      description: Starts the named stage of the delivery over. The review stage runs
+        a failed code review again; 409 when the delivery has no failed review.
       tags:
       - api-design
       parameters:
@@ -1817,9 +496,80 @@ paths:
         schema:
           type: string
         description: api-design-session- followed by 32 hex digits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetryStageInput'
       responses:
-        '200':
-          description: OK
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-14
+      - FR-20
+      - FR-26
+  /api-design/sessions/{session_id}/messages:
+    post:
+      operationId: postApiDesignSessionsBySessionIdMessages
+      summary: Send a message
+      description: Starts the interviewer's turn on the message.
+      tags:
+      - api-design
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: api-design-session- followed by 32 hex digits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageInput'
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
         '401':
           description: Unauthorized
           content:
@@ -1838,8 +588,699 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Request Entity Too Large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-13
+  /api-design/sessions/{session_id}/retry:
+    post:
+      operationId: postApiDesignSessionsBySessionIdRetry
+      summary: Retry the last turn
+      description: Runs the failed interviewer turn again.
+      tags:
+      - api-design
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: api-design-session- followed by 32 hex digits.
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-13
+  /auth/login:
+    post:
+      operationId: postAuthLogin
+      summary: Sign in
+      description: No sign-in required. Returns a session and sets the access_token
+        cookie.
+      tags:
+      - auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Too Many Requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-2
+      - NFR-1
+      - NFR-3
+  /auth/logout:
+    post:
+      operationId: postAuthLogout
+      summary: Sign out
+      description: No sign-in required. Clears the session cookie.
+      tags:
+      - auth
+      responses:
+        '204':
+          description: No Content
+      x-requirements:
+      - FR-5
+  /auth/me:
+    get:
+      operationId: getAuthMe
+      summary: Current user
+      description: The signed-in user.
+      tags:
+      - auth
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-3
+      - FR-4
+  /auth/register:
+    post:
+      operationId: postAuthRegister
+      summary: Register the first account
+      description: No sign-in required. Registers and signs in the first account;
+        403 once any account exists.
+      tags:
+      - auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Too Many Requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-1
+      - FR-7
+      - NFR-1
+  /auth/registration:
+    get:
+      operationId: getAuthRegistration
+      summary: Registration status
+      description: No sign-in required. Whether the first account can still be registered.
+      tags:
+      - auth
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistrationStatus'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-1
+  /auth/users:
+    get:
+      operationId: getAuthUsers
+      summary: List accounts
+      description: Administrator only.
+      tags:
+      - auth
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Account'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-6
+    post:
+      operationId: postAuthUsers
+      summary: Create an account
+      description: Administrator only.
+      tags:
+      - auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-6
+      - FR-7
+  /connectors/github/connection:
+    get:
+      operationId: getConnectorsGithubConnection
+      summary: GitHub connection status
+      description: The shared connection, without its private key.
+      tags:
+      - github
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GitHubConnection'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-8
+      - NFR-2
+    put:
+      operationId: putConnectorsGithubConnection
+      summary: Connect a GitHub App
+      description: Saves the app after GitHub confirms its key and installation. The
+        request must be application/json and come from an allowed origin, if any.
+      tags:
+      - github
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GitHubAppCredentials'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GitHubConnection'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Request Entity Too Large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415':
+          description: Unsupported Media Type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-8
+      - NFR-2
+      - NFR-5
+    delete:
+      operationId: deleteConnectorsGithubConnection
+      summary: Disconnect GitHub
+      description: Removes the shared connection. The body is an empty JSON object.
+      tags:
+      - github
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmptyObject'
+      responses:
+        '204':
+          description: No Content
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415':
+          description: Unsupported Media Type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-8
+  /connectors/github/connection/check:
+    post:
+      operationId: postConnectorsGithubConnectionCheck
+      summary: Check the GitHub connection
+      description: Validates the saved app against GitHub and picks up its installation.
+        The body is an empty JSON object.
+      tags:
+      - github
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmptyObject'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GitHubConnection'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415':
+          description: Unsupported Media Type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-8
+  /connectors/github/connection/manifest:
+    post:
+      operationId: postConnectorsGithubConnectionManifest
+      summary: Connect a created GitHub App
+      description: Saves the app GitHub created from this instance's manifest.
+      tags:
+      - github
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManifestCode'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GitHubConnection'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Request Entity Too Large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415':
+          description: Unsupported Media Type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-8
+  /connectors/github/repositories:
+    get:
+      operationId: getConnectorsGithubRepositories
+      summary: List repositories
+      description: Repositories the installation can access.
+      tags:
+      - github
+      parameters:
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+        description: Page number, 1 to 10000; 1 by default.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepositoryPage'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-9
+  /connectors/github/repositories/{owner}/{repo}/branches:
+    get:
+      operationId: getConnectorsGithubRepositoriesByOwnerByRepoBranches
+      summary: List branches
+      description: Branch names of a repository the installation can access.
+      tags:
+      - github
+      parameters:
+      - name: owner
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Repository owner.
+      - name: repo
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Repository name.
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+        description: Page number, 1 to 10000; 1 by default.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BranchPage'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-9
   /llm/requests:
     post:
       operationId: postLlmRequests
@@ -1885,7 +1326,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '413':
-          description: Content Too Large
+          description: Request Entity Too Large
           content:
             application/json:
               schema:
@@ -1897,7 +1338,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '422':
-          description: Unprocessable Content
+          description: Unprocessable Entity
           content:
             application/json:
               schema:
@@ -1905,112 +1346,6 @@ paths:
       x-requirements:
       - FR-16
       - NFR-5
-  /llm/requests/{request_id}/retry:
-    post:
-      operationId: postLlmRequestsByRequestIdRetry
-      summary: Retry a chat request
-      description: Answers the failed request again.
-      tags:
-      - chat
-      parameters:
-      - name: request_id
-        in: path
-        required: true
-        schema:
-          type: string
-        description: llm-request- followed by 32 hex digits.
-      responses:
-        '202':
-          description: Accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LLMRequestStarted'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-16
-  /llm/requests/{request_id}/fork:
-    post:
-      operationId: postLlmRequestsByRequestIdFork
-      summary: Fork a chat conversation
-      description: Branches after one of the user's messages and answers it again.
-      tags:
-      - chat
-      parameters:
-      - name: request_id
-        in: path
-        required: true
-        schema:
-          type: string
-        description: llm-request- followed by 32 hex digits.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ForkInput'
-      responses:
-        '202':
-          description: Accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LLMRequestStarted'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Content
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-16
   /llm/requests/{request_id}:
     get:
       operationId: getLlmRequestsByRequestId
@@ -2096,6 +1431,915 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-16
+  /llm/requests/{request_id}/fork:
+    post:
+      operationId: postLlmRequestsByRequestIdFork
+      summary: Fork a chat conversation
+      description: Branches after one of the user's messages and answers it again.
+      tags:
+      - chat
+      parameters:
+      - name: request_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: llm-request- followed by 32 hex digits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForkInput'
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LLMRequestStarted'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-16
+  /llm/requests/{request_id}/retry:
+    post:
+      operationId: postLlmRequestsByRequestIdRetry
+      summary: Retry a chat request
+      description: Answers the failed request again.
+      tags:
+      - chat
+      parameters:
+      - name: request_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: llm-request- followed by 32 hex digits.
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LLMRequestStarted'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-16
+  /requirements/intake:
+    get:
+      operationId: getRequirementsIntake
+      summary: Requirements intake
+      description: The questions a requirements session starts with.
+      tags:
+      - requirements
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Intake'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-11
+  /requirements/sessions:
+    post:
+      operationId: postRequirementsSessions
+      summary: Start a requirements session
+      description: Starts the interview in the repository from the intake's answers.
+      tags:
+      - requirements
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRequirementsSession'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionCreated'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-10
+      - NFR-5
+  /requirements/sessions/{session_id}:
+    get:
+      operationId: getRequirementsSessionsBySessionId
+      summary: Get a requirements session
+      description: The session's conversation, state and delivery progress.
+      tags:
+      - requirements
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: requirements-session- followed by 32 hex digits.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequirementsSession'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-10
+  /requirements/sessions/{session_id}/answers:
+    post:
+      operationId: postRequirementsSessionsBySessionIdAnswers
+      summary: Answer the interviewer's questions
+      description: Answers the questions of the last assistant message and starts
+        a turn.
+      tags:
+      - requirements
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: requirements-session- followed by 32 hex digits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnswersInput'
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-10
+  /requirements/sessions/{session_id}/checkout:
+    post:
+      operationId: postRequirementsSessionsBySessionIdCheckout
+      summary: Update the session's checkout
+      description: Checks the session's branch out again at its latest commit; the
+        session is preparing until it is. Refused while a message is unanswered or
+        once the session is finalized.
+      tags:
+      - requirements
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: requirements-session- followed by 32 hex digits.
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-19
+  /requirements/sessions/{session_id}/delivery/answers:
+    post:
+      operationId: postRequirementsSessionsBySessionIdDeliveryAnswers
+      summary: Answer a delivery agent's questions
+      description: Resumes the paused coding agent of the named stage workflow.
+      tags:
+      - requirements
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: requirements-session- followed by 32 hex digits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentAnswersInput'
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionCreated'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-14
+  /requirements/sessions/{session_id}/delivery/findings/accept:
+    post:
+      operationId: postRequirementsSessionsBySessionIdDeliveryFindingsAccept
+      summary: Accept the delivery with open review findings
+      description: Clears the open-findings flag, keeps the pushed delivery as it
+        is and records findings_acceptance (when and by whom) in the delivery progress.
+        The publication stays marked as unverified. 409 while no flag is raised.
+      tags:
+      - requirements
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: requirements-session- followed by 32 hex digits.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-30
+  /requirements/sessions/{session_id}/delivery/findings/instructions:
+    post:
+      operationId: postRequirementsSessionsBySessionIdDeliveryFindingsInstructions
+      summary: Give instructions about open review findings
+      description: Starts a fix round from the instructions, then verification and
+        code review, pushing the result to the same branch. The instructions are recorded
+        on the review round they start. If verification fails for good, verification_status
+        becomes error, the branch keeps the earlier unverified push and the flag stays
+        raised. 409 while no flag is raised.
+      tags:
+      - requirements
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: requirements-session- followed by 32 hex digits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FindingsInstructionsInput'
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Request Entity Too Large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-30
+      - FR-31
+  /requirements/sessions/{session_id}/document:
+    get:
+      operationId: getRequirementsSessionsBySessionIdDocument
+      summary: Download the requirements document
+      description: The requirements document as a file attachment; 404 until it is
+        ready.
+      tags:
+      - requirements
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: requirements-session- followed by 32 hex digits.
+      responses:
+        '200':
+          description: OK
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-12
+  /requirements/sessions/{session_id}/finalize:
+    post:
+      operationId: postRequirementsSessionsBySessionIdFinalize
+      summary: Finalize the requirements session
+      description: Writes the requirements document; the session is completed once
+        it is ready.
+      tags:
+      - requirements
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: requirements-session- followed by 32 hex digits.
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-12
+  /requirements/sessions/{session_id}/fork:
+    post:
+      operationId: postRequirementsSessionsBySessionIdFork
+      summary: Fork the session
+      description: Starts a new session with the conversation up to the given message.
+      tags:
+      - requirements
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: requirements-session- followed by 32 hex digits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForkInput'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionCreated'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-10
+  /requirements/sessions/{session_id}/generation/retry:
+    post:
+      operationId: postRequirementsSessionsBySessionIdGenerationRetry
+      summary: Retry a delivery stage
+      description: Starts the named stage of the delivery over. The review stage runs
+        a failed code review again; 409 when the delivery has no failed review.
+      tags:
+      - requirements
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: requirements-session- followed by 32 hex digits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetryStageInput'
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-14
+      - FR-20
+      - FR-26
+  /requirements/sessions/{session_id}/messages:
+    post:
+      operationId: postRequirementsSessionsBySessionIdMessages
+      summary: Send a message
+      description: Starts the interviewer's turn on the message.
+      tags:
+      - requirements
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: requirements-session- followed by 32 hex digits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageInput'
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Request Entity Too Large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-10
+  /requirements/sessions/{session_id}/retry:
+    post:
+      operationId: postRequirementsSessionsBySessionIdRetry
+      summary: Retry the last turn
+      description: Runs the failed interviewer turn again.
+      tags:
+      - requirements
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: requirements-session- followed by 32 hex digits.
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-10
+  /start:
+    post:
+      operationId: postStart
+      summary: Start the sample workflow
+      description: Runs the sample greeting workflow and returns its result.
+      tags:
+      - workflows
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowResult'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-18
+  /workflows:
+    get:
+      operationId: getWorkflows
+      summary: List workflow executions
+      description: Newest first, 50 per page.
+      tags:
+      - workflows
+      parameters:
+      - name: type
+        in: query
+        required: false
+        schema:
+          type: string
+        description: A workflow type to list only.
+      - name: page_token
+        in: query
+        required: false
+        schema:
+          type: string
+        description: next_page_token of the last page.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowPage'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-17
 security:
 - bearer: []
 components:
@@ -2475,6 +2719,8 @@ components:
           - tests
           - documentation
           - repository
+          - review
+          description: review runs a failed code review again on the verified delivery.
       required:
       - stage
     ForkInput:
@@ -2503,6 +2749,7 @@ components:
           - failed
         verification_status:
           type: string
+          description: As in ApiDesignSession, including reviewing and findings_open.
       required:
       - session_id
     Requirement:
@@ -2586,6 +2833,11 @@ components:
         delivery:
           type: object
           description: Progress of the delivery of a bugfix or documentation task.
+            A bugfix's progress also holds reviews (ReviewRound list), review_error,
+            the open_findings flag, findings_acceptance (FindingsAcceptance), the
+            reviewing and findings_open verification_status values and the publication
+            (RepositoryPublication) with its verified flag, the first 20 open findings
+            its commit message lists and findings_count, as in ApiDesignSession.
       required:
       - session_id
       - status
@@ -2656,13 +2908,30 @@ components:
           description: What must be settled before the design can be finalized.
         verification_status:
           type: string
+          enum:
+          - not_applicable
+          - waiting
+          - running
+          - diagnosing
+          - repairing
+          - reviewing
+          - completed
+          - findings_open
+          - skipped
+          - error
+          description: reviewing while the code review runs; findings_open when the
+            tests pass but review findings remained after the last review round; error
+            also when verification fails for good in a round started by the user's
+            instructions, or when the code review failed (see review_error).
         publication_status:
           type: string
         verification:
           type: object
         publication:
-          type: object
-          description: The branch the delivery pushed.
+          $ref: '#/components/schemas/RepositoryPublication'
+          description: The branch the delivery pushed, with the commit and the open
+            review findings its message lists. Its verified flag is false for documentation
+            without a check and for code pushed with open review findings.
         agent_questions:
           type: array
           items:
@@ -2670,6 +2939,27 @@ components:
           description: Questions of paused delivery agents. The other delivery progress
             fields (code, implementation, tests, repairs and their errors) are returned
             alongside.
+        reviews:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewRound'
+          description: Every code review round of the delivery, oldest first, with
+            each finding's worker and the reason for it and, for rounds the user started,
+            their instructions.
+        review_error:
+          type: string
+          description: Why the last code review failed to run, such as an LLM error;
+            the review stage can then be retried. Cleared when a review completes.
+        open_findings:
+          type: boolean
+          description: Raised when findings remained after the last review round and
+            the delivery was pushed as unverified; the user accepts it or gives instructions.
+            It stays raised when verification fails for good in a round started by
+            instructions, and the branch keeps the earlier unverified push.
+        findings_acceptance:
+          $ref: '#/components/schemas/FindingsAcceptance'
+          description: Set when the user accepted the delivery with its open review
+            findings as it is.
       required:
       - session_id
       - status
@@ -2785,6 +3075,116 @@ components:
           type: string
       required:
       - result
+    ReviewFinding:
+      type: object
+      description: A problem the code review found in the delivery's own changes.
+      properties:
+        summary:
+          type: string
+          description: What is wrong and why it needs a correction.
+        path:
+          type: string
+          description: The changed file the finding is about, when it is about one.
+        target:
+          type: string
+          enum:
+          - implementation
+          - tests
+          - both
+          description: The worker the finding was sent to.
+        reason:
+          type: string
+          description: Briefly, why the finding was sent to that worker.
+      required:
+      - summary
+      - target
+      - reason
+    ReviewRound:
+      type: object
+      description: One code review round of a delivery.
+      properties:
+        round:
+          type: integer
+          description: Numbered from 1 across the whole delivery. Each run of review
+            rounds, including the run started by the user's instructions, is limited
+            to 5 apart from test repair rounds, so numbers above 5 come from instructed
+            runs.
+        findings:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewFinding'
+          description: Empty when the review found nothing worth correcting.
+        instructions:
+          type: string
+          description: The user's instructions about open review findings that the
+            fixes reviewed in this round were made from; absent for rounds the user
+            did not start.
+      required:
+      - round
+      - findings
+    FindingsInstructionsInput:
+      type: object
+      description: What the user wants done about the open review findings.
+      properties:
+        instructions:
+          type: string
+          description: 1 to 10000 characters after trimming.
+      required:
+      - instructions
+    FindingsAcceptance:
+      type: object
+      description: The user's acceptance of a delivery pushed with open review findings.
+      properties:
+        accepted_at:
+          type: string
+          format: date-time
+        accepted_by:
+          type: string
+          description: Login of the user who accepted the delivery as it is.
+      required:
+      - accepted_at
+      - accepted_by
+    RepositoryPublication:
+      type: object
+      description: The branch a delivery was pushed to.
+      properties:
+        branch:
+          type: string
+        commit:
+          type: string
+          description: SHA of the pushed commit.
+        url:
+          type: string
+        verified:
+          type: boolean
+          description: False for documentation without a check and for code pushed
+            with open review findings; the commit message says so too.
+        ignored:
+          type: array
+          items:
+            type: string
+          description: Verified paths left out because the repository's .gitignore
+            matches them (first few).
+        ignored_count:
+          type: integer
+        findings:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewFinding'
+          description: The first 20 open review findings, as the pushed commit's message
+            lists them; empty or absent when the commit was pushed without open findings.
+        findings_count:
+          type: integer
+          description: The number of all open review findings at the push, including
+            those beyond the first 20; the commit message states it too. 0 or absent
+            without open findings.
+      required:
+      - branch
+      - commit
+      - url
+      - verified
+      - ignored
+      - ignored_count
     Error:
       type: object
       properties:

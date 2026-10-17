@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager, suppress
 import psycopg
 from fastapi import Depends, FastAPI, Request
 
+from app.api.errors import TemporalUnavailableError, temporal_unavailable_response
 from app.api.routes import (
     api_design, auth, github, hello, llm_requests, requirements, workflows,
 )
@@ -13,6 +14,8 @@ from app.auth.storage import ensure_schema as ensure_auth_schema
 from app.documents import cleanup_expired_documents, ensure_document_schema
 from app.logging_setup import configure_logging
 from app.github.storage import ensure_schema as ensure_github_schema
+from app.temporal.client import TemporalUnavailable
+from app.temporal.registry import ensure_schema as ensure_registry_schema
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -32,6 +35,7 @@ async def lifespan(_: FastAPI):
     await ensure_document_schema()
     await ensure_github_schema()
     await ensure_auth_schema()
+    await ensure_registry_schema()
     cleanup_task = asyncio.create_task(_cleanup_loop())
     logger.info("API started")
     try:
@@ -44,6 +48,9 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+# Temporal failures answer 503, or 404 for a session or request this instance never started.
+app.add_exception_handler(TemporalUnavailableError, temporal_unavailable_response)
+app.add_exception_handler(TemporalUnavailable, temporal_unavailable_response)
 app.include_router(auth.router)
 # Everything else requires a signed-in user.
 for route_module in (hello, llm_requests, requirements, api_design, workflows, github):

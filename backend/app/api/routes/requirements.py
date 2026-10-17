@@ -1,17 +1,21 @@
 import re
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.api.downloads import session_document_download
 from app.api.errors import http_error
+from app.api.routes.auth import require_user
 from app.api.routes.github import RepositoryInput
 from app.github.service import resolve_repository_selection
 from app.llm.questions import ANSWER_CHARS, MAX_QUESTIONS
 from app.requirements.models import TaskKind
 from app.requirements.prompt import INTAKE_QUESTIONS, intake
+from app.review.models import INSTRUCTIONS_CHARS
 from app.requirements.service import (
+    accept_findings,
+    instruct_findings,
     answer_delivery_questions,
     answer_questions,
     finalize_session,
@@ -93,7 +97,22 @@ class AgentAnswersBody(AnswersBody):
 
 
 class RetryGenerationBody(BaseModel):
-    stage: Literal['server', 'tests', 'documentation', 'repository']
+    # review runs a failed code review again on the verified delivery.
+    stage: Literal['server', 'tests', 'documentation', 'repository', 'review']
+
+
+class FindingsInstructionsBody(BaseModel):
+    instructions: str
+
+    @field_validator("instructions")
+    @classmethod
+    def require_instructions(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Instructions cannot be empty")
+        if len(value) > INSTRUCTIONS_CHARS:
+            raise ValueError(f"Instructions have at most {INSTRUCTIONS_CHARS} characters")
+        return value
 
 
 class ForkBody(BaseModel):
@@ -180,7 +199,30 @@ async def restart_generation(session_id: str, body: RetryGenerationBody):
         await retry_generation(session_id, body.stage)
     except Exception as exc:
         raise http_error(exc) from exc
-    return {'session_id': session_id, 'verification_status': 'waiting'}
+    return {'session_id': session_id,
+            'verification_status': 'reviewing' if body.stage == 'review' else 'waiting'}
+
+
+@router.post('/sessions/{session_id}/delivery/findings/accept')
+async def accept_open_findings(session_id: str, user: dict = Depends(require_user)):
+    """Keep the delivery pushed with open review findings as it is."""
+    _check_session_id(session_id)
+    try:
+        progress = await accept_findings(session_id, user['login'])
+    except Exception as exc:
+        raise http_error(exc) from exc
+    return {'session_id': session_id, 'verification_status': progress.verification_status}
+
+
+@router.post('/sessions/{session_id}/delivery/findings/instructions', status_code=202)
+async def instruct_open_findings(session_id: str, body: FindingsInstructionsBody):
+    """Start a fix round from the user's instructions about open review findings."""
+    _check_session_id(session_id)
+    try:
+        progress = await instruct_findings(session_id, body.instructions)
+    except Exception as exc:
+        raise http_error(exc) from exc
+    return {'session_id': session_id, 'verification_status': progress.verification_status}
 
 
 @router.post("/sessions/{session_id}/finalize", status_code=202)

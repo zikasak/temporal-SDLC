@@ -12,6 +12,7 @@ from app.github.models import RepositorySelection
 from app.requirements.models import DIRECT_KINDS, RequirementsState, TaskKind
 from app.requirements.prompt import intake_messages, opening_message
 from app.temporal.client import connect_temporal
+from app.temporal.registry import register
 from app.temporal.sessions import SessionBusy, fork_messages, start_update, state_at_message
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ async def start_session(
         id=session_id,
         task_queue=TASK_QUEUE,
     )
+    await register(handle.id)
     logger.info("Started requirements session %s", session_id)
     return handle.id
 
@@ -115,6 +117,18 @@ async def retry_generation(session_id: str, stage: RetryStage) -> None:
     if not _delivers(await get_state(session_id)):
         raise SessionBusy('Only failed generation can be retried.')
     await delivery_service.retry(session_id, stage)
+
+
+async def accept_findings(session_id: str, login: str) -> DeliveryProgress:
+    if not _delivers(await get_state(session_id)):
+        raise SessionBusy('The delivery has no open review findings.')
+    return await delivery_service.accept_findings(session_id, login)
+
+
+async def instruct_findings(session_id: str, instructions: str) -> DeliveryProgress:
+    if not _delivers(await get_state(session_id)):
+        raise SessionBusy('The delivery has no open review findings.')
+    return await delivery_service.instruct_findings(session_id, instructions)
 
 
 async def get_session(session_id: str) -> dict[str, Any]:

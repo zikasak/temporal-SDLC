@@ -25,6 +25,10 @@ class InvalidForkPoint(ValueError):
     pass
 
 
+class SessionNotFound(LookupError):
+    pass
+
+
 def fork_messages(
     messages: list[ConversationMessage], message_index: int
 ) -> list[ConversationMessage]:

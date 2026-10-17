@@ -1,13 +1,17 @@
 import re
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.downloads import session_document_download
 from app.api.errors import http_error
+from app.api.routes.auth import require_user
 from app.api.routes.requirements import (
-    AgentAnswersBody, AnswersBody, ForkBody, MessageBody, RetryGenerationBody,
+    AgentAnswersBody, AnswersBody, FindingsInstructionsBody, ForkBody, MessageBody,
+    RetryGenerationBody,
 )
 from app.api_design.service import (
+    accept_findings,
+    instruct_findings,
     answer_delivery_questions,
     answer_questions,
     finalize_session,
@@ -97,7 +101,30 @@ async def restart_generation(session_id: str, body: RetryGenerationBody):
         await retry_generation(session_id, body.stage)
     except Exception as exc:
         raise http_error(exc) from exc
-    return {'session_id': session_id, 'verification_status': 'waiting'}
+    return {'session_id': session_id,
+            'verification_status': 'reviewing' if body.stage == 'review' else 'waiting'}
+
+
+@router.post('/{session_id}/delivery/findings/accept')
+async def accept_open_findings(session_id: str, user: dict = Depends(require_user)):
+    """Keep the delivery pushed with open review findings as it is."""
+    _check_session_id(session_id)
+    try:
+        progress = await accept_findings(session_id, user['login'])
+    except Exception as exc:
+        raise http_error(exc) from exc
+    return {'session_id': session_id, 'verification_status': progress.verification_status}
+
+
+@router.post('/{session_id}/delivery/findings/instructions', status_code=202)
+async def instruct_open_findings(session_id: str, body: FindingsInstructionsBody):
+    """Start a fix round from the user's instructions about open review findings."""
+    _check_session_id(session_id)
+    try:
+        progress = await instruct_findings(session_id, body.instructions)
+    except Exception as exc:
+        raise http_error(exc) from exc
+    return {'session_id': session_id, 'verification_status': progress.verification_status}
 
 
 @router.post("/{session_id}/finalize", status_code=202)

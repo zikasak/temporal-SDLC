@@ -70,6 +70,25 @@ the instructions contradict them, follow the contract. The test sources stay una
 """
 
 
+REVIEW_PROMPT = """
+This is a correction run after a code review. /workspace/service already holds your previous
+implementation, which passes the contract tests. A code review of the delivery's changes
+found problems the service must correct. The `repair.review` entry of the input holds the
+`findings` sent to you (each with its summary, the file it is about, when it is about one,
+and why it was sent to you) and, when present, the user's `instructions` about them, which
+take precedence over the findings. Correct each finding with targeted edits; do not start
+over or rewrite code that works, and keep everything the contract requires working. The
+requirements and OpenAPI design remain the authority. The test sources stay unavailable.
+"""
+
+
+def repair_prompt(inputs: dict) -> str:
+    repair = inputs.get('repair')
+    if not repair:
+        return ''
+    return REVIEW_PROMPT if repair.get('review') else REPAIR_PROMPT
+
+
 def validate_completion(root: Path) -> None:
     if not (root / 'Dockerfile').is_file():
         raise RuntimeError('Agent finished without a Dockerfile')
@@ -85,7 +104,7 @@ def main() -> None:
                             if inputs.get('brief')
                             else PROMPT.format(instructions=language['instructions'])
                             + (REPOSITORY_PROMPT if inputs.get('repository') else ''))
-                           + (REPAIR_PROMPT if inputs.get('repair') else '')),
+                           + repair_prompt(inputs)),
         initial_messages=[context],
         max_turns_env='IMPLEMENTATION_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Implementation completed',
