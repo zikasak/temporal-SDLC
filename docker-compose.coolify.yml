@@ -12,9 +12,9 @@
 # then anyone who reaches it can. Passwords are reset from the `api` container's terminal:
 # python -m app.auth.users add you@example.com
 #
-# Set in Coolify: the LLM provider variables for the chosen LLM_HARNESS,
+# Set in Coolify: the credentials and service URL for the adapters selected in Settings,
 # GITHUB_TOKEN_ENCRYPTION_KEY and GITHUB_ALLOWED_ORIGINS (the public origin, such as
-# https://app.example.com). LLM_HARNESS=pi is not supported here: its credential files
+# https://app.example.com). The Pi adapter is not supported here: its credential files
 # are bind-mounted from the worker's filesystem, which the sandbox daemon cannot see.
 # Provider and Langfuse URLs must be reachable from the sandbox, so not localhost.
 
@@ -25,11 +25,8 @@ x-app: &app
     APP_DATABASE_URL: postgresql://temporal:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/temporal
     TEMPORAL_ADDRESS: temporal:7233
     LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    LLM_HARNESS: ${LLM_HARNESS:-}
     OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-    OPENAI_MODEL: ${OPENAI_MODEL:-}
     OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
-    CLAUDE_MODEL: ${CLAUDE_MODEL:-}
     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
     AGENT_CONTEXT_TOKENS: ${AGENT_CONTEXT_TOKENS:-64000}

@@ -377,7 +377,7 @@ ASKED = [{"question": "Which rooms can be booked?", "options": ["Meeting rooms",
 
 async def test_interviewer_asks_only_with_the_tool(monkeypatch):
     from langchain_core.messages import AIMessage
-    from app.llm import graph
+    from app.temporal import activities
     from app.temporal.activities import requirements_turn
 
     model = InterviewModel([
@@ -386,7 +386,10 @@ async def test_interviewer_asks_only_with_the_tool(monkeypatch):
             {"name": "set_task_kind", "args": {"kind": "new_service"}, "id": "kind"},
             {"name": "ask_user", "args": {"questions": ASKED}, "id": "ask"}]),
     ])
-    monkeypatch.setattr(graph, "get_model", lambda: model)
+    async def get_model(workflow_type):
+        assert workflow_type == 'requirements'
+        return model
+    monkeypatch.setattr(activities, "get_model", get_model)
     opening = {"role": "assistant", "content": "Hi", "questions": [
         {"question": "What kind of task is this?", "options": ["A new service", "Docs"]}]}
     result = await ActivityEnvironment().run(

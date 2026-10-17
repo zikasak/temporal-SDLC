@@ -43,17 +43,10 @@ OPENAPI_GENERATOR_CMD = os.getenv(
 )
 CODEGEN_BASE_PACKAGE = os.getenv("CODEGEN_BASE_PACKAGE", "com.example")
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "ddalcu/Qwen3.8-27B-MLX-Serve-4bit")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # The SDK appends /chat/completions to this API base URL.
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:1234/v1")
-# "pi" routes model calls through the Pi CLI instead of the provider above; Pi then
-# uses its own credentials and, unless PI_MODEL names one, its default model.
-LLM_HARNESS = os.getenv("LLM_HARNESS", "").lower()
-PI_MODEL = os.getenv("PI_MODEL") or None
-# "claude" routes them through Claude Code (the Claude Agent SDK) instead, with Claude
-# Code's credentials and, unless CLAUDE_MODEL names one, its default model.
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL") or None
+# Adapter, model and thinking level are stored per workflow in app.workflow_settings.
 # Pi configuration directory: host Pi calls run against it, and its auth.json (and
 # models.json, when present) is mounted into coding-agent containers. Pi's own
 # PI_CODING_AGENT_DIR is honoured when this is unset.

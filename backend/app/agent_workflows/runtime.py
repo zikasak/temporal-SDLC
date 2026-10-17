@@ -20,7 +20,8 @@ from langchain_core.messages import (
 from langchain_core.tools import BaseTool, StructuredTool, tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
-from app.llm.factory import create_model
+from app.llm.factory import create_adapter
+from app.settings.models import ModelSettings, SETTINGS_FILENAME
 from app.llm.questions import (
     ASK_USER, DESCRIPTION, AskUserInput, answers_result, asks_directly, normalize_questions,
 )
@@ -391,20 +392,11 @@ def run_agent(profile: AgentProfile) -> None:
 
 def _run_agent(profile: AgentProfile) -> bool:
     """Work until the profile's task is done; True when the run paused for answers."""
-    harness = os.getenv('LLM_HARNESS', '').lower()
-    if harness == 'pi':
-        from app.llm.pi import ChatPi
-
-        provider = ChatPi(model=os.getenv('PI_MODEL') or None)
-    elif harness == 'claude':
-        from app.llm.claude import ChatClaude
-
-        provider = ChatClaude(model=os.getenv('CLAUDE_MODEL') or None)
-    else:
-        provider = create_model(model_name=os.environ['OPENAI_MODEL'],
-                                api_key=os.environ['OPENAI_API_KEY'],
-                                base_url=os.environ['OPENAI_BASE_URL'])
-    with provider.session() if harness == 'claude' else nullcontext():
+    settings = ModelSettings.model_validate_json(
+        (profile.root.parent / SETTINGS_FILENAME).read_text())
+    provider = create_adapter(settings, api_key=os.getenv('OPENAI_API_KEY', ''),
+                              base_url=os.getenv('OPENAI_BASE_URL', ''))
+    with provider.session() if settings.adapter == 'claude' else nullcontext():
         return _run_with_provider(profile, provider)
 
 

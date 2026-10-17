@@ -195,6 +195,7 @@ async def test_session_with_a_repository_is_implemented_inside_its_checkout(tmp_
     # The stack is the registered language's, not the author's choice.
     assert json.loads(sent.pop('language.json')) == {
         'name': 'java', 'build_dirs': ['target'], 'instructions': get_language('java').implementation.instructions}
+    sent.pop('llm-settings.json')
     assert sent == {'service/src/main/Api.java': 'generated contract',
                     'service/src/main/Orders.java': 'existing code',
                     'service/pom.xml': 'project pom', 'service/README.md': 'generated readme'}
@@ -254,6 +255,7 @@ async def test_generated_code_joins_only_a_checkout_it_fits(tmp_path, monkeypatc
     added = 'service/src/main/Api.java' in expected
     assert json.loads(sent.pop('input.json'))['generated_code'] is added
     del sent['language.json']
+    sent.pop('llm-settings.json')
     assert sent == expected
 
 
@@ -290,6 +292,7 @@ async def test_change_edits_the_checkout_without_generated_code(tmp_path, monkey
     await ActivityEnvironment().run(activities.implement_service, 'session', context)
     assert json.loads(sent.pop('input.json'))['brief'] == brief
     del sent['language.json']
+    sent.pop('llm-settings.json')
     # The repository's service as it is; never either kind of tests or the contract.
     assert sent == {'service/src/main/Api.java': 'published contract code',
                     'service/Dockerfile': 'FROM scratch'}

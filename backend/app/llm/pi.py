@@ -38,6 +38,7 @@ class ChatPi(BaseChatModel):
 
     # Pi model pattern such as `openai/gpt-4o` or `sonnet:high`; None uses Pi's default.
     model: str | None = None
+    thinking_level: str = 'default'
     command: str = 'pi'
     # Pi configuration directory; None leaves Pi to its environment and default.
     agent_dir: str | None = None
@@ -65,6 +66,8 @@ class ChatPi(BaseChatModel):
                     else ['--no-tools'])
         if self.model:
             command += ['--model', self.model]
+        if self.thinking_level != 'default':
+            command += ['--thinking', self.thinking_level]
         if system:
             command += ['--system-prompt', system]
         env = {**os.environ, AGENT_DIR_ENV: self.agent_dir} if self.agent_dir else os.environ

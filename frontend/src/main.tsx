@@ -6,12 +6,13 @@ import Workflows from "./Workflows";
 import GitHubSettings from "./GitHubSettings";
 import Login, { userRecord, type User } from "./Login";
 import Users from "./Users";
+import Settings from "./Settings";
 import { errorMessage, failure, readBody } from "./api";
 import { APP_RETURN_PATH } from "./github";
 import "./styles.css";
 import React, { useEffect, useState } from "react";
 
-type Mode = "chat" | "requirements" | "api-design" | "workflows" | "github" | "users";
+type Mode = "chat" | "requirements" | "api-design" | "workflows" | "github" | "users" | "settings";
 
 const modes: [Mode, string][] = [
   ["chat", "Chat"],
@@ -19,6 +20,7 @@ const modes: [Mode, string][] = [
   ["api-design", "API design"],
   ["workflows", "Workflows"],
   ["github", "GitHub"],
+  ["settings", "Settings"],
   // Shown to the first user only.
   ["users", "Users"],
 ];
@@ -105,6 +107,7 @@ function Shell() {
       {shown === "workflows" && <Workflows />}
       {shown === "github" && <GitHubSettings />}
       {shown === "users" && <Users />}
+      {shown === "settings" && <Settings />}
     </>
   );
 }

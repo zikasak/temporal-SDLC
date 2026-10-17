@@ -21,11 +21,10 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from app.agent_workflows.runtime import ANSWERS_FILENAME, PAUSE_EXIT, STATE_FILENAME
-from app.config import (
-    CLAUDE_MODEL, LLM_HARNESS, OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL,
-    PI_CREDENTIALS_DIR, PI_MODEL,
-)
+from app.config import OPENAI_API_KEY, OPENAI_BASE_URL, PI_CREDENTIALS_DIR
 from app.llm.questions import Question, normalize_questions
+from app.settings.models import ModelSettings, SETTINGS_FILENAME
+from app.settings.storage import get_workflow_settings
 from app.tracing import container_trace_environment
 
 logger = logging.getLogger(__name__)
@@ -182,9 +181,9 @@ def _container_url(base_url: str) -> str:
     return base_url
 
 
-def pi_container_args() -> list[str]:
-    """Select the Pi harness in the container and mount the credentials it needs."""
-    if LLM_HARNESS != 'pi':
+def pi_container_args(settings: ModelSettings) -> list[str]:
+    """Mount the credentials required by a saved Pi adapter selection."""
+    if settings.adapter != 'pi':
         return []
     if not (PI_CREDENTIALS_DIR / 'auth.json').is_file():
         raise RuntimeError(f'Pi credentials not found: {PI_CREDENTIALS_DIR / "auth.json"}. '
@@ -198,49 +197,29 @@ def pi_container_args() -> list[str]:
     # extensions or sessions. auth.json is writable so a refreshed token is not lost to
     # the host. Each file is mounted over a placeholder inside the shared directory.
     (shared / 'auth.json').touch(mode=0o600)
-    args = ['-e', f'LLM_HARNESS={LLM_HARNESS}', '-v', f'{shared}:{PI_CONTAINER_DIR}',
+    args = ['-v', f'{shared}:{PI_CONTAINER_DIR}',
             '-v', f'{PI_CREDENTIALS_DIR / "auth.json"}:{PI_CONTAINER_DIR}/auth.json']
     if (PI_CREDENTIALS_DIR / 'models.json').is_file():
         (shared / 'models.json').touch(mode=0o600)
         args += ['-v', f'{PI_CREDENTIALS_DIR / "models.json"}:{PI_CONTAINER_DIR}/models.json:ro']
     else:
         (shared / 'models.json').unlink(missing_ok=True)
-    model = PI_MODEL or _pi_default_model()
-    if model:
-        args += ['-e', f'PI_MODEL={model}']
     return args
 
 
-def claude_container_args() -> list[str]:
-    """Select the Claude harness in the container and forward the credentials it needs."""
-    if LLM_HARNESS != 'claude':
+def claude_container_args(settings: ModelSettings) -> list[str]:
+    """Forward the credentials required by a saved Claude adapter selection."""
+    if settings.adapter != 'claude':
         return []
     credentials = [key for key in CLAUDE_CREDENTIALS if os.getenv(key)]
     if not credentials:
         raise RuntimeError('Claude credentials not found: set ANTHROPIC_API_KEY, or '
                            'CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`.')
     # Secrets are forwarded by name, so their values stay out of the docker arguments.
-    args = ['-e', f'LLM_HARNESS={LLM_HARNESS}',
-            *(argument for key in credentials for argument in ('-e', key))]
+    args = [argument for key in credentials for argument in ('-e', key)]
     if os.getenv('ANTHROPIC_BASE_URL'):
         args += ['-e', f'ANTHROPIC_BASE_URL={_container_url(os.environ["ANTHROPIC_BASE_URL"])}']
-    if CLAUDE_MODEL:
-        args += ['-e', f'CLAUDE_MODEL={CLAUDE_MODEL}']
     return args
-
-
-def _pi_default_model() -> str | None:
-    """The host's default Pi model. settings.json itself stays out of the container: it
-    also lists extension packages, which Pi would try to install there."""
-    try:
-        settings = json.loads((PI_CREDENTIALS_DIR / 'settings.json').read_text())
-    except (OSError, ValueError):
-        return None
-    if not settings.get('defaultModel'):
-        return None
-    model = '/'.join(filter(None, [settings.get('defaultProvider'), settings['defaultModel']]))
-    level = settings.get('defaultThinkingLevel')
-    return f'{model}:{level}' if level else model
 
 
 @asynccontextmanager
@@ -269,12 +248,16 @@ async def run_agent(role: str, session_id: str, workspace: Path,
     name = f'{label}-{uuid.uuid4().hex}'
     digest = hashlib.sha256(session_id.encode()).hexdigest()[:16]
     agent_image = f'temporal-{label}-agent:{digest}'
+    settings = await get_workflow_settings(role)
+    # The snapshot travels as input alongside the workspace, never as host selector env vars.
+    (workspace / SETTINGS_FILENAME).write_text(settings.model_dump_json())
+    adapter_args = [*pi_container_args(settings), *claude_container_args(settings)]
     trace_environment = container_trace_environment(session_id, role)
     # A self-hosted loopback Langfuse endpoint also needs Docker's host alias.
     if 'LANGFUSE_BASE_URL' in trace_environment:
         trace_environment['LANGFUSE_BASE_URL'] = _container_url(trace_environment['LANGFUSE_BASE_URL'])
     environment = {**os.environ, **trace_environment, 'OPENAI_API_KEY': OPENAI_API_KEY,
-                   'OPENAI_BASE_URL': container_base_url(), 'OPENAI_MODEL': OPENAI_MODEL}
+                   'OPENAI_BASE_URL': container_base_url()}
     trace_args = [argument for key in trace_environment for argument in ('-e', key)]
     # Runtime tuning is forwarded by name; nothing else of the host environment is.
     setting_args = [argument for key in AGENT_SETTINGS if key in os.environ
@@ -291,9 +274,8 @@ async def run_agent(role: str, session_id: str, workspace: Path,
             'create', '--name', name, '--cap-drop=ALL',
             '--security-opt=no-new-privileges', '--pids-limit=256',
             '--memory=4g', '--cpus=2', '--user', '10001:10001',
-            '-e', 'OPENAI_API_KEY', '-e', 'OPENAI_MODEL', '-e', 'OPENAI_BASE_URL',
-            *trace_args, *setting_args, *pi_container_args(),
-            *claude_container_args(), agent_image, env=environment,
+            '-e', 'OPENAI_API_KEY', '-e', 'OPENAI_BASE_URL',
+            *trace_args, *setting_args, *adapter_args, agent_image, env=environment,
         )
         archive = workspace.parent / 'workspace.tar'
 

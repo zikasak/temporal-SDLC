@@ -26,7 +26,6 @@ from app.test_generation.agent import validate_completion as validate_tests
 @pytest.fixture
 def scripted_model(monkeypatch):
     """Replace only the external provider; tools and completion checks remain real."""
-    monkeypatch.setenv('OPENAI_MODEL', 'test-model')
     monkeypatch.setenv('OPENAI_API_KEY', 'test-key')
     monkeypatch.setenv('OPENAI_BASE_URL', 'https://provider.example/v1')
     monkeypatch.delenv('TEST_AGENT_MAX_TURNS', raising=False)
@@ -48,7 +47,8 @@ def scripted_model(monkeypatch):
                 return next(self.responses)
 
         model = Model()
-        monkeypatch.setattr(runtime, 'create_model', lambda **settings: model)
+        from app.llm import factory
+        monkeypatch.setattr(factory, 'create_model', lambda **settings: model)
         return model
 
     return install
@@ -56,8 +56,12 @@ def scripted_model(monkeypatch):
 
 @pytest.fixture
 def profile(tmp_path):
+    from app.settings.models import ModelSettings, SETTINGS_FILENAME
+    (tmp_path / SETTINGS_FILENAME).write_text(ModelSettings(model='test-model').model_dump_json())
+    root = tmp_path / 'service'
+    root.mkdir()
     return runtime.AgentProfile(
-        root=tmp_path, prompt='Implement the supplied contract', initial_messages=['requirements'],
+        root=root, prompt='Implement the supplied contract', initial_messages=['requirements'],
         max_turns_env='TEST_AGENT_MAX_TURNS', validate_completion=validate_implementation,
         completion_message='Completed', exhaustion_message='Tool-turn limit exceeded',
     )
@@ -68,8 +72,6 @@ ASK = {'name': 'ask_user', 'id': 'ask', 'args': {'questions': [
 
 
 def test_agent_pauses_for_answers_and_resumes_where_it_stopped(tmp_path, profile, scripted_model):
-    profile = replace(profile, root=tmp_path / 'service')
-    profile.root.mkdir()
     # Calls after ask_user still run before the pause.
     scripted_model([AIMessage(content='', tool_calls=[
         ASK, {'name': 'write_file', 'args': {'path': 'Orders.java', 'content': 'class Orders {}'},

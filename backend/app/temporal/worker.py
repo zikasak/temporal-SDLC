@@ -12,6 +12,7 @@ from app.temporal.lifecycle import run_worker
 with workflow.unsafe.imports_passed_through():
     from app.delivery.workflows import DeliveryWorkflow
     from app.documents import ensure_document_schema
+    from app.settings.storage import ensure_schema as ensure_settings_schema
     from app.temporal.activities import (
         api_design_turn,
         checkout_repository,
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 async def main():
     configure_logging()
     await ensure_document_schema()
+    await ensure_settings_schema()
     client = await Client.connect(TEMPORAL_ADDRESS)
     worker = Worker(
         client,

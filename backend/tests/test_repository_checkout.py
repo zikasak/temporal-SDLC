@@ -11,7 +11,6 @@ from temporalio.testing import ActivityEnvironment
 
 from app.delivery.contract import ContractError, read_contract, write_contract
 from app.github import checkout, storage
-from app.llm import graph
 from app.temporal import activities
 
 TOKEN = "ghs_SECRET_SENTINEL"
@@ -287,7 +286,10 @@ async def test_chat_reads_the_checked_out_repository(remote, monkeypatch, reposi
         return []
 
     model = Model()
-    monkeypatch.setattr(graph, "get_model", lambda: model)
+    async def get_model(workflow_type):
+        assert workflow_type == 'chat'
+        return model
+    monkeypatch.setattr(activities, "get_model", get_model)
     monkeypatch.setattr(activities, "list_generated_documents", nothing)
     monkeypatch.setattr(activities, "list_session_passages", nothing)
     session = "llm-request-" + "b" * 32

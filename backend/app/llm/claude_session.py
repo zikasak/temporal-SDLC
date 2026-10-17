@@ -127,6 +127,7 @@ class ClaudeSession:
 
         options = ClaudeAgentOptions(
             model=self.model.model, cli_path=self.model.cli_path,
+            **self.model.thinking_options(),
             cwd=self.directory.name, system_prompt=system, tools=[], setting_sources=[],
             skills=[], strict_mcp_config=True, verbatim_prompts=True,
             extra_args={'no-session-persistence': None}, include_partial_messages=True,

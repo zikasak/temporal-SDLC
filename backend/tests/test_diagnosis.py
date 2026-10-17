@@ -78,6 +78,7 @@ async def test_diagnosis_reviews_both_sides_and_publishes_a_bounded_verdict(sess
     assert json.loads((session / 'diagnosis/verdict.json').read_text()) == result
     removed = sent.pop('removed')
     payload = json.loads(sent.pop('input.json'))
+    sent.pop('llm-settings.json')  # Shared model input is covered by the adapter lifecycle tests.
     assert json.loads(sent.pop('language.json')) == {
         'name': 'java', 'build_dirs': ['target'], 'label': 'Java (Spring Boot)', 'report_pattern': 'TEST-*.xml'}
     # The reviewer gets both source trees and this run's evidence, and nothing else.
