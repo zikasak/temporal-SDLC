@@ -207,6 +207,56 @@ async def test_session_with_a_repository_is_implemented_inside_its_checkout(tmp_
         await ActivityEnvironment().run(activities.implement_service, 'session', context)
 
 
+@pytest.mark.parametrize('repository, expected', [
+    # A project of its own, laid out unlike generated code: the API is implemented in it,
+    # and none of the generated scaffolding reaches the branch.
+    ({'backend/app/Main.java': 'existing service', 'README.md': 'project readme'},
+     {'service/backend/app/Main.java': 'existing service', 'service/README.md': 'project readme'}),
+    # A repository with no project yet starts from the generated one.
+    ({'README.md': 'project readme', 'LICENSE': 'MIT', '.gitignore': 'target/'},
+     {'service/src/main/Api.java': 'generated contract', 'service/pom.xml': 'generated pom',
+      'service/README.md': 'project readme', 'service/LICENSE': 'MIT',
+      'service/.gitignore': 'target/'}),
+])
+async def test_generated_code_joins_only_a_checkout_it_fits(tmp_path, monkeypatch,
+                                                            repository, expected):
+    monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
+    generated = tmp_path / 'session/server'
+    for name, text in {'src/main/Api.java': 'generated contract', 'pom.xml': 'generated pom',
+                       'README.md': 'generated readme'}.items():
+        (generated / name).parent.mkdir(parents=True, exist_ok=True)
+        (generated / name).write_text(text)
+    checkout = tmp_path / 'session/repository'
+    for name, text in repository.items():
+        (checkout / name).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / name).write_text(text)
+    context = {'requirements': [], 'language': 'java',
+               'repository': {'full_name': 'octocat/project', 'branch': 'main'}}
+    sent = {}
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': 0})
+        if args[0] == 'cp' and args[1] == '-a':
+            import tarfile
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.update({item.name: archive.extractfile(item).read().decode()
+                             for item in archive.getmembers() if item.isfile()})
+        if args[0] == 'cp' and args[1].endswith(':/workspace/service/.'):
+            (Path(args[2]) / 'Dockerfile').write_text('FROM scratch')
+        if args[0] == 'build' and '--iidfile' in args:
+            Path(args[args.index('--iidfile') + 1]).write_text('sha256:' + 'c' * 64)
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    await ActivityEnvironment().run(activities.implement_service, 'session', context)
+    # The author is told whether the generated contract is in the checkout.
+    added = 'service/src/main/Api.java' in expected
+    assert json.loads(sent.pop('input.json'))['generated_code'] is added
+    del sent['language.json']
+    assert sent == expected
+
+
 async def test_change_edits_the_checkout_without_generated_code(tmp_path, monkeypatch):
     monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
     checkout = tmp_path / 'session/repository'

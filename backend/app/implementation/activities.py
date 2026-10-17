@@ -1,6 +1,7 @@
 """Implementation policies; shared host machinery builds and publishes the service."""
 import dataclasses
 import json
+import re
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,8 @@ from app.requirements.document import without_repeated_tables
 
 
 EXCLUDED = {'.git', '.openapi-generator', '__pycache__', '.agent-output'}
+# What a repository holds before a project of its own: a readme, a licence, Git settings.
+BARE_REPOSITORY = re.compile(r'(readme|licen[cs]e|copying)(\..*)?|\.git.*|\.github', re.I)
 
 
 def is_service_file(language: Language, relative: Path) -> bool:
@@ -28,6 +31,15 @@ def is_service_file(language: Language, relative: Path) -> bool:
     excluded = EXCLUDED | set(language.implementation.test_dirs) | set(language.build_dirs)
     return (relative.parts[0] not in (TESTS_DIR, CONTRACTS_DIR)
             and not any(part.lower() in excluded for part in relative.parts))
+
+
+def takes_generated_code(language: Language, checkout: Path) -> bool:
+    """Whether the generated project fits the repository: it holds no project yet, or
+    its service has the generated layout. Into any other project the generated files
+    would only bring a second, unused service and its scaffolding."""
+    if all((checkout / path).is_dir() for path in language.implementation.contract_paths):
+        return True
+    return all(BARE_REPOSITORY.fullmatch(item.name) for item in checkout.iterdir())
 
 
 def copy_service(language: Language, source: Path, target: Path) -> None:
@@ -51,6 +63,10 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
     if not source.is_dir():
         raise ApplicationError('Generated server code is unavailable', non_retryable=True)
 
+    generated = bool(checkout) and not change and takes_generated_code(language, checkout)
+    if checkout and not change:
+        # The author is told whether the generated contract was added to the checkout.
+        context = {**context, 'generated_code': generated}
     context = without_repeated_tables(context)
     index, files = on_demand_contracts(context, len(json.dumps(context))) or (context, {})
     contract_paths = language.implementation.contract_paths
@@ -59,11 +75,13 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
         project = workspace / 'service'
         if checkout and not repair and not change:
             copy_service(language, checkout, project)
-            # Generated sources are the contract and replace the repository's; any other
-            # generated file only fills a gap, so an existing build file is kept.
-            copy_regular_files(source, project, include=lambda relative: (
-                is_service_file(language, relative)
-                and (relative.parts[0] in contract_paths or not (project / relative).exists())))
+            if generated:
+                # Generated sources are the contract and replace the repository's; any
+                # other generated file only fills a gap, so an existing build file is kept.
+                copy_regular_files(source, project, include=lambda relative: (
+                    is_service_file(language, relative)
+                    and (relative.parts[0] in contract_paths
+                         or not (project / relative).exists())))
         else:
             copy_service(language, source, project)
         write_language(workspace, language,

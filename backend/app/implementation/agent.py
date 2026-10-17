@@ -29,12 +29,18 @@ Only finish once implementation, a successful build and Dockerfile are complete.
 
 REPOSITORY_PROMPT = """
 /workspace/service is a checkout of the project's Git repository, named by the `repository`
-entry of the input, with the generated interfaces and models added to it. Every file
-you read or change is inside that checkout, and it is pushed to a new branch of the
-repository once the service passes verification. Read the existing code before writing:
-follow its structure and conventions and extend what is already there instead of
-duplicating it. Do not remove files that are unrelated to this service.
+entry of the input, {generated} Every file you read or change is inside that checkout, and
+it is pushed to a new branch of the repository once the service passes verification. Read
+the existing code before writing: follow its structure and conventions and extend what is
+already there instead of duplicating it. Do not remove files that are unrelated to this
+service.
 """
+GENERATED = 'with the generated interfaces and models added to it.'
+# The repository's service is laid out unlike generated code, which was left out of it.
+OWN_LAYOUT = """without generated code: the service in it has a layout of its own, and the
+OpenAPI design alone is the API contract. Find where the service serves its API and
+implement the design there; do not add a second application, generated scaffolding or a
+separate copy of the API."""
 
 CHANGE_PROMPT = """Change the existing service in /workspace/service, a checkout of the
 project's Git repository named by the `repository` entry of the input. The `brief` entry
@@ -89,6 +95,14 @@ def repair_prompt(inputs: dict) -> str:
     return REVIEW_PROMPT if repair.get('review') else REPAIR_PROMPT
 
 
+def repository_prompt(inputs: dict) -> str:
+    if not inputs.get('repository'):
+        return ''
+    # Inputs recorded before the choice was made had the generated code added.
+    return REPOSITORY_PROMPT.format(
+        generated=GENERATED if inputs.get('generated_code', True) else OWN_LAYOUT)
+
+
 def validate_completion(root: Path) -> None:
     if not (root / 'Dockerfile').is_file():
         raise RuntimeError('Agent finished without a Dockerfile')
@@ -103,7 +117,7 @@ def main() -> None:
         root=ROOT, prompt=((CHANGE_PROMPT.format(instructions=language['instructions'])
                             if inputs.get('brief')
                             else PROMPT.format(instructions=language['instructions'])
-                            + (REPOSITORY_PROMPT if inputs.get('repository') else ''))
+                            + repository_prompt(inputs))
                            + repair_prompt(inputs)),
         initial_messages=[context],
         max_turns_env='IMPLEMENTATION_MAX_TURNS', validate_completion=validate_completion,
