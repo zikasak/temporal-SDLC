@@ -12,7 +12,8 @@ from app.requirements.models import Requirement, TaskKind
 from app.review.models import FindingsAcceptance, ReviewRound
 from app.verification.models import VerificationResult, VerificationStatus
 
-# `review` runs a failed code review again on the verified delivery.
+# `review` runs a failed code review again on the verified delivery, or goes on from a
+# correction of review findings that did not pass verification.
 RetryStage = Literal['server', 'tests', 'documentation', 'repository', 'review']
 RETRY_STAGES = ('server', 'tests', 'documentation', 'repository', 'review')
 NAMED_TESTS = 5
@@ -111,6 +112,9 @@ class DeliveryProgress:
     reviews: list[ReviewRound] = field(default_factory=list)
     # Why the last code review failed to run; cleared when a review completes.
     review_error: str | None = None
+    # Raised when the correction of a review round's findings did not pass verification;
+    # retrying the review goes on from that correction.
+    correction_failed: bool = False
     # Raised when findings remained after the last review round and the delivery was
     # pushed as unverified; the user accepts it or gives instructions.
     open_findings: bool = False

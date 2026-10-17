@@ -27,6 +27,8 @@ with workflow.unsafe.imports_passed_through():
 
 # Each round is a diagnosis, a repair of one side and a new verification.
 MAX_REPAIR_ROUNDS = 5
+# Runs of one verification whose result is an infrastructure error, not a verdict.
+VERIFICATION_ATTEMPTS = 2
 # An API change may add more tests than one run reports on singly; the run still
 # answers for every test of the suite.
 MAX_TRACKED = 1000
@@ -243,8 +245,11 @@ class DeliveryWorkflow:
             # Generation and verification already succeeded; only the push is repeated.
             return
         if self.state.retry_stage == 'review':
-            # The verified delivery is reviewed again; a new run of review rounds.
-            await self._review_rounds()
+            if self.progress.correction_failed:
+                await self._retry_correction()
+            else:
+                # The verified delivery is reviewed again; a new run of review rounds.
+                await self._review_rounds()
             return
         if self.spec.kind == 'docs':
             await self._document()
@@ -340,7 +345,9 @@ class DeliveryWorkflow:
     async def _correct(self, findings: list[ReviewFinding], number: int,
                        instructions: str | None = None) -> bool:
         """Have each worker the findings concern correct them, or with the user's
-        instructions both, then verify again. True when verification passed again."""
+        instructions both, then verify again. True when verification passed again.
+        A correction of the review's own findings that did not pass is left for the user
+        to retry; one from instructions leaves the open findings to decide about again."""
         self.progress.verification_status = 'repairing'
         workers = [worker for worker in ('implementation', 'tests')
                    if instructions or for_worker(findings, worker)]
@@ -348,6 +355,32 @@ class DeliveryWorkflow:
             (self._implement_service if worker == 'implementation' else self._generate_tests)(
                 review_request(findings, worker, number, instructions))
             for worker in workers))
+        if await self._verify_correction(workers, number):
+            return True
+        self.progress.correction_failed = not instructions
+        return False
+
+    async def _retry_correction(self) -> None:
+        """Go on from a correction of review findings that did not pass, then with the
+        review rounds. A worker that failed, or corrected tests of a bugfix that no longer
+        failed without the fix, correct the findings again; otherwise the corrected
+        delivery is only verified again."""
+        self.progress.correction_failed = False
+        number = self.progress.reviews[-1]['round']
+        if (self.progress.implementation_error or self.progress.tests_error
+                or self.spec.kind == 'bugfix' and self.progress.baseline_status != 'reproduced'):
+            self.progress.implementation_error = None
+            self.progress.tests_error = None
+            corrected = await self._correct(open_review_findings(self.progress), number)
+        else:
+            self.progress.verification_status = 'repairing'
+            corrected = await self._verify_correction([], number)
+            self.progress.correction_failed = not corrected
+        if corrected:
+            await self._review_rounds()
+
+    async def _verify_correction(self, workers: list[str], number: int) -> bool:
+        """Verify the delivery as the workers corrected it; true when it passed again."""
         if self.progress.implementation_error or self.progress.tests_error:
             self.progress.verification_status = 'error'
             return False
@@ -476,26 +509,32 @@ class DeliveryWorkflow:
     async def _verify_service(self, repair: int = 0) -> None:
         self.progress.verification_status = 'running'
         change = self.spec.kind in CHANGE_KINDS
-        try:
-            self.progress.verification = await workflow.execute_child_workflow(
-                'VerificationWorkflow',
-                args=[self.spec.session_id, self.progress.implementation['image_id'],
-                      self.progress.tests['image_id'], self.spec.language,
-                      # The run of a change answers for every test of its suite.
-                      self.progress.tests['added_tests'][:MAX_TRACKED] if change else None],
-                id=self._child_id('verification', repair),
-                task_queue=VERIFICATION_TASK_QUEUE,
-                result_type=dict,
-            )
-        except ChildWorkflowError as exc:
-            workflow.logger.warning('Service verification failed: %s', exc.cause or exc)
-            self.progress.verification_error = 'Service verification could not complete.'
-            self.progress.verification_status = 'error'
-        else:
-            self.progress.verification_status = 'completed'
-            if change and self.progress.verification['status'] == 'passed':
-                # Red without the fix is only half of it: every test must be seen green.
-                self.progress.verification_error = unproven_green(self.progress.verification)
+        # A run that could not complete says nothing about the code, so it runs once more.
+        for attempt in range(1, VERIFICATION_ATTEMPTS + 1):
+            try:
+                self.progress.verification = await workflow.execute_child_workflow(
+                    'VerificationWorkflow',
+                    args=[self.spec.session_id, self.progress.implementation['image_id'],
+                          self.progress.tests['image_id'], self.spec.language,
+                          # The run of a change answers for every test of its suite.
+                          self.progress.tests['added_tests'][:MAX_TRACKED] if change else None],
+                    id=self._child_id('verification', repair),
+                    task_queue=VERIFICATION_TASK_QUEUE,
+                    result_type=dict,
+                )
+            except ChildWorkflowError as exc:
+                workflow.logger.warning('Service verification failed: %s', exc.cause or exc)
+                self.progress.verification_error = 'Service verification could not complete.'
+                self.progress.verification_status = 'error'
+                return
+            if self.progress.verification['status'] != 'error':
+                break
+            workflow.logger.warning('Verification run %d could not complete: %s', attempt,
+                                    self.progress.verification['error'])
+        self.progress.verification_status = 'completed'
+        if change and self.progress.verification['status'] == 'passed':
+            # Red without the fix is only half of it: every test must be seen green.
+            self.progress.verification_error = unproven_green(self.progress.verification)
 
     def _coding_context(self) -> dict[str, Any]:
         context = {

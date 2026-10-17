@@ -5,7 +5,7 @@ import ForkButton from "./ForkButton";
 import { AskedQuestions, QuestionForm, questionList, type Question } from "./Questions";
 import { RepositorySummary } from "./RepositoryPicker";
 import {
-  DeliveryResults, answeredProgress, deliveryPending, deliveryProgress, retriedProgress,
+  DeliveryResults, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress,
   type DeliveryProgress, type GenerationStage,
 } from "./Delivery";
 import {
@@ -323,6 +323,24 @@ export default function ApiDesign() {
     }
   }
 
+  async function decideFindings(instructions: string | null) {
+    if (!session) return false;
+    setSubmitting(true);
+    setError("");
+    try {
+      const path = `/${encodeURIComponent(session.session_id)}/delivery/findings`;
+      await (instructions === null ? post(`${path}/accept`) : post(`${path}/instructions`, { instructions }));
+      setSession({ ...session, ...decidedProgress(session, instructions) });
+      setRefreshKey((value) => value + 1);
+      return true;
+    } catch (caught) {
+      setError(failure(caught, instructions === null ? "Could not accept the findings." : "Could not send the instructions."));
+      return false;
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   async function answerAgent(workflowId: string, answers: string[]) {
     if (!session) return false;
     setSubmitting(true);
@@ -367,6 +385,7 @@ export default function ApiDesign() {
       setRefreshKey((value) => value + 1);
     } catch (caught) {
       setError(failure(caught, stage === "repository" ? "Could not retry the push."
+        : stage === "review" ? "Could not retry the code review."
         : `Could not restart ${stage === "server" ? "server" : "test"} generation.`));
     } finally {
       setSubmitting(false);
@@ -686,7 +705,8 @@ export default function ApiDesign() {
                 <DeliveryResults progress={session} retrying={retryingGeneration}
                   disabled={submitting || pipelinePending(session)}
                   onRetry={(stage) => void retryGeneration(stage)}
-                  answering={submitting} onAnswer={answerAgent} />
+                  answering={submitting} onAnswer={answerAgent}
+                    onFindings={decideFindings} />
               </section>
             )}
 

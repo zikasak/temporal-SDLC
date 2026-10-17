@@ -101,11 +101,19 @@ def default_agent_image(role: str, workspace_name: str) -> AgentImageBuild:
     )
 
 
+MIN_SECRET_LENGTH = 8
+
+
 def redact_output(output: str, env: Mapping[str, str] | None = None) -> str:
-    """Redact known host/provider secrets before returning, saving or logging output."""
+    """Redact known host/provider secrets before returning, saving or logging output.
+
+    Values shorter than MIN_SECRET_LENGTH are left alone: settings such as
+    AGENT_CONTEXT_TOKENS=46000 match the names but are no secrets, and replacing them
+    would corrupt ordinary output, such as a PID in `docker inspect` JSON."""
     secrets = {OPENAI_API_KEY} if OPENAI_API_KEY else set()
     for key, value in (env if env is not None else os.environ).items():
-        if value and any(part in key.upper() for part in ('KEY', 'TOKEN', 'PASSWORD', 'SECRET')):
+        if (len(value) >= MIN_SECRET_LENGTH
+                and any(part in key.upper() for part in ('KEY', 'TOKEN', 'PASSWORD', 'SECRET'))):
             secrets.add(value)
     for secret in sorted(secrets, key=len, reverse=True):
         output = output.replace(secret, '[redacted]')

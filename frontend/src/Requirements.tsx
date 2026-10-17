@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import Markdown from "react-markdown";
 import { errorMessage, failure, readBody } from "./api";
 import {
-  DeliveryResults, answeredProgress, deliveryPending, deliveryProgress, retriedProgress,
+  DeliveryResults, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress,
   type DeliveryProgress, type GenerationStage,
 } from "./Delivery";
 import ForkButton from "./ForkButton";
@@ -304,6 +304,24 @@ export default function Requirements() {
       return true;
     } catch (caught) {
       setError(failure(caught, "Could not send the answers."));
+      return false;
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function decideFindings(instructions: string | null) {
+    if (!session?.delivery) return false;
+    setSubmitting(true);
+    setError("");
+    try {
+      const path = `/${encodeURIComponent(session.session_id)}/delivery/findings`;
+      await (instructions === null ? post(`${path}/accept`) : post(`${path}/instructions`, { instructions }));
+      setSession({ ...session, delivery: decidedProgress(session.delivery, instructions) });
+      setRefreshKey((value) => value + 1);
+      return true;
+    } catch (caught) {
+      setError(failure(caught, instructions === null ? "Could not accept the findings." : "Could not send the instructions."));
       return false;
     } finally {
       setSubmitting(false);
@@ -678,7 +696,8 @@ export default function Requirements() {
                     documentation={session.kind === "docs"}
                     disabled={submitting || deliveryPending(session.delivery)}
                     onRetry={(stage) => void retryGeneration(stage)}
-                    answering={submitting} onAnswer={answerAgent} />
+                    answering={submitting} onAnswer={answerAgent}
+                    onFindings={decideFindings} />
                 )}
               </section>
             )}
