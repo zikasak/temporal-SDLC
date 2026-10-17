@@ -15,8 +15,9 @@
 # Set in Coolify: the credentials and service URL for the adapters selected in Settings,
 # GITHUB_TOKEN_ENCRYPTION_KEY and GITHUB_ALLOWED_ORIGINS (the public origin, such as
 # https://app.example.com). Pi uses OPENAI_API_KEY for openai/* models and
-# ANTHROPIC_API_KEY for anthropic/* models. File-based Pi logins are not supported
-# here: the sandbox daemon cannot see credential files on the worker's filesystem.
+# ANTHROPIC_API_KEY for anthropic/* models. For openai-codex/*, sign in with Pi in
+# the API container as user app (UID 10001); its dedicated credential volume is
+# shared with workers and the sandbox daemon so OAuth refreshes persist.
 # Provider and Langfuse URLs must be reachable from the sandbox, so not localhost.
 
 x-app: &app
@@ -30,6 +31,10 @@ x-app: &app
     OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+    PI_CREDENTIALS_DIR: /pi/agent
+    # Also used by the interactive Pi login in the API container's terminal.
+    PI_CODING_AGENT_DIR: /pi/agent
+    PI_CREDENTIALS_SHARED: "true"
     AGENT_CONTEXT_TOKENS: ${AGENT_CONTEXT_TOKENS:-64000}
     CONTRACT_EMBED_CHARS: ${CONTRACT_EMBED_CHARS:-32000}
     GITHUB_TOKEN_ENCRYPTION_KEY: ${GITHUB_TOKEN_ENCRYPTION_KEY:-}
@@ -47,7 +52,10 @@ x-app: &app
     APP_TRACE_CONTENT_ENABLED: ${APP_TRACE_CONTENT_ENABLED:-false}
   volumes:
     - app_data:/data
+    - pi_credentials:/pi/agent
   depends_on: &app-depends-on
+    pi-credentials-init:
+      condition: service_completed_successfully
     postgres:
       condition: service_healthy
     temporal-namespace:
@@ -62,6 +70,7 @@ x-sandbox-worker: &sandbox-worker
     DOCKER_HOST: unix:///run/sandbox/docker.sock
   volumes:
     - app_data:/data
+    - pi_credentials:/pi/agent
     - sandbox_socket:/run/sandbox:ro
   depends_on:
     <<: *app-depends-on
@@ -69,6 +78,18 @@ x-sandbox-worker: &sandbox-worker
       condition: service_healthy
 
 services:
+  pi-credentials-init:
+    build: ./backend
+    user: "0:0"
+    restart: "no"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        chown -R 10001:10001 /pi/agent
+        chmod 700 /pi/agent
+    volumes:
+      - pi_credentials:/pi/agent
+
   frontend:
     build: ./frontend
     restart: unless-stopped
@@ -120,6 +141,9 @@ services:
     # Sysbox (installed on the host) runs Docker-in-Docker without `privileged`: root in
     # this container is an unprivileged user on the host.
     runtime: sysbox-runc
+    depends_on:
+      pi-credentials-init:
+        condition: service_completed_successfully
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
@@ -139,6 +163,8 @@ services:
     volumes:
       - sandbox_socket:/run/sandbox
       - sandbox_data:/var/lib/docker
+      # Agent bind sources are resolved inside this daemon, not the worker.
+      - pi_credentials:/pi/agent
     # Its own network, apart from PostgreSQL and Temporal.
     networks:
       - sandbox
@@ -232,6 +258,7 @@ services:
 
 volumes:
   app_data:
+  pi_credentials:
   postgres_data:
   sandbox_socket:
   sandbox_data:

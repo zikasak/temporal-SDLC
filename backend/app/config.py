@@ -53,6 +53,10 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:1234/v1")
 PI_CREDENTIALS_DIR = Path(
     os.getenv("PI_CREDENTIALS_DIR") or os.getenv("PI_CODING_AGENT_DIR") or "~/.pi/agent"
 ).expanduser()
+# A dedicated credential directory mounted at the same path in workers and the
+# sandbox daemon can be shared whole, preserving Pi's sibling token-refresh lock.
+# Keep false for a developer's Pi home, which can also contain extensions/sessions.
+PI_CREDENTIALS_SHARED = os.getenv('PI_CREDENTIALS_SHARED', '').lower() in {'1', 'true', 'yes'}
 
 # Contracts larger than this are supplied to coding agents as an index plus read-only
 # files instead of being embedded whole in every model invocation.

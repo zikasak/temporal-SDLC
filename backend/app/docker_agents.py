@@ -21,7 +21,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from app.agent_workflows.runtime import ANSWERS_FILENAME, PAUSE_EXIT, STATE_FILENAME
-from app.config import OPENAI_API_KEY, OPENAI_BASE_URL, PI_CREDENTIALS_DIR
+from app.config import OPENAI_API_KEY, OPENAI_BASE_URL, PI_CREDENTIALS_DIR, PI_CREDENTIALS_SHARED
 from app.llm.questions import Question, normalize_questions
 from app.settings.models import ModelSettings, SETTINGS_FILENAME
 from app.settings.storage import get_workflow_settings
@@ -198,6 +198,11 @@ def pi_container_args(settings: ModelSettings) -> list[str]:
         raise RuntimeError(f'Pi credentials not found: {PI_CREDENTIALS_DIR / "auth.json"}. '
                            'Sign in with pi, set PI_CREDENTIALS_DIR, or configure the '
                            'selected provider API key (OPENAI_API_KEY or ANTHROPIC_API_KEY).')
+    if PI_CREDENTIALS_SHARED:
+        # Coolify mounts this dedicated volume in the worker and daemon at the
+        # same path. Sharing the directory (rather than a single auth.json bind)
+        # preserves atomic credential replacements and a common refresh lock.
+        return ['-v', f'{PI_CREDENTIALS_DIR}:{PI_CONTAINER_DIR}']
     # Pi serializes token refreshes with a lock directory created beside auth.json, so
     # the containers' Pi directory is one host directory: agents running in parallel then
     # contend for the same lock instead of each refreshing the token on its own.
