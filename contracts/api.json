@@ -26,8 +26,8 @@
       "description": "The session's conversation, state and delivery progress.",
       "error_statuses": [
         401,
-        503,
-        404
+        404,
+        503
       ],
       "method": "GET",
       "parameters": [
@@ -42,7 +42,13 @@
       "path": "/api-design/sessions/{session_id}",
       "request_schema": null,
       "requirement_ids": [
-        "FR-13"
+        "FR-13",
+        "FR-34",
+        "FR-35",
+        "FR-36",
+        "FR-37",
+        "FR-38",
+        "FR-39"
       ],
       "response_array": false,
       "response_schema": "ApiDesignSession",
@@ -259,7 +265,7 @@
       "tag": "api-design"
     },
     {
-      "description": "Starts the named stage of the delivery over. The review stage runs a failed code review again; 409 when the delivery has no failed review.",
+      "description": "Starts the named stage of the delivery over. The review stage runs a failed code review again; 409 when the delivery has no failed review. The repository stage pushes again and then opens or updates the pull request, which also recovers a pull request step that ended in error.",
       "error_statuses": [
         401,
         404,
@@ -282,7 +288,10 @@
       "requirement_ids": [
         "FR-14",
         "FR-20",
-        "FR-26"
+        "FR-26",
+        "FR-34",
+        "FR-36",
+        "FR-37"
       ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
@@ -874,8 +883,8 @@
       "description": "The session's conversation, state and delivery progress.",
       "error_statuses": [
         401,
-        503,
-        404
+        404,
+        503
       ],
       "method": "GET",
       "parameters": [
@@ -890,7 +899,13 @@
       "path": "/requirements/sessions/{session_id}",
       "request_schema": null,
       "requirement_ids": [
-        "FR-10"
+        "FR-10",
+        "FR-34",
+        "FR-35",
+        "FR-36",
+        "FR-37",
+        "FR-38",
+        "FR-39"
       ],
       "response_array": false,
       "response_schema": "RequirementsSession",
@@ -1136,7 +1151,7 @@
       "tag": "requirements"
     },
     {
-      "description": "Starts the named stage of the delivery over. The review stage runs a failed code review again; 409 when the delivery has no failed review.",
+      "description": "Starts the named stage of the delivery over. The review stage runs a failed code review again; 409 when the delivery has no failed review. The repository stage pushes again and then opens or updates the pull request, which also recovers a pull request step that ended in error.",
       "error_statuses": [
         401,
         404,
@@ -1159,7 +1174,10 @@
       "requirement_ids": [
         "FR-14",
         "FR-20",
-        "FR-26"
+        "FR-26",
+        "FR-34",
+        "FR-36",
+        "FR-37"
       ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
@@ -1871,7 +1889,7 @@
       "properties": [
         {
           "array": false,
-          "description": "review runs a failed code review again on the verified delivery.",
+          "description": "review runs a failed code review again on the verified delivery. repository pushes the delivery again and then opens or updates its pull request, such as after pull_request_status became error.",
           "enum": [
             "server",
             "tests",
@@ -2077,7 +2095,7 @@
         },
         {
           "array": false,
-          "description": "Progress of the delivery of a bugfix or documentation task. A bugfix's progress also holds reviews (ReviewRound list), review_error, the open_findings flag, findings_acceptance (FindingsAcceptance), the reviewing and findings_open verification_status values and the publication (RepositoryPublication) with its verified flag, the first 20 open findings its commit message lists and findings_count, as in ApiDesignSession.",
+          "description": "Progress of the delivery of a bugfix or documentation task. A bugfix's progress also holds reviews (ReviewRound list), review_error, the open_findings flag, findings_acceptance (FindingsAcceptance), the reviewing and findings_open verification_status values and the publication (RepositoryPublication) with its verified flag, the first 20 open findings its commit message lists and findings_count, as in ApiDesignSession. Every delivery's progress also holds pull_request_status and, once a pushed delivery's pull request is open, pull_request (PullRequest), and pull_request_error, as in ApiDesignSession.",
           "name": "delivery",
           "required": false,
           "type": "object"
@@ -2274,6 +2292,35 @@
           "name": "findings_acceptance",
           "required": false,
           "type": "FindingsAcceptance"
+        },
+        {
+          "array": false,
+          "description": "The pull request step after the push, with the same values as publication_status: waiting until the branch is pushed, running while the pull request is opened or updated, completed once it is open or updated, skipped when nothing was pushed, error when it could not be opened or updated (see pull_request_error). An error never fails the push or the delivery; retrying the repository stage pushes again and retries the pull request.",
+          "enum": [
+            "not_applicable",
+            "waiting",
+            "running",
+            "completed",
+            "skipped",
+            "error"
+          ],
+          "name": "pull_request_status",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "The pull request opened from the pushed branch to the default branch, once it is open. A later push to the same branch keeps an open pull request and updates its description, and marks a draft ready for review when that push is verified. If the earlier pull request was closed or merged, the later push opens a new one and this field links to it. When updating it fails, this field keeps the existing pull request.",
+          "name": "pull_request",
+          "required": false,
+          "type": "PullRequest"
+        },
+        {
+          "array": false,
+          "description": "Why the pull request could not be opened or updated, such as the GitHub App installation lacking the pull_requests: write permission, or a network or GitHub API error. Reported the same way whether opening or updating failed. The push and the delivery do not fail because of it; retrying the repository stage tries again. Cleared when the pull request step completes.",
+          "name": "pull_request_error",
+          "required": false,
+          "type": "string"
         }
       ]
     },
@@ -2623,6 +2670,48 @@
           "name": "findings_count",
           "required": false,
           "type": "integer"
+        }
+      ]
+    },
+    {
+      "description": "The pull request opened from a delivery's pushed branch to the repository's default branch.",
+      "name": "PullRequest",
+      "properties": [
+        {
+          "array": false,
+          "description": "The pull request's number in the repository.",
+          "name": "number",
+          "required": true,
+          "type": "integer"
+        },
+        {
+          "array": false,
+          "description": "The pull request's title on GitHub.",
+          "name": "title",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "Link to the pull request on GitHub.",
+          "format": "uri",
+          "name": "url",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "True while the last push to its branch was an unverified delivery: documentation without a check or code pushed with open review findings. A later verified push to the same branch marks the pull request ready for review, and draft becomes false.",
+          "name": "draft",
+          "required": true,
+          "type": "boolean"
+        },
+        {
+          "array": false,
+          "description": "The default branch the pull request targets.",
+          "name": "base",
+          "required": true,
+          "type": "string"
         }
       ]
     }

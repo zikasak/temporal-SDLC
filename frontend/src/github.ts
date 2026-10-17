@@ -128,7 +128,7 @@ export function createGitHubApp(name: string, organization: string) {
     redirect_url: origin + APP_RETURN_PATH, setup_url: origin + APP_RETURN_PATH,
     // GitHub wants a webhook address; nothing is delivered to it.
     hook_attributes: { url: `${origin}/api/connectors/github/events`, active: false },
-    default_permissions: { contents: "write", metadata: "read" }, default_events: [],
+    default_permissions: { contents: "write", metadata: "read", pull_requests: "write" }, default_events: [],
   };
   const form = document.createElement("form");
   form.method = "post";

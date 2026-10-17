@@ -44,6 +44,7 @@ type ReviewRound = { round: number; findings: ReviewFinding[]; instructions?: st
 // that agent sees the answers.
 type AgentQuestions = { workflow_id: string; stage: string; questions: Question[] };
 type PublicationStatus = "not_applicable" | "waiting" | "running" | "completed" | "skipped" | "error";
+type PullRequest = { number: number; title: string; url: string; draft: boolean; base: string };
 
 /** What a session's delivery has produced so far, as the session API reports it. */
 export type DeliveryProgress = {
@@ -72,6 +73,10 @@ export type DeliveryProgress = {
   correction_failed: boolean;
   // Pushed as unverified with findings left; the user accepts them or gives instructions.
   open_findings: boolean;
+  // The pull request step after the push, and the pull request once it is open.
+  pull_request: PullRequest | null;
+  pull_request_error: string | null;
+  pull_request_status: PublicationStatus;
 };
 
 const verificationStatuses: VerificationStatus[] = [
@@ -153,6 +158,15 @@ function agentQuestions(value: unknown): AgentQuestions[] {
   })).filter((item) => item.questions.length > 0);
 }
 
+/** A pull request of `repository` only; any other link is dropped. */
+function pullRequest(value: unknown, repository: RepositorySelection | null): PullRequest | null {
+  if (!isObject(value) || !repository || typeof value.number !== "number" ||
+      typeof value.title !== "string" || typeof value.url !== "string" ||
+      typeof value.draft !== "boolean" || typeof value.base !== "string" ||
+      value.url !== `https://github.com/${repository.full_name}/pull/${value.number}`) return null;
+  return { number: value.number, title: value.title, url: value.url, draft: value.draft, base: value.base };
+}
+
 function text(value: unknown) {
   return typeof value === "string" ? value : null;
 }
@@ -190,6 +204,10 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     review_error: text(value.review_error),
     correction_failed: value.correction_failed === true,
     open_findings: value.open_findings === true,
+    pull_request: pullRequest(value.pull_request, repository),
+    pull_request_error: text(value.pull_request_error),
+    pull_request_status: publicationStatuses.includes(value.pull_request_status as PublicationStatus)
+      ? value.pull_request_status as PublicationStatus : "not_applicable",
   };
 }
 
@@ -229,7 +247,8 @@ function AgentQuestionsPanel({ progress, answering, onAnswer }: {
 /** Whether the delivery is still working, so its session should be polled again. */
 export function deliveryPending(progress: DeliveryProgress) {
   return ["waiting", "running", "diagnosing", "repairing", "reviewing"].includes(progress.verification_status) ||
-    ["waiting", "running"].includes(progress.publication_status);
+    ["waiting", "running"].includes(progress.publication_status) ||
+    ["waiting", "running"].includes(progress.pull_request_status);
 }
 
 /** What the page shows at once after deciding about open review findings, until the next
@@ -251,7 +270,8 @@ export function retriedProgress(progress: DeliveryProgress, stage: GenerationSta
       correction_failed: false,
       verification_status: progress.correction_failed ? "repairing" : "reviewing",
       ...(checkedOut && !progress.open_findings
-        ? { publication_error: null, publication_status: "waiting" as const } : {}),
+        ? { publication_error: null, publication_status: "waiting" as const,
+            pull_request_error: null, pull_request_status: "waiting" as const } : {}),
     };
   }
   return {
@@ -270,7 +290,10 @@ export function retriedProgress(progress: DeliveryProgress, stage: GenerationSta
       verification_status: "waiting" as const,
       repairs: [],
     }),
-    ...(checkedOut ? { publication_error: null, publication_status: "waiting" as const } : {}),
+    ...(checkedOut ? {
+      publication_error: null, publication_status: "waiting" as const,
+      pull_request_error: null, pull_request_status: "waiting" as const,
+    } : {}),
   };
 }
 
@@ -383,6 +406,20 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
         onClick={() => onRetry("repository")}>
         {retrying === "repository" ? "Pushing again…" : "Retry push"}
       </button>
+    </div>}
+    {progress.pull_request_status === "running" && <p role="status">Opening or updating the pull request…</p>}
+    {progress.pull_request && <p className="verification-outcome verification-passed" role="status">
+      {progress.pull_request.draft ? "Draft pull request" : "Pull request"}{" "}
+      <a href={progress.pull_request.url} target="_blank" rel="noreferrer">
+        #{progress.pull_request.number} {progress.pull_request.title}
+      </a>{" "}into <code>{progress.pull_request.base}</code>
+    </p>}
+    {progress.pull_request_error && <div className="generation-failure">
+      <p role="alert">{progress.pull_request_error} The push itself succeeded.</p>
+      {!progress.publication_error && <button type="button" className="generate-button" disabled={disabled}
+        onClick={() => onRetry("repository")}>
+        {retrying === "repository" ? "Pushing again…" : "Push again and retry the pull request"}
+      </button>}
     </div>}
   </>;
 }

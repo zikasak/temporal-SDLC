@@ -35,5 +35,17 @@ class RepositoryPublication(TypedDict):
     findings_count: NotRequired[int]
 
 
+class PullRequest(TypedDict):
+    """The pull request opened from a delivery's pushed branch to the default branch."""
+
+    number: int
+    title: str
+    url: str
+    # True while the last push to its branch was unverified.
+    draft: bool
+    # The default branch it targets.
+    base: str
+
+
 PublicationStatus = Literal['not_applicable', 'waiting', 'running', 'completed', 'skipped',
                             'error']

@@ -23,7 +23,9 @@ with workflow.unsafe.imports_passed_through():
     from app.review.models import (
         MAX_REVIEW_ROUNDS, ReviewFinding, ReviewRound, for_worker, review_request,
     )
-    from app.temporal.activities import publish_documentation, publish_repository
+    from app.temporal.activities import (
+        open_pull_request, publish_documentation, publish_repository,
+    )
 
 # Each round is a diagnosis, a repair of one side and a new verification.
 MAX_REPAIR_ROUNDS = 5
@@ -69,6 +71,7 @@ class DeliveryWorkflow:
         else:
             if self.spec.checkout:
                 self.progress.publication_status = 'waiting'
+                self.progress.pull_request_status = 'waiting'
             if self.spec.kind == 'bugfix':
                 await self._change()
             elif self.spec.kind == 'docs':
@@ -586,8 +589,19 @@ class DeliveryWorkflow:
                 # A run started by the user's instructions that did not pass leaves the
                 # earlier unverified push on the branch, and the flag raised.
                 self.progress.publication_status = 'completed'
+                if (self.progress.pull_request_status in ('waiting', 'running')
+                        and workflow.patched('kept-push-pull-request')):
+                    # A retried repository stage, such as after a failed pull request
+                    # step, still opens or updates the pull request of the earlier push;
+                    # a step that was not attempted is never reported as done.
+                    await self._pull_request()
+                elif self.progress.pull_request_status in ('waiting', 'running'):
+                    # Histories that predate the patch keep their pull request as it was.
+                    self.progress.pull_request_status = (
+                        'completed' if self.progress.pull_request else 'skipped')
             else:
                 self.progress.publication_status = 'skipped'
+                self.progress.pull_request_status = 'skipped'
             return
         self.progress.publication_status = 'running'
         self.progress.publication_error = None
@@ -621,14 +635,57 @@ class DeliveryWorkflow:
                 f'The {"documentation" if documentation else "verified sources"} could not be '
                 'pushed to the repository.' + (f' {reason}' if reason else ''))
             self.progress.publication_status = 'error'
+            # Nothing new was pushed, so no pull request step runs for it.
+            self.progress.pull_request_status = 'skipped'
         else:
             workflow.logger.info('Sources pushed to %s', self.progress.publication['branch'])
             self.progress.publication_status = 'completed'
             if not documentation:
+                # A repeated push of a delivery whose findings the user accepted keeps
+                # the acceptance; any other push with open findings asks the user again.
+                accepted = (open_findings and self.state.retry_stage == 'repository'
+                            and self.progress.findings_acceptance is not None
+                            and not self.progress.open_findings)
                 # Raised for the user to accept the delivery or give instructions.
-                self.progress.open_findings = open_findings
-                if open_findings:
+                self.progress.open_findings = open_findings and not accepted
+                if open_findings and not accepted:
                     self.progress.findings_acceptance = None
+            if workflow.patched('pull-request'):
+                await self._pull_request()
+            else:
+                # A delivery whose history predates the pull request step opens none;
+                # the step ends here instead of waiting for good.
+                self.progress.pull_request_status = 'not_applicable'
+
+    async def _pull_request(self) -> None:
+        """Open the pull request of the pushed branch, or update the open one. Its failure
+        never fails the push or the delivery: it is reported, and retrying the repository
+        stage pushes again and tries again. A failed update keeps the pull request."""
+        self.progress.pull_request_status = 'running'
+        self.progress.pull_request_error = None
+        brief = self.spec.brief
+        change = {
+            'kind': self.spec.kind,
+            'requirements': brief['requirements'] if brief else self.spec.requirements,
+            'retired': brief['retired'] if brief else [],
+        }
+        try:
+            self.progress.pull_request = await workflow.execute_activity(
+                open_pull_request,
+                args=[self.spec.session_id, self.spec.repository, self.progress.publication,
+                      change],
+                start_to_close_timeout=timedelta(minutes=2),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except ActivityError as exc:
+            workflow.logger.warning('Pull request step failed: %s', exc.cause or exc)
+            reason = str(getattr(exc.cause, 'message', '') or '')[-500:]
+            self.progress.pull_request_error = (
+                reason or 'The pull request could not be opened or updated.')
+            self.progress.pull_request_status = 'error'
+        else:
+            workflow.logger.info('Pull request #%d is open', self.progress.pull_request['number'])
+            self.progress.pull_request_status = 'completed'
 
     @staticmethod
     def _stage_name(stage: str, repair: dict[str, Any] | None) -> str:

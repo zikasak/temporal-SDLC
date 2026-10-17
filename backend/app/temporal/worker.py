@@ -16,6 +16,7 @@ with workflow.unsafe.imports_passed_through():
         api_design_turn,
         checkout_repository,
         greet,
+        open_pull_request,
         parse_document,
         publish_documentation,
         publish_repository,
@@ -54,7 +55,7 @@ async def main():
             requirements_turn, write_requirements_document,
             api_design_turn, write_openapi_document,
             checkout_repository, update_repository_checkout, publish_repository,
-            publish_documentation,
+            publish_documentation, open_pull_request,
             read_repository_contract, read_requirements_document,
         ],
     )
