@@ -26,6 +26,12 @@ Set `AUTH_JWT_SECRET` (at least 32 random characters) in `backend/.env` first; w
 
 `POST /auth/login` accepts `{"login":"you@example.com","password":"..."}` and returns a JWT (HS256, valid for `AUTH_TOKEN_TTL_HOURS`, default 12) as `access_token` and as an `HttpOnly`, `SameSite=Strict` cookie. The browser uses the cookie; other clients send `Authorization: Bearer <token>`. `GET /auth/me` returns the signed-in login, the token's expiry and `admin`, true for the first user. Tokens are stateless: signing out clears the cookie, and removing a user or changing a password does not revoke tokens already issued. Change `AUTH_JWT_SECRET` to sign everyone out. Sign-in is limited to `AUTH_LOGIN_ATTEMPTS_PER_MINUTE` (default 10) per client address, answering 429 beyond that, and password checks run two at a time with a short queue, answering 503 when it is full. Behind reverse proxies set `AUTH_TRUSTED_PROXY_HOPS` to their number so the limit applies to the real client address; the limits are per API process. All signed-in users share the same sessions and data; registering accounts is the only thing reserved for the first user.
 
+## Model settings
+
+The **Settings** tab stores the adapter, model, and thinking level for each workflow in PostgreSQL. Choices are discovered from the configured providers: Pi's RPC model list and per-model thinking levels (using `PI_CREDENTIALS_DIR`), Claude Agent SDK initialization metadata, or the configured `OPENAI_BASE_URL` model endpoint. The Google endpoint uses its native model list. Discovery sends no model prompts. Pi must be installed on the API host and support `get_available_thinking_levels`; Claude uses the SDK's bundled CLI.
+
+Model and thinking selectors show only provider-reported choices. Endpoints without thinking capability metadata offer **Model default**, which omits explicit reasoning options. **Refresh provider options** reloads the catalog without discarding edits. Unavailable saved selections stay visible for correction; saves recheck provider availability and the model/level combination before writing any workflow. Changes apply to the next model run.
+
 ## Start locally
 
 In Zed, run `debugger: start` and select **Full stack (API + workers + frontend)**.
@@ -47,7 +53,6 @@ Install backend dependencies and configure the worker with an OpenAI compatible 
 
 ```sh
 backend/env/bin/pip install -r backend/requirements.txt
-export OPENAI_MODEL="your-model-name"
 export OPENAI_API_KEY="your-api-key"
 # Optional for a compatible provider; the default is the local MLX endpoint.
 # export OPENAI_BASE_URL="http://localhost:1234/v1"

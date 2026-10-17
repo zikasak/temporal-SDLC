@@ -1914,6 +1914,8 @@ h2 {
 .settings-fields select:hover { border-color: var(--green); }
 .settings-fields :disabled { opacity: 0.65; cursor: not-allowed; }
 .settings-hint { margin: 16px 0 24px; }
+.settings-selection-error { grid-column: 1 / -1; margin: 0; }
+.settings-heading .workflows-refresh { margin-top: 12px; }
 
 .settings-actions {
   display: flex;

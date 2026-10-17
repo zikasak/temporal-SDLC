@@ -4,26 +4,53 @@ import { errorMessage, failure, readBody } from "./api";
 type Adapter = "pi" | "openai" | "claude";
 type ModelSettings = { adapter: Adapter; model: string; thinking_level: string };
 type Workflows = Record<string, ModelSettings>;
+type ModelOption = { id: string; label: string; thinking_levels: string[] };
+type ProviderOptions = { label: string; models: ModelOption[]; error: string | null; hint: string | null };
+type Providers = Record<Adapter, ProviderOptions>;
 type SettingsResponse = {
   workflows: Workflows;
   workflow_labels: Record<string, string>;
-  thinking_levels: Record<Adapter, string[]>;
+  providers: Providers;
 };
 
-const adapters: [Adapter, string][] = [["pi", "Pi"], ["openai", "OpenAI"], ["claude", "Claude"]];
+const adapters: Adapter[] = ["pi", "openai", "claude"];
+
+function providerResponse(value: unknown): Providers {
+  const providers = value as Providers | null;
+  if (!providers || !adapters.every((adapter) => {
+    const provider = providers[adapter];
+    return provider && typeof provider.label === "string" &&
+      (provider.error === null || typeof provider.error === "string") &&
+      (provider.hint === null || typeof provider.hint === "string") &&
+      Array.isArray(provider.models) && provider.models.every((model) =>
+        model && typeof model.id === "string" && typeof model.label === "string" &&
+        Array.isArray(model.thinking_levels) && model.thinking_levels.includes("default") &&
+        model.thinking_levels.every((level) => typeof level === "string"));
+  })) throw new Error("The backend returned invalid provider options.");
+  return providers;
+}
+
+function selectedModel(providers: Providers, item: ModelSettings) {
+  return providers[item.adapter].models.find((model) => model.id === item.model);
+}
+
+function validSelection(providers: Providers, item: ModelSettings) {
+  return !providers[item.adapter].error &&
+    !!selectedModel(providers, item)?.thinking_levels.includes(item.thinking_level);
+}
 
 function settingsResponse(value: unknown): SettingsResponse {
   if (typeof value !== "object" || value === null) throw new Error("Invalid settings response.");
   const data = value as SettingsResponse;
-  if (!data.workflows || !data.workflow_labels || !data.thinking_levels ||
-      !adapters.every(([adapter]) => Array.isArray(data.thinking_levels[adapter])) ||
+  providerResponse(data.providers);
+  if (!data.workflows || !data.workflow_labels ||
       Object.keys(data.workflows).length !== Object.keys(data.workflow_labels).length ||
       !Object.entries(data.workflows).length ||
       !Object.entries(data.workflows).every(([key, item]) =>
         typeof data.workflow_labels[key] === "string" && item &&
-        adapters.some(([adapter]) => adapter === item.adapter) &&
+        adapters.includes(item.adapter) &&
         typeof item.model === "string" &&
-        data.thinking_levels[item.adapter].includes(item.thinking_level))) {
+        typeof item.thinking_level === "string")) {
     throw new Error("The backend returned invalid workflow settings.");
   }
   return data;
@@ -37,7 +64,9 @@ export default function Settings() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [reload, setReload] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
   const dirty = data !== null && JSON.stringify(draft) !== JSON.stringify(data.workflows);
+  const valid = data !== null && Object.values(draft).every((item) => validSelection(data.providers, item));
 
   useEffect(() => {
     const controller = new AbortController();
@@ -72,17 +101,40 @@ export default function Settings() {
   function update(workflow: string, patch: Partial<ModelSettings>) {
     setDraft((current) => {
       const next = { ...current[workflow], ...patch };
-      if (data && !data.thinking_levels[next.adapter].includes(next.thinking_level)) {
-        next.thinking_level = "default";
+      if (data) {
+        const models = data.providers[next.adapter].models;
+        if (patch.adapter && !models.some((model) => model.id === next.model)) {
+          next.model = models[0]?.id ?? "";
+        }
+        if (!selectedModel(data.providers, next)?.thinking_levels.includes(next.thinking_level)) {
+          next.thinking_level = "default";
+        }
       }
       return { ...current, [workflow]: next };
     });
     setNotice("");
   }
 
+  async function refreshProviders() {
+    setRefreshing(true);
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch("/api/settings/providers");
+      const body = await readBody(response);
+      if (!response.ok) throw new Error(errorMessage(body, response.status));
+      const providers = providerResponse(body);
+      setData((current) => current ? { ...current, providers } : current);
+    } catch (caught) {
+      setError(failure(caught, "Could not refresh provider options."));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!data || !dirty || saving) return;
+    if (!data || !dirty || !valid || saving || refreshing) return;
     setSaving(true);
     setError("");
     setNotice("");
@@ -122,45 +174,76 @@ export default function Settings() {
           <div className="settings-heading">
             <h2>Workflow models</h2>
             <p>Shared across the application. Changes apply to the next model run; running agents keep their current settings.</p>
+            <button className="workflows-refresh" type="button" disabled={saving || refreshing}
+              onClick={() => void refreshProviders()}>{refreshing ? "Refreshing providers…" : "Refresh provider options"}</button>
           </div>
+          {Object.entries(data.providers).map(([adapter, provider]) => provider.error && (
+            <p className="connector-error" role="alert" key={adapter}>{provider.error}</p>
+          ))}
           <div className="settings-column-labels" aria-hidden="true">
             <span>Workflow</span><span>Adapter</span><span>Model</span><span>Thinking level</span>
           </div>
-          {Object.entries(data.workflow_labels).map(([key, label]) => (
-            <fieldset className="settings-row" key={key} disabled={saving}>
-              <legend>{label}</legend>
-              <div className="settings-fields">
-                <label htmlFor={`${key}-adapter`}><span className="settings-field-label">Adapter</span>
-                  <select id={`${key}-adapter`} aria-label={`${label} adapter`} value={draft[key].adapter}
-                    onChange={(event) => update(key, { adapter: event.target.value as Adapter })}>
-                    {adapters.map(([value, name]) => <option key={value} value={value}>{name}</option>)}
-                  </select>
-                </label>
-                <label htmlFor={`${key}-model`}><span className="settings-field-label">Model</span>
-                  <input id={`${key}-model`} aria-label={`${label} model`} value={draft[key].model}
-                    required maxLength={300} pattern=".*\S.*" autoComplete="off" spellCheck={false}
-                    onChange={(event) => update(key, { model: event.target.value })} />
-                </label>
-                <label htmlFor={`${key}-thinking`}><span className="settings-field-label">Thinking level</span>
-                  <select id={`${key}-thinking`} aria-label={`${label} thinking level`} value={draft[key].thinking_level}
-                    onChange={(event) => update(key, { thinking_level: event.target.value })}>
-                    {data.thinking_levels[draft[key].adapter].map((level) => (
-                      <option value={level} key={level}>{level === "default" ? "Model default" : level === "xhigh" ? "Extra high" : level.charAt(0).toUpperCase() + level.slice(1)}</option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-            </fieldset>
+          {Object.entries(data.workflow_labels).map(([key, label]) => {
+            const item = draft[key];
+            const provider = data.providers[item.adapter];
+            const model = selectedModel(data.providers, item);
+            const levels = model?.thinking_levels ?? [];
+            const selectionValid = validSelection(data.providers, item);
+            return (
+              <fieldset className="settings-row" key={key} disabled={saving || refreshing}>
+                <legend>{label}</legend>
+                <div className="settings-fields">
+                  <label htmlFor={`${key}-adapter`}><span className="settings-field-label">Adapter</span>
+                    <select id={`${key}-adapter`} aria-label={`${label} adapter`} value={draft[key].adapter}
+                      onChange={(event) => update(key, { adapter: event.target.value as Adapter })}>
+                      {Object.entries(data.providers).map(([value, options]) => (
+                        <option key={value} value={value} disabled={!!options.error || !options.models.length}>{options.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label htmlFor={`${key}-model`}><span className="settings-field-label">Model</span>
+                    <select id={`${key}-model`} aria-label={`${label} model`} value={item.model}
+                      disabled={!!provider.error || !provider.models.length} aria-invalid={!model}
+                      aria-describedby={!selectionValid ? `${key}-selection-error` : undefined}
+                      onChange={(event) => update(key, { model: event.target.value })}>
+                      {!model && <option value={item.model} disabled>{item.model ? `${item.model} (unavailable)` : "Choose a model"}</option>}
+                      {provider.models.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+                    </select>
+                  </label>
+                  <label htmlFor={`${key}-thinking`}><span className="settings-field-label">Thinking level</span>
+                    <select id={`${key}-thinking`} aria-label={`${label} thinking level`} value={draft[key].thinking_level}
+                      disabled={!!provider.error || !model || (levels.length === 1 && levels.includes(item.thinking_level))}
+                      aria-invalid={!!model && !levels.includes(item.thinking_level)}
+                      aria-describedby={!selectionValid ? `${key}-selection-error` : undefined}
+                      onChange={(event) => update(key, { thinking_level: event.target.value })}>
+                      {!levels.includes(item.thinking_level) && <option value={item.thinking_level} disabled>{item.thinking_level} (unavailable)</option>}
+                      {levels.map((level) => (
+                        <option value={level} key={level}>{level === "default" ? "Model default" : level === "xhigh" ? "Extra high" : level.charAt(0).toUpperCase() + level.slice(1)}</option>
+                      ))}
+                    </select>
+                  </label>
+                  {!selectionValid && <p id={`${key}-selection-error`} className="settings-selection-error connector-error">
+                    {provider.error ? "Refresh provider options or choose another adapter to verify this selection." :
+                      !model ? "This model is no longer available. Choose an available model." :
+                      "This thinking level is no longer supported. Choose an available level."}
+                  </p>}
+                </div>
+              </fieldset>
+            );
+          })}
+          <p className="settings-hint">Models and thinking levels come from the selected provider. Model default leaves reasoning unchanged. Workflows without model calls have no model settings.</p>
+          {Object.entries(data.providers).map(([adapter, provider]) => provider.hint &&
+            Object.values(draft).some((item) => item.adapter === adapter) && (
+              <p key={adapter} className="settings-hint">{provider.label}: {provider.hint}</p>
           ))}
-          <p className="settings-hint">Enter a model ID supported by the selected adapter. Thinking levels depend on the model; use Model default to leave its reasoning unchanged. Workflows without model calls have no model settings.</p>
           <div className="settings-actions">
             <div className="repository-actions">
-              <button className="submit-button" type="submit" disabled={!dirty || saving}>{saving ? "Saving…" : "Save settings"}</button>
-              <button className="workflows-refresh" type="button" disabled={!dirty || saving} onClick={() => {
+              <button className="submit-button" type="submit" disabled={!dirty || !valid || saving || refreshing}>{saving ? "Saving…" : "Save settings"}</button>
+              <button className="workflows-refresh" type="button" disabled={!dirty || saving || refreshing} onClick={() => {
                 setDraft(data.workflows); setError(""); setNotice("");
               }}>Discard changes</button>
             </div>
-            <span className="field-hint" role="status">{saving ? "Saving settings…" : dirty ? "Unsaved changes" : "All changes saved"}</span>
+            <span className="field-hint" role="status">{saving ? "Saving settings…" : refreshing ? "Refreshing provider options…" : !valid ? "Resolve unavailable selections before saving" : dirty ? "Unsaved changes" : "All changes saved"}</span>
           </div>
           {error && <p className="connector-error" role="alert">{error}</p>}
           <p className="connector-notice" role="status">{notice}</p>

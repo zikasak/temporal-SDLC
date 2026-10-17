@@ -12,6 +12,31 @@ from psycopg.rows import dict_row
 from app.api.routes.settings import router
 from app.llm import model
 from app.settings import storage
+from app.settings import providers
+from app.settings.models import ModelSettings
+
+
+@pytest.fixture(autouse=True)
+def provider_catalog(monkeypatch):
+    catalog = {
+        'openai': [providers.ModelOption(id=name, label=name) for name in
+                   (ModelSettings().model, 'saved-chat-model')],
+        'pi': [providers.ModelOption(id='openai/saved-pi-model', label='Pi model',
+                                    thinking_levels=['default', 'high'])],
+        'claude': [providers.ModelOption(id=name, label=name, thinking_levels=levels)
+                   for name, levels in [('sonnet', ['default', 'high', 'max']),
+                                        ('opus', ['default', 'high']),
+                                        ('haiku', ['default'])]],
+    }
+
+    def discover(adapter):
+        async def load():
+            return catalog[adapter]
+        return load
+
+    monkeypatch.setattr(providers, 'PROVIDERS', {
+        adapter: (adapter.title(), discover(adapter)) for adapter in catalog})
+    return catalog
 
 
 @pytest.fixture
@@ -53,7 +78,7 @@ async def test_settings_persist_per_workflow_and_models_reload_after_save(databa
     initial = await client.get('/settings')
     assert initial.status_code == 200
     workflows = initial.json()['workflows']
-    workflows['chat'] = {'adapter': 'openai', 'model': '  saved-chat-model  ', 'thinking_level': 'low'}
+    workflows['chat'] = {'adapter': 'openai', 'model': '  saved-chat-model  ', 'thinking_level': 'default'}
     workflows['requirements'] = {'adapter': 'pi', 'model': 'openai/saved-pi-model', 'thinking_level': 'high'}
     workflows['api_design'] = {'adapter': 'claude', 'model': 'sonnet', 'thinking_level': 'max'}
     response = await client.put('/settings', json={'workflows': workflows})
@@ -64,16 +89,16 @@ async def test_settings_persist_per_workflow_and_models_reload_after_save(databa
     assert (await client.get('/settings')).json()['workflows'] == response.json()['workflows']
 
     chat = await model.get_model('chat')
-    assert chat.model_name == 'saved-chat-model' and chat.reasoning_effort == 'low'
+    assert chat.model_name == 'saved-chat-model' and chat.reasoning_effort is None
     requirements = await model.get_model('requirements')
     assert requirements.model == 'openai/saved-pi-model' and requirements.thinking_level == 'high'
     design = await model.get_model('api_design')
     assert design.model == 'sonnet' and design.thinking_level == 'max'
 
-    workflows['chat'] = {'adapter': 'claude', 'model': 'opus', 'thinking_level': 'off'}
+    workflows['chat'] = {'adapter': 'claude', 'model': 'opus', 'thinking_level': 'high'}
     assert (await client.put('/settings', json={'workflows': workflows})).status_code == 200
     updated = await model.get_model('chat')
-    assert updated.model == 'opus' and updated.thinking_level == 'off'
+    assert updated.model == 'opus' and updated.thinking_level == 'high'
     assert (await model.get_model('requirements')).model == 'openai/saved-pi-model'
 
 
@@ -82,14 +107,43 @@ async def test_invalid_settings_never_partially_overwrite_saved_choices(database
     for patch in (
         {'adapter': 'unknown'}, {'thinking_level': 'off'}, {'model': '  '},
         {'model': 'bad\x00model'}, {'model': 'x' * 301}, {'unknown': True},
+        {'model': 'unknown-model'},
+        {'adapter': 'claude', 'model': 'haiku', 'thinking_level': 'high'},
+        {'adapter': 'claude', 'model': 'opus', 'thinking_level': 'max'},
     ):
         workflows = copy.deepcopy(original)
-        workflows['requirements']['model'] = 'must-not-be-saved'
+        workflows['requirements']['model'] = 'saved-chat-model'
         workflows['chat'].update(patch)
         assert (await client.put('/settings', json={'workflows': workflows})).status_code == 422
         assert (await client.get('/settings')).json()['workflows'] == original
     for workflows in ({}, {**original, 'unknown_workflow': original['chat']}):
         assert (await client.put('/settings', json={'workflows': workflows})).status_code == 422
+
+
+async def test_catalog_changes_and_provider_failure_never_overwrite_settings(
+        database, client, provider_catalog, monkeypatch):
+    initial = (await client.get('/settings')).json()
+    assert initial['providers']['claude']['models'][0]['thinking_levels'] == ['default']
+    original = initial['workflows']
+    workflows = copy.deepcopy(original)
+    workflows['chat'] = {'adapter': 'claude', 'model': 'sonnet', 'thinking_level': 'max'}
+    # A model disappears after loading the page: validation uses fresh discovery.
+    provider_catalog['claude'] = [item for item in provider_catalog['claude'] if item.id != 'sonnet']
+    response = await client.put('/settings', json={'workflows': workflows})
+    assert response.status_code == 422
+    assert (await client.get('/settings')).json()['workflows'] == original
+
+    async def offline():
+        raise RuntimeError('private-token-must-not-leak')
+
+    monkeypatch.setitem(providers.PROVIDERS, 'claude', ('Claude', offline))
+    response = await client.get('/settings')
+    assert response.status_code == 200
+    assert response.json()['providers']['openai']['models']
+    assert response.json()['providers']['claude']['error']
+    assert 'private-token' not in response.text
+    assert (await client.put('/settings', json={'workflows': workflows})).status_code == 503
+    assert (await client.get('/settings')).json()['workflows'] == original
 
 
 async def test_unavailable_settings_store_returns_retryable_error(client, monkeypatch):

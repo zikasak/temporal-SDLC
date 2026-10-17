@@ -13,11 +13,6 @@ WORKFLOW_LABELS: dict[str, str] = {
     'implementation': 'Implementation', 'test_generation': 'Test generation',
     'diagnosis': 'Diagnosis', 'documentation': 'Documentation', 'review': 'Review',
 }
-THINKING_LEVELS: dict[str, tuple[str, ...]] = {
-    'pi': ('default', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'),
-    'openai': ('default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'),
-    'claude': ('default', 'off', 'low', 'medium', 'high', 'xhigh', 'max'),
-}
 SETTINGS_FILENAME = 'llm-settings.json'
 
 
@@ -27,7 +22,7 @@ class ModelSettings(BaseModel):
     adapter: Adapter = 'openai'
     model: str = Field(default='ddalcu/Qwen3.8-27B-MLX-Serve-4bit', min_length=1,
                        max_length=300)
-    thinking_level: str = 'default'
+    thinking_level: str = Field(default='default', min_length=1, max_length=100)
 
     @field_validator('model')
     @classmethod
@@ -35,12 +30,6 @@ class ModelSettings(BaseModel):
         if any(ord(char) < 32 or ord(char) == 127 for char in value):
             raise ValueError('Model must not contain control characters')
         return value
-
-    @model_validator(mode='after')
-    def valid_thinking_level(self):
-        if self.thinking_level not in THINKING_LEVELS[self.adapter]:
-            raise ValueError(f'Unsupported thinking level for {self.adapter}')
-        return self
 
 
 class WorkflowSettings(BaseModel):
