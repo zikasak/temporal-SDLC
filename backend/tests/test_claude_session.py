@@ -27,7 +27,9 @@ def native_messages(request):
     return messages
 
 
-def test_authoring_keeps_native_history_through_many_tool_turns(claude_http, tmp_path, monkeypatch):
+async def test_authoring_keeps_native_history_through_many_tool_turns(
+    claude_http, tmp_path, monkeypatch
+):
     replies, requests = claude_http
     thinking = {'type': 'thinking', 'thinking': 'Keep the complete native conversation.',
                 'signature': 'native-signature'}
@@ -41,7 +43,7 @@ def test_authoring_keeps_native_history_through_many_tool_turns(claude_http, tmp
     root = tmp_path / 'service'
     root.mkdir()
 
-    runtime.run_agent(runtime.AgentProfile(
+    await runtime.run_agent(runtime.AgentProfile(
         root=root, prompt='Implement the supplied contract', initial_messages=['requirements'],
         max_turns_env='TEST_AGENT_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Completed', exhaustion_message='Tool-turn limit exceeded',
@@ -72,7 +74,7 @@ def test_authoring_keeps_native_history_through_many_tool_turns(claude_http, tmp
 
 
 @pytest.mark.parametrize('stop', ['limit', 'pause'])
-def test_authoring_stops_without_another_model_request(claude_http, tmp_path, monkeypatch, stop):
+async def test_authoring_stops_without_another_model_request(claude_http, tmp_path, monkeypatch, stop):
     replies, requests = claude_http
     root = tmp_path / 'service'
     root.mkdir()
@@ -91,17 +93,48 @@ def test_authoring_stops_without_another_model_request(claude_http, tmp_path, mo
         completion_message='Completed', exhaustion_message='Tool-turn limit exceeded')
 
     with pytest.raises(exception, match=match):
-        runtime.run_agent(profile)
+        await runtime.run_agent(profile)
 
     assert len(requests) == 1
     if stop == 'pause':
         (tmp_path / runtime.ANSWERS_FILENAME).write_text(json.dumps({'answers': ['EUR']}))
         replies.extend([[native_call('write', 'write_file', path='Dockerfile', content='FROM scratch')],
                         [{'type': 'text', 'text': 'Finished'}]])
-        runtime.run_agent(profile)
+        await runtime.run_agent(profile)
         assert (root / 'Dockerfile').read_text() == 'FROM scratch'
         assert 'EUR' in str(requests[1]['messages'])
         assert not (tmp_path / runtime.STATE_FILENAME).exists()
+
+
+@pytest.mark.parametrize('turns', [1, 3, 5])
+async def test_correction_queries_share_the_stage_turn_budget(
+        claude_http, tmp_path, monkeypatch, turns):
+    replies, requests = claude_http
+    monkeypatch.setenv('TEST_AGENT_MAX_TURNS', str(turns))
+    replies.extend([
+        [{'type': 'text', 'text': 'Should I use the supplied contract?'}],
+        [native_call('write', 'write_file', path='Dockerfile', content='FROM scratch')],
+        [native_call('read', 'read_file', path='Dockerfile')],
+        [{'type': 'text', 'text': 'Finished'}],
+    ])
+    root = tmp_path / 'service'
+    root.mkdir()
+    profile = runtime.AgentProfile(
+        root=root, prompt='Implement the supplied contract', initial_messages=['requirements'],
+        max_turns_env='TEST_AGENT_MAX_TURNS', validate_completion=validate_completion,
+        completion_message='Completed', exhaustion_message='Tool-turn limit exceeded')
+
+    if turns < 5:
+        with pytest.raises(RuntimeError, match='Tool-turn limit exceeded'):
+            await runtime.run_agent(profile)
+        assert len(requests) == turns
+    else:
+        await runtime.run_agent(profile)
+        assert len(requests) == 4
+        assert (root / 'Dockerfile').read_text() == 'FROM scratch'
+        original = native_messages(requests[0])
+        assert native_messages(requests[1])[:len(original)] == original
+        assert runtime.DIRECT_QUESTION_NOTICE in str(requests[1]['messages'])
 
 
 async def test_native_session_continues_followups_and_resumes_from_disk(claude_http, tmp_path):
@@ -141,7 +174,7 @@ async def test_native_session_continues_followups_and_resumes_from_disk(claude_h
     assert 'Continue after restarting' in str(requests[-1]['messages'])
 
 
-def test_native_session_propagates_provider_failure_and_closes(claude_http, tmp_path):
+async def test_native_session_propagates_provider_failure_and_closes(claude_http, tmp_path):
     replies, requests = claude_http
     replies.extend([[native_call('write', 'write_file', path='Dockerfile', content='FROM scratch')],
                     {'type': 'error', 'error': {'type': 'authentication_error',
@@ -149,7 +182,7 @@ def test_native_session_propagates_provider_failure_and_closes(claude_http, tmp_
     root = tmp_path / 'service'
     root.mkdir()
     with pytest.raises(RuntimeError, match='Invalid local test credentials'):
-        runtime.run_agent(runtime.AgentProfile(
+        await runtime.run_agent(runtime.AgentProfile(
             root=root, prompt='Implement the contract', initial_messages=['requirements'],
             max_turns_env='TEST_AGENT_MAX_TURNS', validate_completion=validate_completion,
             completion_message='Completed', exhaustion_message='Tool-turn limit exceeded'))

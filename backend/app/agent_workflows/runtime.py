@@ -6,10 +6,10 @@ import json
 import os
 import re
 import signal
-import subprocess
 import sys
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,7 @@ from langchain_core.messages import (
 from langchain_core.tools import BaseTool, StructuredTool, tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
+from app.asyncio_utils import async_context, run_sync
 from app.llm.factory import create_adapter
 from app.settings.models import ModelSettings, SETTINGS_FILENAME
 from app.llm.questions import (
@@ -231,25 +232,35 @@ def workspace_tools(root: Path, contracts: Path | None = None,
         return search_lines(regex, workspace_path(path), pattern)
 
     @tool
-    def shell(command: str) -> str:
+    async def shell(command: str) -> str:
         """Run a shell command in the project (120 second timeout).
 
         Long output is saved to a log file and summarized as its error lines and tail;
         the summary names the log so read_file or search_files can retrieve the rest.
         """
         logs = root / OUTPUT_DIR
-        logs.mkdir(exist_ok=True)
+        await run_sync(logs.mkdir, exist_ok=True)
         log = logs / f'shell-{next(commands)}.log'
-        with log.open('wb') as output:
-            process = subprocess.Popen(command, shell=True, cwd=root, stdout=output,
-                                       stderr=subprocess.STDOUT, start_new_session=True)
+        async with async_context(log.open, 'wb') as output:
+            process = await asyncio.create_subprocess_shell(
+                command, cwd=root, stdout=output, stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True)
             try:
-                process.wait(timeout=120)
+                await asyncio.wait_for(process.wait(), timeout=120)
                 status = f'Exit code: {process.returncode}'
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
+            except BaseException as exc:
+                # Kill descendants too: a shell may have exited while its children live.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await process.wait()
+                if not isinstance(exc, TimeoutError):
+                    raise
                 status = 'Command timed out'
+        return await run_sync(shell_output, log, status)
+
+    def shell_output(log: Path, status: str) -> str:
         if log.stat().st_size <= SHELL_CHARS:
             text = log.read_text('utf-8', 'replace')
             log.unlink()
@@ -275,6 +286,9 @@ def workspace_tools(root: Path, contracts: Path | None = None,
         ])
 
     tools = [read_file, write_file, edit_file, list_files, search_files, shell]
+    for item in tools:
+        if item.coroutine is None:
+            item.coroutine = partial(run_sync, item.func)
     if contracts is None:
         return tools
     contracts = contracts.resolve()
@@ -298,6 +312,8 @@ def workspace_tools(root: Path, contracts: Path | None = None,
         return search_lines(regex, workspace_path(name, contracts, 'contracts directory'),
                             base=contracts)
 
+    for item in (read_contract, search_contracts):
+        item.coroutine = partial(run_sync, item.func)
     return [*tools, read_contract, search_contracts]
 
 
@@ -372,7 +388,7 @@ def _resume(directory: Path) -> dict[str, Any] | None:
     return {**state, 'history': history, 'checkpoint': messages_from_dict(state['checkpoint'])}
 
 
-def run_agent(profile: AgentProfile) -> None:
+async def run_agent(profile: AgentProfile) -> None:
     role = os.getenv('APP_TRACE_AGENT_ROLE', profile.root.name).replace('_', '-')
     paused = False
     try:
@@ -380,25 +396,25 @@ def run_agent(profile: AgentProfile) -> None:
                              session_id=os.getenv('APP_TRACE_SESSION_ID'),
                              input=list(profile.initial_messages),
                              trace_context=container_trace_context()) as span:
-            paused = _run_agent(profile)
+            paused = await _run_agent(profile)
             if span is not None:
                 span.update(output='Paused for the user\'s answers' if paused
                             else profile.completion_message)
     finally:
-        shutdown_tracing()
+        await run_sync(shutdown_tracing)
     if paused:
         sys.exit(PAUSE_EXIT)
 
 
-def _run_agent(profile: AgentProfile) -> bool:
+async def _run_agent(profile: AgentProfile) -> bool:
     """Work until the profile's task is done; True when the run paused for answers."""
     settings = ModelSettings.model_validate_json(
-        (profile.root.parent / SETTINGS_FILENAME).read_text())
+        await run_sync((profile.root.parent / SETTINGS_FILENAME).read_text))
     provider = create_adapter(settings, api_key=os.getenv('OPENAI_API_KEY', ''),
                               base_url=os.getenv('OPENAI_BASE_URL', ''))
     if settings.adapter == 'claude':
-        return asyncio.run(_run_claude(profile, provider))
-    return _run_with_provider(profile, provider)
+        return await _run_claude(profile, provider)
+    return await _run_with_provider(profile, provider)
 
 
 async def _run_claude(profile: AgentProfile, provider) -> bool:
@@ -408,7 +424,11 @@ async def _run_claude(profile: AgentProfile, provider) -> bool:
     directory = profile.root.parent
     state_file = directory / STATE_FILENAME
     answers_file = directory / ANSWERS_FILENAME
-    state = json.loads(state_file.read_text()) if state_file.is_file() else None
+    state = (
+        json.loads(await run_sync(state_file.read_text))
+        if await run_sync(state_file.is_file)
+        else None
+    )
     if state is not None and state.get('adapter') != 'claude':
         raise ValueError('A paused run must resume with the same adapter')
     turns = state['turns'] if state else int(os.getenv(
@@ -421,7 +441,7 @@ async def _run_claude(profile: AgentProfile, provider) -> bool:
         pending['questions'] = normalize_questions(questions)
         return 'The run is paused. The user will answer in the next message.'
 
-    tools = [*workspace_tools(profile.root, profile.contracts, profile.build_dirs),
+    tools = [*(await run_sync(workspace_tools, profile.root, profile.contracts, profile.build_dirs)),
              StructuredTool.from_function(ask_user, name=ASK_USER, description=DESCRIPTION,
                                           args_schema=AskUserInput)]
     provider.cwd = profile.root
@@ -429,7 +449,7 @@ async def _run_claude(profile: AgentProfile, provider) -> bool:
     provider.resume = state['session_id'] if state else None
     head = [SystemMessage(profile.prompt + ASK_GUIDANCE)]
     if state:
-        answers = json.loads(answers_file.read_text())['answers']
+        answers = json.loads(await run_sync(answers_file.read_text))['answers']
         from app.llm.questions import answer_problem
         problem = answer_problem(state['pending']['questions'], answers)
         if problem:
@@ -440,32 +460,46 @@ async def _run_claude(profile: AgentProfile, provider) -> bool:
         messages = [*head, *(HumanMessage(text) for text in profile.initial_messages)]
     nudges = state.get('nudges', 0) if state else 0
     try:
-        async with provider.async_session():
-            while True:
+        while True:
+            if turns <= 0:
+                raise RuntimeError(profile.exhaustion_message)
+            # The SDK fixes max_turns at client startup. Resume the native transcript
+            # in a fresh client for each correction, with only the remaining budget.
+            async with provider.async_session():
                 reply = await provider.ainvoke(messages, tools=tools, until=lambda: bool(pending),
                                               max_turns=turns)
-                if pending:
-                    _pause(directory, {'adapter': 'claude', 'session_id': provider.session_id,
-                                       'pending': pending, 'turns': turns - provider.turns_used,
-                                       'nudges': nudges})
-                    answers_file.unlink(missing_ok=True)
-                    print(f'Paused for answers to {len(pending["questions"])} questions', flush=True)
-                    return True
-                if nudges < DIRECT_QUESTION_NUDGES and asks_directly(reply.text):
-                    nudges += 1
-                    messages = [*messages, reply, HumanMessage(DIRECT_QUESTION_NOTICE)]
-                    continue
-                profile.validate_completion(profile.root)
-                state_file.unlink(missing_ok=True)
-                answers_file.unlink(missing_ok=True)
-                print(profile.completion_message, flush=True)
-                return False
+            turns -= provider.turns_used
+            if pending:
+                await run_sync(
+                    _pause,
+                    directory,
+                    {
+                        'adapter': 'claude',
+                        'session_id': provider.session_id,
+                        'pending': pending,
+                        'turns': turns,
+                        'nudges': nudges,
+                    },
+                )
+                await run_sync(answers_file.unlink, missing_ok=True)
+                print(f'Paused for answers to {len(pending["questions"])} questions', flush=True)
+                return True
+            if nudges < DIRECT_QUESTION_NUDGES and asks_directly(reply.text):
+                nudges += 1
+                provider.resume = provider.session_id
+                messages = [*head, HumanMessage(DIRECT_QUESTION_NOTICE)]
+                continue
+            await run_sync(profile.validate_completion, profile.root)
+            await run_sync(state_file.unlink, missing_ok=True)
+            await run_sync(answers_file.unlink, missing_ok=True)
+            print(profile.completion_message, flush=True)
+            return False
     except ClaudeTurnLimit as exc:
         raise RuntimeError(profile.exhaustion_message) from exc
 
 
-def _run_with_provider(profile: AgentProfile, provider) -> bool:
-    tools = [*workspace_tools(profile.root, profile.contracts, profile.build_dirs),
+async def _run_with_provider(profile: AgentProfile, provider) -> bool:
+    tools = [*(await run_sync(workspace_tools, profile.root, profile.contracts, profile.build_dirs)),
              ask_user_tool()]
     by_name = {item.name: item for item in tools}
     model = provider.bind_tools(tools)
@@ -478,7 +512,7 @@ def _run_with_provider(profile: AgentProfile, provider) -> bool:
     changed: dict[str, None] = {}
     turns = int(os.getenv(profile.max_turns_env, str(profile.default_max_turns)))
     nudges = 0
-    resumed = _resume(profile.root.parent)
+    resumed = await run_sync(_resume, profile.root.parent)
     if resumed:
         checkpoint, history, notes = resumed['checkpoint'], resumed['history'], resumed['notes']
         changed = dict.fromkeys(resumed['changed'])
@@ -493,7 +527,7 @@ def _run_with_provider(profile: AgentProfile, provider) -> bool:
     # Disabled tracing leaves the invocation unchanged for custom model adapters.
     traced_config = {'config': config} if 'callbacks' in config else {}
     for turn in range(turns):
-        response = model.invoke([*head, *checkpoint, *history], **traced_config)
+        response = await model.ainvoke([*head, *checkpoint, *history], **traced_config)
         history.append(response)
         usage = getattr(response, 'usage_metadata', None) or {}
         if usage.get('input_tokens'):
@@ -504,7 +538,7 @@ def _run_with_provider(profile: AgentProfile, provider) -> bool:
                 nudges += 1
                 history.append(HumanMessage(content=DIRECT_QUESTION_NOTICE))
                 continue
-            profile.validate_completion(profile.root)
+            await run_sync(profile.validate_completion, profile.root)
             print(profile.completion_message, flush=True)
             return False
         asked = None
@@ -524,7 +558,7 @@ def _run_with_provider(profile: AgentProfile, provider) -> bool:
                              'position': len(history)}
                 continue
             try:
-                result = by_name[call['name']].invoke(
+                result = await by_name[call['name']].ainvoke(
                     call['args'], **({'config': {**config, 'run_name': call['name']}}
                                     if traced_config else {}),
                 )
@@ -534,7 +568,7 @@ def _run_with_provider(profile: AgentProfile, provider) -> bool:
                 result = f'Tool failed: {type(exc).__name__}: {exc}'
             history.append(ToolMessage(content=str(result), tool_call_id=call['id']))
         if asked:
-            _pause(profile.root.parent, {
+            await run_sync(_pause, profile.root.parent, {
                 'pending': asked, 'history': messages_to_dict(history),
                 'checkpoint': messages_to_dict(checkpoint), 'notes': notes,
                 'changed': list(changed), 'turns': turns - turn - 1, 'nudges': nudges})
@@ -547,9 +581,9 @@ def _run_with_provider(profile: AgentProfile, provider) -> bool:
         request = [SystemMessage(content=CHECKPOINT_PROMPT), HumanMessage(content=(
             (f'Previous checkpoint:\n{notes}\n\n' if notes else '')
             + 'History being removed:\n' + _transcript(history[:start])))]
-        notes = provider.invoke(request, **(
+        notes = (await provider.ainvoke(request, **(
             {'config': {**config, 'run_name': 'compact-history'}} if traced_config else {}
-        )).text.strip()
+        ))).text.strip()
         files = f'\nFiles written or edited so far: {", ".join(changed)}' if changed else ''
         checkpoint = [HumanMessage(content=f'{CHECKPOINT_NOTICE}{files}\n\n{notes}'.strip())]
         del history[:start]

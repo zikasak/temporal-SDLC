@@ -1,7 +1,9 @@
 """Container-only documentation author. Its filesystem holds documentation files only."""
+import asyncio
 import json
 from pathlib import Path
 
+from app.asyncio_utils import run_sync
 from app.agent_workflows.runtime import AgentProfile, run_agent
 
 ROOT = Path('/workspace/repository')
@@ -37,19 +39,19 @@ def validate_completion(root: Path) -> None:
     """Nothing to build; the host checks that the documentation changed."""
 
 
-def main() -> None:
-    context = Path('/workspace/input.json').read_text()
-    language = json.loads(LANGUAGE.read_text())
-    run_agent(AgentProfile(
+async def main() -> None:
+    context = await run_sync(Path('/workspace/input.json').read_text)
+    language = json.loads(await run_sync(LANGUAGE.read_text))
+    await run_agent(AgentProfile(
         root=ROOT, prompt=PROMPT.format(suffixes=language['suffixes']),
         initial_messages=[context],
         max_turns_env='DOCUMENTATION_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Documentation completed',
         exhaustion_message='Documentation exceeded the tool-turn limit',
-        contracts=CONTRACTS if CONTRACTS.is_dir() else None,
+        contracts=CONTRACTS if await run_sync(CONTRACTS.is_dir) else None,
         build_dirs=language['build_dirs'],
     ))
 
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())

@@ -15,6 +15,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
+from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.host import copy_file
 from app.github.client import validate_selection
 from app.github.models import RepositoryCheckout, RepositoryPublication, RepositorySelection
@@ -90,7 +91,7 @@ async def _git(*args: str, cwd: Path, token: str | None = None) -> str:
         raise
     text = output.decode('utf-8', 'replace').strip()
     if token:
-        text = text.replace(token, '[redacted]').replace(_credentials(token), '[redacted]')
+        text = (text.replace(token, '[redacted]').replace(_credentials(token), '[redacted]'))
     if process.returncode:
         raise CheckoutError(f'git {args[0]} failed: {text[-OUTPUT_CHARS:]}')
     return text
@@ -116,12 +117,12 @@ async def checkout(session_dir: Path, repository: RepositorySelection,
     `latest` the branch is cloned again as it is now, replacing that copy only once the
     new one is complete."""
     validate_selection(repository['full_name'], repository['branch'])
-    recorded = None if latest else _recorded(session_dir, repository)
+    recorded = None if latest else await run_sync(_recorded, session_dir, repository)
     if recorded:
         return recorded
-    session_dir.mkdir(parents=True, exist_ok=True)
+    await run_sync(session_dir.mkdir, parents=True, exist_ok=True)
     target = session_dir / CHECKOUT_DIR
-    with tempfile.TemporaryDirectory(dir=session_dir) as temporary:
+    async with async_context(tempfile.TemporaryDirectory, dir=session_dir) as temporary:
         clone = Path(temporary) / CHECKOUT_DIR
         await _git(
             'clone', '--quiet', '--single-branch', '--no-tags', '--depth', '1',
@@ -130,13 +131,13 @@ async def checkout(session_dir: Path, repository: RepositorySelection,
             cwd=session_dir, token=token,
         )
         commit = await _git('rev-parse', 'HEAD', cwd=clone)
-        if target.exists():
-            shutil.rmtree(target)
-        os.replace(clone, target)
+        if await run_sync(target.exists):
+            await run_sync(shutil.rmtree, target)
+        await run_sync(os.replace, clone, target)
         manifest = Path(temporary) / MANIFEST
-        manifest.write_text(json.dumps({'full_name': repository['full_name'],
+        await run_sync(manifest.write_text, json.dumps({'full_name': repository['full_name'],
                                         'branch': repository['branch'], 'commit': commit}))
-        os.replace(manifest, session_dir / MANIFEST)
+        await run_sync(os.replace, manifest, session_dir / MANIFEST)
     return {'commit': commit}
 
 
@@ -176,7 +177,7 @@ async def push(target: Path, repository: RepositorySelection, token: str, *, bra
     now came from the verified sources; those paths are reported as `ignored` rather
     than dropped silently, in case a rule matches a real source file."""
     validate_selection(repository['full_name'], branch)
-    if not (target / '.git').is_dir():
+    if not await run_sync((target / '.git').is_dir):
         raise CheckoutError('The repository checkout is unavailable')
     await _git('checkout', '--quiet', '-B', branch, cwd=target)
     await _git('add', '--all', cwd=target)

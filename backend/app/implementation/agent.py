@@ -1,7 +1,9 @@
 """Container-only coding agent. No Temporal, database, or Docker access."""
+import asyncio
 import json
 from pathlib import Path
 
+from app.asyncio_utils import run_sync
 from app.agent_workflows.runtime import AgentProfile, run_agent
 
 ROOT = Path('/workspace/service')
@@ -108,11 +110,11 @@ def validate_completion(root: Path) -> None:
         raise RuntimeError('Agent finished without a Dockerfile')
 
 
-def main() -> None:
-    context = Path('/workspace/input.json').read_text()
+async def main() -> None:
+    context = await run_sync(Path('/workspace/input.json').read_text)
     inputs = json.loads(context)
-    language = json.loads(LANGUAGE.read_text())
-    run_agent(AgentProfile(
+    language = json.loads(await run_sync(LANGUAGE.read_text))
+    await run_agent(AgentProfile(
         # A change to an existing service is told about its checkout by its own prompt.
         root=ROOT, prompt=((CHANGE_PROMPT.format(instructions=language['instructions'])
                             if inputs.get('brief')
@@ -123,10 +125,10 @@ def main() -> None:
         max_turns_env='IMPLEMENTATION_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Implementation completed',
         exhaustion_message='Implementation exceeded the tool-turn limit',
-        contracts=CONTRACTS if CONTRACTS.is_dir() else None,
+        contracts=CONTRACTS if await run_sync(CONTRACTS.is_dir) else None,
         build_dirs=language['build_dirs'],
     ))
 
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())

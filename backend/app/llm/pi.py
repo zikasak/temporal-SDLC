@@ -1,19 +1,23 @@
 """LangChain chat model backed by the Pi coding-agent CLI (`pi --mode json`)."""
+import asyncio
 import json
 import os
-import subprocess
+import signal
 import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.callbacks import AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.utils.function_calling import convert_to_openai_tool
+
+from app.asyncio_utils import async_context, run_sync
+
 
 # Registers the bound tools and swaps the caller's history in as native messages.
 EXTENSION = Path(__file__).with_name('pi_extension.ts')
@@ -58,6 +62,11 @@ class ChatPi(BaseChatModel):
     def _generate(self, messages: list[BaseMessage], stop: list[str] | None = None,
                   run_manager: CallbackManagerForLLMRun | None = None, *,
                   tools: Sequence[dict[str, Any]] = (), **kwargs: Any) -> ChatResult:
+        return asyncio.run(self._agenerate(messages, stop, tools=tools, **kwargs))
+
+    async def _agenerate(self, messages: list[BaseMessage], stop: list[str] | None = None,
+                         run_manager: AsyncCallbackManagerForLLMRun | None = None, *,
+                         tools: Sequence[dict[str, Any]] = (), **kwargs: Any) -> ChatResult:
         system = '\n\n'.join(message.text for message in messages
                              if isinstance(message, SystemMessage))
         command = [self.command, *PI_FLAGS]
@@ -71,20 +80,31 @@ class ChatPi(BaseChatModel):
         if system:
             command += ['--system-prompt', system]
         env = {**os.environ, AGENT_DIR_ENV: self.agent_dir} if self.agent_dir else os.environ
-        with tempfile.NamedTemporaryFile('w', suffix='.json') as request:
-            json.dump({'tools': list(tools), 'messages': _pi_messages(messages)}, request)
-            request.flush()
+        async with async_context(tempfile.NamedTemporaryFile, 'w', suffix='.json') as request:
+            await run_sync(json.dump, {'tools': list(tools), 'messages': _pi_messages(messages)},
+                           request)
+            await run_sync(request.flush)
+            process = await asyncio.create_subprocess_exec(
+                *command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, env={**env, INPUT_ENV: request.name},
+                start_new_session=True)
             try:
-                process = subprocess.run(
-                    command, input=PLACEHOLDER_PROMPT, capture_output=True, text=True,
-                    timeout=self.timeout, env={**env, INPUT_ENV: request.name})
-            except subprocess.TimeoutExpired as exc:
-                raise TimeoutError(
-                    f'pi did not finish within {self.timeout:g} seconds') from exc
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(PLACEHOLDER_PROMPT.encode()), self.timeout)
+            except BaseException as exc:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await process.communicate()
+                if isinstance(exc, TimeoutError):
+                    raise TimeoutError(
+                        f'pi did not finish within {self.timeout:g} seconds') from exc
+                raise
         if process.returncode:
             raise RuntimeError(f'pi exited with code {process.returncode}: '
-                               f'{process.stderr.strip()[-MAX_ERROR_CHARS:]}')
-        reply = _final_reply(process.stdout)
+                               f'{stderr.decode("utf-8", "replace").strip()[-MAX_ERROR_CHARS:]}')
+        reply = _final_reply(stdout.decode('utf-8'))
         # JSON mode reports a failed response in the stream, not in the exit status.
         if reply.get('stopReason') in {'error', 'aborted'}:
             raise RuntimeError(f'pi response failed: '

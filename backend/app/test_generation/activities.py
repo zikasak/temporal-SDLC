@@ -9,6 +9,7 @@ from typing import Any
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from app.asyncio_utils import run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import (
     StageInputs, StageSpec, copy_regular_files, run_stage, session_language, write_language,
@@ -128,21 +129,28 @@ async def generate_service_tests(session_id: str, context: dict[str, Any]) -> di
     # The repository's tests as they were before any author ran. A change that leaves the
     # API as it is adds to them and leaves them alone.
     continued = bool(context.get('repository'))
-    repository = (suite.test_cases(session_dir / SNAPSHOT_DIR / 'suite') if continued else {})
+    repository = (
+        await run_sync(suite.test_cases, session_dir / SNAPSHOT_DIR / 'suite') if continued else {}
+    )
     frozen = None
     if repair and repair.get('review'):
         # Code review findings concern the delivery's own tests: the repository's tests
         # it left as they were stay so for a change.
         if change:
-            published = suite.test_cases(session_dir / 'tests/suite')
+            published = await run_sync(suite.test_cases, session_dir / 'tests/suite')
             frozen = {case: source for case, source in repository.items()
                       if published.get(case) == source}
     elif repair:
         # Only the tests the diagnosis found broken may differ from the published suite.
         broken = {suite.case_id(item['class_name'], item['name'])
                   for item in repair.get('broken_tests', [])}
-        frozen = {case: source for case, source in suite.test_cases(
-            session_dir / 'tests/suite').items() if case not in broken}
+        frozen = {
+            case: source
+            for case, source in (
+                await run_sync(suite.test_cases, session_dir / 'tests/suite')
+            ).items()
+            if case not in broken
+        }
     elif change:
         frozen = repository
     result = await run_stage(stage(language, frozen, must_add=change and not repair),
@@ -150,7 +158,7 @@ async def generate_service_tests(session_id: str, context: dict[str, Any]) -> di
     if not continued or 'questions' in result:
         return result
     # What the suite now differs in from the repository's, for the runs that judge it.
-    cases = suite.test_cases(Path(result['path']))
+    cases = await run_sync(suite.test_cases, Path(result['path']))
     return {**result,
             'added_tests': sorted(cases.keys() - repository.keys()),
             'changed_tests': sorted(case for case, source in repository.items()

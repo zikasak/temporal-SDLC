@@ -1,4 +1,3 @@
-import asyncio
 import re
 import time
 from collections.abc import Callable
@@ -11,6 +10,7 @@ from langgraph.errors import GraphRecursionError
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from app.asyncio_utils import run_sync
 from app.agent_workflows.host import session_language
 from app.api_design.models import ApiDesignState, ApiModel
 from app.api_design.openapi import DOCUMENT_FILENAME as OPENAPI_FILENAME
@@ -179,7 +179,7 @@ async def _publish(session_id: str, repository: RepositorySelection, subject: st
     token, connection = await _github_token()
     bot = f"{connection['app_slug']}[bot]"
     try:
-        await asyncio.to_thread(update)
+        await run_sync(update)
         result = await repository_checkout.push(
             target, repository, token,
             branch=repository_checkout.publication_branch(session_id),
@@ -210,7 +210,7 @@ async def publish_repository(
     target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
     service = target.parent / 'implementation/service'
     suite = target.parent / 'tests/suite'
-    if not all(item.is_dir() for item in (target, service, suite)):
+    if not await run_sync(all, (item.is_dir() for item in (target, service, suite))):
         raise ApplicationError("The verified sources or the repository checkout are unavailable.",
                                non_retryable=True)
 
@@ -241,7 +241,7 @@ async def publish_documentation(
     documentation_files = partial(is_documentation_file, session_language(language))
     target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
     written = target.parent / 'documentation/files'
-    if not all(item.is_dir() for item in (target, written)):
+    if not await run_sync(all, (item.is_dir() for item in (target, written))):
         raise ApplicationError("The documentation or the repository checkout is unavailable.",
                                non_retryable=True)
     return await _publish(
@@ -300,7 +300,7 @@ async def read_repository_contract(session_id: str) -> RepositoryContract:
     changes its service starts from."""
     target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
     try:
-        return await asyncio.to_thread(read_contract, target)
+        return await run_sync(read_contract, target)
     except ContractError as exc:
         activity.logger.warning("Session %s has no usable contract: %s", session_id, exc)
         # Shown to the user as it is; another attempt reads the same checkout.
@@ -344,7 +344,7 @@ async def send_llm_message(
     except psycopg.Error:
         activity.logger.warning("Could not load remembered passages", exc_info=True)
         remembered = []
-    repository_files = _repository_tools(session_id) if repository else []
+    repository_files = await run_sync(_repository_tools, session_id) if repository else []
     prompt, document_ids = model_messages(
         messages, generated_documents, inline_texts, remembered,
         repository_tools.chat_guidance(repository, bool(repository_files))
@@ -389,8 +389,8 @@ async def requirements_turn(
 ) -> dict[str, Any]:
     retired = retired or []
     ctx = requirements_tools.RequirementsContext.from_list(
-        requirements, kind, await asyncio.to_thread(_published_requirements), retired)
-    repository = _repository_tools()
+        requirements, kind, await run_sync(_published_requirements), retired)
+    repository = await run_sync(_repository_tools)
     asked = question_tools.QuestionsContext()
     started = time.perf_counter()
     try:
@@ -488,7 +488,7 @@ async def api_design_turn(state: ApiDesignState) -> dict[str, Any]:
         state.api, {item["id"] for item in state.requirements}, state.language,
         language_fixed=bool(state.change_document),
     )
-    repository = _repository_tools()
+    repository = await run_sync(_repository_tools)
     asked = question_tools.QuestionsContext()
     started = time.perf_counter()
     try:

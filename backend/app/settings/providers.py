@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, Field
 
+from app.asyncio_utils import async_context
 from app.config import OPENAI_API_KEY, OPENAI_BASE_URL, PI_CREDENTIALS_DIR
 from app.settings.models import Adapter
 
@@ -63,7 +64,7 @@ async def _claude_models() -> list[ModelOption]:
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
     # Match bare-model execution: no project settings, tools or persisted session.
-    with tempfile.TemporaryDirectory(prefix='claude-models-') as cwd:
+    async with async_context(tempfile.TemporaryDirectory, prefix='claude-models-') as cwd:
         options = ClaudeAgentOptions(cwd=cwd, tools=[], setting_sources=[],
                                      extra_args={'no-session-persistence': None})
         async with ClaudeSDKClient(options=options) as client:

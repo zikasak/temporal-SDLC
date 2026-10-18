@@ -14,6 +14,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from app import docker_agents
+from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import (
     ANSWERS_KEY, copy_regular_files, paused_result, session_language, write_language,
@@ -117,16 +118,16 @@ async def run_diagnosis(session_id: str, context: dict[str, Any]) -> dict[str, A
     session_dir = GENERATED_CODE_DIR / session_id
     artifact_dir = session_dir / 'diagnosis'
     paused = artifact_dir / docker_agents.PAUSED_DIR
-    with tempfile.TemporaryDirectory() as temporary:
+    async with async_context(tempfile.TemporaryDirectory) as temporary:
         work = Path(temporary)
         workspace = work / 'workspace'
-        artifact_dir.mkdir(exist_ok=True)
+        await run_sync(artifact_dir.mkdir, exist_ok=True)
         if answers:
             # The paused review continues in the workspace it left.
-            docker_agents.resume_workspace(paused, workspace, answers)
+            await run_sync(docker_agents.resume_workspace, paused, workspace, answers)
         else:
-            workspace.mkdir()
-            prepare_review(language, session_dir, context, workspace)
+            await run_sync(workspace.mkdir)
+            await run_sync(prepare_review, language, session_dir, context, workspace)
         async with docker_agents.keep_activity_alive('Diagnosing failed verification'):
             output = work / 'output'
             try:
@@ -138,13 +139,16 @@ async def run_diagnosis(session_id: str, context: dict[str, Any]) -> dict[str, A
                         dockerfile=language.agent_dockerfile))
             except docker_agents.AgentPaused as exc:
                 return paused_result(session_id, exc)
-        verdict = read_verdict(output, context.get('verification') or {},
-                               language.test_suite.case_id)
+        verdict = await run_sync(
+            read_verdict, output, context.get('verification') or {}, language.test_suite.case_id
+        )
         result: Diagnosis = {'session_id': session_id, **verdict,
                              'path': str(artifact_dir)}
     manifest = artifact_dir / f'{uuid.uuid4().hex}.json'
-    manifest.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
-    os.replace(manifest, artifact_dir / VERDICT)
+    await run_sync(
+        manifest.write_text, json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8'
+    )
+    await run_sync(os.replace, manifest, artifact_dir / VERDICT)
     logger.info('Diagnosis finished (session=%s, target=%s)', session_id, result['target'])
     return result
 

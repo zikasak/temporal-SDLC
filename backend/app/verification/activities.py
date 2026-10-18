@@ -19,6 +19,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from app import docker_agents
+from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.host import build_image, publish_manifest, session_language
 from app.github.checkout import CHECKOUT_DIR, SNAPSHOT_DIR, TESTS_DIR
 from app.implementation.activities import copy_service
@@ -47,7 +48,7 @@ CONSTRAINTS = (
 async def collect_reports(container: str, destination: Path, reports: TestReports) -> None:
     """Bound the Docker tar stream before touching any untrusted archive paths."""
     logger.info('Collecting test reports (container=%s, path=%s)', container, destination)
-    with tempfile.TemporaryFile() as stderr:
+    async with async_context(tempfile.TemporaryFile) as stderr:
         process = await asyncio.create_subprocess_exec(
             'docker', 'cp', f'{container}:{reports.directory}/.', '-',
             stdout=asyncio.subprocess.PIPE, stderr=stderr,
@@ -66,6 +67,10 @@ async def collect_reports(container: str, destination: Path, reports: TestReport
             if process.returncode is None:
                 process.kill()
                 await process.wait()
+    await run_sync(_extract_reports, archive, destination, reports)
+
+
+def _extract_reports(archive: bytes, destination: Path, reports: TestReports) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     # Docker emits an uncompressed tar. Do not auto-decompress untrusted input.
     with tarfile.open(fileobj=io.BytesIO(archive), mode='r:') as tar:
@@ -83,7 +88,7 @@ async def collect_reports(container: str, destination: Path, reports: TestReport
                 raise RuntimeError('Test reports exceed size limits')
             with tar.extractfile(member) as source:
                 (destination / name).write_bytes(source.read(MAX_REPORT_BYTES + 1))
-        logger.info('Collected %d test reports (container=%s)', len(names), container)
+        logger.info('Collected %d test reports', len(names))
 
 
 def summarize_reports(directory: Path, reports: TestReports,
@@ -190,14 +195,15 @@ async def run_verification(session_id: str, service_image: str, test_image: str,
     if tracked is not None:
         # A run that answers for single tests answers for the whole suite: its build
         # configuration could otherwise leave tests out without any of them failing.
-        suite_tests = published_suite_tests(GENERATED_CODE_DIR / session_id / suite_dir,
-                                            test_image, stack)
+        suite_tests = await run_sync(
+            published_suite_tests, GENERATED_CODE_DIR / session_id / suite_dir, test_image, stack
+        )
     token = uuid.uuid4().hex
     network = f'verification-{token}'
     service, runner = f'{network}-service', f'{network}-tests'
     artifact_dir = GENERATED_CODE_DIR / session_id / 'verification'
     run_dir = artifact_dir / token
-    run_dir.mkdir(parents=True)
+    await run_sync(run_dir.mkdir, parents=True)
     result: VerificationResult = {
         'session_id': session_id, 'status': 'error',
         'tests': 0, 'passed': 0, 'failures': 0, 'errors': 0, 'skipped': 0,
@@ -253,7 +259,9 @@ async def run_verification(session_id: str, service_image: str, test_image: str,
                     try:
                         log = await docker_agents.docker('logs', '--tail', '200', name, timeout=30)
                         result[key] = log[-LOG_LIMIT:]
-                        (run_dir / f'{key}.log').write_text(result[key], encoding='utf-8')
+                        await run_sync(
+                            (run_dir / f'{key}.log').write_text, result[key], encoding='utf-8'
+                        )
                     except Exception as exc:
                         result[key] = f'Could not retrieve logs: {str(exc)[-1000:]}'
                 for name in created:
@@ -271,11 +279,20 @@ async def run_verification(session_id: str, service_image: str, test_image: str,
                 if runner_started:
                     try:
                         await collect_reports(runner, run_dir / 'reports', reports)
-                        result.update(summarize_reports(
-                            run_dir / 'reports', reports, tracked, stack.test_suite.case_id,
-                            suite_tests))
+                        result.update(
+                            await run_sync(
+                                summarize_reports,
+                                run_dir / 'reports',
+                                reports,
+                                tracked,
+                                stack.test_suite.case_id,
+                                suite_tests,
+                            )
+                        )
                     except Exception as exc:
-                        result['error'] = result['error'] or f'Could not read test reports: {str(exc)[-1000:]}'
+                        result['error'] = (
+                            result['error'] or f'Could not read test reports: {str(exc)[-1000:]}'
+                        )
             if runner_state.get('OOMKilled') or service_state.get('OOMKilled'):
                 result['error'] = 'A verification container was OOM killed'
             elif result['exit_code'] in {124, 125, 137, 143}:
@@ -301,10 +318,10 @@ async def run_verification(session_id: str, service_image: str, test_image: str,
             raise
     result['duration_seconds'] = round(time.monotonic() - started, 3)
     payload = json.dumps(result, ensure_ascii=False, indent=2)
-    (run_dir / 'result.json').write_text(payload, encoding='utf-8')
+    await run_sync((run_dir / 'result.json').write_text, payload, encoding='utf-8')
     manifest = artifact_dir / f'{token}.json'
-    manifest.write_text(payload, encoding='utf-8')
-    os.replace(manifest, artifact_dir / 'result.json')
+    await run_sync(manifest.write_text, payload, encoding='utf-8')
+    await run_sync(os.replace, manifest, artifact_dir / 'result.json')
     logger.info('Verification finished (session=%s, status=%s, tests=%d, failures=%d, errors=%d, %.2fs, path=%s)',
                 session_id, result['status'], result['tests'], result['failures'], result['errors'],
                 result['duration_seconds'], run_dir)
@@ -346,21 +363,21 @@ async def snapshot_repository_tests(session_id: str, language: str) -> dict[str,
     suite = session_language(language).test_suite
     session_dir = GENERATED_CODE_DIR / session_id
     checkout = session_dir / CHECKOUT_DIR
-    if not checkout.is_dir():
+    if not await run_sync(checkout.is_dir):
         raise ApplicationError('The repository checkout is unavailable', non_retryable=True)
     snapshot = session_dir / SNAPSHOT_DIR
     target = snapshot / 'suite'
-    if not target.is_dir():
-        snapshot.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=snapshot) as temporary:
+    if not await run_sync(target.is_dir):
+        await run_sync(snapshot.mkdir, parents=True, exist_ok=True)
+        async with async_context(tempfile.TemporaryDirectory, dir=snapshot) as temporary:
             clean = Path(temporary) / 'suite'
-            if (checkout / TESTS_DIR).is_dir():
-                copy_test_suite(suite, checkout / TESTS_DIR, clean)
+            if await run_sync((checkout / TESTS_DIR).is_dir):
+                await run_sync(copy_test_suite, suite, checkout / TESTS_DIR, clean)
             else:
-                shutil.copytree(suite.template, clean)
-            os.replace(clean, target)
+                await run_sync(shutil.copytree, suite.template, clean)
+            await run_sync(os.replace, clean, target)
         logger.info('Repository tests recorded (session=%s)', session_id)
-    return {'tests': len(suite.test_cases(target))}
+    return {'tests': len(await run_sync(suite.test_cases, target))}
 
 
 @activity.defn
@@ -372,16 +389,16 @@ async def build_repository_tests(session_id: str, language: str) -> dict[str, st
         raise ApplicationError('Invalid session ID', non_retryable=True)
     session_language(language)
     artifact_dir = GENERATED_CODE_DIR / session_id / SNAPSHOT_DIR
-    if not (artifact_dir / 'suite').is_dir():
+    if not await run_sync((artifact_dir / 'suite').is_dir):
         raise ApplicationError('The repository tests were not recorded', non_retryable=True)
     async with docker_agents.keep_activity_alive('Building the repository tests'):
-        with tempfile.TemporaryDirectory(dir=artifact_dir) as temporary:
+        async with async_context(tempfile.TemporaryDirectory, dir=artifact_dir) as temporary:
             clean = Path(temporary) / 'build'
-            shutil.copytree(artifact_dir / 'suite', clean)
+            await run_sync(shutil.copytree, artifact_dir / 'suite', clean)
             image_id = await build_image(clean, 'repository test runner',
                                          artifact_dir / 'image-build.log')
     result = {'image_id': image_id, 'session_id': session_id}
-    publish_manifest(artifact_dir, result)
+    await run_sync(publish_manifest, artifact_dir, result)
     logger.info('Repository test image built (session=%s, image=%s)', session_id, image_id)
     return result
 
@@ -396,20 +413,20 @@ async def build_baseline(session_id: str, language: str) -> dict[str, str]:
     stack = session_language(language)
     session_dir = GENERATED_CODE_DIR / session_id
     checkout = session_dir / CHECKOUT_DIR
-    if not checkout.is_dir():
+    if not await run_sync(checkout.is_dir):
         raise ApplicationError('The repository checkout is unavailable', non_retryable=True)
     artifact_dir = session_dir / 'baseline'
-    artifact_dir.mkdir(parents=True, exist_ok=True)
+    await run_sync(artifact_dir.mkdir, parents=True, exist_ok=True)
     async with docker_agents.keep_activity_alive('Building the repository service'):
-        with tempfile.TemporaryDirectory(dir=artifact_dir) as temporary:
+        async with async_context(tempfile.TemporaryDirectory, dir=artifact_dir) as temporary:
             clean = Path(temporary) / 'build'
-            copy_service(stack, checkout, clean)
-            if not (clean / 'Dockerfile').is_file():
+            await run_sync(copy_service, stack, checkout, clean)
+            if not await run_sync((clean / 'Dockerfile').is_file):
                 raise ApplicationError('The repository has no Dockerfile to build its service',
                                        non_retryable=True)
             image_id = await build_image(clean, 'baseline service',
                                          artifact_dir / 'image-build.log')
     result = {'image_id': image_id, 'session_id': session_id}
-    publish_manifest(artifact_dir, result)
+    await run_sync(publish_manifest, artifact_dir, result)
     logger.info('Baseline service image built (session=%s, image=%s)', session_id, image_id)
     return result

@@ -1,6 +1,5 @@
 """Uploaded originals on disk, their metadata, and extracted text."""
 
-import asyncio
 import hashlib
 import logging
 import os
@@ -11,6 +10,7 @@ from zipfile import BadZipFile, ZipFile
 
 from fastapi import UploadFile
 
+from app.asyncio_utils import async_context, run_sync
 from app.config import DOCUMENT_STORAGE_DIR
 from app.db import connect
 from app.documents.errors import DocumentNotFound, DocumentParseError, DocumentTooLarge
@@ -23,7 +23,7 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
 async def store_original(upload: UploadFile) -> dict[str, Any]:
-    filename = (upload.filename or "").replace("\\", "/").split("/")[-1]
+    filename = ((upload.filename or "").replace("\\", "/")).split("/")[-1]
     if not filename or len(filename) > 255:
         raise DocumentParseError("Choose a file with a valid filename.")
     content_type, _ = document_type(filename)
@@ -31,32 +31,22 @@ async def store_original(upload: UploadFile) -> dict[str, Any]:
     storage_name = document_id
     temporary_path = storage_path(f"{storage_name}.upload")
     final_path = storage_path(storage_name)
-    DOCUMENT_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    await run_sync(DOCUMENT_STORAGE_DIR.mkdir, parents=True, exist_ok=True)
     size = 0
     digest = hashlib.sha256()
 
     try:
-        with temporary_path.open("xb") as target:
+        async with async_context(temporary_path.open, "xb") as target:
             while chunk := await upload.read(1024 * 1024):
                 size += len(chunk)
                 if size > MAX_UPLOAD_BYTES:
                     raise DocumentTooLarge("The file exceeds the 20 MiB upload limit.")
                 digest.update(chunk)
-                target.write(chunk)
+                await run_sync(target.write, chunk)
         if size == 0:
             raise DocumentParseError("The attached file is empty.")
-        with temporary_path.open("rb") as source:
-            header = source.read(8)
-        if filename.lower().endswith(".pdf") and not header.startswith(b"%PDF-"):
-            raise DocumentParseError("The attached file is not a PDF.")
-        if filename.lower().endswith(".docx"):
-            try:
-                with ZipFile(temporary_path) as archive:
-                    if "word/document.xml" not in archive.namelist():
-                        raise DocumentParseError("The attached file is not a DOCX document.")
-            except BadZipFile as exc:
-                raise DocumentParseError("The attached file is not a DOCX document.") from exc
-        os.replace(temporary_path, final_path)
+        await run_sync(_validate_upload, temporary_path, filename)
+        await run_sync(os.replace, temporary_path, final_path)
         async with await connect() as conn:
             await conn.execute(
                 """
@@ -67,10 +57,10 @@ async def store_original(upload: UploadFile) -> dict[str, Any]:
                 (document_id, filename, content_type, size, digest.hexdigest(),
                  storage_name, new_expiry()),
             )
-    except Exception as exc:
+    except BaseException as exc:
         logger.warning("Could not store upload %r: %s", filename, exc)
-        temporary_path.unlink(missing_ok=True)
-        final_path.unlink(missing_ok=True)
+        await run_sync(temporary_path.unlink, missing_ok=True)
+        await run_sync(final_path.unlink, missing_ok=True)
         raise
     finally:
         await upload.close()
@@ -82,6 +72,20 @@ async def store_original(upload: UploadFile) -> dict[str, Any]:
         "content_type": content_type,
         "size_bytes": size,
     }
+
+
+def _validate_upload(temporary_path: Path, filename: str) -> None:
+    with temporary_path.open("rb") as source:
+        header = source.read(8)
+    if filename.lower().endswith(".pdf") and not header.startswith(b"%PDF-"):
+        raise DocumentParseError("The attached file is not a PDF.")
+    if filename.lower().endswith(".docx"):
+        try:
+            with ZipFile(temporary_path) as archive:
+                if "word/document.xml" not in archive.namelist():
+                    raise DocumentParseError("The attached file is not a DOCX document.")
+        except BadZipFile as exc:
+            raise DocumentParseError("The attached file is not a DOCX document.") from exc
 
 
 async def get_document(document_id: str) -> dict[str, Any]:
@@ -129,7 +133,7 @@ async def parse_stored_document(document_id: str) -> None:
                 return
             _, parser = document_type(row["filename"])
             try:
-                text = await asyncio.to_thread(parser, storage_path(row["storage_name"]))
+                text = await run_sync(parser, storage_path(row["storage_name"]))
             except DocumentParseError as exc:
                 error = exc
                 await conn.execute(
@@ -184,7 +188,7 @@ async def delete_document(document_id: str) -> None:
         )
         row = await cursor.fetchone()
     if row:
-        storage_path(row["storage_name"]).unlink(missing_ok=True)
+        await run_sync(storage_path(row["storage_name"]).unlink, missing_ok=True)
         logger.info("Deleted document %s", document_id)
 
 
@@ -197,7 +201,7 @@ async def cleanup_expired_documents() -> None:
             )
             rows = await cursor.fetchall()
             for row in rows:
-                storage_path(row["storage_name"]).unlink(missing_ok=True)
+                await run_sync(storage_path(row["storage_name"]).unlink, missing_ok=True)
                 await conn.execute(
                     "DELETE FROM app.documents WHERE id = %s", (row["id"],)
                 )

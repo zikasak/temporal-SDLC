@@ -20,6 +20,7 @@ from urllib.parse import urlsplit, urlunsplit
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.runtime import ANSWERS_FILENAME, PAUSE_EXIT, STATE_FILENAME
 from app.config import OPENAI_API_KEY, OPENAI_BASE_URL, PI_CREDENTIALS_DIR, PI_CREDENTIALS_SHARED
 from app.llm.questions import Question, normalize_questions
@@ -65,23 +66,27 @@ def resume_workspace(paused: Path, workspace: Path, answers: list[str]) -> None:
 async def _keep_paused(name: str, paused: Path) -> list[Question]:
     """Copy the paused container's workspace to `paused`; the questions it asked."""
     staging = paused.parent / f'.{paused.name}-{uuid.uuid4().hex}'
-    staging.mkdir(parents=True)
+    await run_sync(staging.mkdir, parents=True)
     try:
         await docker('cp', name + ':/workspace/.', str(staging))
         # The state is the agent's own output and is read as untrusted.
         state = staging / STATE_FILENAME
-        if state.is_symlink() or not state.is_file() or state.stat().st_size > MAX_STATE_BYTES:
+        if (
+            await run_sync(state.is_symlink)
+            or not await run_sync(state.is_file)
+            or (await run_sync(state.stat)).st_size > MAX_STATE_BYTES
+        ):
             raise RuntimeError('The agent paused without saving its state')
         try:
-            pending = json.loads(state.read_text())['pending']
+            pending = json.loads(await run_sync(state.read_text))['pending']
             questions = normalize_questions(pending['questions'])
         except (ValueError, KeyError, TypeError) as exc:
             raise RuntimeError(f'The agent paused with an unusable state: {exc}') from exc
-        if paused.exists():
-            shutil.rmtree(paused)
-        os.replace(staging, paused)
+        if await run_sync(paused.exists):
+            await run_sync(shutil.rmtree, paused)
+        await run_sync(os.replace, staging, paused)
     except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
+        await run_sync(shutil.rmtree, staging, ignore_errors=True)
         raise
     return questions
 
@@ -94,11 +99,13 @@ class AgentImageBuild:
     build_args: Mapping[str, str] = field(default_factory=dict)
 
 
+_BACKEND = Path(__file__).resolve().parent.parent
+
+
 def default_agent_image(role: str, workspace_name: str) -> AgentImageBuild:
     """The built-in agent image (Python 3.12, Java 21 and Maven), shared by the coding stages."""
-    backend = Path(__file__).resolve().parent.parent
     return AgentImageBuild(
-        context=backend, dockerfile=backend / 'app/agent_workflows/Dockerfile',
+        context=_BACKEND, dockerfile=_BACKEND / 'app/agent_workflows/Dockerfile',
         build_args={'AGENT_ROLE': role, 'WORKSPACE_NAME': workspace_name},
     )
 
@@ -131,7 +138,7 @@ async def docker(*args: str, timeout: int = 1800, env: dict | None = None,
     logger.info('Docker [%s] %s started (timeout=%ss)', command_id, operation, timeout)
     process = None
     failure = None
-    with tempfile.TemporaryFile() as log:
+    async with async_context(tempfile.TemporaryFile) as log:
         try:
             process = await asyncio.create_subprocess_exec(
                 'docker', *args, stdout=log, stderr=asyncio.subprocess.STDOUT, env=env, stdin=stdin,
@@ -144,9 +151,12 @@ async def docker(*args: str, timeout: int = 1800, env: dict | None = None,
                 await process.wait()
             raise
         finally:
-            log.seek(0, 2)
-            log.seek(max(0, log.tell() - 8000))
-            output = redact_output(log.read().decode('utf-8', 'replace').strip(), env)
+            def read_tail() -> str:
+                log.seek(0, 2)
+                log.seek(max(0, log.tell() - 8000))
+                return log.read().decode('utf-8', 'replace').strip()
+
+            output = redact_output(await run_sync(read_tail), env)
             elapsed = time.monotonic() - started
             exit_code = process.returncode if process is not None else None
             outcome = type(failure).__name__ if failure is not None else f'exit={exit_code}'
@@ -159,9 +169,11 @@ async def docker(*args: str, timeout: int = 1800, env: dict | None = None,
                 )
             if log_path is not None:
                 try:
-                    log_path.parent.mkdir(parents=True, exist_ok=True)
-                    log_path.write_text(
-                        f'Docker {operation}: {outcome}, {elapsed:.2f}s\n{output}\n', encoding='utf-8',
+                    await run_sync(log_path.parent.mkdir, parents=True, exist_ok=True)
+                    await run_sync(
+                        log_path.write_text,
+                        f'Docker {operation}: {outcome}, {elapsed:.2f}s\n{output}\n',
+                        encoding='utf-8',
                     )
                     logger.info('Docker [%s] output saved to %s', command_id, log_path)
                 except OSError:
@@ -252,6 +264,17 @@ async def keep_activity_alive(message: str):
         await asyncio.gather(pulse, return_exceptions=True)
 
 
+def _archive_workspace(workspace: Path, archive: Path) -> None:
+    def owner(info: tarfile.TarInfo) -> tarfile.TarInfo:
+        info.uid = info.gid = 10001
+        info.uname = info.gname = 'agent'
+        return info
+
+    with tarfile.open(archive, 'w') as tar:
+        for item in workspace.iterdir():
+            tar.add(item, arcname=item.name, filter=owner)
+
+
 async def run_agent(role: str, session_id: str, workspace: Path,
                     output: Path, output_name: str, log_path: Path, *,
                     image_build: AgentImageBuild, paused: Path) -> None:
@@ -265,8 +288,8 @@ async def run_agent(role: str, session_id: str, workspace: Path,
     agent_image = f'temporal-{label}-agent:{digest}'
     settings = await get_workflow_settings(role)
     # The snapshot travels as input alongside the workspace, never as host selector env vars.
-    (workspace / SETTINGS_FILENAME).write_text(settings.model_dump_json())
-    adapter_args = [*pi_container_args(settings), *claude_container_args(settings)]
+    await run_sync((workspace / SETTINGS_FILENAME).write_text, settings.model_dump_json())
+    adapter_args = [*(await run_sync(pi_container_args, settings)), *claude_container_args(settings)]
     trace_environment = container_trace_environment(session_id, role)
     # A self-hosted loopback Langfuse endpoint also needs Docker's host alias.
     if 'LANGFUSE_BASE_URL' in trace_environment:
@@ -294,15 +317,8 @@ async def run_agent(role: str, session_id: str, workspace: Path,
         )
         archive = workspace.parent / 'workspace.tar'
 
-        def owner(info: tarfile.TarInfo) -> tarfile.TarInfo:
-            info.uid = info.gid = 10001
-            info.uname = info.gname = 'agent'
-            return info
-
-        with tarfile.open(archive, 'w') as tar:
-            for item in workspace.iterdir():
-                tar.add(item, arcname=item.name, filter=owner)
-        with archive.open('rb') as stream:
+        await run_sync(_archive_workspace, workspace, archive)
+        async with async_context(archive.open, 'rb') as stream:
             await docker('cp', '-a', '-', name + ':/workspace', stdin=stream)
         await docker('start', name)
         logger.info('%s agent running (session=%s, container=%s)', role, session_id, name)
@@ -313,7 +329,7 @@ async def run_agent(role: str, session_id: str, workspace: Path,
         except Exception as exc:
             agent_log = f'Could not retrieve agent logs: {exc}'
         agent_log = redact_output(agent_log, environment)
-        log_path.write_text(agent_log, encoding='utf-8')
+        await run_sync(log_path.write_text, agent_log, encoding='utf-8')
         logger.info('%s agent finished (session=%s, exit=%s, log=%s)',
                     role, session_id, state['ExitCode'], log_path)
         if state['ExitCode'] == PAUSE_EXIT:
@@ -326,7 +342,7 @@ async def run_agent(role: str, session_id: str, workspace: Path,
                 f"{label.capitalize()} agent exited with code {state['ExitCode']}{detail}. "
                 f"Log: {log_path}\n{agent_log[-4000:]}"
             )
-        output.mkdir()
+        await run_sync(output.mkdir)
         await docker('cp', name + f':/workspace/{output_name}/.', str(output))
     except AgentPaused as exc:
         logger.info('%s agent paused (session=%s): %s', role, session_id, exc)
@@ -336,7 +352,7 @@ async def run_agent(role: str, session_id: str, workspace: Path,
         raise
     finally:
         if not kept:
-            shutil.rmtree(paused, ignore_errors=True)
+            await run_sync(shutil.rmtree, paused, ignore_errors=True)
         try:
             await docker('rm', '-f', name, timeout=30)
         except Exception:

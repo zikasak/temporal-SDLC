@@ -1,8 +1,10 @@
 """Container-only test author. Its filesystem contains contracts and tests only."""
+import asyncio
 import json
 from functools import partial
 from pathlib import Path
 
+from app.asyncio_utils import run_sync
 from app.agent_workflows.runtime import AgentProfile, run_agent
 
 ROOT = Path('/workspace/tests')
@@ -135,11 +137,11 @@ def validate_completion(test_glob: str, root: Path) -> None:
         raise RuntimeError('Agent finished without test files')
 
 
-def main() -> None:
-    context = Path('/workspace/input.json').read_text()
+async def main() -> None:
+    context = await run_sync(Path('/workspace/input.json').read_text)
     inputs = json.loads(context)
-    language = json.loads(LANGUAGE.read_text())
-    run_agent(AgentProfile(
+    language = json.loads(await run_sync(LANGUAGE.read_text))
+    await run_agent(AgentProfile(
         # A change to an existing service is told about its repository by its own prompt.
         root=ROOT, prompt=((CHANGE_PROMPT.format(instructions=language['instructions'])
                             if inputs.get('brief')
@@ -147,16 +149,16 @@ def main() -> None:
                             + (REPOSITORY_PROMPT if inputs.get('repository') else ''))
                            + repair_prompt(inputs)),
         initial_messages=[context,
-                          *(['OpenAPI contract:\n' + OPENAPI.read_text()]
-                            if OPENAPI.is_file() else [])],
+                          *(['OpenAPI contract:\n' + (await run_sync(OPENAPI.read_text))]
+                            if await run_sync(OPENAPI.is_file) else [])],
         max_turns_env='TEST_GENERATION_MAX_TURNS',
         validate_completion=partial(validate_completion, language['test_glob']),
         completion_message='Test generation completed',
         exhaustion_message='Test generation exceeded the tool-turn limit',
-        contracts=CONTRACTS if CONTRACTS.is_dir() else None,
+        contracts=CONTRACTS if await run_sync(CONTRACTS.is_dir) else None,
         build_dirs=language['build_dirs'],
     ))
 
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())

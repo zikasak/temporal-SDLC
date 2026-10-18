@@ -4,6 +4,7 @@ import signal
 
 from temporalio.worker import Worker
 
+from app.asyncio_utils import run_sync
 from app.tracing import shutdown_tracing
 
 
@@ -24,4 +25,4 @@ async def run_worker(worker: Worker) -> None:
         if not run.cancelled():
             raise
     finally:
-        await asyncio.to_thread(shutdown_tracing)
+        await run_sync(shutdown_tracing)

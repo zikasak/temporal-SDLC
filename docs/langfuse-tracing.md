@@ -82,12 +82,15 @@ open through tool calls and any corrective follow-ups. Coding pauses retain `.cl
 beside the project and resume the same native session in the next container. Normal
 completion, errors, timeouts and limits close the SDK client.
 
-Native transcript persistence is enabled because the plugin reads the actual Claude JSONL
-files. These local transcripts contain unmasked session content even when export content
-capture is disabled. Host transcripts follow Claude's configured storage location; coding
-transcripts are retained only with a paused workspace and never enter published service
-sources. Plugin cursor/log state is scoped per native session workspace. Forced termination
-can lose observations that hooks have not yet exported.
+Host sessions disable transcript persistence when native tracing is off. The tracing
+plugin reads Claude's JSONL files, so traced host sessions use a temporary Claude config
+directory that is deleted when the SDK session closes. They never store transcripts in
+the worker's default Claude directory. These temporary files contain unmasked session
+content even when export content capture is disabled. Coding transcripts are retained
+only with a paused workspace and never enter published service sources. Corrective coding
+queries resume that transcript with the remaining stage turn budget. Plugin cursor/log
+state is scoped per native session workspace. Forced termination can lose observations
+that hooks have not yet exported and leave temporary files for the host to clean up.
 
 Feature tags, environment, release and session attributes propagate to children.
 Host roots include Temporal workflow/run/activity IDs and attempt numbers. API

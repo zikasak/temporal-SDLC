@@ -1,7 +1,9 @@
 """Container-only reviewer. It decides which side failed verification; it repairs nothing."""
+import asyncio
 import json
 from pathlib import Path
 
+from app.asyncio_utils import run_sync
 from app.agent_workflows.runtime import AgentProfile, run_agent
 
 ROOT = Path('/workspace/review')
@@ -75,10 +77,10 @@ def validate_completion(root: Path) -> None:
         raise RuntimeError('Agent verdict against the tests lists no broken test')
 
 
-def main() -> None:
-    context = Path('/workspace/input.json').read_text()
-    language = json.loads(LANGUAGE.read_text())
-    run_agent(AgentProfile(
+async def main() -> None:
+    context = await run_sync(Path('/workspace/input.json').read_text)
+    language = json.loads(await run_sync(LANGUAGE.read_text))
+    await run_agent(AgentProfile(
         root=ROOT, prompt=(PROMPT.format(label=language['label'],
                                          report_pattern=language['report_pattern'])
                            + (CHANGE_PROMPT if json.loads(context).get('brief') else '')),
@@ -86,10 +88,10 @@ def main() -> None:
         max_turns_env='DIAGNOSIS_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Diagnosis completed',
         exhaustion_message='Diagnosis exceeded the tool-turn limit',
-        contracts=CONTRACTS if CONTRACTS.is_dir() else None,
+        contracts=CONTRACTS if await run_sync(CONTRACTS.is_dir) else None,
         build_dirs=language['build_dirs'],
     ))
 
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
