@@ -3,7 +3,7 @@ import asyncio
 import tempfile
 import uuid
 from collections.abc import Sequence
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
@@ -61,16 +61,30 @@ class ChatClaude(BaseChatModel):
     @contextmanager
     def session(self):
         """Use one native conversation for a coding run, closing it on every exit."""
+        session = self._open_session()
+        try:
+            yield self
+        finally:
+            self._session = None
+            session.close()
+
+    @asynccontextmanager
+    async def async_session(self):
+        """`session` for async callers: closing waits for the CLI off the event loop."""
+        session = self._open_session()
+        try:
+            yield self
+        finally:
+            self._session = None
+            await asyncio.to_thread(session.close)
+
+    def _open_session(self):
         from app.llm.claude_session import ClaudeSession
 
         if self._session is not None:
             raise RuntimeError('Claude session is already open')
         self._session = ClaudeSession(self)
-        try:
-            yield self
-        finally:
-            self._session.close()
-            self._session = None
+        return self._session
 
     @property
     def _llm_type(self) -> str:

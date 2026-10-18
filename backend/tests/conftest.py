@@ -3,6 +3,10 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
+from functools import partial
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
@@ -107,6 +111,99 @@ def fake_claude(tmp_path):
         return str(script)
 
     return install, lambda: json.loads(log.read_text())
+
+
+@pytest.fixture
+def claude_http(monkeypatch, tmp_path):
+    """The bundled Claude CLI against a loopback Anthropic endpoint: returns (replies,
+    requests), where each reply is the content blocks of the next response, or an error
+    body to answer with 401."""
+    from app.llm import claude
+    from app.llm.claude import ChatClaude
+    from app.settings.models import ModelSettings, SETTINGS_FILENAME
+
+    requests, replies = [], []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            if self.path.split('?', 1)[0] != '/v1/messages':
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"input_tokens":100}')
+                return
+            requests.append(body)
+            blocks = replies.pop(0) if replies else [{'type': 'text', 'text': 'Unexpected request'}]
+            if isinstance(blocks, dict):
+                replies.insert(0, blocks)
+                self.send_response(401)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(blocks).encode())
+                return
+            called = any(block['type'] == 'tool_use' for block in blocks)
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.end_headers()
+
+            def send(kind, **data):
+                self.wfile.write(('event: ' + kind + '\ndata: '
+                                 + json.dumps({'type': kind, **data}) + '\n\n').encode())
+                self.wfile.flush()
+
+            send('message_start', message={
+                'id': f'msg_{len(requests)}', 'type': 'message', 'role': 'assistant',
+                'model': body['model'], 'content': [], 'stop_reason': None,
+                'stop_sequence': None, 'usage': {'input_tokens': 20, 'output_tokens': 0,
+                    'cache_creation_input_tokens': 3, 'cache_read_input_tokens': 7}})
+            for i, block in enumerate(blocks):
+                if block['type'] == 'tool_use':
+                    send('content_block_start', index=i, content_block={**block, 'input': {}})
+                    send('content_block_delta', index=i, delta={
+                        'type': 'input_json_delta', 'partial_json': json.dumps(block['input'])})
+                elif block['type'] == 'thinking':
+                    send('content_block_start', index=i,
+                         content_block={'type': 'thinking', 'thinking': ''})
+                    send('content_block_delta', index=i, delta={
+                        'type': 'thinking_delta', 'thinking': block['thinking']})
+                    send('content_block_delta', index=i, delta={
+                        'type': 'signature_delta', 'signature': block['signature']})
+                else:
+                    send('content_block_start', index=i, content_block={'type': 'text', 'text': ''})
+                    send('content_block_delta', index=i,
+                         delta={'type': 'text_delta', 'text': block['text']})
+                send('content_block_stop', index=i)
+                if block['type'] == 'tool_use' and i < len(blocks) - 1:
+                    # The CLI runs a streamed call before the response ends.
+                    time.sleep(0.5)
+            send('message_delta', delta={
+                'stop_reason': 'tool_use' if called else 'end_turn', 'stop_sequence': None},
+                usage={'output_tokens': 5})
+            send('message_stop')
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    for name in ('CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS',
+                 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv('ANTHROPIC_BASE_URL', f'http://127.0.0.1:{server.server_port}')
+    monkeypatch.setenv('ANTHROPIC_API_KEY', 'local-test-key')
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-config'))
+    monkeypatch.setenv('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', '1')
+    monkeypatch.setenv('CLAUDE_CODE_MAX_RETRIES', '0')
+    (tmp_path / SETTINGS_FILENAME).write_text(ModelSettings(
+        adapter='claude', model='claude-opus-5-5', thinking_level='high').model_dump_json())
+    monkeypatch.setattr(claude, 'ChatClaude', partial(ChatClaude, timeout=10))
+    try:
+        yield replies, requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 @pytest.fixture(autouse=True)

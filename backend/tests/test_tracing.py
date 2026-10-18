@@ -12,7 +12,6 @@ import pytest
 from google.protobuf.json_format import MessageToDict
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
-from tests.conftest import claude_reply
 
 SECRET = 'private-provider-key-for-trace-tests'
 EMAIL = 'private@example.com'
@@ -212,20 +211,19 @@ shutdown_tracing()
 
 
 def test_claude_harness_turn_exports_generations_with_model_and_cached_usage(
-        tracing_server, fake_claude):
+        claude_http, tracing_server):
+    # The loopback CLI's environment is set first, so the turn's process inherits it.
+    replies, _ = claude_http
     environment, spans = tracing_server
-    install, _ = fake_claude
-    environment.update(TEST_MODEL_SETTINGS=json.dumps({'adapter': 'claude', 'model': 'claude-test'}), FAKE_CLAUDE=install(
-        claude_reply(('call_1', 'mcp__langchain__record_requirement', {
-            'category': 'functional', 'title': 'Search', 'description': 'Search listings',
-            'priority': 'must'})),
-        claude_reply('Recorded')))
+    environment['TEST_MODEL_SETTINGS'] = json.dumps({'adapter': 'claude', 'model': 'claude-test'})
+    replies.extend([[{'type': 'tool_use', 'id': 'call_1',
+                      'name': 'mcp__langchain__record_requirement', 'input': {
+                          'category': 'functional', 'title': 'Search',
+                          'description': 'Search listings', 'priority': 'must'}}],
+                    [{'type': 'text', 'text': 'Recorded'}]])
     run_script('''
-import asyncio, os
-from functools import partial
+import asyncio
 from temporalio.testing import ActivityEnvironment
-from app.llm import claude
-claude.ChatClaude = partial(claude.ChatClaude, cli_path=os.environ['FAKE_CLAUDE'])
 from app.temporal.activities import requirements_turn
 from app.tracing import shutdown_tracing
 async def main():

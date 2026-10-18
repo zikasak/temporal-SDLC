@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
@@ -35,6 +36,18 @@ async def _log_tool_call(request, execute):
     else:
         logger.info("Tool call %s", name)
     return result
+
+
+@asynccontextmanager
+async def native_session(model: BaseChatModel):
+    """Keep one provider conversation across the graph's model calls when the model
+    offers it, so each call only appends to the prompt the provider has cached."""
+    session = getattr(model, "async_session", None)
+    if session is None:
+        yield
+        return
+    async with session():
+        yield
 
 
 def get_message_graph(tools: list[BaseTool], until: Callable[[], bool] | None = None,

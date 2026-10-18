@@ -42,7 +42,7 @@ from app.github.models import (
     PullRequest, RepositoryCheckout, RepositoryPublication, RepositorySelection,
 )
 from app.implementation.activities import is_service_file
-from app.llm.graph import get_message_graph, interview
+from app.llm.graph import get_message_graph, interview, native_session
 from app.llm.model import get_model
 from app.llm.prompt import INLINE_DOCUMENT_CHARS, MAX_REMEMBERED_CHARS, model_messages
 from app.temporal.tracing import trace_activity
@@ -359,12 +359,15 @@ async def send_llm_message(
     )
     started = time.perf_counter()
     try:
+        model = await get_model('chat')
         graph = get_message_graph(
             [*build_tools(ToolContext(session_id, document_ids)), *repository_files],
-            model=await get_model('chat'))
-        result = await graph.ainvoke(
-            {"messages": prompt}, config=langchain_config(recursion_limit=20, run_name='respond-with-tools')
-        )
+            model=model)
+        async with native_session(model):
+            result = await graph.ainvoke(
+                {"messages": prompt},
+                config=langchain_config(recursion_limit=20, run_name='respond-with-tools'),
+            )
         answer = str(result["messages"][-1].text).strip()
         if not answer:
             answer = summarize_tool_results(result["messages"])
@@ -391,16 +394,18 @@ async def requirements_turn(
     asked = question_tools.QuestionsContext()
     started = time.perf_counter()
     try:
+        model = await get_model('requirements')
         graph = get_message_graph(
             [*requirements_tools.build(ctx), *question_tools.build(asked), *repository],
-            until=lambda: bool(asked.questions), model=await get_model('requirements'))
-        reply = await interview(
-            graph, interview_messages(
-                messages, requirements, kind,
-                repository_tools.GUIDANCE if repository else "",
-                list(ctx.service_requirements()), ctx.retired_list()),
-            langchain_config(recursion_limit=20, run_name='interview-with-tools'),
-            lambda: bool(asked.questions))
+            until=lambda: bool(asked.questions), model=model)
+        async with native_session(model):
+            reply = await interview(
+                graph, interview_messages(
+                    messages, requirements, kind,
+                    repository_tools.GUIDANCE if repository else "",
+                    list(ctx.service_requirements()), ctx.retired_list()),
+                langchain_config(recursion_limit=20, run_name='interview-with-tools'),
+                lambda: bool(asked.questions))
     except ValueError as exc:
         activity.logger.warning("Requirements turn failed: %s", exc)
         raise ApplicationError(str(exc), non_retryable=True) from exc
@@ -487,13 +492,15 @@ async def api_design_turn(state: ApiDesignState) -> dict[str, Any]:
     asked = question_tools.QuestionsContext()
     started = time.perf_counter()
     try:
+        model = await get_model('api_design')
         graph = get_message_graph(
             [*api_design_tools.build(ctx), *question_tools.build(asked), *repository],
-            until=lambda: bool(asked.questions), model=await get_model('api_design'))
-        reply = await interview(
-            graph, api_turn_messages(state, repository_tools.GUIDANCE if repository else ""),
-            langchain_config(recursion_limit=40, run_name='draft-api-with-tools'),
-            lambda: bool(asked.questions))
+            until=lambda: bool(asked.questions), model=model)
+        async with native_session(model):
+            reply = await interview(
+                graph, api_turn_messages(state, repository_tools.GUIDANCE if repository else ""),
+                langchain_config(recursion_limit=40, run_name='draft-api-with-tools'),
+                lambda: bool(asked.questions))
     except GraphRecursionError:
         # Drafting can take many tool calls; keep what was recorded.
         activity.logger.warning("The API design turn hit the recursion limit")
