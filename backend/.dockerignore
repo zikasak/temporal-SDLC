@@ -11,7 +11,10 @@
 !app/llm/__init__.py
 !app/llm/factory.py
 !app/llm/claude.py
-!app/llm/claude_session.py
+!app/llm/mcp.py
+!app/llm/claude_trace_hook.py
+!app/llm/plugins/
+!app/llm/plugins/**
 !app/llm/pi.py
 !app/llm/pi_extension.ts
 !app/llm/questions.py

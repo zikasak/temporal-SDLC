@@ -5,7 +5,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
-from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.runnables import Runnable
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
@@ -39,7 +39,7 @@ async def _log_tool_call(request, execute):
 
 
 @asynccontextmanager
-async def native_session(model: BaseChatModel):
+async def native_session(model: Runnable):
     """Keep one provider conversation across the graph's model calls when the model
     offers it, so each call only appends to the prompt the provider has cached."""
     session = getattr(model, "async_session", None)
@@ -51,9 +51,13 @@ async def native_session(model: BaseChatModel):
 
 
 def get_message_graph(tools: list[BaseTool], until: Callable[[], bool] | None = None,
-                      *, model: BaseChatModel):
+                      *, model: Runnable):
     """The model ↔ tool loop. `until` ends it after a round of tool calls, such as the
     one that asked the user something; the model then gets no further turn."""
+    from app.llm.claude import ChatClaude, ClaudeGraph
+
+    if isinstance(model, ChatClaude):
+        return ClaudeGraph(model, tools, until)
     graph = StateGraph(MessagesState)
     bound_model = model.bind_tools(tools)
 

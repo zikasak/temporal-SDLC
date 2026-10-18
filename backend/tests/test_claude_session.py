@@ -6,12 +6,11 @@ import pytest
 
 from app.agent_workflows import runtime
 from app.implementation.agent import validate_completion
-from app.llm import claude
 from app.llm.claude import ChatClaude
 
 
 def native_call(identifier, name, **arguments):
-    return {'type': 'tool_use', 'id': identifier, 'name': 'mcp__langchain__' + name,
+    return {'type': 'tool_use', 'id': identifier, 'name': 'mcp__flow__' + name,
             'input': arguments}
 
 
@@ -29,16 +28,6 @@ def native_messages(request):
 
 
 def test_authoring_keeps_native_history_through_many_tool_turns(claude_http, tmp_path, monkeypatch):
-    from langchain_core.callbacks import BaseCallbackHandler
-
-    usages = []
-
-    class CaptureUsage(BaseCallbackHandler):
-        def on_llm_end(self, response, **kwargs):
-            usages.append(response.generations[0][0].message.usage_metadata)
-
-    monkeypatch.setattr(runtime, 'langchain_config', lambda **kwargs: {
-        'callbacks': [CaptureUsage()], **kwargs})
     replies, requests = claude_http
     thinking = {'type': 'thinking', 'thinking': 'Keep the complete native conversation.',
                 'signature': 'native-signature'}
@@ -62,10 +51,6 @@ def test_authoring_keeps_native_history_through_many_tool_turns(claude_http, tmp
     assert len(requests) == 14
     assert requests[0]['thinking']['type'] == 'adaptive'
     assert requests[0]['output_config']['effort'] == 'high'
-    assert len(usages) == 14
-    assert all(usage == {
-        'input_tokens': 30, 'output_tokens': 5, 'total_tokens': 35,
-        'input_token_details': {'cache_read': 7, 'cache_creation': 3}} for usage in usages)
     for before, after in zip(requests, requests[1:]):
         previous = native_messages(before)
         assert native_messages(after)[:len(previous)] == previous
@@ -77,13 +62,13 @@ def test_authoring_keeps_native_history_through_many_tool_turns(claude_http, tmp
     results = [block for message in messages if message['role'] == 'user'
                and isinstance(message['content'], list) for block in message['content']
                if block['type'] == 'tool_result']
-    by_id = {block['tool_use_id']: block['content'] for block in results}
+    by_id = {block['tool_use_id']: ''.join(item['text'] for item in block['content'])
+             if isinstance(block['content'], list) else block['content'] for block in results}
     assert by_id['write'] == 'Written'
     assert by_id['missing'].startswith('Tool failed: FileNotFoundError:')
     assert 'path' in by_id['invalid']
     assert [by_id[f'read_{i}'] for i in range(12)] == ['FROM scratch'] * 12
     assert 'No response requested.' not in str(messages)
-    assert claude.CONTINUE_PROMPT not in str(messages)
 
 
 @pytest.mark.parametrize('stop', ['limit', 'pause'])
@@ -119,34 +104,41 @@ def test_authoring_stops_without_another_model_request(claude_http, tmp_path, mo
         assert not (tmp_path / runtime.STATE_FILENAME).exists()
 
 
-def test_native_session_restarts_after_compaction_and_continues_followups(claude_http):
+async def test_native_session_continues_followups_and_resumes_from_disk(claude_http, tmp_path):
     from langchain_core.messages import HumanMessage, SystemMessage
     from langchain_core.tools import tool
 
     replies, requests = claude_http
     replies.extend([[native_call('first', 'lookup', term='first')],
-                    [{'type': 'text', 'text': 'After checkpoint'}],
-                    [{'type': 'text', 'text': 'After follow-up'}]])
+                    [{'type': 'text', 'text': 'First reply'}],
+                    [{'type': 'text', 'text': 'After follow-up'}],
+                    [{'type': 'text', 'text': 'Resumed reply'}]])
 
     @tool
     def lookup(term: str) -> str:
         """Look up a term."""
         return term
 
-    provider = ChatClaude(model='claude-opus-5-5', timeout=10)
-    model = provider.bind_tools([lookup])
-    with provider.session():
-        model.invoke([SystemMessage('Be brief'), HumanMessage('Original task')])
-        checkpoint = [SystemMessage('Be brief'), HumanMessage('Checkpoint replaces old history')]
-        response = model.invoke(checkpoint)
-        model.invoke([*checkpoint, response, HumanMessage('Follow up')])
+    options = dict(model='claude-opus-5-5', timeout=10, cwd=tmp_path,
+                   config_dir=tmp_path / 'native-config')
+    provider = ChatClaude(**options)
+    messages = [SystemMessage('Be brief'), HumanMessage('Original task')]
+    async with provider.async_session():
+        response = await provider.ainvoke(messages, tools=[lookup])
+        response = await provider.ainvoke(
+            [*messages, response, HumanMessage('Follow up')], tools=[lookup])
+    resumed = ChatClaude(**options, resume=provider.session_id)
+    assert (await resumed.ainvoke('Continue after restarting', tools=[lookup])).text == 'Resumed reply'
 
-    assert len(requests) == 3
-    assert 'Original task' not in str(requests[1]['messages'])
-    previous = native_messages(requests[1])
-    assert native_messages(requests[2])[:len(previous)] == previous
-    assert 'After checkpoint' in str(requests[2]['messages'])
-    assert 'Follow up' in str(requests[2]['messages'])
+    assert resumed.session_id == provider.session_id
+    assert len(requests) == 4
+    for before, after in zip(requests, requests[1:]):
+        previous = native_messages(before)
+        assert native_messages(after)[:len(previous)] == previous
+    assert 'Original task' in str(requests[-1]['messages'])
+    assert 'First reply' in str(requests[-1]['messages'])
+    assert 'Follow up' in str(requests[-1]['messages'])
+    assert 'Continue after restarting' in str(requests[-1]['messages'])
 
 
 def test_native_session_propagates_provider_failure_and_closes(claude_http, tmp_path):
@@ -199,4 +191,3 @@ def test_interview_graph_appends_to_one_native_conversation(claude_http):
     messages = str(native_messages(requests[-1]))
     assert 'FIRST' in messages and 'SECOND' in messages
     assert 'No response requested.' not in messages
-    assert claude.CONTINUE_PROMPT not in messages

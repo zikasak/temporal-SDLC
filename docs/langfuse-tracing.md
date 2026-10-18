@@ -54,23 +54,40 @@ The SDK automatically calculates cost only for recognized model pricing; configu
 custom model pricing in Langfuse for the local Qwen model if cost accounting is
 needed. No fabricated user IDs or token/cost estimates are added.
 
-With the Claude adapter selected in Settings, each Claude Code request is one generation like any other
-provider's: it carries the model Claude Code actually used, and prompt-cache reads and
-writes are reported as `input_cache_read` / `input_cache_creation` beside the uncached
-input. Claude Code's own telemetry is not enabled.
+With the Claude adapter, the pinned **Langfuse Claude Observability Plugin v1.2.1**
+exports native conversation turns, generations (including thinking), MCP calls/results,
+and token usage. It replaces LangChain generation/tool callbacks for Claude, avoiding
+repeated observations and cost accounting. Other providers retain their LangChain tracing.
+The upstream plugin source and license are vendored under
+`app/llm/plugins/langfuse-observability`; `UPSTREAM.md` records the exact commit.
 
-Coding agents keep one native Claude SDK conversation open across ordinary tool turns.
-The agent loop still executes and traces workspace tools; a SDK hook waits for their
-real results before Claude continues. The CLI retains thinking blocks and its injected
-context, and its working directory stays stable. Each generation reports that request's
-streaming token usage, rather than the session's cumulative result counters. This keeps
-prompt prefixes reusable by Anthropic's cache.
+The SDK loads the plugin explicitly, without a marketplace installation or runtime package
+download. Its hooks invoke `app.llm.claude_trace_hook` with the application's Python and
+Langfuse 4.16.0, so content opt-in, masking, error sanitization, environment and release
+also apply to plugin observations. Image upload is disabled. Missing credentials or
+`LANGFUSE_TRACING_ENABLED=false` prevents plugin loading. Unsampled application roots
+also skip the plugin. Hook export remains best-effort and flushes on Stop/SessionEnd.
 
-Application history compaction deliberately starts a new native conversation from the
-checkpoint, in the same directory. A run paused for user answers closes its CLI and seeds
-a new conversation from the saved application history on resume. Completion, errors,
-timeouts and turn limits also close the CLI; pending tool turns are interrupted first.
-Ordinary host chat calls and checkpoint summarization remain independent requests.
+The plugin receives the current application trace/parent IDs explicitly and attaches its
+`Conversational Turn` beneath that observation. Generations and MCP tools are children
+of the native turn, linked by the tool-use ID. The application's session ID stays
+on all observations; Claude's native session ID remains separate. Cache usage follows the
+plugin's native names (`cache_read_input_tokens` and `cache_creation_input_tokens`, with
+separate cache-write durations when supplied), alongside uncached input and output.
+
+Claude owns its history and automatic compaction. The SDK's built-in tool loop calls the
+flow MCP server directly; the application never hands back placeholder tool results.
+Host activities start a native session from application conversation context and keep it
+open through tool calls and any corrective follow-ups. Coding pauses retain `.claude-native`
+beside the project and resume the same native session in the next container. Normal
+completion, errors, timeouts and limits close the SDK client.
+
+Native transcript persistence is enabled because the plugin reads the actual Claude JSONL
+files. These local transcripts contain unmasked session content even when export content
+capture is disabled. Host transcripts follow Claude's configured storage location; coding
+transcripts are retained only with a paused workspace and never enter published service
+sources. Plugin cursor/log state is scoped per native session workspace. Forced termination
+can lose observations that hooks have not yet exported.
 
 Feature tags, environment, release and session attributes propagate to children.
 Host roots include Temporal workflow/run/activity IDs and attempt numbers. API
@@ -86,6 +103,9 @@ build-implementation (host span)
     ├── read_file / write_file / edit_file / … / shell (tools)
     └── decide-next-action (generation)
 ```
+
+For Claude, the agent instead contains the plugin's native turn with generation and
+MCP-tool children.
 
 Only coding-agent containers receive an explicit telemetry environment allowlist
 at creation. Credentials never enter build arguments, images, generated service
@@ -153,7 +173,8 @@ use Sessions for conversation flows and feature tags to filter Traces/Dashboards
 
 Local transport tests run the actual SDK and model/framework adapters against
 HTTP test servers, not mocked callbacks. They verify concurrent session isolation,
-generation/token capture, tool hierarchy, cross-process agent parenting, exit
+generation/token capture, native Claude MCP execution and plugin parenting/privacy,
+tool hierarchy, cross-process agent parenting, exit
 flushing, content exclusion, redaction on provider failure, and disabled tracing.
 Normal tests forcibly disable external tracing, even when a developer has `.env`.
 
@@ -163,6 +184,13 @@ python -m pytest -q
 ```
 
 ### Live validation
+
+The native Claude/plugin migration is validated against a local Anthropic-compatible
+endpoint and OTLP collector using the actual bundled CLI, including a non-root Docker
+agent. Coverage includes native thinking, MCP side effects/results, cache usage,
+parent/session propagation, disabled/sampled-out tracing, masking, and pause/resume
+without repeated exports. The hosted traces below predate this migration; re-audit
+hosted ingestion after deploying the new worker and agent images.
 
 After the self-hosted ingestion issue was fixed, the real Temporal → LangGraph →
 local-model run completed and its observations were fetched via the Langfuse CLI.

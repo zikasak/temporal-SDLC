@@ -106,18 +106,23 @@ as their Pi directory. Pi locks `auth.json` through a lock directory beside it, 
 that directory lets parallel agents take turns refreshing an OAuth token instead of each
 rotating it. The saved workflow settings select the model and thinking level.
 
-Selecting the **Claude** adapter routes model calls through Claude Code, driven by the
-Claude Agent SDK (`app/llm/claude.py`). The `claude-agent-sdk` package bundles the CLI, so
-neither the host nor the coding-agent image installs anything else. Each model call is one
-Claude Code process making one request: its built-in tools, settings, skills and project
-context files are switched off, the application's tools are declared to it as an
-in-process MCP server, and the turn limit hands every tool call back to LangGraph or the
-coding-agent loop to run. Earlier messages are resumed as a native session transcript.
-Claude Code still adds its own short environment notes to each request, and a conversation
-that ends in tool results is resumed with a short prompt to carry on, because Claude Code
-only starts a turn from a user message. Claude Code closes such a resumed conversation with
-a filler assistant turn, `No response requested.`; a reply that only repeats it is asked
-for once more, and a second one fails the call. The saved workflow settings select the model.
+Selecting the **Claude** adapter runs a native Claude Code session through the
+Claude Agent SDK (`app/llm/claude.py`). The SDK bundles the CLI. Claude executes its own
+model/tool loop and compacts its own context. The current flow's tools are real executable
+tools on the in-process `flow` MCP server; Claude receives their actual results directly.
+Its built-in tools, unrelated settings, skills and project context files remain disabled.
+The application supplies conversation context as a prompt when starting a host turn and
+appends follow-ups within that native session. There are no forged transcript rows,
+placeholder tool results, bridge threads or forced single-turn handoffs to LangGraph.
+
+Coding agents use the project as their stable working directory. Their native session
+transcripts and plugin export state live beside the project in `.claude-native`, included
+in the preserved workspace when a run pauses. `ask_user` stops native execution before
+another model request. The next container resumes that native session ID and sends the
+answers as a new user message. Completion and native turn limits still enforce the stage's
+existing validation and failure behavior. A paused run must keep the Claude adapter when
+resumed; pauses saved by the previous custom runner cannot be resumed by this version.
+
 On the host Claude Code signs in with its own login, or with
 `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) when set. A
 host login lives in the keychain or `~/.claude` and is not shared with containers: coding
@@ -235,15 +240,16 @@ exactly edit workspace files, and execute shell commands. Long command output is
 under `.agent-output/` in the workspace and returned as its diagnostic lines and tail;
 that directory is never published.
 
-The loop keeps its context inside `AGENT_CONTEXT_TOKENS` (default 64000; set it to the
-model's context window, `0` disables). Usage reported by the provider is used when
+For OpenAI and Pi, the application loop keeps its context inside `AGENT_CONTEXT_TOKENS`
+(default 64000; set it to the model's context window, `0` disables). Usage reported by the provider is used when
 available, otherwise a character-based estimate. Past 75% of the budget, the oldest
 complete assistant/tool-result batches are replaced by one checkpoint message: the files
 written or edited so far, plus decisions, completed and remaining work and unresolved
 errors summarized by an extra `compact-history` model call. The system prompt, the
 supplied contracts and the most recent batches (about 25% of the budget, always at
 least the latest) are kept verbatim; current code is re-read from disk. The setting is
-forwarded from the worker's environment to both coding containers.
+forwarded from the worker's environment to coding containers. Claude uses native
+compaction instead; `AGENT_CONTEXT_TOKENS` does not alter its context window.
 
 Contracts whose embedded form exceeds `CONTRACT_EMBED_CHARS` (default 60000 characters)
 are supplied on demand instead. `/workspace/input.json` then holds an index of every

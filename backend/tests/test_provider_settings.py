@@ -43,11 +43,10 @@ async def test_openai_catalog_uses_configured_endpoint_without_guessing_effort(c
 
 
 async def test_claude_catalog_reads_model_capabilities_without_sending_a_prompt(
-        client, monkeypatch, fake_claude):
+        client, monkeypatch, claude_catalog):
     from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
-    install, _ = fake_claude
-    cli = install(server_info={'models': [
+    cli = claude_catalog(server_info={'models': [
         {'value': 'smart', 'displayName': 'Smart', 'supportsEffort': True,
          'supportsAdaptiveThinking': True, 'supportedEffortLevels': ['low', 'high']},
         {'value': 'fast', 'displayName': 'Fast'},
