@@ -14,6 +14,7 @@ from typing import Any
 from temporalio.exceptions import ApplicationError
 
 from app import docker_agents
+from app.asyncio_utils import async_context, run_sync
 from app.languages import Language, UnsupportedLanguage, get_language
 from app.tracing import trace_operation
 from app.temporal.tracing import activity_metadata
@@ -90,7 +91,7 @@ async def build_image(context: Path, label: str, log_path: Path) -> str:
     """Build the image of a sanitized source tree and return its immutable ID."""
     iid = context.parent / 'image-id'
     await docker_agents.docker('build', '--iidfile', str(iid), str(context), log_path=log_path)
-    image_id = iid.read_text().strip()
+    image_id = (await run_sync(iid.read_text)).strip()
     if not re.fullmatch(r'sha256:[0-9a-f]{64}', image_id):
         raise RuntimeError(f'Docker returned an invalid {label} image ID')
     return image_id
@@ -129,22 +130,24 @@ async def _run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
     context = {key: value for key, value in context.items() if key != ANSWERS_KEY}
     logger.info('%s stage preparing inputs (session=%s)', stage.role, session_id)
     session_dir = generated_code_dir / session_id
-    inputs = stage.prepare_inputs(session_dir, context)
+    inputs = await run_sync(stage.prepare_inputs, session_dir, context)
     artifact_dir = session_dir / stage.artifact_subdir
-    artifact_dir.mkdir(parents=True, exist_ok=True)
+    await run_sync(artifact_dir.mkdir, parents=True, exist_ok=True)
     paused = artifact_dir / docker_agents.PAUSED_DIR
     async with docker_agents.keep_activity_alive(stage.heartbeat):
-        with tempfile.TemporaryDirectory(dir=artifact_dir) as temporary:
+        async with async_context(tempfile.TemporaryDirectory, dir=artifact_dir) as temporary:
             work = Path(temporary)
             workspace = work / 'workspace'
             if answers:
                 # The paused agent continues in the workspace it left, inputs included.
-                docker_agents.resume_workspace(paused, workspace, answers)
+                await run_sync(docker_agents.resume_workspace, paused, workspace, answers)
             else:
-                workspace.mkdir()
-                inputs.populate(workspace)
-                (workspace / 'input.json').write_text(
-                    json.dumps(inputs.context, ensure_ascii=False))
+                await run_sync(workspace.mkdir)
+                await run_sync(inputs.populate, workspace)
+                await run_sync(
+                    (workspace / 'input.json').write_text,
+                    json.dumps(inputs.context, ensure_ascii=False),
+                )
             output = work / 'output'
             try:
                 await docker_agents.run_agent(
@@ -155,8 +158,8 @@ async def _run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
                 return paused_result(session_id, exc)
             logger.info('%s stage sanitizing agent output (session=%s)', stage.role, session_id)
             clean = work / 'build'
-            stage.sanitize_output(output, clean)
-            stage.validate_output(clean)
+            await run_sync(stage.sanitize_output, output, clean)
+            await run_sync(stage.validate_output, clean)
             image = {}
             if stage.image_label:
                 build_log = artifact_dir / 'image-build.log'
@@ -164,11 +167,11 @@ async def _run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
                             stage.role, stage.image_label, session_id, build_log)
                 image = {'image_id': await build_image(clean, stage.image_label, build_log)}
             destination = artifact_dir / stage.output_subdir
-            if destination.exists():
-                shutil.rmtree(destination)
-            os.replace(clean, destination)
+            if await run_sync(destination.exists):
+                await run_sync(shutil.rmtree, destination)
+            await run_sync(os.replace, clean, destination)
             result = {**image, 'path': str(destination), 'session_id': session_id}
-            publish_manifest(artifact_dir, result)
+            await run_sync(publish_manifest, artifact_dir, result)
             logger.info('%s stage published its output (session=%s, image=%s, path=%s)',
                         stage.role, session_id, image.get('image_id'), destination)
             return result

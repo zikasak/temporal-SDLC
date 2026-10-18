@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 
+from app.asyncio_utils import async_context, run_sync
 from app.llm.mcp import TOOL_PREFIX, TOOL_SERVER, flow_server
 from app.tracing import claude_trace_environment
 
@@ -83,16 +84,27 @@ class ChatClaude(Runnable):
         if self._client is None:
             cwd = self.cwd
             if cwd is None:
-                cwd = Path(self._stack.enter_context(
-                    tempfile.TemporaryDirectory(prefix='claude-native-')))
+                cwd = Path(await self._stack.enter_async_context(
+                    async_context(tempfile.TemporaryDirectory, prefix='claude-native-')))
             env = claude_trace_environment()
             env.update(APP_CLAUDE_HOOK_PYTHON=sys.executable,
                        PYTHONPATH=os.pathsep.join(filter(None, [str(Path(__file__).parents[2]),
                                                                os.getenv('PYTHONPATH')])))
             env['CC_LANGFUSE_STATE_DIR'] = str((self.config_dir or cwd) / '.langfuse-state')
             if self.config_dir is not None:
-                self.config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+                await run_sync(self.config_dir.mkdir, parents=True, exist_ok=True, mode=0o700)
                 env['CLAUDE_CONFIG_DIR'] = str(self.config_dir)
+            native_tracing = env.get('APP_CLAUDE_TRACING_ENABLED') == 'true'
+            if self.config_dir is None and native_tracing:
+                # The plugin reads native transcripts. Keep them only for this host
+                # session, under the same temporary-directory cleanup as its cwd.
+                if self.cwd is not None:
+                    cwd_config = Path(await self._stack.enter_async_context(
+                        async_context(tempfile.TemporaryDirectory, prefix='claude-tracing-')))
+                else:
+                    cwd_config = cwd
+                env['CLAUDE_CONFIG_DIR'] = str(cwd_config / '.claude-native')
+                env['CC_LANGFUSE_STATE_DIR'] = str(cwd_config / '.langfuse-state')
             thinking = ({} if self.thinking_level == 'default' else
                         {'thinking': {'type': 'disabled'}} if self.thinking_level == 'off' else
                         {'thinking': {'type': 'adaptive'}, 'effort': self.thinking_level})
@@ -107,8 +119,9 @@ class ChatClaude(Runnable):
                 hooks=({'PostToolUse': [HookMatcher(matcher=TOOL_PREFIX + '.*',
                                                   hooks=[stop_after_tools])]}
                        if until else None),
-                plugins=[{'type': 'local', 'path': str(PLUGIN)}] if env.get(
-                    'APP_CLAUDE_TRACING_ENABLED') == 'true' else [],
+                plugins=[{'type': 'local', 'path': str(PLUGIN)}] if native_tracing else [],
+                extra_args=({'no-session-persistence': None}
+                            if self.config_dir is None and not native_tracing else {}),
                 env=env, resume=self.resume,
             )
             self._client = await self._stack.enter_async_context(ClaudeSDKClient(options))

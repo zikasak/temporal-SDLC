@@ -7,7 +7,7 @@ from app.llm.claude import ChatClaude
 
 
 @pytest.mark.parametrize('thinking_level', ['default', 'off', 'high'])
-async def test_native_reply_and_thinking_options(claude_http, thinking_level):
+async def test_native_reply_and_thinking_options(claude_http, thinking_level, tmp_path):
     replies, requests = claude_http
     replies.append([{'type': 'text', 'text': 'A complete '},
                     {'type': 'text', 'text': 'reply.'}])
@@ -21,6 +21,7 @@ async def test_native_reply_and_thinking_options(claude_http, thinking_level):
     [request] = requests
     assert request['messages'][0]['content'] == '@notes.md /help question'
     assert not request.get('tools')
+    assert not list((tmp_path / 'claude-config' / 'projects').rglob('*.jsonl'))
     if thinking_level == 'high':
         assert request['thinking']['type'] == 'adaptive'
         assert request['output_config']['effort'] == 'high'

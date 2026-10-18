@@ -11,6 +11,7 @@ import asyncio
 import getpass
 import sys
 
+from app.asyncio_utils import run_sync
 from app.auth import storage
 from app.auth.passwords import MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, hash_password
 
@@ -40,11 +41,11 @@ async def _run(args: argparse.Namespace) -> None:
             raise SystemExit(f"No user {login}.")
         print(f"Removed {login}. Tokens already issued stay valid until they expire.")
         return
-    password = _read_password()
+    password = await run_sync(_read_password)
     if not MIN_PASSWORD_LENGTH <= len(password) <= MAX_PASSWORD_LENGTH:
         raise SystemExit(f"Use a password of {MIN_PASSWORD_LENGTH} to "
                          f"{MAX_PASSWORD_LENGTH} characters.")
-    created = await storage.save_user(login, hash_password(password))
+    created = await storage.save_user(login, await run_sync(hash_password, password))
     print(f"Created {login}." if created else f"Replaced the password of {login}.")
 
 

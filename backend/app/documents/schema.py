@@ -1,9 +1,10 @@
+from app.asyncio_utils import run_sync
 from app.config import DOCUMENT_STORAGE_DIR
 from app.db import connect
 
 
 async def ensure_document_schema() -> None:
-    DOCUMENT_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    await run_sync(DOCUMENT_STORAGE_DIR.mkdir, parents=True, exist_ok=True)
     async with await connect() as conn:
         await conn.execute("CREATE SCHEMA IF NOT EXISTS app")
         await conn.execute(

@@ -18,7 +18,7 @@ def flow_server(tools: Sequence[BaseTool], *, until: Callable[[], bool] | None =
         async def execute(arguments):
             if until is not None and until():
                 return {'content': [{'type': 'text', 'text': 'The flow is paused for the user.'}],
-                        'isError': True}
+                        'is_error': True}
             try:
                 # The Claude plugin owns tool observations, including errors. Do not
                 # also export LangChain callbacks for this same tool execution.
@@ -28,7 +28,7 @@ def flow_server(tools: Sequence[BaseTool], *, until: Callable[[], bool] | None =
             except Exception as exc:
                 return {'content': [{'type': 'text',
                                      'text': f'Tool failed: {type(exc).__name__}: {exc}'}],
-                        'isError': True}
+                        'is_error': True}
 
         return execute
 

@@ -1,8 +1,10 @@
 """Container-only code reviewer. It reports problems in the delivery's own changes that
 the passing tests do not cover; it changes nothing."""
+import asyncio
 import json
 from pathlib import Path
 
+from app.asyncio_utils import run_sync
 from app.agent_workflows.runtime import AgentProfile, run_agent
 
 ROOT = Path('/workspace/review')
@@ -82,11 +84,11 @@ def validate_completion(root: Path) -> None:
                                'implementation, tests or both')
 
 
-def main() -> None:
-    context = Path('/workspace/input.json').read_text()
+async def main() -> None:
+    context = await run_sync(Path('/workspace/input.json').read_text)
     inputs = json.loads(context)
-    language = json.loads(LANGUAGE.read_text())
-    run_agent(AgentProfile(
+    language = json.loads(await run_sync(LANGUAGE.read_text))
+    await run_agent(AgentProfile(
         root=ROOT, prompt=(PROMPT.format(label=language['label'])
                            + (CHANGE_PROMPT if inputs.get('brief') else '')
                            + (INSTRUCTIONS_PROMPT if inputs.get('instructions') else '')),
@@ -94,10 +96,10 @@ def main() -> None:
         max_turns_env='REVIEW_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Code review completed',
         exhaustion_message='Code review exceeded the tool-turn limit',
-        contracts=CONTRACTS if CONTRACTS.is_dir() else None,
+        contracts=CONTRACTS if await run_sync(CONTRACTS.is_dir) else None,
         build_dirs=language['build_dirs'],
     ))
 
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())

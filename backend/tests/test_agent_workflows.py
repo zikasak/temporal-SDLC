@@ -1,3 +1,4 @@
+import asyncio
 import json
 import shlex
 import sys
@@ -41,7 +42,7 @@ def scripted_model(monkeypatch):
             def bind_tools(self, tools):
                 return self
 
-            def invoke(self, messages):
+            async def ainvoke(self, messages):
                 self.messages = list(messages)
                 self.requests.append(self.messages)
                 return next(self.responses)
@@ -71,13 +72,13 @@ ASK = {'name': 'ask_user', 'id': 'ask', 'args': {'questions': [
     {'question': 'Which currency?', 'options': ['EUR', 'USD']}]}}
 
 
-def test_agent_pauses_for_answers_and_resumes_where_it_stopped(tmp_path, profile, scripted_model):
+async def test_agent_pauses_for_answers_and_resumes_where_it_stopped(tmp_path, profile, scripted_model):
     # Calls after ask_user still run before the pause.
     scripted_model([AIMessage(content='', tool_calls=[
         ASK, {'name': 'write_file', 'args': {'path': 'Orders.java', 'content': 'class Orders {}'},
               'id': 'orders'}])])
     with pytest.raises(SystemExit) as paused:
-        runtime.run_agent(profile)
+        await runtime.run_agent(profile)
     assert paused.value.code == runtime.PAUSE_EXIT
     state = json.loads((tmp_path / runtime.STATE_FILENAME).read_text())
     assert state['pending']['questions'] == ASK['args']['questions']
@@ -90,7 +91,7 @@ def test_agent_pauses_for_answers_and_resumes_where_it_stopped(tmp_path, profile
              'id': 'dockerfile'}]),
         AIMessage(content='Finished'),
     ])
-    runtime.run_agent(profile)
+    await runtime.run_agent(profile)
     system, inputs, call, answered, written = model.requests[0]
     assert system.content == profile.prompt + runtime.ASK_GUIDANCE
     # The results follow the order of the calls.
@@ -102,7 +103,7 @@ def test_agent_pauses_for_answers_and_resumes_where_it_stopped(tmp_path, profile
     assert (profile.root / 'Orders.java').is_file()
 
 
-def test_agent_is_sent_back_when_it_asks_in_its_text(profile, scripted_model):
+async def test_agent_is_sent_back_when_it_asks_in_its_text(profile, scripted_model):
     model = scripted_model([
         AIMessage(content='Should the service store prices in cents?'),
         AIMessage(content='', tool_calls=[
@@ -110,12 +111,12 @@ def test_agent_is_sent_back_when_it_asks_in_its_text(profile, scripted_model):
              'id': 'written'}]),
         AIMessage(content='Done: prices are stored in cents.'),
     ])
-    runtime.run_agent(profile)
+    await runtime.run_agent(profile)
     assert model.requests[1][-1].content == runtime.DIRECT_QUESTION_NOTICE
     assert len(model.requests) == 3
 
 
-def test_agent_executes_tools_and_returns_correlated_errors(profile, scripted_model):
+async def test_agent_executes_tools_and_returns_correlated_errors(profile, scripted_model):
     model = scripted_model([
         AIMessage(content='', tool_calls=[
             {'name': 'read_file', 'args': {'path': 'missing.txt'}, 'id': 'missing'},
@@ -124,7 +125,7 @@ def test_agent_executes_tools_and_returns_correlated_errors(profile, scripted_mo
         ]),
         AIMessage(content='Finished'),
     ])
-    runtime.run_agent(profile)
+    await runtime.run_agent(profile)
     assert (profile.root / 'Dockerfile').read_text() == 'FROM scratch'
     results = {message.tool_call_id: message.content for message in model.messages
                if isinstance(message, ToolMessage)}
@@ -137,13 +138,13 @@ def test_agent_executes_tools_and_returns_correlated_errors(profile, scripted_mo
     (validate_implementation, 'without a Dockerfile'),
     (partial(validate_tests, get_language('java').test_suite.test_glob), 'without test files'),
 ])
-def test_agent_cannot_finish_without_role_artifacts(profile, scripted_model, validator, error):
+async def test_agent_cannot_finish_without_role_artifacts(profile, scripted_model, validator, error):
     scripted_model([AIMessage(content='Finished')])
     with pytest.raises(RuntimeError, match=error):
-        runtime.run_agent(replace(profile, validate_completion=validator))
+        await runtime.run_agent(replace(profile, validate_completion=validator))
 
 
-def test_agent_stops_at_configured_turn_limit(profile, scripted_model, monkeypatch):
+async def test_agent_stops_at_configured_turn_limit(profile, scripted_model, monkeypatch):
     monkeypatch.setenv('TEST_AGENT_MAX_TURNS', '2')
     scripted_model([
         AIMessage(content='', tool_calls=[
@@ -151,7 +152,7 @@ def test_agent_stops_at_configured_turn_limit(profile, scripted_model, monkeypat
         ]) for content in ['first', 'second', 'third']
     ])
     with pytest.raises(RuntimeError, match='Tool-turn limit exceeded'):
-        runtime.run_agent(profile)
+        await runtime.run_agent(profile)
     assert (profile.root / 'progress.txt').read_text() == 'second'
 
 
@@ -172,7 +173,7 @@ def assert_calls_and_results_correlate(messages):
     assert not pending
 
 
-def test_stale_history_becomes_a_checkpoint_within_the_context_budget(
+async def test_stale_history_becomes_a_checkpoint_within_the_context_budget(
         profile, scripted_model, monkeypatch, capsys):
     monkeypatch.setenv('AGENT_CONTEXT_TOKENS', '6000')
     source = 'class Body {}\n' * 430
@@ -189,7 +190,7 @@ def test_stale_history_becomes_a_checkpoint_within_the_context_budget(
         ]),
         AIMessage(content='Finished'),
     ])
-    runtime.run_agent(profile)
+    await runtime.run_agent(profile)
 
     first_turn, second_turn, first_summary, third_turn, second_summary, *later = model.requests
     assert len(second_turn) == len(first_turn) + 2
@@ -223,7 +224,7 @@ def test_stale_history_becomes_a_checkpoint_within_the_context_budget(
 
 
 @pytest.mark.parametrize('budget,compacted', [('64000', True), ('0', False)])
-def test_compaction_follows_provider_reported_usage(profile, scripted_model, monkeypatch,
+async def test_compaction_follows_provider_reported_usage(profile, scripted_model, monkeypatch,
                                                     budget, compacted):
     monkeypatch.setenv('AGENT_CONTEXT_TOKENS', budget)
     usage = {'input_tokens': 60000, 'output_tokens': 20, 'total_tokens': 60020}
@@ -234,7 +235,7 @@ def test_compaction_follows_provider_reported_usage(profile, scripted_model, mon
         *([AIMessage(content='Remaining: nothing')] if compacted else []),
         AIMessage(content='Finished'),
     ])
-    runtime.run_agent(profile)
+    await runtime.run_agent(profile)
     assert len(model.requests) == (4 if compacted else 3)
     assert_calls_and_results_correlate(model.messages[2:])
     assert [type(message) for message in model.messages[2:]] == (
@@ -429,21 +430,42 @@ def test_files_are_located_without_reading_build_output(tmp_path, tools):
     assert len(found) == 51 and found[-1].startswith('[More than 50 matches')
 
 
-def test_shell_runs_in_project_and_returns_short_output_whole(tmp_path, tools):
+async def test_shell_runs_in_project_and_returns_short_output_whole(tmp_path, tools):
     script = 'import os, sys; print(os.getcwd()); sys.exit(3)'
-    result = tools['shell'].invoke({
+    result = await tools['shell'].ainvoke({
         'command': f'{shlex.quote(sys.executable)} -c {shlex.quote(script)}',
     })
     assert result == f'Exit code: 3\n{tmp_path.resolve()}\n'
     assert tools['list_files'].invoke({'path': '.agent-output'}) == 'No files found'
 
 
-def test_long_shell_output_is_summarized_and_remains_retrievable(tmp_path, tools):
+async def test_cancelled_shell_stops_its_descendants(tmp_path, tools):
+    ready, leaked = tmp_path / 'ready', tmp_path / 'leaked'
+    script = ('from pathlib import Path; import time; '
+              f'Path({str(ready)!r}).touch(); time.sleep(0.4); '
+              f'Path({str(leaked)!r}).touch()')
+    # Keep the shell alive while its child runs, so cancellation must kill the group.
+    task = asyncio.create_task(tools['shell'].ainvoke({
+        'command': f'{shlex.quote(sys.executable)} -c {shlex.quote(script)} & wait',
+    }))
+    try:
+        async with asyncio.timeout(5):
+            while not ready.exists():
+                await asyncio.sleep(0.01)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    await asyncio.sleep(0.5)
+    assert not leaked.exists()
+
+
+async def test_long_shell_output_is_summarized_and_remains_retrievable(tmp_path, tools):
     script = ('for n in range(1, 2001):\n'
               '    print("[ERROR] Service.java:[12,5] cannot find symbol" if n == 700'
               '          else f"[INFO] downloading artifact {n}")\n'
               'print("BUILD FAILURE")')
-    result = tools['shell'].invoke({
+    result = await tools['shell'].ainvoke({
         'command': f'{shlex.quote(sys.executable)} -c {shlex.quote(script)}',
     })
     assert len(result) < 5000

@@ -13,12 +13,13 @@ from temporalio.worker import Worker
 from app.config import TEMPORAL_ADDRESS
 from app.temporal.activities import requirements_turn, write_requirements_document
 from app.temporal.workflows import RequirementsWorkflow
+from app.asyncio_utils import run_sync
 from app.tracing import shutdown_tracing, tracing_client
 
 
 async def main() -> None:
     langfuse = tracing_client()
-    if langfuse is None or not await asyncio.to_thread(langfuse.auth_check):
+    if langfuse is None or not await run_sync(langfuse.auth_check):
         raise RuntimeError('Configure valid Langfuse credentials and enable tracing first')
     session = 'langfuse-smoke-' + uuid.uuid4().hex[:12]
     client = await Client.connect(TEMPORAL_ADDRESS)
@@ -46,8 +47,12 @@ async def main() -> None:
             await handle.terminate()
 
 
-if __name__ == '__main__':
+async def run() -> None:
     try:
-        asyncio.run(main())
+        await main()
     finally:
-        shutdown_tracing()
+        await run_sync(shutdown_tracing)
+
+
+if __name__ == '__main__':
+    asyncio.run(run())

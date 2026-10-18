@@ -15,6 +15,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from app import docker_agents
+from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import (
     ANSWERS_KEY, copy_regular_files, paused_result, session_language, write_language,
@@ -187,20 +188,23 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
     session_dir = GENERATED_CODE_DIR / session_id
     artifact_dir = session_dir / 'review'
     paused = artifact_dir / docker_agents.PAUSED_DIR
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory() as temporary:
+    await run_sync(artifact_dir.mkdir, parents=True, exist_ok=True)
+    async with async_context(tempfile.TemporaryDirectory) as temporary:
         work = Path(temporary)
         workspace = work / 'workspace'
         if answers:
             # The paused review continues in the workspace it left.
-            docker_agents.resume_workspace(paused, workspace, answers)
-            changes = json.loads((workspace / 'input.json').read_text()).get('changes') or {}
+            await run_sync(docker_agents.resume_workspace, paused, workspace, answers)
+            changes = (
+                json.loads(await run_sync((workspace / 'input.json').read_text)).get('changes')
+                or {}
+            )
         else:
-            workspace.mkdir()
-            changes = prepare_review(language, session_dir, context, workspace)
+            await run_sync(workspace.mkdir)
+            changes = await run_sync(prepare_review, language, session_dir, context, workspace)
         changed = {path for paths in changes.values() for path in paths}
         if not changed:
-            shutil.rmtree(paused, ignore_errors=True)
+            await run_sync(shutil.rmtree, paused, ignore_errors=True)
             logger.info('Nothing to review (session=%s)', session_id)
             return {'session_id': session_id, 'findings': [], 'path': str(artifact_dir)}
         async with docker_agents.keep_activity_alive('Reviewing the delivery'):
@@ -214,11 +218,13 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
                         dockerfile=language.agent_dockerfile))
             except docker_agents.AgentPaused as exc:
                 return paused_result(session_id, exc)
-        findings = read_findings(output, changed)
+        findings = await run_sync(read_findings, output, changed)
     result = {'session_id': session_id, 'findings': findings, 'path': str(artifact_dir)}
     manifest = artifact_dir / f'{uuid.uuid4().hex}.json'
-    manifest.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
-    os.replace(manifest, artifact_dir / FINDINGS)
+    await run_sync(
+        manifest.write_text, json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8'
+    )
+    await run_sync(os.replace, manifest, artifact_dir / FINDINGS)
     logger.info('Code review finished (session=%s, findings=%d)', session_id, len(findings))
     return result
 

@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from starlette.datastructures import UploadFile
 
+from app.asyncio_utils import run_sync
 from app.api.errors import http_error
 from app.api.routes.requirements import ForkBody
 from app.api.routes.github import RepositoryInput
@@ -219,7 +220,7 @@ async def download_document(request_id: str, document_id: str):
                      f"attachment; filename*=utf-8''{quote(document['filename'])}"},
         )
     path = original_path(document)
-    if not path.is_file():
+    if not await run_sync(path.is_file):
         raise HTTPException(status_code=404, detail="Document not found")
     return FileResponse(
         path, media_type=document["content_type"], filename=document["filename"]

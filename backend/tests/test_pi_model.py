@@ -1,4 +1,5 @@
 """Drive the Pi adapter through a real subprocess standing in for the `pi` CLI."""
+import asyncio
 import json
 import os
 import sys
@@ -153,15 +154,49 @@ async def test_host_model_runs_pi_against_the_configured_directory(fake_pi, tmp_
     install([assistant('ok')], [assistant('ok')])
     monkeypatch.setenv('PATH', str(tmp_path) + os.pathsep + os.environ['PATH'])
     model = await llm_model.get_model('chat')
-    model.invoke('hi')
+    await model.ainvoke('hi')
     # Without a directory of its own the adapter leaves Pi's environment alone.
-    ChatPi().invoke('hi')
+    await ChatPi().ainvoke('hi')
 
     assert [call['agent_dir'] for call in calls()] == [
         str(tmp_path / 'configured'), str(tmp_path / 'inherited')]
     argv = calls()[0]['argv']
     assert argv[argv.index('--model') + 1] == 'openai/gpt-test'
     assert argv[argv.index('--thinking') + 1] == 'high'
+
+
+@pytest.mark.parametrize('cancel', [False, True])
+async def test_interrupted_generation_reaps_pi_process(tmp_path, cancel):
+    pid_file = tmp_path / 'pid'
+    script = tmp_path / 'pi'
+    script.write_text(f'#!{sys.executable}\n'
+                      'import os, pathlib, time\n'
+                      f'pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\n'
+                      'time.sleep(60)\n')
+    script.chmod(0o755)
+    model = ChatPi(command=str(script), timeout=10 if cancel else 0.5)
+    task = asyncio.create_task(model.ainvoke('hi'))
+    pid = None
+    try:
+        async with asyncio.timeout(5):
+            while not pid_file.exists():
+                await asyncio.sleep(0.01)
+        pid = int(pid_file.read_text())
+        if cancel:
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError if cancel else TimeoutError):
+            await task
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if pid is not None:
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
 
 
 def test_failed_response_raises(fake_pi):
@@ -183,7 +218,7 @@ def test_missing_response_raises(fake_pi):
         ChatPi(command=install([{'type': 'agent_settled'}])).invoke('hi')
 
 
-def test_coding_agent_runs_its_tools_through_pi(fake_pi, tmp_path, monkeypatch):
+async def test_coding_agent_runs_its_tools_through_pi(fake_pi, tmp_path, monkeypatch):
     install, calls = fake_pi
     install([assistant(('call-1', 'write_file',
                         {'path': 'Dockerfile', 'content': 'FROM scratch'}), stop='toolUse')],
@@ -197,7 +232,7 @@ def test_coding_agent_runs_its_tools_through_pi(fake_pi, tmp_path, monkeypatch):
     root = tmp_path / 'service'
     root.mkdir()
 
-    runtime.run_agent(runtime.AgentProfile(
+    await runtime.run_agent(runtime.AgentProfile(
         root=root, prompt='Implement the supplied contract', initial_messages=['requirements'],
         max_turns_env='TEST_AGENT_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Completed', exhaustion_message='Tool-turn limit exceeded',

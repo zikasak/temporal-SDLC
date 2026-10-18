@@ -212,13 +212,14 @@ shutdown_tracing()
 
 @pytest.mark.parametrize('tracing_mode', ['content', 'metadata', 'disabled', 'sampled-out'])
 def test_claude_plugin_exports_native_generations_and_mcp_tools_under_activity(
-        claude_http, tracing_server, tracing_mode):
+        claude_http, tracing_server, tracing_mode, tmp_path):
     # The loopback CLI's environment is set first, so the turn's process inherits it.
     replies, _ = claude_http
     environment, spans = tracing_server
     environment['TEST_MODEL_SETTINGS'] = json.dumps({'adapter': 'claude', 'model': 'claude-test'})
     capture_content = 'true' if tracing_mode == 'content' else 'false'
     environment['APP_TRACE_CONTENT_ENABLED'] = capture_content
+    environment['TEST_CLAUDE_TMP'] = str(tmp_path)
     if tracing_mode == 'disabled':
         environment['LANGFUSE_TRACING_ENABLED'] = 'false'
     if tracing_mode == 'sampled-out':
@@ -231,16 +232,20 @@ def test_claude_plugin_exports_native_generations_and_mcp_tools_under_activity(
                           'description': f'Search listings {EMAIL} {SECRET}', 'priority': 'must'}}],
                     [{'type': 'text', 'text': 'Recorded'}]])
     run_script('''
-import asyncio
+import asyncio, os, tempfile
+from pathlib import Path
 from temporalio.testing import ActivityEnvironment
 from app.temporal.activities import requirements_turn
 from app.tracing import shutdown_tracing
+tempfile.tempdir = os.environ['TEST_CLAUDE_TMP']
 async def main():
     result = await ActivityEnvironment().run(requirements_turn,
         [{'role':'user', 'content':'Search listings'}], [])
     assert result['reply'] == 'Recorded'
     assert result['requirements'][0]['title'] == 'Search'
 asyncio.run(main())
+assert not list(Path(tempfile.tempdir).glob('claude-native-*'))
+assert not list(Path(os.environ['CLAUDE_CONFIG_DIR']).rglob('*.jsonl'))
 shutdown_tracing()
 ''', environment)
     if tracing_mode in {'disabled', 'sampled-out'}:
@@ -299,11 +304,12 @@ from app.tracing import trace_operation, container_trace_environment, shutdown_t
 child = """
 from pathlib import Path
 from app.agent_workflows.runtime import AgentProfile, run_agent
+import asyncio
 root=Path.cwd()
-run_agent(AgentProfile(root=root, prompt='Write done.txt, then finish',
+asyncio.run(run_agent(AgentProfile(root=root, prompt='Write done.txt, then finish',
     initial_messages=['Create a search service'], max_turns_env='TEST_AGENT_MAX_TURNS',
     validate_completion=lambda root: root.joinpath('done.txt').read_text(),
-    completion_message='Done', exhaustion_message='Too many turns', default_max_turns=3))
+    completion_message='Done', exhaustion_message='Too many turns', default_max_turns=3)))
 """
 with trace_operation('build-implementation', session_id='pipeline', feature='implementation') as span:
     env={**os.environ, **container_trace_environment('pipeline', 'implementation')}
@@ -352,6 +358,7 @@ def test_claude_pause_resume_exports_each_native_call_once_under_its_current_sta
 import json, os
 from pathlib import Path
 from app.agent_workflows.runtime import AgentProfile, run_agent
+import asyncio
 from app.tracing import shutdown_tracing
 from app.settings.models import SETTINGS_FILENAME
 directory = Path(os.environ['TEST_WORKSPACE'])
@@ -360,10 +367,10 @@ root = directory / 'service'
 root.mkdir(exist_ok=True)
 (directory / SETTINGS_FILENAME).write_text(os.environ['TEST_MODEL_SETTINGS'])
 try:
-    run_agent(AgentProfile(root=root, prompt='Write done.txt, then finish',
+    asyncio.run(run_agent(AgentProfile(root=root, prompt='Write done.txt, then finish',
         initial_messages=['Create a service'], max_turns_env='TEST_AGENT_MAX_TURNS',
         validate_completion=lambda root: root.joinpath('done.txt').read_text(),
-        completion_message='Done', exhaustion_message='Too many turns'))
+        completion_message='Done', exhaustion_message='Too many turns')))
 except SystemExit as exc:
     assert exc.code == 75
 finally:

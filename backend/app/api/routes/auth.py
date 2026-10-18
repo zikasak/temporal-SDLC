@@ -26,7 +26,7 @@ class Credentials(BaseModel):
     password: str
 
 
-def require_user(request: Request) -> dict:
+async def require_user(request: Request) -> dict:
     """Dependency: the signed-in user, from a bearer token or the session cookie."""
     scheme, _, bearer = request.headers.get("authorization", "").partition(" ")
     token = bearer.strip() if scheme.lower() == "bearer" else request.cookies.get(COOKIE)

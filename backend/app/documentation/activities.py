@@ -9,6 +9,7 @@ from typing import Any
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from app.asyncio_utils import run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import (
     StageInputs, StageSpec, copy_regular_files, run_stage, session_language, write_language,
@@ -96,4 +97,4 @@ async def write_documentation(session_id: str, context: dict[str, Any]) -> dict[
     if 'questions' in result:
         return result
     return {**result,
-            'changed_files': changed_files(language, checkout, Path(result['path']))}
+            'changed_files': (await run_sync(changed_files, language, checkout, Path(result['path'])))}
