@@ -1,10 +1,6 @@
 """Exercise the bundled Claude CLI against a loopback Anthropic endpoint."""
 import copy
 import json
-import time
-from functools import partial
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Thread
 
 import pytest
 
@@ -12,93 +8,6 @@ from app.agent_workflows import runtime
 from app.implementation.agent import validate_completion
 from app.llm import claude
 from app.llm.claude import ChatClaude
-
-
-@pytest.fixture
-def claude_http(monkeypatch, tmp_path):
-    requests, replies = [], []
-
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *args):
-            pass
-
-        def do_POST(self):
-            body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-            if self.path.split('?', 1)[0] != '/v1/messages':
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b'{"input_tokens":100}')
-                return
-            requests.append(body)
-            blocks = replies.pop(0) if replies else [{'type': 'text', 'text': 'Unexpected request'}]
-            if isinstance(blocks, dict):
-                replies.insert(0, blocks)
-                self.send_response(401)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps(blocks).encode())
-                return
-            called = any(block['type'] == 'tool_use' for block in blocks)
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/event-stream')
-            self.end_headers()
-
-            def send(kind, **data):
-                self.wfile.write(('event: ' + kind + '\ndata: '
-                                 + json.dumps({'type': kind, **data}) + '\n\n').encode())
-                self.wfile.flush()
-
-            send('message_start', message={
-                'id': f'msg_{len(requests)}', 'type': 'message', 'role': 'assistant',
-                'model': body['model'], 'content': [], 'stop_reason': None,
-                'stop_sequence': None, 'usage': {'input_tokens': 20, 'output_tokens': 0,
-                    'cache_creation_input_tokens': 3, 'cache_read_input_tokens': 7}})
-            for i, block in enumerate(blocks):
-                if block['type'] == 'tool_use':
-                    send('content_block_start', index=i, content_block={**block, 'input': {}})
-                    send('content_block_delta', index=i, delta={
-                        'type': 'input_json_delta', 'partial_json': json.dumps(block['input'])})
-                elif block['type'] == 'thinking':
-                    send('content_block_start', index=i,
-                         content_block={'type': 'thinking', 'thinking': ''})
-                    send('content_block_delta', index=i, delta={
-                        'type': 'thinking_delta', 'thinking': block['thinking']})
-                    send('content_block_delta', index=i, delta={
-                        'type': 'signature_delta', 'signature': block['signature']})
-                else:
-                    send('content_block_start', index=i, content_block={'type': 'text', 'text': ''})
-                    send('content_block_delta', index=i,
-                         delta={'type': 'text_delta', 'text': block['text']})
-                send('content_block_stop', index=i)
-                if block['type'] == 'tool_use' and i < len(blocks) - 1:
-                    # The CLI runs a streamed call before the response ends.
-                    time.sleep(0.5)
-            send('message_delta', delta={
-                'stop_reason': 'tool_use' if called else 'end_turn', 'stop_sequence': None},
-                usage={'output_tokens': 5})
-            send('message_stop')
-
-    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    for name in ('CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS',
-                 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv('ANTHROPIC_BASE_URL', f'http://127.0.0.1:{server.server_port}')
-    monkeypatch.setenv('ANTHROPIC_API_KEY', 'local-test-key')
-    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-config'))
-    monkeypatch.setenv('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', '1')
-    monkeypatch.setenv('CLAUDE_CODE_MAX_RETRIES', '0')
-    from app.settings.models import ModelSettings, SETTINGS_FILENAME
-    (tmp_path / SETTINGS_FILENAME).write_text(ModelSettings(
-        adapter='claude', model='claude-opus-5-5', thinking_level='high').model_dump_json())
-    monkeypatch.setattr(claude, 'ChatClaude', partial(ChatClaude, timeout=10))
-    try:
-        yield replies, requests
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join()
 
 
 def native_call(identifier, name, **arguments):
@@ -254,3 +163,40 @@ def test_native_session_propagates_provider_failure_and_closes(claude_http, tmp_
             completion_message='Completed', exhaustion_message='Tool-turn limit exceeded'))
     assert (root / 'Dockerfile').is_file()
     assert len(requests) >= 2
+
+
+def test_interview_graph_appends_to_one_native_conversation(claude_http):
+    import asyncio
+
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_core.tools import tool
+
+    from app.llm.graph import get_message_graph, interview, native_session
+
+    replies, requests = claude_http
+    replies.extend([[native_call('first', 'lookup', term='first')],
+                    [native_call('second', 'lookup', term='second')],
+                    [{'type': 'text', 'text': 'Done'}]])
+
+    @tool
+    def lookup(term: str) -> str:
+        """Look up a term."""
+        return term.upper()
+
+    async def turn():
+        provider = ChatClaude(model='claude-opus-5-5', timeout=10)
+        graph = get_message_graph([lookup], model=provider)
+        async with native_session(provider):
+            return await interview(
+                graph, [SystemMessage('Be brief'), HumanMessage('Look both up')],
+                {'recursion_limit': 10}, lambda: False)
+
+    assert asyncio.run(turn()) == 'Done'
+    assert len(requests) == 3
+    for before, after in zip(requests, requests[1:]):
+        previous = native_messages(before)
+        assert native_messages(after)[:len(previous)] == previous
+    messages = str(native_messages(requests[-1]))
+    assert 'FIRST' in messages and 'SECOND' in messages
+    assert 'No response requested.' not in messages
+    assert claude.CONTINUE_PROMPT not in messages
