@@ -5,7 +5,6 @@ import sys
 import tempfile
 import threading
 import time
-from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -19,98 +18,31 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 # explicitly in isolated child processes with disposable local credentials.
 os.environ['LANGFUSE_TRACING_ENABLED'] = 'false'
 
-# Stands in for the Claude Code CLI behind the real Claude Agent SDK: answers the SDK's
-# control requests, lists the tools the SDK serves, records what the turn was given and
-# replies with the next scripted event stream.
-FAKE_CLAUDE = '''
-import json, os, pathlib, sys
+
+@pytest.fixture
+def claude_catalog(tmp_path):
+    """A CLI that answers discovery requests and rejects any model prompt."""
+    def install(server_info):
+        script = tmp_path / 'claude'
+        script.write_text(f'#!{sys.executable}\nimport json, sys\n'
+                          f'SERVER_INFO = json.loads({json.dumps(server_info)!r})\n' + '''
 if sys.argv[1:] == ['-v']:
     print('2.1.292 (Claude Code)')
     sys.exit()
-argv = sys.argv[1:]
-calls = json.loads(LOG.read_text()) if LOG.exists() else []
-
-def send(item):
-    print(json.dumps(item), flush=True)
-
-def mcp(number, method, params=None):
-    message = {'jsonrpc': '2.0', 'method': method, 'params': params or {}}
-    if number:
-        message['id'] = number
-    send({'type': 'control_request', 'request_id': method,
-          'request': {'subtype': 'mcp_message', 'server_name': 'langchain',
-                      'message': message}})
-    for line in sys.stdin:
-        reply = json.loads(line)
-        if reply['type'] == 'control_response' and reply['response']['request_id'] == method:
-            return reply['response']['response']['mcp_response'].get('result')
-
 for line in sys.stdin:
     item = json.loads(line)
+    if item['type'] == 'user':
+        raise RuntimeError('Discovery must never send a prompt')
     if item['type'] == 'control_request':
-        send({'type': 'control_response', 'response': {
+        print(json.dumps({'type': 'control_response', 'response': {
             'subtype': 'success', 'request_id': item['request_id'],
-            'response': SERVER_INFO if item['request']['subtype'] == 'initialize' else {}}})
-    if item['type'] != 'user':
-        continue
-    tools = []
-    if '--mcp-config' in argv:
-        mcp(1, 'initialize', {'protocolVersion': '2025-06-18', 'capabilities': {},
-                              'clientInfo': {'name': 'fake', 'version': '1'}})
-        mcp(None, 'notifications/initialized')
-        tools = mcp(2, 'tools/list')['tools']
-    session = next((arg.split('=', 1)[1] for arg in argv if arg.startswith('--resume=')), None)
-    transcript = [json.loads(entry)['message'] for path in pathlib.Path(
-        os.environ.get('CLAUDE_CONFIG_DIR', '')).glob(f'projects/*/{session}.jsonl')
-        for entry in path.read_text().splitlines()] if session else []
-    calls.append({'argv': argv, 'prompt': item, 'transcript': transcript, 'tools': tools})
-    LOG.write_text(json.dumps(calls))
-    events = RUNS[len(calls) - 1]
-    for event in events:
-        send(event)
-    # The CLI exits non-zero after an error result.
-    sys.exit(1 if events[-1].get('is_error') else 0)
-'''
-
-
-def claude_reply(*content, usage=None, **result):
-    """One scripted run: an assistant event per block, as the CLI streams them, then the
-    result. Strings are text and (id, name, input) tuples tool calls, which end the run on
-    the turn limit as the real CLI does."""
-    blocks = [{'type': 'thinking', 'thinking': '', 'signature': 'sig'}, *(
-        {'type': 'text', 'text': item} if isinstance(item, str) else
-        {'type': 'tool_use', 'id': item[0], 'name': item[1], 'input': item[2]}
-        for item in content)]
-    called = any(block['type'] == 'tool_use' for block in blocks)
-    return [*({'type': 'assistant', 'session_id': 'session', 'parent_tool_use_id': None,
-               'message': {'id': 'msg_1', 'role': 'assistant', 'model': 'claude-test',
-                           'content': [block]}} for block in blocks),
-            {'type': 'result', 'session_id': 'session', 'duration_ms': 1, 'duration_api_ms': 1,
-             'num_turns': 2 if called else 1, 'total_cost_usd': 0.01,
-             'subtype': 'error_max_turns' if called else 'success', 'is_error': called,
-             'stop_reason': 'tool_use' if called else 'end_turn',
-             'errors': ['Reached maximum number of turns (1)'] if called else [],
-             'usage': usage or {'input_tokens': 20, 'output_tokens': 5,
-                                'cache_read_input_tokens': 7,
-                                'cache_creation_input_tokens': 3}, **result}]
-
-
-@pytest.fixture
-def fake_claude(tmp_path):
-    """Returns (install, calls): install(*runs) writes a `claude` whose nth turn emits the
-    nth list of events; calls() is what every turn received."""
-    log = tmp_path / 'claude-calls.json'
-
-    def install(*runs, server_info=None):
-        script = tmp_path / 'claude'
-        script.write_text(f'#!{sys.executable}\nimport json, pathlib\n'
-                          f'LOG = pathlib.Path({str(log)!r})\n'
-                          f'SERVER_INFO = json.loads({json.dumps(server_info or {})!r})\n'
-                          f'RUNS = json.loads({json.dumps(runs)!r})\n' + FAKE_CLAUDE)
+            'response': SERVER_INFO if item['request']['subtype'] == 'initialize' else {}}}),
+            flush=True)
+''')
         script.chmod(0o755)
         return str(script)
 
-    return install, lambda: json.loads(log.read_text())
+    return install
 
 
 @pytest.fixture
@@ -118,8 +50,6 @@ def claude_http(monkeypatch, tmp_path):
     """The bundled Claude CLI against a loopback Anthropic endpoint: returns (replies,
     requests), where each reply is the content blocks of the next response, or an error
     body to answer with 401."""
-    from app.llm import claude
-    from app.llm.claude import ChatClaude
     from app.settings.models import ModelSettings, SETTINGS_FILENAME
 
     requests, replies = [], []
@@ -197,7 +127,6 @@ def claude_http(monkeypatch, tmp_path):
     monkeypatch.setenv('CLAUDE_CODE_MAX_RETRIES', '0')
     (tmp_path / SETTINGS_FILENAME).write_text(ModelSettings(
         adapter='claude', model='claude-opus-5-5', thinking_level='high').model_dump_json())
-    monkeypatch.setattr(claude, 'ChatClaude', partial(ChatClaude, timeout=10))
     try:
         yield replies, requests
     finally:

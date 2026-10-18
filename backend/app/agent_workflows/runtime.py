@@ -1,4 +1,5 @@
 """Container-only tools and bounded model loop. No host config, Temporal or Docker."""
+import asyncio
 import fnmatch
 import itertools
 import json
@@ -8,7 +9,6 @@ import signal
 import subprocess
 import sys
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -396,8 +396,72 @@ def _run_agent(profile: AgentProfile) -> bool:
         (profile.root.parent / SETTINGS_FILENAME).read_text())
     provider = create_adapter(settings, api_key=os.getenv('OPENAI_API_KEY', ''),
                               base_url=os.getenv('OPENAI_BASE_URL', ''))
-    with provider.session() if settings.adapter == 'claude' else nullcontext():
-        return _run_with_provider(profile, provider)
+    if settings.adapter == 'claude':
+        return asyncio.run(_run_claude(profile, provider))
+    return _run_with_provider(profile, provider)
+
+
+async def _run_claude(profile: AgentProfile, provider) -> bool:
+    """Let the native SDK execute the stage through MCP and resume its real session."""
+    from app.llm.claude import ClaudeTurnLimit
+
+    directory = profile.root.parent
+    state_file = directory / STATE_FILENAME
+    answers_file = directory / ANSWERS_FILENAME
+    state = json.loads(state_file.read_text()) if state_file.is_file() else None
+    if state is not None and state.get('adapter') != 'claude':
+        raise ValueError('A paused run must resume with the same adapter')
+    turns = state['turns'] if state else int(os.getenv(
+        profile.max_turns_env, str(profile.default_max_turns)))
+    if turns <= 0:
+        raise RuntimeError(profile.exhaustion_message)
+    pending = {}
+
+    def ask_user(questions: list) -> str:
+        pending['questions'] = normalize_questions(questions)
+        return 'The run is paused. The user will answer in the next message.'
+
+    tools = [*workspace_tools(profile.root, profile.contracts, profile.build_dirs),
+             StructuredTool.from_function(ask_user, name=ASK_USER, description=DESCRIPTION,
+                                          args_schema=AskUserInput)]
+    provider.cwd = profile.root
+    provider.config_dir = directory / '.claude-native'
+    provider.resume = state['session_id'] if state else None
+    head = [SystemMessage(profile.prompt + ASK_GUIDANCE)]
+    if state:
+        answers = json.loads(answers_file.read_text())['answers']
+        from app.llm.questions import answer_problem
+        problem = answer_problem(state['pending']['questions'], answers)
+        if problem:
+            raise ValueError(problem)
+        messages = [*head, HumanMessage(answers_result(state['pending']['questions'], answers))]
+        print('Resumed native Claude session with the user\'s answers', flush=True)
+    else:
+        messages = [*head, *(HumanMessage(text) for text in profile.initial_messages)]
+    nudges = state.get('nudges', 0) if state else 0
+    try:
+        async with provider.async_session():
+            while True:
+                reply = await provider.ainvoke(messages, tools=tools, until=lambda: bool(pending),
+                                              max_turns=turns)
+                if pending:
+                    _pause(directory, {'adapter': 'claude', 'session_id': provider.session_id,
+                                       'pending': pending, 'turns': turns - provider.turns_used,
+                                       'nudges': nudges})
+                    answers_file.unlink(missing_ok=True)
+                    print(f'Paused for answers to {len(pending["questions"])} questions', flush=True)
+                    return True
+                if nudges < DIRECT_QUESTION_NUDGES and asks_directly(reply.text):
+                    nudges += 1
+                    messages = [*messages, reply, HumanMessage(DIRECT_QUESTION_NOTICE)]
+                    continue
+                profile.validate_completion(profile.root)
+                state_file.unlink(missing_ok=True)
+                answers_file.unlink(missing_ok=True)
+                print(profile.completion_message, flush=True)
+                return False
+    except ClaudeTurnLimit as exc:
+        raise RuntimeError(profile.exhaustion_message) from exc
 
 
 def _run_with_provider(profile: AgentProfile, provider) -> bool:

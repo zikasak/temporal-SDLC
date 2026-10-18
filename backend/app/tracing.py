@@ -5,6 +5,7 @@ import logging
 import os
 import re
 from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 from typing import Any
 
@@ -12,6 +13,7 @@ logger = logging.getLogger(__name__)
 _SECRET_FIELD = re.compile(r'(api[_-]?key|password|secret|authorization|access[_-]?token)', re.I)
 _EMAIL = re.compile(r'\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b')
 _TOKEN = re.compile(r'\b(?:sk-lf-|pk-lf-|sk-proj-|sk-)[A-Za-z0-9_-]+|\bAIza[\w-]+')
+_trace_attributes = ContextVar('application_trace_attributes', default={})
 
 
 def _enabled() -> bool:
@@ -203,7 +205,11 @@ def trace_operation(name: str, *, session_id: str | None, feature: str,
         yield None
         return
     try:
-        yield span
+        token = _trace_attributes.set({'session_id': session_id, 'feature': feature})
+        try:
+            yield span
+        finally:
+            _trace_attributes.reset(token)
     except BaseException as exc:
         # Do not export exception messages/stack traces: provider errors can
         # contain credentials or confidential inputs. Keep the failure type.
@@ -237,6 +243,30 @@ def container_trace_context() -> dict | None:
     if re.fullmatch(r'[0-9a-f]{32}', trace_id) and re.fullmatch(r'[0-9a-f]{16}', parent_id):
         return {'trace_id': trace_id, 'parent_span_id': parent_id}
     return None
+
+
+def claude_trace_environment() -> dict[str, str]:
+    """Explicit cross-process parent context for the Claude observability plugin."""
+    environment = {'APP_CLAUDE_TRACING_ENABLED': 'false'}
+    client = tracing_client()
+    if client is None:
+        return environment
+    from opentelemetry import trace
+
+    current = trace.get_current_span().get_span_context()
+    if current.is_valid and not current.trace_flags.sampled:
+        return environment
+    attributes = _trace_attributes.get()
+    environment.update(
+        APP_CLAUDE_TRACING_ENABLED='true',
+        CC_LANGFUSE_PARENT_TRACE_ID=client.get_current_trace_id() or '',
+        CC_LANGFUSE_PARENT_SPAN_ID=client.get_current_observation_id() or '',
+        APP_CLAUDE_TRACE_SESSION_ID=attributes.get('session_id') or '',
+        APP_CLAUDE_TRACE_FEATURE=attributes.get('feature') or '',
+        # Images would otherwise upload outside the application's span masking.
+        CC_LANGFUSE_CAPTURE_IMAGES='false', LANGFUSE_MEDIA_UPLOAD_ENABLED='false',
+    )
+    return environment
 
 
 def shutdown_tracing() -> None:

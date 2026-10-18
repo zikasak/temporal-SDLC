@@ -3,6 +3,7 @@ from urllib.parse import urlparse
 
 import httpx
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.runnables import Runnable
 from langchain_openai import ChatOpenAI
 
 from app.settings.models import ModelSettings
@@ -31,7 +32,7 @@ def create_model(*, model_name: str, api_key: str, base_url: str,
 
 
 def create_adapter(settings: ModelSettings, *, api_key: str, base_url: str,
-                   pi_agent_dir: str | None = None) -> BaseChatModel:
+                   pi_agent_dir: str | None = None) -> Runnable:
     if settings.adapter == 'pi':
         from app.llm.pi import ChatPi
 

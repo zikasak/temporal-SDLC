@@ -210,16 +210,25 @@ shutdown_tracing()
     assert_no_sensitive_content(spans)
 
 
-def test_claude_harness_turn_exports_generations_with_model_and_cached_usage(
-        claude_http, tracing_server):
+@pytest.mark.parametrize('tracing_mode', ['content', 'metadata', 'disabled', 'sampled-out'])
+def test_claude_plugin_exports_native_generations_and_mcp_tools_under_activity(
+        claude_http, tracing_server, tracing_mode):
     # The loopback CLI's environment is set first, so the turn's process inherits it.
     replies, _ = claude_http
     environment, spans = tracing_server
     environment['TEST_MODEL_SETTINGS'] = json.dumps({'adapter': 'claude', 'model': 'claude-test'})
-    replies.extend([[{'type': 'tool_use', 'id': 'call_1',
-                      'name': 'mcp__langchain__record_requirement', 'input': {
+    capture_content = 'true' if tracing_mode == 'content' else 'false'
+    environment['APP_TRACE_CONTENT_ENABLED'] = capture_content
+    if tracing_mode == 'disabled':
+        environment['LANGFUSE_TRACING_ENABLED'] = 'false'
+    if tracing_mode == 'sampled-out':
+        environment['LANGFUSE_SAMPLE_RATE'] = '0'
+    replies.extend([[{'type': 'thinking', 'thinking': 'Plan the synthetic search requirement',
+                      'signature': 'native-signature'},
+                     {'type': 'tool_use', 'id': 'call_1',
+                      'name': 'mcp__flow__record_requirement', 'input': {
                           'category': 'functional', 'title': 'Search',
-                          'description': 'Search listings', 'priority': 'must'}}],
+                          'description': f'Search listings {EMAIL} {SECRET}', 'priority': 'must'}}],
                     [{'type': 'text', 'text': 'Recorded'}]])
     run_script('''
 import asyncio
@@ -234,29 +243,54 @@ async def main():
 asyncio.run(main())
 shutdown_tracing()
 ''', environment)
+    if tracing_mode in {'disabled', 'sampled-out'}:
+        assert not spans
+        return
     root, = [span for span in spans if span.name == 'gather-requirements']
+    native_turn, = [span for span in spans if span.name == 'Conversational Turn']
+    assert native_turn.trace_id == root.trace_id
+    assert native_turn.parent_span_id == root.span_id
+    assert all(span.trace_id == root.trace_id for span in spans)
+    assert all(attributes(span)['session.id'] == attributes(root)['session.id'] for span in spans)
     generations = [span for span in spans
                    if attributes(span).get('langfuse.observation.type') == 'generation']
     assert len(generations) == 2
     for generation in generations:
-        assert generation.parent_span_id == root.span_id
+        assert generation.parent_span_id == native_turn.span_id
         attrs = attributes(generation)
         assert attrs['langfuse.observation.model.name'] == 'claude-test'
         usage = json.loads(attrs['langfuse.observation.usage_details'])
         # Cached prompt tokens are reported apart from the uncached input they add to.
-        assert (usage['input'], usage['input_cache_read'], usage['input_cache_creation'],
+        assert (usage['input'], usage['cache_read_input_tokens'], usage['cache_creation_input_tokens'],
                 usage['output']) == (20, 7, 3, 5)
-    call, = next(calls for span in generations if (calls := json.loads(
-        attributes(span)['langfuse.observation.output']).get('tool_calls')))
-    assert call['function']['name'] == 'record_requirement'
     tool, = [span for span in spans
              if attributes(span).get('langfuse.observation.type') == 'tool']
-    assert tool.name == 'record_requirement' and tool.parent_span_id == root.span_id
+    assert tool.name == 'Tool: mcp__flow__record_requirement'
+    assert tool.parent_span_id == native_turn.span_id
+    wire = '\n'.join(str(span) for span in spans)
+    if capture_content == 'true':
+        assert 'Plan the synthetic search requirement' in wire
+        assert 'Search listings' in wire
+    else:
+        assert 'Plan the synthetic search requirement' not in wire
+        assert 'Search listings' not in wire
+        for span in spans:
+            for key in ('langfuse.observation.input', 'langfuse.observation.output'):
+                if key in attributes(span):
+                    assert attributes(span)[key] == '[CONTENT CAPTURE DISABLED]'
     assert_no_sensitive_content(spans)
 
 
-def test_agent_process_nests_under_host_stage_and_flushes_before_exit(tracing_server):
+@pytest.mark.parametrize('adapter', ['openai', 'claude'])
+def test_agent_process_nests_under_host_stage_and_flushes_before_exit(
+        claude_http, tracing_server, adapter):
     environment, spans = tracing_server
+    if adapter == 'claude':
+        environment['TEST_MODEL_SETTINGS'] = json.dumps({'adapter': 'claude', 'model': 'claude-test'})
+        replies, _ = claude_http
+        replies.extend([[{'type': 'tool_use', 'id': 'write', 'name': 'mcp__flow__write_file',
+                          'input': {'path': 'done.txt', 'content': 'Search service'}}],
+                        [{'type': 'text', 'text': 'Done'}]])
     run_script('''
 import os, subprocess, sys, tempfile
 from pathlib import Path
@@ -290,11 +324,69 @@ shutdown_tracing()
     assert all(attributes(span)['session.id'] == 'pipeline' for span in spans)
     generations = [span for span in spans
                    if attributes(span).get('langfuse.observation.type') == 'generation']
-    tool, = [span for span in spans if span.name == 'write_file']
+    tool, = [span for span in spans
+             if attributes(span).get('langfuse.observation.type') == 'tool']
     assert len(generations) == 2
-    assert tool.parent_span_id == agent.span_id
-    assert all(span.parent_span_id == agent.span_id for span in generations)
+    if adapter == 'claude':
+        native_turn, = [span for span in spans if span.name == 'Conversational Turn']
+        assert native_turn.parent_span_id == agent.span_id
+        parent = native_turn
+    else:
+        parent = agent
+    assert tool.parent_span_id == parent.span_id
+    assert all(span.parent_span_id == parent.span_id for span in generations)
     assert_no_sensitive_content(spans)
+
+
+def test_claude_pause_resume_exports_each_native_call_once_under_its_current_stage(
+        claude_http, tracing_server, tmp_path):
+    replies, requests = claude_http
+    environment, spans = tracing_server
+    environment.update(TEST_MODEL_SETTINGS=json.dumps({'adapter': 'claude', 'model': 'claude-test'}),
+                       TEST_WORKSPACE=str(tmp_path / 'paused'),
+                       APP_TRACE_SESSION_ID='paused-pipeline', APP_TRACE_AGENT_ROLE='implementation')
+    replies.append([{'type': 'tool_use', 'id': 'ask', 'name': 'mcp__flow__ask_user',
+                     'input': {'questions': [{'question': 'Which currency?',
+                                               'options': ['EUR', 'USD']}]}}])
+    script = '''
+import json, os
+from pathlib import Path
+from app.agent_workflows.runtime import AgentProfile, run_agent
+from app.tracing import shutdown_tracing
+from app.settings.models import SETTINGS_FILENAME
+directory = Path(os.environ['TEST_WORKSPACE'])
+directory.mkdir(exist_ok=True)
+root = directory / 'service'
+root.mkdir(exist_ok=True)
+(directory / SETTINGS_FILENAME).write_text(os.environ['TEST_MODEL_SETTINGS'])
+try:
+    run_agent(AgentProfile(root=root, prompt='Write done.txt, then finish',
+        initial_messages=['Create a service'], max_turns_env='TEST_AGENT_MAX_TURNS',
+        validate_completion=lambda root: root.joinpath('done.txt').read_text(),
+        completion_message='Done', exhaustion_message='Too many turns'))
+except SystemExit as exc:
+    assert exc.code == 75
+finally:
+    shutdown_tracing()
+'''
+    run_script(script, environment)
+    assert len(requests) == 1
+    (tmp_path / 'paused/.agent-answers.json').write_text(json.dumps({'answers': ['EUR']}))
+    replies.extend([[{'type': 'tool_use', 'id': 'write', 'name': 'mcp__flow__write_file',
+                      'input': {'path': 'done.txt', 'content': 'EUR'}}],
+                    [{'type': 'text', 'text': 'Done'}]])
+    run_script(script, environment)
+    assert len(requests) == 3
+    stages = [span for span in spans if span.name == 'author-implementation']
+    assert len(stages) == 2
+    turns = [span for span in spans if span.name == 'Conversational Turn']
+    assert len(turns) == 2
+    assert {span.parent_span_id for span in turns} == {span.span_id for span in stages}
+    generations = [span for span in spans
+                   if attributes(span).get('langfuse.observation.type') == 'generation']
+    assert len(generations) == 3
+    assert len({(span.trace_id, span.span_id) for span in spans}) == len(spans)
+    assert all(attributes(span)['session.id'] == 'paused-pipeline' for span in spans)
 
 
 def test_provider_failure_still_raises_and_exports_a_redacted_error(tracing_server):
