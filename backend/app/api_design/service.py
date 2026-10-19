@@ -143,11 +143,11 @@ async def finalize_session(session_id: str) -> None:
     logger.info("Finalizing API design session %s", session_id)
 
 
-async def retry_generation(session_id: str, stage: RetryStage) -> None:
+async def retry_generation(session_id: str, stage: RetryStage) -> DeliveryProgress:
     state = await get_state(session_id)
     if state.status != 'completed' or not state.document:
         raise SessionBusy('Only failed generation can be retried.')
-    await delivery_service.retry(session_id, stage)
+    return await delivery_service.retry(session_id, stage)
 
 
 async def _check_delivered(session_id: str) -> None:

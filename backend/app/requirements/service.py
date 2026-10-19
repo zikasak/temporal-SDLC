@@ -113,10 +113,10 @@ def _delivers(state: RequirementsState) -> bool:
     return state.status == "completed" and state.kind in DIRECT_KINDS
 
 
-async def retry_generation(session_id: str, stage: RetryStage) -> None:
+async def retry_generation(session_id: str, stage: RetryStage) -> DeliveryProgress:
     if not _delivers(await get_state(session_id)):
         raise SessionBusy('Only failed generation can be retried.')
-    await delivery_service.retry(session_id, stage)
+    return await delivery_service.retry(session_id, stage)
 
 
 async def accept_findings(session_id: str, login: str) -> DeliveryProgress:
