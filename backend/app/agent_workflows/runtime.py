@@ -47,6 +47,10 @@ class AgentProfile:
     build_dirs: Sequence[str] = ()
     # For report-only stages, writing this file ends the run after validation.
     completion_file: str | None = None
+    # Replaces CHECKPOINT_PROMPT for stages whose progress is not code on disk.
+    checkpoint_prompt: str | None = None
+    # Offers the note tool, whose notes are kept verbatim across history compaction.
+    working_notes: bool = False
 
 
 READ_LINES = 500
@@ -69,7 +73,7 @@ COMPACT_AT = 0.75
 KEEP_RECENT = 0.25
 # Code and JSON run near three characters a token; used when the provider reports no usage.
 TOKEN_CHARS = 3
-CLIP_CHARS = 1500
+CLIP_CHARS = 4000
 CHECKPOINT_PROMPT = """You keep the working notes of a coding agent. The oldest part of its
 tool history is about to be removed from its context. Write the checkpoint it will continue
 from, merging any previous checkpoint with the history below. Use these sections:
@@ -80,6 +84,14 @@ Unresolved errors: exact messages and file locations of failures not yet fixed.
 Current file contents stay on disk and will be re-read, so do not reproduce code.
 Be specific and concise. Record only what the history shows; never guess.
 """
+# Without this, the summary takes its own clipping for truncated reads and asks for rereads.
+CLIP_NOTICE = """
+Long calls and results in the history are shortened for this summary only, where a marker
+says characters were omitted here only. The agent saw them in full: never record a read or
+an output as truncated or incomplete because of these markers.
+"""
+NOTE = 'note'
+NOTE_CHARS = 1000
 CHECKPOINT_NOTICE = ('[Checkpoint] Older tool calls and their results were removed to save '
                      'context. Files on disk are the source of truth: re-read the regions '
                      'you need before changing them.')
@@ -342,7 +354,8 @@ def _clip(text: str) -> str:
     if len(text) <= CLIP_CHARS:
         return text
     half = CLIP_CHARS // 2
-    return f'{text[:half]}\n[{len(text) - CLIP_CHARS} characters omitted]\n{text[-half:]}'
+    return (f'{text[:half]}\n[... {len(text) - CLIP_CHARS} characters omitted here only; '
+            f'the agent saw them ...]\n{text[-half:]}')
 
 
 def _transcript(messages: Sequence[BaseMessage]) -> str:
@@ -365,6 +378,17 @@ def ask_user_tool() -> BaseTool:
 
     return StructuredTool.from_function(ask_user, name=ASK_USER, description=DESCRIPTION,
                                         args_schema=AskUserInput)
+
+
+def note_tool(notes: list[str]) -> BaseTool:
+    def note(text: str) -> str:
+        """Record a conclusion you must not lose, such as a suspected or confirmed problem
+        or a region you finished. Older tool results are removed as the context fills;
+        your notes are kept word for word. Call it alongside your next tool calls."""
+        notes.append(text.strip()[:NOTE_CHARS])
+        return 'Noted.'
+
+    return StructuredTool.from_function(note, name=NOTE)
 
 
 def _pause(directory: Path, state: dict[str, Any]) -> None:
@@ -451,7 +475,8 @@ async def _run_claude(profile: AgentProfile, provider) -> bool:
 
     tools = [*(await run_sync(workspace_tools, profile.root, profile.contracts, profile.build_dirs)),
              StructuredTool.from_function(ask_user, name=ASK_USER, description=DESCRIPTION,
-                                          args_schema=AskUserInput)]
+                                          args_schema=AskUserInput),
+             *([note_tool([])] if profile.working_notes else [])]
     provider.cwd = profile.root
     provider.config_dir = directory / '.claude-native'
     provider.resume = state['session_id'] if state else None
@@ -510,8 +535,9 @@ async def _run_claude(profile: AgentProfile, provider) -> bool:
 
 
 async def _run_with_provider(profile: AgentProfile, provider) -> bool:
+    working: list[str] = []
     tools = [*(await run_sync(workspace_tools, profile.root, profile.contracts, profile.build_dirs)),
-             ask_user_tool()]
+             ask_user_tool(), *([note_tool(working)] if profile.working_notes else [])]
     by_name = {item.name: item for item in tools}
     model = provider.bind_tools(tools)
     # The instructions and authoritative inputs are never compacted.
@@ -528,6 +554,7 @@ async def _run_with_provider(profile: AgentProfile, provider) -> bool:
         checkpoint, history, notes = resumed['checkpoint'], resumed['history'], resumed['notes']
         changed = dict.fromkeys(resumed['changed'])
         turns, nudges = resumed['turns'], resumed['nudges']
+        working += resumed.get('working', [])
         print('Resumed with the user\'s answers', flush=True)
     budget = int(os.getenv(CONTEXT_TOKENS_ENV, str(DEFAULT_CONTEXT_TOKENS)))
     schemas = len(json.dumps([convert_to_openai_tool(item) for item in tools])) // TOKEN_CHARS
@@ -592,7 +619,8 @@ async def _run_with_provider(profile: AgentProfile, provider) -> bool:
             await run_sync(_pause, profile.root.parent, {
                 'pending': asked, 'history': messages_to_dict(history),
                 'checkpoint': messages_to_dict(checkpoint), 'notes': notes,
-                'changed': list(changed), 'turns': turns - turn - 1, 'nudges': nudges})
+                'changed': list(changed), 'working': working, 'turns': turns - turn - 1,
+                'nudges': nudges})
             print(f'Paused for answers to {len(asked["questions"])} questions', flush=True)
             return True
         if await run_sync(_completion_written, profile):
@@ -606,14 +634,18 @@ async def _run_with_provider(profile: AgentProfile, provider) -> bool:
         start = _recent_start(history, budget * KEEP_RECENT)
         if not budget or used <= budget * COMPACT_AT or not start:
             continue
-        request = [SystemMessage(content=CHECKPOINT_PROMPT), HumanMessage(content=(
+        request = [SystemMessage(content=(profile.checkpoint_prompt or CHECKPOINT_PROMPT)
+                                 + CLIP_NOTICE), HumanMessage(content=(
             (f'Previous checkpoint:\n{notes}\n\n' if notes else '')
             + 'History being removed:\n' + _transcript(history[:start])))]
         notes = (await provider.ainvoke(request, **(
             {'config': {**config, 'run_name': 'compact-history'}} if traced_config else {}
         ))).text.strip()
         files = f'\nFiles written or edited so far: {", ".join(changed)}' if changed else ''
-        checkpoint = [HumanMessage(content=f'{CHECKPOINT_NOTICE}{files}\n\n{notes}'.strip())]
+        noted = ''.join(f'\n- {item}' for item in working)
+        noted = f'\nYour notes so far:{noted}' if noted else ''
+        checkpoint = [HumanMessage(
+            content=f'{CHECKPOINT_NOTICE}{files}{noted}\n\n{notes}'.strip())]
         del history[:start]
         measured, counted = fixed + _tokens(checkpoint[0]), 0
         print(f'Compacted {start} messages into a checkpoint (about {used} tokens in use)',
