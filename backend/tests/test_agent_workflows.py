@@ -225,7 +225,8 @@ async def test_stale_history_becomes_a_checkpoint_within_the_context_budget(
     # The summary sees what is being removed, clipped, and builds on the last checkpoint.
     assert 'Call write_file: {"path": "Orders.java"' in first_summary[1].content
     assert 'Stock.java' not in first_summary[1].content
-    assert len(first_summary[1].content) < 2000
+    assert 'omitted here only' in first_summary[1].content
+    assert len(first_summary[1].content) < len(source)
     assert second_summary[1].content.startswith(
         'Previous checkpoint:\nDecisions: money is stored in cents\nRemaining: Payments')
     assert 'Call write_file: {"path": "Stock.java"' in second_summary[1].content
@@ -249,6 +250,30 @@ async def test_stale_history_becomes_a_checkpoint_within_the_context_budget(
     assert sum(len(str(message.content)) for message in later[-1]) < len(source) * 2
     assert (profile.root / 'Orders.java').read_text() == source
     assert capsys.readouterr().out.count('Compacted 2 messages into a checkpoint') == 2
+
+
+async def test_working_notes_survive_compaction_word_for_word(profile, scripted_model,
+                                                             monkeypatch):
+    monkeypatch.setenv('AGENT_CONTEXT_TOKENS', '6000')
+    source = 'class Body {}\n' * 430
+    verdict = 'service/orders.py:10-40 sound; refunds miss the 409 the contract requires'
+    model = scripted_model([
+        AIMessage(content='', tool_calls=[
+            {'name': 'note', 'args': {'text': verdict}, 'id': 'note'},
+            *write('Orders.java', source).tool_calls]),
+        write('Stock.java', source),
+        AIMessage(content='Remaining: Dockerfile'),
+        write('Dockerfile', 'FROM scratch'),
+        AIMessage(content='Finished'),
+    ])
+    await runtime.run_agent(replace(profile, working_notes=True,
+                                    checkpoint_prompt='Keep the reviewer\'s verdicts.'))
+
+    summary, after = model.requests[2], model.requests[3]
+    assert summary[0].content == 'Keep the reviewer\'s verdicts.' + runtime.CLIP_NOTICE
+    checkpoint = after[2].content
+    assert f'Your notes so far:\n- {verdict}\n' in checkpoint
+    assert checkpoint.endswith('Remaining: Dockerfile')
 
 
 @pytest.mark.parametrize('budget,compacted', [('64000', True), ('0', False)])

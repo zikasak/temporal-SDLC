@@ -50,6 +50,12 @@ Work within the tool-turn budget: prioritize significant changed behaviour, keep
 confirmed findings, and finish when the remaining-turn notice tells you to wrap up. Do not
 expand the review into another investigation at that point or invent findings to fill gaps.
 
+Older tool results leave your context as it fills, and nothing you only thought survives
+that. Whenever you suspect or confirm a problem, or finish judging a changed region, record
+it with the note tool in the same turn as your next reads: the file and lines, the verdict,
+and for a problem the contract statement it breaks and the evidence. Do not reread a region
+your notes already judge.
+
 Do not change service/ or tests/ and do not run the tests. Finish by writing findings.json
 in the project root with write_file, containing exactly this JSON object:
 {{"findings": [{{"summary": "what is wrong and why it needs a correction",
@@ -60,6 +66,18 @@ Writing findings.json ends the review immediately, so write it only when the fin
 final. No additional tool call or final text reply is needed.
 """
 
+# The reviewer's progress is its judgments, not files on disk, so the checkpoint keeps them.
+CHECKPOINT_PROMPT = """You keep the working notes of a code reviewer. The oldest part of its
+tool history is about to be removed from its context. Write the checkpoint it will continue
+from, merging any previous checkpoint with the history below. Use these sections:
+Suspected problems: each problem the history or its notes point to, with the changed file and
+lines, the contract or brief statement it breaks, the evidence seen and what is unverified.
+Reviewed: changed files and line ranges already read and judged, with the verdict, so they
+are not read again.
+Remaining: changed files and ranges not yet reviewed, most significant first.
+Do not reproduce code. Be specific and concise. Record only what the history shows; never
+guess.
+"""
 CHANGE_PROMPT = """
 The service existed before this delivery and was changed for the task in the `brief` entry
 of the input: the problem, the expected behaviour and the acceptance criteria. The brief has
@@ -101,7 +119,7 @@ async def main() -> None:
         max_turns_env='REVIEW_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Code review completed',
         exhaustion_message='Code review exceeded the tool-turn limit',
-        completion_file=FINDINGS,
+        completion_file=FINDINGS, checkpoint_prompt=CHECKPOINT_PROMPT, working_notes=True,
         contracts=CONTRACTS if await run_sync(CONTRACTS.is_dir) else None,
         build_dirs=language['build_dirs'],
     ))
