@@ -46,13 +46,18 @@ author never sees the tests and the test author never sees the implementation, s
 summary self-contained: name the endpoint or requirement, quote what the contract requires,
 state the wrong or missing behaviour and the required correction.
 
+Work within the tool-turn budget: prioritize significant changed behaviour, keep track of
+confirmed findings, and finish when the remaining-turn notice tells you to wrap up. Do not
+expand the review into another investigation at that point or invent findings to fill gaps.
+
 Do not change service/ or tests/ and do not run the tests. Finish by writing findings.json
 in the project root with write_file, containing exactly this JSON object:
 {{"findings": [{{"summary": "what is wrong and why it needs a correction",
                 "path": "service/... or tests/... the changed file, when it is about one",
                 "target": "implementation" or "tests" or "both",
                 "reason": "briefly, why that worker"}}]}}
-Only finish once findings.json is written.
+Writing findings.json ends the review immediately, so write it only when the findings are
+final. No additional tool call or final text reply is needed.
 """
 
 CHANGE_PROMPT = """
@@ -96,6 +101,7 @@ async def main() -> None:
         max_turns_env='REVIEW_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Code review completed',
         exhaustion_message='Code review exceeded the tool-turn limit',
+        completion_file=FINDINGS,
         contracts=CONTRACTS if await run_sync(CONTRACTS.is_dir) else None,
         build_dirs=language['build_dirs'],
     ))

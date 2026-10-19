@@ -45,6 +45,8 @@ class AgentProfile:
     contracts: Path | None = None
     # Directory names holding the language's build output and installed dependencies.
     build_dirs: Sequence[str] = ()
+    # For report-only stages, writing this file ends the run after validation.
+    completion_file: str | None = None
 
 
 READ_LINES = 500
@@ -100,6 +102,7 @@ DIRECT_QUESTION_NOTICE = ('[System] Your last message asked a question in its te
                           'nobody reads it: the run ends with a reply that calls no tool. To '
                           'ask the user, call ask_user. Otherwise decide yourself, finish the '
                           'work, and end with a summary that asks nothing.')
+FINISHING_TURNS = 10
 DIAGNOSTIC = re.compile(r'\[ERROR\]|\berror\b|BUILD (SUCCESS|FAILURE)|Exception|FAILED|Tests run:')
 
 
@@ -388,6 +391,11 @@ def _resume(directory: Path) -> dict[str, Any] | None:
     return {**state, 'history': history, 'checkpoint': messages_from_dict(state['checkpoint'])}
 
 
+def _completion_written(profile: AgentProfile) -> bool:
+    return (profile.completion_file is not None
+            and (profile.root / profile.completion_file).is_file())
+
+
 async def run_agent(profile: AgentProfile) -> None:
     role = os.getenv('APP_TRACE_AGENT_ROLE', profile.root.name).replace('_', '-')
     paused = False
@@ -466,8 +474,10 @@ async def _run_claude(profile: AgentProfile, provider) -> bool:
             # The SDK fixes max_turns at client startup. Resume the native transcript
             # in a fresh client for each correction, with only the remaining budget.
             async with provider.async_session():
-                reply = await provider.ainvoke(messages, tools=tools, until=lambda: bool(pending),
-                                              max_turns=turns)
+                reply = await provider.ainvoke(
+                    messages, tools=tools,
+                    until=lambda: bool(pending) or _completion_written(profile),
+                    max_turns=turns)
             turns -= provider.turns_used
             if pending:
                 await run_sync(
@@ -484,7 +494,8 @@ async def _run_claude(profile: AgentProfile, provider) -> bool:
                 await run_sync(answers_file.unlink, missing_ok=True)
                 print(f'Paused for answers to {len(pending["questions"])} questions', flush=True)
                 return True
-            if nudges < DIRECT_QUESTION_NUDGES and asks_directly(reply.text):
+            if (not await run_sync(_completion_written, profile)
+                    and nudges < DIRECT_QUESTION_NUDGES and asks_directly(reply.text)):
                 nudges += 1
                 provider.resume = provider.session_id
                 messages = [*head, HumanMessage(DIRECT_QUESTION_NOTICE)]
@@ -527,7 +538,17 @@ async def _run_with_provider(profile: AgentProfile, provider) -> bool:
     # Disabled tracing leaves the invocation unchanged for custom model adapters.
     traced_config = {'config': config} if 'callbacks' in config else {}
     for turn in range(turns):
-        response = await model.ainvoke([*head, *checkpoint, *history], **traced_config)
+        remaining = turns - turn
+        notice = []
+        if remaining <= FINISHING_TURNS:
+            unit = 'turn' if remaining == 1 else 'turns'
+            notice = [HumanMessage(content=(
+                f'[System] You have {remaining} model {unit} remaining. '
+                'Finish the task and write its required output files now. '
+                'Do not start new investigations. The run fails if the required outputs '
+                'are missing when the turn limit is reached.'))]
+        # Keep the current budget outside compacted history and recompute it on resume.
+        response = await model.ainvoke([*head, *checkpoint, *history, *notice], **traced_config)
         history.append(response)
         usage = getattr(response, 'usage_metadata', None) or {}
         if usage.get('input_tokens'):
@@ -574,6 +595,13 @@ async def _run_with_provider(profile: AgentProfile, provider) -> bool:
                 'changed': list(changed), 'turns': turns - turn - 1, 'nudges': nudges})
             print(f'Paused for answers to {len(asked["questions"])} questions', flush=True)
             return True
+        if await run_sync(_completion_written, profile):
+            await run_sync(profile.validate_completion, profile.root)
+            print(profile.completion_message, flush=True)
+            return False
+        # There is no following turn to benefit from another compaction request.
+        if remaining == 1:
+            break
         used = measured + sum(_tokens(message) for message in history[counted:])
         start = _recent_start(history, budget * KEEP_RECENT)
         if not budget or used <= budget * COMPACT_AT or not start:

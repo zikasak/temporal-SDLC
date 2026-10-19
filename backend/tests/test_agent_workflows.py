@@ -146,7 +146,7 @@ async def test_agent_cannot_finish_without_role_artifacts(profile, scripted_mode
 
 async def test_agent_stops_at_configured_turn_limit(profile, scripted_model, monkeypatch):
     monkeypatch.setenv('TEST_AGENT_MAX_TURNS', '2')
-    scripted_model([
+    model = scripted_model([
         AIMessage(content='', tool_calls=[
             {'name': 'write_file', 'args': {'path': 'progress.txt', 'content': content}, 'id': content},
         ]) for content in ['first', 'second', 'third']
@@ -154,6 +154,34 @@ async def test_agent_stops_at_configured_turn_limit(profile, scripted_model, mon
     with pytest.raises(RuntimeError, match='Tool-turn limit exceeded'):
         await runtime.run_agent(profile)
     assert (profile.root / 'progress.txt').read_text() == 'second'
+    for request, remaining in zip(model.requests, [2, 1]):
+        assert f'{remaining} model turn' in request[-1].content
+
+
+@pytest.mark.parametrize('content,error', [
+    ('{"findings": []}', None),
+    (json.dumps({'findings': [{'summary': 'Missing authorization',
+                              'target': 'implementation'}]}), None),
+    ('not json', 'without a readable findings.json'),
+    ('{"findings": [{"summary": "Missing authorization", "target": "invalid"}]}',
+     'Every finding needs a summary and a target'),
+    (None, 'Tool-turn limit exceeded'),
+])
+async def test_review_finishes_on_its_last_tool_turn_only_with_valid_findings(
+        profile, scripted_model, monkeypatch, content, error):
+    from app.review.agent import FINDINGS, validate_completion
+
+    monkeypatch.setenv('TEST_AGENT_MAX_TURNS', '1')
+    model = scripted_model([write(FINDINGS, content) if content is not None
+                            else write('notes.txt', 'Still investigating')])
+    review = replace(profile, validate_completion=validate_completion, completion_file=FINDINGS)
+    if error:
+        with pytest.raises(RuntimeError, match=error):
+            await runtime.run_agent(review)
+    else:
+        await runtime.run_agent(review)
+        assert json.loads((profile.root / FINDINGS).read_text()) == json.loads(content)
+    assert len(model.requests) == 1
 
 
 def write(path, content='x'):

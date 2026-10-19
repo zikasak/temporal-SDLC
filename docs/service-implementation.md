@@ -251,6 +251,12 @@ least the latest) are kept verbatim; current code is re-read from disk. The sett
 forwarded from the worker's environment to coding containers. Claude uses native
 compaction instead; `AGENT_CONTEXT_TOKENS` does not alter its context window.
 
+The OpenAI and Pi loop reports the remaining turn budget during its last ten turns,
+asking the agent to finish its required files. History compaction does not reset the
+turn budget. The review stage ends as soon as it writes a valid `findings.json`, including
+on the final allowed tool turn; it needs no additional model reply. Native Claude reviews
+also stop after this file is written. Missing or malformed findings still fail the review.
+
 Contracts whose embedded form exceeds `CONTRACT_EMBED_CHARS` (default 60000 characters)
 are supplied on demand instead. `/workspace/input.json` then holds an index of every
 requirement (ID, category, priority, title), endpoint (operation, summary, requirement
