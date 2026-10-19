@@ -140,6 +140,18 @@ def _privacy_exporter():
     )
 
 
+# The MCP SDK traces every tools/call it serves to Claude, without arguments or results.
+# The Claude plugin already exports those calls, with their content, from the transcript.
+_IGNORED_SCOPES = {'mcp-python-sdk'}
+
+
+def _should_export(span) -> bool:
+    from langfuse.span_filter import is_default_export_span
+
+    scope = span.instrumentation_scope
+    return (scope is None or scope.name not in _IGNORED_SCOPES) and is_default_export_span(span)
+
+
 @lru_cache(maxsize=1)
 def _client():
     # Lazy initialization is important: host config loads .env first, while
@@ -149,6 +161,7 @@ def _client():
     try:
         client = Langfuse(mask_otel_spans=mask_otel_spans,
                           span_exporter=_privacy_exporter(),
+                          should_export_span=_should_export,
                           environment=os.getenv('LANGFUSE_TRACING_ENVIRONMENT', 'development'))
     except Exception:
         logger.warning('Langfuse initialization failed; tracing disabled')
