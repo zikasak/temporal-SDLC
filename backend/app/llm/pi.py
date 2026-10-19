@@ -1,5 +1,6 @@
 """LangChain chat model backed by the Pi coding-agent CLI (`pi --mode json`)."""
 import asyncio
+import hashlib
 import json
 import os
 import signal
@@ -82,6 +83,7 @@ class ChatPi(BaseChatModel):
             command += ['--thinking', self.thinking_level]
         if system:
             command += ['--system-prompt', system]
+        command += ['--session-id', _session_id(system, messages)]
         env = {**os.environ, AGENT_DIR_ENV: self.agent_dir} if self.agent_dir else os.environ
         async with async_context(tempfile.NamedTemporaryFile, 'w', suffix='.json') as request:
             await run_sync(json.dump, {'tools': list(tools), 'messages': _pi_messages(messages)},
@@ -136,6 +138,15 @@ class ChatPi(BaseChatModel):
         info = {'cost_details': {COST_KEYS[key]: value for key, value in cost.items()
                                  if key in COST_KEYS}} if cost.get('total') else None
         return ChatResult(generations=[ChatGeneration(message=message, generation_info=info)])
+
+
+def _session_id(system: str, messages: list[BaseMessage]) -> str:
+    """An id shared by every request of one conversation. Pi sends it as the provider's
+    prompt cache key, so a fresh id per process would scatter the conversation's requests
+    across caches that never hold its earlier turns."""
+    opening = next((message.text for message in messages
+                    if not isinstance(message, SystemMessage)), '')
+    return hashlib.sha256(json.dumps([system, opening]).encode()).hexdigest()[:32]
 
 
 def _pi_messages(messages: list[BaseMessage]) -> list[dict[str, Any]]:
