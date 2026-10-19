@@ -51,6 +51,10 @@ class AgentProfile:
     checkpoint_prompt: str | None = None
     # Offers the note tool, whose notes are kept verbatim across history compaction.
     working_notes: bool = False
+    # For report-only stages: when the turns run out without the completion file, one
+    # last request without tools writes it from the notes, the checkpoint and the latest
+    # history, as this prompt asks. The reply becomes the file's content.
+    wrap_up_prompt: str | None = None
 
 
 READ_LINES = 500
@@ -115,6 +119,10 @@ DIRECT_QUESTION_NOTICE = ('[System] Your last message asked a question in its te
                           'ask the user, call ask_user. Otherwise decide yourself, finish the '
                           'work, and end with a summary that asks nothing.')
 FINISHING_TURNS = 10
+TURN_BUDGET = """
+You have {turns} model turns for this task; each reply of yours is one, however many tool
+calls it makes. Plan the work to fit, and batch independent tool calls into one turn.
+"""
 DIAGNOSTIC = re.compile(r'\[ERROR\]|\berror\b|BUILD (SUCCESS|FAILURE)|Exception|FAILED|Tests run:')
 
 
@@ -540,9 +548,6 @@ async def _run_with_provider(profile: AgentProfile, provider) -> bool:
              ask_user_tool(), *([note_tool(working)] if profile.working_notes else [])]
     by_name = {item.name: item for item in tools}
     model = provider.bind_tools(tools)
-    # The instructions and authoritative inputs are never compacted.
-    head = [SystemMessage(content=profile.prompt + ASK_GUIDANCE),
-            *(HumanMessage(content=text) for text in profile.initial_messages)]
     checkpoint: list[BaseMessage] = []
     history: list[BaseMessage] = []
     notes = ''
@@ -556,6 +561,9 @@ async def _run_with_provider(profile: AgentProfile, provider) -> bool:
         turns, nudges = resumed['turns'], resumed['nudges']
         working += resumed.get('working', [])
         print('Resumed with the user\'s answers', flush=True)
+    # The instructions and authoritative inputs are never compacted.
+    head = [SystemMessage(content=profile.prompt + ASK_GUIDANCE + TURN_BUDGET.format(turns=turns)),
+            *(HumanMessage(content=text) for text in profile.initial_messages)]
     budget = int(os.getenv(CONTEXT_TOKENS_ENV, str(DEFAULT_CONTEXT_TOKENS)))
     schemas = len(json.dumps([convert_to_openai_tool(item) for item in tools])) // TOKEN_CHARS
     fixed = schemas + sum(_tokens(message) for message in head)
@@ -642,12 +650,40 @@ async def _run_with_provider(profile: AgentProfile, provider) -> bool:
             {'config': {**config, 'run_name': 'compact-history'}} if traced_config else {}
         ))).text.strip()
         files = f'\nFiles written or edited so far: {", ".join(changed)}' if changed else ''
-        noted = ''.join(f'\n- {item}' for item in working)
-        noted = f'\nYour notes so far:{noted}' if noted else ''
+        left = f'\nModel turns remaining: {remaining - 1}.'
         checkpoint = [HumanMessage(
-            content=f'{CHECKPOINT_NOTICE}{files}{noted}\n\n{notes}'.strip())]
+            content=f'{CHECKPOINT_NOTICE}{left}{files}{_noted(working)}\n\n{notes}'.strip())]
         del history[:start]
         measured, counted = fixed + _tokens(checkpoint[0]), 0
         print(f'Compacted {start} messages into a checkpoint (about {used} tokens in use)',
               flush=True)
-    raise RuntimeError(profile.exhaustion_message)
+    if not (profile.wrap_up_prompt and profile.completion_file):
+        raise RuntimeError(profile.exhaustion_message)
+    await _wrap_up(profile, provider, notes, working, history, traced_config)
+    return False
+
+
+def _noted(working: Sequence[str]) -> str:
+    return ''.join(['\nYour notes so far:', *(f'\n- {item}' for item in working)]
+                   if working else [])
+
+
+async def _wrap_up(profile: AgentProfile, provider, notes: str, working: Sequence[str],
+                   history: Sequence[BaseMessage], traced_config: dict[str, Any]) -> None:
+    """Write the completion file of a run whose turns ran out from what it established."""
+    inputs = '\n\n'.join(profile.initial_messages)
+    request = [SystemMessage(content=profile.wrap_up_prompt + CLIP_NOTICE), HumanMessage(content=(
+        f'Task inputs:\n{inputs}\n{_noted(working)}\n\n'
+        + (f'Checkpoint:\n{notes}\n\n' if notes else '')
+        + 'Latest history:\n' + _transcript(history)))]
+    config = traced_config.get('config')
+    reply = await provider.ainvoke(request, **(
+        {'config': {**config, 'run_name': 'wrap-up'}} if config else {}))
+    content = re.sub(r'^```\w*\n|\n?```$', '', reply.text.strip())
+    target = profile.root / profile.completion_file
+    await run_sync(target.write_text, content)
+    try:
+        await run_sync(profile.validate_completion, profile.root)
+    except RuntimeError as exc:
+        raise RuntimeError(profile.exhaustion_message) from exc
+    print(f'{profile.completion_message} from its notes after the turn limit', flush=True)

@@ -42,6 +42,11 @@ MAX_FINDINGS_BYTES = 256 * 1024
 MAX_DIFF_CHARS = 2 * 1024 * 1024
 MAX_FILE_BYTES = 1024 * 1024
 LISTED_CHANGES = 500
+# Larger changes are split by file into parts that separate review runs take in turn, so
+# each part's diff and the code around it fit one agent's context.
+PART_DIFF_CHARS = 60_000
+# Which part of the changes a review run takes, counted from 0, in the activity context.
+PART_KEY = 'review_part'
 
 
 def record_baseline(language: Language, session_dir: Path) -> Path:
@@ -81,33 +86,47 @@ def _lines(path: Path | None) -> list[str] | None:
         return None
 
 
-def changed_files(before: Path, after: Path, prefix: str) -> tuple[list[str], str]:
-    """The paths, under `prefix`, that differ between the trees, and their unified diff."""
+def changed_files(before: Path, after: Path, prefix: str) -> dict[str, str]:
+    """The paths, under `prefix`, that differ between the trees, each with its unified diff,
+    in path order."""
     old, new = _files(before), _files(after)
-    changed: list[str] = []
-    parts: list[str] = []
+    changed: dict[str, str] = {}
     for relative in sorted(old.keys() | new.keys()):
         source, target = old.get(relative), new.get(relative)
         if source and target and source.read_bytes() == target.read_bytes():
             continue
         name = f'{prefix}/{relative}'
-        changed.append(name)
         a, b = _lines(source), _lines(target)
         if a is None or b is None:
-            parts.append(f'Binary or large file {name} differs\n')
+            changed[name] = f'Binary or large file {name} differs\n'
             continue
-        parts.extend(difflib.unified_diff(
+        lines = list(difflib.unified_diff(
             a, b, fromfile=f'a/{name}' if source else '/dev/null',
             tofile=f'b/{name}' if target else '/dev/null'))
-        if parts and not parts[-1].endswith('\n'):
-            parts[-1] += '\n'
-    return changed, ''.join(parts)
+        if lines and not lines[-1].endswith('\n'):
+            lines[-1] += '\n'
+        changed[name] = ''.join(lines)
+    return changed
+
+
+def review_parts(diffs: dict[str, str]) -> list[list[str]]:
+    """Consecutive changed files grouped into parts of at most PART_DIFF_CHARS of diff,
+    so files of one directory tend to share a part; a larger file is a part of its own."""
+    parts: list[list[str]] = []
+    size = 0
+    for path, diff in diffs.items():
+        if not parts or size + len(diff) > PART_DIFF_CHARS:
+            parts.append([])
+            size = 0
+        parts[-1].append(path)
+        size += len(diff)
+    return parts
 
 
 def prepare_review(language: Language, session_dir: Path, context: dict[str, Any],
-                   workspace: Path) -> dict[str, list[str]]:
-    """Both verified source trees, their changes and the contracts; nothing else. Returns
-    the changed files of each side."""
+                   workspace: Path, part: int = 0) -> tuple[dict[str, list[str]], int]:
+    """Both verified source trees, the changes of the given part and the contracts; nothing
+    else. Returns the changed files of each side in that part, and the number of parts."""
     service = session_dir / 'implementation/service'
     suite = session_dir / 'tests/suite'
     if not all(item.is_dir() for item in (service, suite)):
@@ -118,14 +137,24 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
     review = workspace / 'review'
     copy_service(language, service, review / 'service')
     copy_regular_files(suite, review / 'tests', include=lambda relative: True)
-    service_changes, service_diff = changed_files(service_before, review / 'service', 'service')
-    tests_changes, tests_diff = changed_files(tests_before, review / 'tests', 'tests')
-    diff = service_diff + tests_diff
+    diffs = {**changed_files(service_before, review / 'service', 'service'),
+             **changed_files(tests_before, review / 'tests', 'tests')}
+    parts = review_parts(diffs)
+    if part >= max(len(parts), 1):
+        raise ApplicationError(f'The changes have no review part {part}', non_retryable=True)
+    own = parts[part] if parts else []
+    diff = ''.join(diffs[path] for path in own)
     if len(diff) > MAX_DIFF_CHARS:
         diff = (diff[:MAX_DIFF_CHARS]
                 + '\n[The diff is cut here; read the remaining changed files directly.]\n')
     (review / 'changes.diff').write_text(diff, encoding='utf-8')
-    changes = {'service': service_changes, 'tests': tests_changes}
+
+    def by_side(paths: list[str]) -> dict[str, list[str]]:
+        return {side: [path for path in paths if path.startswith(f'{side}/')][:LISTED_CHANGES]
+                for side in ('service', 'tests')}
+
+    changes = by_side(own)
+    others = [path for path in diffs if path not in own]
     contracts = without_repeated_tables(
         {key: value for key, value in context.items()
          if key not in ('instructions', 'repository', 'language')})
@@ -135,11 +164,12 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
         write_contracts(workspace, files)
     instructions = str(context.get('instructions') or '')[:INSTRUCTIONS_CHARS]
     (workspace / 'input.json').write_text(json.dumps(
-        {**index,
-         'changes': {side: paths[:LISTED_CHANGES] for side, paths in changes.items()},
+        {**index, 'changes': changes,
+         **({PART_KEY: {'part': part + 1, 'of': len(parts), 'other_changes': by_side(others)}}
+            if len(parts) > 1 else {}),
          **({'instructions': instructions} if instructions else {})},
         ensure_ascii=False))
-    return changes
+    return changes, max(len(parts), 1)
 
 
 def read_findings(output: Path, changed: set[str]) -> list[ReviewFinding]:
@@ -183,7 +213,9 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
         raise ApplicationError('Invalid session ID', non_retryable=True)
     answers = context.get(ANSWERS_KEY)
-    context = {key: value for key, value in context.items() if key != ANSWERS_KEY}
+    part = int(context.get(PART_KEY) or 0)
+    context = {key: value for key, value in context.items()
+               if key not in (ANSWERS_KEY, PART_KEY)}
     language = session_language(context.get('language'))
     session_dir = GENERATED_CODE_DIR / session_id
     artifact_dir = session_dir / 'review'
@@ -195,18 +227,21 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
         if answers:
             # The paused review continues in the workspace it left.
             await run_sync(docker_agents.resume_workspace, paused, workspace, answers)
-            changes = (
-                json.loads(await run_sync((workspace / 'input.json').read_text)).get('changes')
-                or {}
-            )
+            inputs = json.loads(await run_sync((workspace / 'input.json').read_text))
+            changes = inputs.get('changes') or {}
+            count = int((inputs.get(PART_KEY) or {}).get('of') or 1)
         else:
             await run_sync(workspace.mkdir)
-            changes = await run_sync(prepare_review, language, session_dir, context, workspace)
+            changes, count = await run_sync(
+                prepare_review, language, session_dir, context, workspace, part)
         changed = {path for paths in changes.values() for path in paths}
+        # The workflow runs the next part's review with this in its context.
+        following = {'next_part': part + 1} if part + 1 < count else {}
         if not changed:
             await run_sync(shutil.rmtree, paused, ignore_errors=True)
             logger.info('Nothing to review (session=%s)', session_id)
-            return {'session_id': session_id, 'findings': [], 'path': str(artifact_dir)}
+            return {'session_id': session_id, 'findings': [], 'path': str(artifact_dir),
+                    **following}
         async with docker_agents.keep_activity_alive('Reviewing the delivery'):
             output = work / 'output'
             try:
@@ -224,9 +259,11 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
     await run_sync(
         manifest.write_text, json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8'
     )
-    await run_sync(os.replace, manifest, artifact_dir / FINDINGS)
-    logger.info('Code review finished (session=%s, findings=%d)', session_id, len(findings))
-    return result
+    name = FINDINGS if count == 1 else f'findings-part-{part + 1}.json'
+    await run_sync(os.replace, manifest, artifact_dir / name)
+    logger.info('Code review finished (session=%s, part=%d/%d, findings=%d)',
+                session_id, part + 1, count, len(findings))
+    return {**result, **following}
 
 
 @activity.defn
