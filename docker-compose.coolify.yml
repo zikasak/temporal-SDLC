@@ -17,7 +17,8 @@
 # https://app.example.com). Pi uses OPENAI_API_KEY for openai/* models and
 # ANTHROPIC_API_KEY for anthropic/* models. For openai-codex/*, sign in with Pi in
 # the API container as user app (UID 10001); its dedicated credential volume is
-# shared with workers and the sandbox daemon so OAuth refreshes persist.
+# shared with workers and the sandbox daemon so OAuth refreshes persist. The API refreshes
+# the OAuth tokens ahead of expiry, so agent containers, which can be killed, never do.
 # Provider and Langfuse URLs must be reachable from the sandbox, so not localhost.
 
 x-app: &app

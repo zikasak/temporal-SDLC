@@ -14,6 +14,7 @@ from app.auth.storage import ensure_schema as ensure_auth_schema
 from app.documents import cleanup_expired_documents, ensure_document_schema
 from app.logging_setup import configure_logging
 from app.github.storage import ensure_schema as ensure_github_schema
+from app.llm.pi_credentials import refresh_pi_credentials_loop
 from app.temporal.client import TemporalUnavailable
 from app.temporal.registry import ensure_schema as ensure_registry_schema
 from app.settings.storage import ensure_schema as ensure_settings_schema
@@ -38,14 +39,16 @@ async def lifespan(_: FastAPI):
     await ensure_auth_schema()
     await ensure_registry_schema()
     await ensure_settings_schema()
-    cleanup_task = asyncio.create_task(_cleanup_loop())
+    tasks = [asyncio.create_task(_cleanup_loop()), asyncio.create_task(refresh_pi_credentials_loop())]
     logger.info("API started")
     try:
         yield
     finally:
-        cleanup_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await cleanup_task
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with suppress(asyncio.CancelledError):
+                await task
         logger.info("API stopped")
 
 
