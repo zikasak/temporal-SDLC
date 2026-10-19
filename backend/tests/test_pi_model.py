@@ -118,6 +118,21 @@ def test_history_is_sent_as_native_messages(fake_pi):
     assert 'Paris' not in call['stdin']
 
 
+def test_requests_of_one_conversation_share_a_session_id(fake_pi):
+    install, calls = fake_pi
+    model = ChatPi(command=install([assistant('a')], [assistant('b')], [assistant('c')]))
+    opening = [SystemMessage('Be brief.'), HumanMessage('Weather in Paris?')]
+
+    model.invoke(opening)
+    model.invoke([*opening, AIMessage('Sunny.'), HumanMessage('And tomorrow?')])
+    model.invoke([SystemMessage('Be brief.'), HumanMessage('Weather in Rome?')])
+
+    first, later, other = [call['argv'][call['argv'].index('--session-id') + 1]
+                           for call in calls()]
+    # Pi turns the session id into the provider's prompt cache key.
+    assert first == later != other
+
+
 def test_bound_tools_are_declared_and_their_calls_returned(fake_pi):
     install, calls = fake_pi
 
