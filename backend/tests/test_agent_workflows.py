@@ -93,7 +93,9 @@ async def test_agent_pauses_for_answers_and_resumes_where_it_stopped(tmp_path, p
     ])
     await runtime.run_agent(profile)
     system, inputs, call, answered, written = model.requests[0]
-    assert system.content == profile.prompt + runtime.ASK_GUIDANCE
+    # The resumed run is told the turns left of the budget, not the whole budget again.
+    assert system.content == (profile.prompt + runtime.ASK_GUIDANCE
+                              + runtime.TURN_BUDGET.format(turns=79))
     # The results follow the order of the calls.
     assert [item['id'] for item in call.tool_calls] == ['ask', 'orders']
     assert written.tool_call_id == 'orders'
@@ -184,6 +186,36 @@ async def test_review_finishes_on_its_last_tool_turn_only_with_valid_findings(
     assert len(model.requests) == 1
 
 
+@pytest.mark.parametrize('reply,error', [
+    ('```json\n{"findings": [{"summary": "Refunds miss the 409", "target": "implementation"}]}'
+     '\n```', None),
+    ('No findings could be established.', 'Tool-turn limit exceeded'),
+])
+async def test_review_out_of_turns_writes_its_findings_from_its_notes(
+        profile, scripted_model, monkeypatch, reply, error):
+    from app.review.agent import FINDINGS, validate_completion
+
+    monkeypatch.setenv('TEST_AGENT_MAX_TURNS', '1')
+    verdict = 'service/refunds.py:20 returns 200 where the contract requires 409'
+    model = scripted_model([
+        AIMessage(content='', tool_calls=[
+            {'name': 'note', 'args': {'text': verdict}, 'id': 'note'}]),
+        AIMessage(content=reply),
+    ])
+    review = replace(profile, validate_completion=validate_completion, completion_file=FINDINGS,
+                     working_notes=True, wrap_up_prompt='Write the established findings.')
+    if error:
+        with pytest.raises(RuntimeError, match=error):
+            await runtime.run_agent(review)
+    else:
+        await runtime.run_agent(review)
+        assert json.loads((profile.root / FINDINGS).read_text()) == {'findings': [
+            {'summary': 'Refunds miss the 409', 'target': 'implementation'}]}
+    system, request = model.requests[1]
+    assert system.content == 'Write the established findings.' + runtime.CLIP_NOTICE
+    assert 'requirements' in request.content and f'- {verdict}' in request.content
+
+
 def write(path, content='x'):
     return AIMessage(content='', tool_calls=[
         {'name': 'write_file', 'args': {'path': path, 'content': content}, 'id': path}])
@@ -235,7 +267,8 @@ async def test_stale_history_becomes_a_checkpoint_within_the_context_budget(
             (third_turn, 'Orders.java, Stock.java', 'Payments, Dockerfile'),
             (later[-1], 'Orders.java, Stock.java, Payments.java', 'Dockerfile')]:
         system, inputs, checkpoint, *recent = request
-        assert isinstance(system, SystemMessage) and system.content == profile.prompt + runtime.ASK_GUIDANCE
+        assert isinstance(system, SystemMessage) and system.content == (
+            profile.prompt + runtime.ASK_GUIDANCE + runtime.TURN_BUDGET.format(turns=80))
         assert isinstance(inputs, HumanMessage) and inputs.content == 'requirements'
         assert isinstance(checkpoint, HumanMessage)
         assert f'Files written or edited so far: {files}\n' in checkpoint.content

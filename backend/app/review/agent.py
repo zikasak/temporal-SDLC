@@ -16,6 +16,10 @@ TARGETS = {'implementation', 'tests', 'both'}
 # What the session's language calls itself, written by the host.
 LANGUAGE = Path('/workspace/language.json')
 
+FINDINGS_FORMAT = """{"findings": [{"summary": "what is wrong and why it needs a correction",
+              "path": "service/... or tests/... the changed file, when it is about one",
+              "target": "implementation" or "tests" or "both",
+              "reason": "briefly, why that worker"}]}"""
 PROMPT = """You review the changes a delivery made to a {label} service and to its HTTP
 contract tests. The implementation and the tests were written independently from the
 same requirements and OpenAPI design, and the tests already pass against the service.
@@ -58,10 +62,7 @@ your notes already judge.
 
 Do not change service/ or tests/ and do not run the tests. Finish by writing findings.json
 in the project root with write_file, containing exactly this JSON object:
-{{"findings": [{{"summary": "what is wrong and why it needs a correction",
-                "path": "service/... or tests/... the changed file, when it is about one",
-                "target": "implementation" or "tests" or "both",
-                "reason": "briefly, why that worker"}}]}}
+{findings_format}
 Writing findings.json ends the review immediately, so write it only when the findings are
 final. No additional tool call or final text reply is needed.
 """
@@ -77,6 +78,25 @@ are not read again.
 Remaining: changed files and ranges not yet reviewed, most significant first.
 Do not reproduce code. Be specific and concise. Record only what the history shows; never
 guess.
+"""
+# Used when the reviewer's turns run out before it wrote findings.json.
+WRAP_UP_PROMPT = f"""A code reviewer ran out of its tool-turn budget before it wrote its
+findings. From the task inputs, its notes, its checkpoint and its latest history below,
+write the findings its evidence establishes, as exactly this JSON object and nothing else:
+{FINDINGS_FORMAT}
+Leave out what is unverified or speculative, and anything about code the delivery did not
+change; an empty list is right when nothing is established. Make each summary
+self-contained: name the endpoint or requirement, quote what the contract requires, state
+the wrong or missing behaviour and the required correction. Send each finding to
+"implementation" when the service must change, "tests" when the tests must change and
+"both" when both must.
+"""
+PART_PROMPT = """
+The delivery's changes are too large for one review, so separate reviewers each review one
+part of them; the `review_part` entry of the input says which part is yours. Your part is the
+files in `changes` and their diff in changes.diff. `review_part.other_changes` lists the
+files the other parts review: read them where your files depend on them, but report only
+problems in your own part's changes.
 """
 CHANGE_PROMPT = """
 The service existed before this delivery and was changed for the task in the `brief` entry
@@ -112,7 +132,8 @@ async def main() -> None:
     inputs = json.loads(context)
     language = json.loads(await run_sync(LANGUAGE.read_text))
     await run_agent(AgentProfile(
-        root=ROOT, prompt=(PROMPT.format(label=language['label'])
+        root=ROOT, prompt=(PROMPT.format(label=language['label'], findings_format=FINDINGS_FORMAT)
+                           + (PART_PROMPT if inputs.get('review_part') else '')
                            + (CHANGE_PROMPT if inputs.get('brief') else '')
                            + (INSTRUCTIONS_PROMPT if inputs.get('instructions') else '')),
         initial_messages=[context],
@@ -120,6 +141,7 @@ async def main() -> None:
         completion_message='Code review completed',
         exhaustion_message='Code review exceeded the tool-turn limit',
         completion_file=FINDINGS, checkpoint_prompt=CHECKPOINT_PROMPT, working_notes=True,
+        wrap_up_prompt=WRAP_UP_PROMPT,
         contracts=CONTRACTS if await run_sync(CONTRACTS.is_dir) else None,
         build_dirs=language['build_dirs'],
     ))
