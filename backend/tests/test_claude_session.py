@@ -106,6 +106,34 @@ async def test_authoring_stops_without_another_model_request(claude_http, tmp_pa
         assert not (tmp_path / runtime.STATE_FILENAME).exists()
 
 
+@pytest.mark.parametrize('content,error', [
+    ('{"findings": []}', None),
+    ('not json', 'without a readable findings.json'),
+])
+async def test_native_review_stops_after_writing_findings(
+        claude_http, tmp_path, monkeypatch, content, error):
+    from app.review.agent import FINDINGS, validate_completion as validate_review
+
+    replies, requests = claude_http
+    monkeypatch.setenv('TEST_AGENT_MAX_TURNS', '1')
+    replies.append([native_call('report', 'write_file', path=FINDINGS, content=content)])
+    root = tmp_path / 'review'
+    root.mkdir()
+    profile = runtime.AgentProfile(
+        root=root, prompt='Review the supplied changes', initial_messages=['requirements'],
+        max_turns_env='TEST_AGENT_MAX_TURNS', validate_completion=validate_review,
+        completion_message='Reviewed', exhaustion_message='Tool-turn limit exceeded',
+        completion_file=FINDINGS)
+
+    if error:
+        with pytest.raises(RuntimeError, match=error):
+            await runtime.run_agent(profile)
+    else:
+        await runtime.run_agent(profile)
+        assert json.loads((root / FINDINGS).read_text()) == {'findings': []}
+    assert len(requests) == 1
+
+
 @pytest.mark.parametrize('turns', [1, 3, 5])
 async def test_correction_queries_share_the_stage_turn_budget(
         claude_http, tmp_path, monkeypatch, turns):
