@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir langchain==1.4.2 langchain-openai==1.6.6 langchai
 RUN pip install --no-cache-dir claude-agent-sdk==0.2.164
 ARG AGENT_ROLE
 ARG WORKSPACE_NAME
-COPY app/__init__.py app/tracing.py /opt/app/
+COPY app/__init__.py app/asyncio_utils.py app/tracing.py /opt/app/
 COPY app/agent_workflows/__init__.py app/agent_workflows/runtime.py /opt/app/agent_workflows/
 COPY app/llm/__init__.py app/llm/factory.py app/llm/claude.py app/llm/mcp.py app/llm/claude_trace_hook.py app/llm/pi.py app/llm/pi_extension.ts app/llm/questions.py /opt/app/llm/
 COPY app/llm/plugins/ /opt/app/llm/plugins/
