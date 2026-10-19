@@ -48,8 +48,8 @@ for line in sys.stdin:
 @pytest.fixture
 def claude_http(monkeypatch, tmp_path):
     """The bundled Claude CLI against a loopback Anthropic endpoint: returns (replies,
-    requests), where each reply is the content blocks of the next response, or an error
-    body to answer with 401."""
+    requests), where each reply is the content blocks of the next response, a (seconds,
+    blocks) pair to send them after a delay, or an error body to answer with 401."""
     from app.settings.models import ModelSettings, SETTINGS_FILENAME
 
     requests, replies = [], []
@@ -67,6 +67,9 @@ def claude_http(monkeypatch, tmp_path):
                 return
             requests.append(body)
             blocks = replies.pop(0) if replies else [{'type': 'text', 'text': 'Unexpected request'}]
+            if isinstance(blocks, tuple):
+                delay, blocks = blocks
+                time.sleep(delay)
             if isinstance(blocks, dict):
                 replies.insert(0, blocks)
                 self.send_response(401)

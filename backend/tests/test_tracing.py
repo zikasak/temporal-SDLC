@@ -341,7 +341,63 @@ shutdown_tracing()
         parent = agent
     assert tool.parent_span_id == parent.span_id
     assert all(span.parent_span_id == parent.span_id for span in generations)
+    # The MCP SDK's own spans of the same calls carry no content and are not exported.
+    assert not [span for span in spans if span.name.startswith('tools/call')]
     assert_no_sensitive_content(spans)
+
+
+def test_claude_agent_without_progress_times_out_and_still_exports_its_session(
+        claude_http, tracing_server, tmp_path):
+    replies, requests = claude_http
+    environment, spans = tracing_server
+    environment.update(TEST_MODEL_SETTINGS=json.dumps({'adapter': 'claude', 'model': 'claude-test'}),
+                       TEST_WORKSPACE=str(tmp_path / 'stage'),
+                       APP_TRACE_SESSION_ID='stalled-pipeline', APP_TRACE_AGENT_ROLE='implementation')
+    # Together the replies outlast the timeout; only the last one is silent for longer.
+    replies.extend([(1.5, [{'type': 'tool_use', 'id': 'first', 'name': 'mcp__flow__write_file',
+                            'input': {'path': 'first.txt', 'content': 'first'}}]),
+                    (1.5, [{'type': 'tool_use', 'id': 'second', 'name': 'mcp__flow__write_file',
+                            'input': {'path': 'second.txt', 'content': 'second'}}]),
+                    (6, [{'type': 'text', 'text': 'Too late'}])])
+    run_script('''
+import asyncio, os
+from pathlib import Path
+from app.agent_workflows import runtime
+from app.settings.models import SETTINGS_FILENAME
+from app.tracing import shutdown_tracing
+create_adapter = runtime.create_adapter
+def impatient_adapter(*args, **kwargs):
+    provider = create_adapter(*args, **kwargs)
+    provider.timeout = 2.5
+    return provider
+runtime.create_adapter = impatient_adapter
+directory = Path(os.environ['TEST_WORKSPACE'])
+root = directory / 'service'
+root.mkdir(parents=True)
+(directory / SETTINGS_FILENAME).write_text(os.environ['TEST_MODEL_SETTINGS'])
+try:
+    asyncio.run(runtime.run_agent(runtime.AgentProfile(root=root, prompt='Write files',
+        initial_messages=['Create a service'], max_turns_env='TEST_AGENT_MAX_TURNS',
+        validate_completion=lambda root: None, completion_message='Done',
+        exhaustion_message='Too many turns')))
+except TimeoutError as exc:
+    assert 'sent nothing for 2.5 seconds' in str(exc)
+else:
+    raise AssertionError('The stalled agent finished')
+assert (root / 'second.txt').read_text() == 'second'
+shutdown_tracing()
+''', environment)
+    assert len(requests) == 3
+    agent, = [span for span in spans if span.name == 'author-implementation']
+    assert attributes(agent)['langfuse.observation.level'] == 'ERROR'
+    native_turn, = [span for span in spans if span.name == 'Conversational Turn']
+    assert native_turn.parent_span_id == agent.span_id
+    tools = [span for span in spans if attributes(span).get('langfuse.observation.type') == 'tool']
+    assert [span.name for span in tools] == ['Tool: mcp__flow__write_file'] * 2
+    assert all(span.parent_span_id == native_turn.span_id for span in tools)
+    generations = [span for span in spans
+                   if attributes(span).get('langfuse.observation.type') == 'generation']
+    assert len(generations) == 2
 
 
 def test_claude_pause_resume_exports_each_native_call_once_under_its_current_stage(

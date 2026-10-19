@@ -1,6 +1,7 @@
 """Native Claude Agent SDK sessions; Claude owns its history and MCP tool loop."""
 import asyncio
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -11,7 +12,7 @@ from pathlib import Path
 
 from claude_agent_sdk import (
     AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ClaudeSDKError,
-    HookMatcher, ResultMessage, TextBlock,
+    HookMatcher, ResultMessage, SystemMessage as NativeSystemMessage, TextBlock,
 )
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
@@ -21,7 +22,10 @@ from app.asyncio_utils import async_context, run_sync
 from app.llm.mcp import TOOL_PREFIX, TOOL_SERVER, flow_server
 from app.tracing import claude_trace_environment
 
+logger = logging.getLogger(__name__)
 PLUGIN = Path(__file__).with_name('plugins') / 'langfuse-observability'
+# Bounds exporting a transcript the plugin's hooks left behind.
+TRACE_EXPORT_TIMEOUT = 120
 
 
 class ClaudeTurnLimit(RuntimeError):
@@ -33,6 +37,7 @@ class ChatClaude(Runnable):
     model: str | None = None
     thinking_level: str = 'default'
     cli_path: str | None = None
+    # Seconds without any message from Claude; a coding stage's many turns may take longer.
     timeout: float = 600
     # Coding stages keep native transcripts beside the project through a pause.
     cwd: Path | None = None
@@ -42,6 +47,9 @@ class ChatClaude(Runnable):
     turns_used: int = field(default=0, init=False)
     _stack: AsyncExitStack | None = field(default=None, init=False, repr=False)
     _client: ClaudeSDKClient | None = field(default=None, init=False, repr=False)
+    # The native session's ID, and whether its latest request ended without a result.
+    _native_session: str | None = field(default=None, init=False, repr=False)
+    _unfinished: bool = field(default=False, init=False, repr=False)
     _messages: list[BaseMessage] = field(default_factory=list, init=False, repr=False)
 
     @asynccontextmanager
@@ -124,6 +132,11 @@ class ChatClaude(Runnable):
                             if self.config_dir is None and not native_tracing else {}),
                 env=env, resume=self.resume,
             )
+            self._native_session, self._unfinished = self.resume, False
+            if native_tracing:
+                # Runs once the CLI has exited and before its transcript is removed.
+                self._stack.push_async_callback(
+                    self._export_unfinished, env, Path(env['CLAUDE_CONFIG_DIR']))
             self._client = await self._stack.enter_async_context(ClaudeSDKClient(options))
         # Follow-ups append only new user messages. Native history, thinking, tool
         # results and compaction stay inside Claude; no transcript reconstruction.
@@ -139,10 +152,14 @@ class ChatClaude(Runnable):
         blocks = []
         message_id = None
         model_name = self.model
+        self._unfinished = True
         try:
-            async with asyncio.timeout(self.timeout):
+            async with asyncio.timeout(self.timeout) as deadline:
                 await self._client.query(prompt)
                 async for event in self._client.receive_response():
+                    deadline.reschedule(asyncio.get_running_loop().time() + self.timeout)
+                    if isinstance(event, NativeSystemMessage) and event.subtype == 'init':
+                        self._native_session = event.data.get('session_id') or self._native_session
                     if isinstance(event, AssistantMessage) and event.parent_tool_use_id is None:
                         if event.message_id != message_id:
                             blocks = []
@@ -151,9 +168,10 @@ class ChatClaude(Runnable):
                         model_name = event.model
                     elif isinstance(event, ResultMessage):
                         result = event
+                        self._native_session, self._unfinished = event.session_id, False
         except TimeoutError as exc:
             await self._client.interrupt()
-            raise TimeoutError(f'Claude did not finish within {self.timeout:g} seconds') from exc
+            raise TimeoutError(f'Claude sent nothing for {self.timeout:g} seconds') from exc
         except ClaudeSDKError:
             if result is None:
                 raise
@@ -175,6 +193,34 @@ class ChatClaude(Runnable):
         )
         self._messages = [*messages, reply]
         return reply
+
+    async def _export_unfinished(self, env: dict[str, str], config_dir: Path) -> None:
+        """Export a request that ended without a result. The plugin exports from the
+        Stop and SessionEnd hooks, which an interrupted or failed session never reaches
+        or the closing CLI cuts short. Turns it already exported are not repeated."""
+        session = self._native_session
+        if not self._unfinished or not session:
+            return
+        try:
+            transcripts = await run_sync(
+                lambda: sorted(config_dir.glob(f'projects/*/{session}.jsonl')))
+            if not transcripts:
+                return
+            payload = json.dumps({'session_id': session, 'transcript_path': str(transcripts[0]),
+                                  'hook_event_name': 'SessionEnd'})
+            process = await asyncio.create_subprocess_exec(
+                env['APP_CLAUDE_HOOK_PYTHON'], '-m', 'app.llm.claude_trace_hook',
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL, env={**os.environ, **env})
+            try:
+                await asyncio.wait_for(process.communicate(payload.encode()),
+                                       TRACE_EXPORT_TIMEOUT)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+                logger.warning('Exporting the unfinished Claude session timed out')
+        except Exception:
+            logger.warning('Could not export the unfinished Claude session', exc_info=True)
 
 
 def _prompt(messages: list[BaseMessage]) -> str:
