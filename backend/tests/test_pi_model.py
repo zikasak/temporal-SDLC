@@ -36,7 +36,9 @@ def assistant(*content, stop='stop', **fields):
     return {'type': 'message_end', 'message': {
         'role': 'assistant', 'content': [{'type': 'thinking', 'thinking': 'hmm'}, *blocks],
         'provider': 'openai', 'model': 'gpt-test', 'stopReason': stop,
-        'usage': {'input': 20, 'output': 5, 'cacheRead': 7, 'cacheWrite': 3}, **fields}}
+        'usage': {'input': 20, 'output': 5, 'cacheRead': 7, 'cacheWrite': 3,
+                  'cost': {'input': 0.2, 'output': 0.25, 'cacheRead': 0.007,
+                           'cacheWrite': 0.0375, 'total': 0.4945}}, **fields}}
 
 
 @pytest.fixture
@@ -72,7 +74,8 @@ def test_returns_final_text_and_usage(fake_pi):
 
     assert reply.content == 'line one line two'
     assert reply.tool_calls == []
-    assert reply.usage_metadata == {'input_tokens': 30, 'output_tokens': 5, 'total_tokens': 35}
+    assert reply.usage_metadata == {'input_tokens': 30, 'output_tokens': 5, 'total_tokens': 35,
+                                    'input_token_details': {'cache_read': 7, 'cache_creation': 3}}
     assert reply.response_metadata['model_name'] == 'gpt-test'
     [call] = calls()
     argv = call['argv']

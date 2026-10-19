@@ -34,6 +34,9 @@ PLACEHOLDER_PROMPT = 'continue'
 NO_USAGE = {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0, 'totalTokens': 0,
             'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0, 'total': 0}}
 MAX_ERROR_CHARS = 2000
+# Pi's cost categories under the usage names Langfuse derives from `usage_metadata`.
+COST_KEYS = {'input': 'input', 'output': 'output', 'cacheRead': 'input_cache_read',
+             'cacheWrite': 'input_cache_creation', 'total': 'total'}
 
 
 class ChatPi(BaseChatModel):
@@ -119,12 +122,20 @@ class ChatPi(BaseChatModel):
                         for block in content if block['type'] == 'toolCall'],
             usage_metadata={'input_tokens': prompt_tokens,
                             'output_tokens': usage.get('output', 0),
-                            'total_tokens': prompt_tokens + usage.get('output', 0)},
+                            'total_tokens': prompt_tokens + usage.get('output', 0),
+                            'input_token_details': {
+                                'cache_read': usage.get('cacheRead', 0),
+                                'cache_creation': usage.get('cacheWrite', 0)}},
             response_metadata={'model_name': reply.get('model'),
                                'model_provider': reply.get('provider'),
                                'finish_reason': reply.get('stopReason')},
         )
-        return ChatResult(generations=[ChatGeneration(message=message)])
+        cost = usage.get('cost') or {}
+        # Pi prices the request itself; a zero total means it had no price for the model,
+        # so the tracer is left to infer one.
+        info = {'cost_details': {COST_KEYS[key]: value for key, value in cost.items()
+                                 if key in COST_KEYS}} if cost.get('total') else None
+        return ChatResult(generations=[ChatGeneration(message=message, generation_info=info)])
 
 
 def _pi_messages(messages: list[BaseMessage]) -> list[dict[str, Any]]:
