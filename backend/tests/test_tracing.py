@@ -452,6 +452,43 @@ finally:
     assert all(attributes(span)['session.id'] == 'paused-pipeline' for span in spans)
 
 
+def test_pi_generation_reports_cache_usage_and_its_own_cost(tracing_server, tmp_path):
+    environment, spans = tracing_server
+    pi = tmp_path / 'pi'
+    pi.write_text(f'''#!{sys.executable}
+import json
+print(json.dumps({{'type': 'message_end', 'message': {{
+    'role': 'assistant', 'content': [{{'type': 'text', 'text': 'Hi'}}],
+    'provider': 'anthropic', 'model': 'claude-pi', 'stopReason': 'stop',
+    'usage': {{'input': 20, 'output': 5, 'cacheRead': 7, 'cacheWrite': 3,
+              'cost': {{'input': 0.2, 'output': 0.25, 'cacheRead': 0.007,
+                        'cacheWrite': 0.0375, 'total': 0.4945}}}}}}}}))
+''')
+    pi.chmod(0o755)
+    environment['TEST_PI_COMMAND'] = str(pi)
+    run_script('''
+import os
+from langchain_core.messages import HumanMessage
+from app.llm.pi import ChatPi
+from app.tracing import langchain_config, shutdown_tracing, trace_operation
+with trace_operation('pi-turn', session_id='session-pi', feature='test'):
+    reply = ChatPi(command=os.environ['TEST_PI_COMMAND']).invoke(
+        [HumanMessage('Hello')], config=langchain_config())
+assert reply.content == 'Hi'
+shutdown_tracing()
+''', environment)
+    generation, = [span for span in spans
+                   if attributes(span).get('langfuse.observation.type') == 'generation']
+    attrs = attributes(generation)
+    usage = json.loads(attrs['langfuse.observation.usage_details'])
+    # Cached prompt tokens are reported apart from the uncached input they add to.
+    assert (usage['input'], usage['input_cache_read'], usage['input_cache_creation'],
+            usage['output']) == (20, 7, 3, 5)
+    assert json.loads(attrs['langfuse.observation.cost_details']) == {
+        'input': 0.2, 'output': 0.25, 'input_cache_read': 0.007,
+        'input_cache_creation': 0.0375, 'total': 0.4945}
+
+
 def test_provider_failure_still_raises_and_exports_a_redacted_error(tracing_server):
     environment, spans = tracing_server
     run_script('''

@@ -190,6 +190,15 @@ def langchain_config(**settings) -> dict:
                 # generation, tool and retriever callbacks under that root.
                 return True
 
+            def on_llm_end(self, response, *, run_id, **kwargs):
+                # Adapters that price their own requests (Pi) pass the cost alongside
+                # the generation; it must land before the handler ends the observation.
+                info = response.generations[-1][-1].generation_info or {}
+                generation = self._runs.get(run_id)
+                if info.get('cost_details') and generation is not None:
+                    generation.update(cost_details=info['cost_details'])
+                return super().on_llm_end(response, run_id=run_id, **kwargs)
+
         settings['callbacks'] = [AgentCallbackHandler(public_key=os.environ['LANGFUSE_PUBLIC_KEY'])]
     return settings
 
