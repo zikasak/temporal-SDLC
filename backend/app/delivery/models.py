@@ -1,5 +1,6 @@
 """What the delivery pipeline is asked to build and how far it has come."""
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any, Literal, TypedDict
 
 from app.api_design.models import ApiModel
@@ -18,6 +19,9 @@ from app.verification.models import VerificationResult, VerificationStatus
 RetryStage = Literal['server', 'tests', 'documentation', 'repository', 'review']
 RETRY_STAGES = ('server', 'tests', 'documentation', 'repository', 'review')
 NAMED_TESTS = 5
+# How long a finished delivery waits for the user's next decision, such as a retry, and
+# its sessions with it. Only a closed workflow falls to the namespace's retention.
+TASK_IDLE_TIMEOUT = timedelta(days=14)
 # How the tests a change added fared against the service as the repository holds it.
 # `reproduced`: they all fail and the existing tests pass, so the change has something to
 # turn green. `not_reproduced`: one of them does not fail, so nothing may be fixed.
@@ -208,6 +212,46 @@ class DeliveryState:
     # A run that only records the progress as it is given, such as the user's acceptance
     # of open review findings.
     record_only: bool = False
+    # Raised once the run has done its work and waits for the user's next decision; a
+    # restart continues the delivery as a new run of the same workflow.
+    waiting: bool = False
+
+
+STOPPED = 'The delivery was stopped before this stage finished.'
+
+
+def interrupted(state: DeliveryState) -> DeliveryState:
+    """A run stopped from outside, such as a terminated one, as a retry finds it: the
+    stage it was in has failed, so the retry of that stage goes on from there."""
+    progress = state.progress
+    state.waiting = False
+    progress.agent_questions = []
+    if progress.publication_status == 'running':
+        progress.publication_error = STOPPED
+        progress.publication_status = 'error'
+        progress.pull_request_status = 'skipped'
+    elif progress.pull_request_status == 'running':
+        progress.pull_request_error = STOPPED
+        progress.pull_request_status = 'error'
+    elif progress.verification_status == 'reviewing':
+        progress.review_error = STOPPED
+        progress.verification_status = 'error'
+    elif progress.verification_status == 'repairing' and progress.reviews:
+        # A correction of review findings; retrying the review goes on from it.
+        progress.correction_failed = True
+        progress.verification_status = 'error'
+    elif progress.verification_status in ('waiting', 'running', 'diagnosing', 'repairing'):
+        # Before the delivery was verified, the author whose retry starts it over failed.
+        if state.spec.kind == 'docs':
+            progress.documentation_error = STOPPED
+        elif state.spec.kind == 'bugfix':
+            progress.tests_error = STOPPED
+        elif not progress.code:
+            progress.code_error = STOPPED
+        else:
+            progress.implementation_error = STOPPED
+        progress.verification_status = 'error'
+    return state
 
 
 def open_review_findings(progress: DeliveryProgress) -> list:

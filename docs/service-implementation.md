@@ -13,7 +13,7 @@ A documentation task has one author and no service, tests or check; see
 [Changing documentation only](#changing-documentation-only).
 The delivery keeps each stage's result or error in its own `DeliveryProgress`, which the
 session GET endpoint merges into the session it reports. The design session stays open
-until its delivery ends.
+until its delivery ends; see [One workflow tree per task](#one-workflow-tree-per-task).
 After successful code generation the delivery starts `ImplementationWorkflow` and
 `TestGenerationWorkflow` on separate task queues.
 Both children start before either is awaited to completion. Each result becomes
@@ -337,12 +337,49 @@ with `{"stage": "server"}`, `{"stage": "tests"}` or, after a failed push,
 cannot be restarted; attempts while generation is active return HTTP 409.
 
 A retry starts a fresh `DeliveryWorkflow` run under the same delivery ID, preserving
-its task and successful sibling artifacts. The design session itself is never restarted.
+its task and successful sibling artifacts: the finished run, which waits for it, continues
+as new (the `restart` update), so the run stays its session's child. The design session
+itself is never restarted.
 Server retries rerun implementation/build, or codegen followed by both authoring
 branches if codegen itself failed. Test retries rerun only test generation/build.
 Each retried child gets a run-specific ID. Verification resumes automatically once
 both images are available; repeated failures remain manually retryable. This is a
 fresh authoring attempt from the original inputs, not repair using failure logs.
+
+### One workflow tree per task
+
+Requirements, API design, delivery and every retry of it are one Temporal workflow tree
+whose root is the requirements session, so no part of a task falls to the namespace's
+retention while another part goes on. Retention only deletes closed workflows, and here
+nothing closes while anything below it is open:
+
+```mermaid
+flowchart TD
+    requirements["RequirementsWorkflow<br/>requirements-session-…"]
+    design["ApiDesignWorkflow<br/>api-design-session-… (and its forks)"]
+    delivery["DeliveryWorkflow<br/>delivery-…: retries continue it as new"]
+    stages["Codegen, implementation, tests, verification,<br/>diagnosis, review, documentation"]
+    requirements --> design --> delivery --> stages
+    requirements -- bugfix, docs --> delivery
+```
+
+- A finalized requirements session whose task needs an API design stays open. `POST
+  /api-design/sessions` and API design forks start the design as its child (the
+  `start_api_design` update). The session closes once no design is open and none was started
+  for `TASK_IDLE_TIMEOUT` (14 days, `app/delivery/models.py`). Sessions that closed
+  before this existed still get top-level designs.
+- A delivery that has done its work does not close: `get_state().waiting` is raised and it
+  waits for the user's next decision (a stage retry, accepting open findings, or
+  instructions about them), each of which continues it as new. It closes after
+  `TASK_IDLE_TIMEOUT` without one, and its sessions close after it.
+- Terminating a stuck delivery does not end its session. Its progress then reports the
+  stage it stopped in as failed (`interrupted()` in `app/delivery/models.py`): the review,
+  the correction of review findings, the push, the pull request, or the author whose retry
+  starts the delivery over. Retrying that stage has the session start the delivery again
+  (the `restart_delivery` update) as its child. A stage stuck inside a healthy delivery is
+  better ended by terminating only that stage's child workflow, such as
+  `review-<session-id>-…`: the delivery records the stage's error and waits for its retry.
+- Terminating the requirements session terminates the whole task.
 
 ## Working in the repository
 

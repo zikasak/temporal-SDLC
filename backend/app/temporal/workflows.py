@@ -11,7 +11,7 @@ with workflow.unsafe.imports_passed_through():
     from app.api_design.models import ApiDesignState
     from app.api_design.openapi import api_problems, design_problems
     from app.api_design.prompt import opening_fallback
-    from app.delivery.models import DeliveryState, TaskSpec, delivery_id
+    from app.delivery.models import TASK_IDLE_TIMEOUT, DeliveryState, TaskSpec, delivery_id
     from app.github.models import RepositorySelection
     from app.requirements.document import render_requirements_markdown
     from app.requirements.models import (
@@ -42,6 +42,9 @@ MAX_MESSAGE_CHARS = 10000
 OPEN_STATUSES = ("interviewing", "turn_running")
 INTERVIEW_TOO_LONG = "This interview is too long to continue. Generate the document."
 DISCUSSION_TOO_LONG = "This discussion is too long to continue. Generate the OpenAPI."
+# Requirements → API design → delivery is one Temporal workflow tree whose root stays open
+# as long as any part of the task does; histories from before that replay without it.
+TASK_TREE = "task-tree"
 
 
 def pending_questions(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -114,6 +117,53 @@ async def _check_out(state: RequirementsState | ApiDesignState, resume_status: s
     return True
 
 
+class _Delivering:
+    """A session that delivers its task as its own child, and stays open until that
+    closes. A delivery stopped from outside, such as a terminated one, leaves the session
+    open for the user to start it again (`restart_delivery`) from where it stopped."""
+
+    def _init_delivery(self) -> None:
+        self._delivering = False
+        self._redelivery: DeliveryState | None = None
+
+    async def _run_delivery(self, state: DeliveryState) -> None:
+        session_id = workflow.info().workflow_id
+        self._delivering = True
+        while True:
+            stopped = False
+            try:
+                await workflow.execute_child_workflow(
+                    "DeliveryWorkflow", state, id=delivery_id(session_id))
+            except ChildWorkflowError as exc:
+                # Stage failures are results of the delivery; only an aborted one ends here.
+                workflow.logger.warning("Delivery did not finish: %s", exc.cause or exc)
+                stopped = True
+            if not workflow.patched(TASK_TREE):
+                return
+            if stopped and self._redelivery is None:
+                try:
+                    await workflow.wait_condition(lambda: self._redelivery is not None,
+                                                  timeout=TASK_IDLE_TIMEOUT)
+                except asyncio.TimeoutError:
+                    pass
+            if self._redelivery is None:
+                self._delivering = False
+                await workflow.wait_condition(workflow.all_handlers_finished)
+                if self._redelivery is None:
+                    return
+            state, self._redelivery = self._redelivery, None
+            self._delivering = True
+            workflow.logger.info("Starting the stopped delivery again")
+
+    def _restart_delivery(self, state: DeliveryState) -> None:
+        self._redelivery = state
+
+    def _validate_restart_delivery(self) -> None:
+        # The caller found the delivery closed; this session may not have seen it yet.
+        if not self._delivering or self._redelivery is not None:
+            raise ValueError("This session's delivery cannot be started again.")
+
+
 @workflow.defn
 class SayHelloWorkflow:
     @workflow.run
@@ -165,11 +215,13 @@ class LLMRequestWorkflow:
 
 
 @workflow.defn
-class RequirementsWorkflow:
+class RequirementsWorkflow(_Delivering):
     """One requirements interview: each user message is an update, and the
     finalize update turns the gathered requirements into a document. A task that
     leaves the API as it is has no API design to follow, so the session then hands
-    it to a DeliveryWorkflow itself."""
+    it to a DeliveryWorkflow itself; any other task's API designs, and through them
+    their deliveries, are this session's children. The session is the root of its
+    task, open while any part of it is."""
 
     @workflow.init
     def __init__(self, state: RequirementsState | None = None) -> None:
@@ -181,6 +233,10 @@ class RequirementsWorkflow:
         self._updates = 0
         # Validators can all pass in one workflow task, so turns queue here.
         self._turn_lock = asyncio.Lock()
+        self._init_delivery()
+        # The API design sessions started from this one, each followed to its end.
+        self._designs: list[asyncio.Task[None]] = []
+        self._owns_designs = False
 
     @workflow.run
     async def run(self, state: RequirementsState | None = None) -> dict[str, Any] | None:
@@ -208,7 +264,60 @@ class RequirementsWorkflow:
         await workflow.wait_condition(workflow.all_handlers_finished)
         if self.state.status == "completed" and self.state.kind in DIRECT_KINDS:
             await self._deliver()
+        elif self.state.status == "completed" and workflow.patched(TASK_TREE):
+            await self._own_designs()
         return self.state.document
+
+    async def _own_designs(self) -> None:
+        """Stay open while any API design of this task is, and for as long after the
+        last one as a finished delivery waits for the user."""
+        self._owns_designs = True
+        while True:
+            await workflow.wait_condition(
+                lambda: all(task.done() for task in self._designs)
+                and workflow.all_handlers_finished())
+            started = len(self._designs)
+            try:
+                await workflow.wait_condition(lambda: len(self._designs) != started,
+                                              timeout=TASK_IDLE_TIMEOUT)
+            except asyncio.TimeoutError:
+                self._owns_designs = False
+                await workflow.wait_condition(workflow.all_handlers_finished)
+                if all(task.done() for task in self._designs):
+                    workflow.logger.info("Requirements session idle, closing its task")
+                    return
+                self._owns_designs = True
+
+    @workflow.update
+    async def start_api_design(self, session_id: str, state: ApiDesignState) -> None:
+        """Start an API design of this task, or a fork of one, as this session's child;
+        done once it has started."""
+        handle = await workflow.start_child_workflow(
+            "ApiDesignWorkflow", state, id=session_id)
+        workflow.logger.info("API design %s started", session_id)
+        self._designs.append(asyncio.create_task(self._follow_design(handle)))
+
+    @start_api_design.validator
+    def validate_start_api_design(self, session_id: str, state: ApiDesignState) -> None:
+        if not self._owns_designs:
+            raise ValueError("Generate the requirements document before designing the API.")
+
+    @staticmethod
+    async def _follow_design(handle: workflow.ChildWorkflowHandle) -> None:
+        try:
+            await handle
+        except ChildWorkflowError as exc:
+            workflow.logger.warning("API design %s did not finish: %s", handle.id,
+                                    exc.cause or exc)
+
+    @workflow.update
+    def restart_delivery(self, state: DeliveryState) -> None:
+        """Start this session's stopped delivery again from `state`."""
+        self._restart_delivery(state)
+
+    @restart_delivery.validator
+    def validate_restart_delivery(self, state: DeliveryState) -> None:
+        self._validate_restart_delivery()
 
     @workflow.query
     def get_state(self) -> RequirementsState:
@@ -422,27 +531,19 @@ class RequirementsWorkflow:
             document = render_requirements_markdown(self.state.requirements,
                                                     retired=self.state.retired)
         contract = self.state.contract
-        try:
-            await workflow.execute_child_workflow(
-                "DeliveryWorkflow",
-                DeliveryState(spec=TaskSpec(
-                    session_id=session_id,
-                    requirements=contract["requirements"],
-                    requirements_document=contract["requirements_document"],
-                    api=contract["api"],
-                    kind=self.state.kind,
-                    brief={"requirements": self.state.requirements,
-                           "requirements_document": document,
-                           "retired": self.state.retired},
-                    language=contract["language"],
-                    repository=self.state.repository,
-                    checkout=self.state.checkout,
-                )),
-                id=delivery_id(session_id),
-            )
-        except ChildWorkflowError as exc:
-            # Stage failures are results of the delivery; only an aborted one ends here.
-            workflow.logger.warning("Delivery did not finish: %s", exc.cause or exc)
+        await self._run_delivery(DeliveryState(spec=TaskSpec(
+            session_id=session_id,
+            requirements=contract["requirements"],
+            requirements_document=contract["requirements_document"],
+            api=contract["api"],
+            kind=self.state.kind,
+            brief={"requirements": self.state.requirements,
+                   "requirements_document": document,
+                   "retired": self.state.retired},
+            language=contract["language"],
+            repository=self.state.repository,
+            checkout=self.state.checkout,
+        )))
 
     async def _expire(self) -> None:
         """After a day without messages, keep whatever was gathered."""
@@ -461,7 +562,7 @@ class RequirementsWorkflow:
 
 
 @workflow.defn
-class ApiDesignWorkflow:
+class ApiDesignWorkflow(_Delivering):
     """One API design discussion based on a finished requirements session: the
     model drafts the API first, or for a change to an existing service applies the
     change to the API its repository holds, each user message is an update, and the
@@ -478,6 +579,7 @@ class ApiDesignWorkflow:
         self._resume_status = _await_checkout(self.state)
         self._updates = 0
         self._turn_lock = asyncio.Lock()
+        self._init_delivery()
 
     @workflow.run
     async def run(self, state: ApiDesignState) -> dict[str, Any] | None:
@@ -517,6 +619,15 @@ class ApiDesignWorkflow:
     @workflow.query
     def get_state(self) -> ApiDesignState:
         return self.state
+
+    @workflow.update
+    def restart_delivery(self, state: DeliveryState) -> None:
+        """Start this session's stopped delivery again from `state`."""
+        self._restart_delivery(state)
+
+    @restart_delivery.validator
+    def validate_restart_delivery(self, state: DeliveryState) -> None:
+        self._validate_restart_delivery()
 
     async def _confirm_contract(self) -> bool:
         """A change was specified against the contract of one commit, and this session
@@ -663,26 +774,17 @@ class ApiDesignWorkflow:
 
     async def _deliver(self) -> None:
         """Hand the finished design to its delivery and stay open until that ends."""
-        session_id = workflow.info().workflow_id
-        try:
-            await workflow.execute_child_workflow(
-                "DeliveryWorkflow",
-                DeliveryState(spec=TaskSpec(
-                    session_id=session_id,
-                    requirements=self.state.requirements,
-                    requirements_document=self.state.requirements_document,
-                    api=self.state.api,
-                    document_id=self.state.document["document_id"],
-                    kind=self.state.kind,
-                    language=self.state.language,
-                    repository=self.state.repository,
-                    checkout=self.state.checkout,
-                )),
-                id=delivery_id(session_id),
-            )
-        except ChildWorkflowError as exc:
-            # Stage failures are results of the delivery; only an aborted one ends here.
-            workflow.logger.warning("Delivery did not finish: %s", exc.cause or exc)
+        await self._run_delivery(DeliveryState(spec=TaskSpec(
+            session_id=workflow.info().workflow_id,
+            requirements=self.state.requirements,
+            requirements_document=self.state.requirements_document,
+            api=self.state.api,
+            document_id=self.state.document["document_id"],
+            kind=self.state.kind,
+            language=self.state.language,
+            repository=self.state.repository,
+            checkout=self.state.checkout,
+        )))
 
     async def _expire(self) -> None:
         """After a day without messages, keep the API if it is complete."""

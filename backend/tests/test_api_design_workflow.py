@@ -22,7 +22,7 @@ from app.delivery.workflows import DeliveryWorkflow
 from app.requirements.document import render_requirements_markdown
 from app.temporal import sessions
 from app.temporal.workflows import ApiDesignWorkflow
-from tests.pipeline import CODE, FakeCodegenWorkflow, FakeStages, stage_workers
+from tests.pipeline import CODE, FakeCodegenWorkflow, FakeStages, finished, stage_workers
 
 TASK_QUEUE = "api-design-test"
 DOCUMENT = {"document_id": "0" * 32, "filename": "openapi.yaml",
@@ -130,6 +130,7 @@ async def test_new_api_design_inherits_the_requirements_repository(env, worker, 
     monkeypatch.setattr(service.requirements_service, "get_state", requirements_state)
     monkeypatch.setattr(service, "get_generated_document", document)
     monkeypatch.setattr(service, "connect_temporal", connect)
+    monkeypatch.setattr(sessions, "connect_temporal", connect)
     monkeypatch.setattr(service, "TASK_QUEUE", TASK_QUEUE)
     if not linked:
         # Only chat may run without a repository.
@@ -293,8 +294,10 @@ def delivery(env, handle) -> Any:
 
 
 async def delivered(env, handle) -> DeliveryProgress:
-    assert await handle.result() == DOCUMENT
-    return await delivery(env, handle).result()
+    progress = await finished(env, handle.id)
+    # The session stays open while its delivery does.
+    assert (await handle.query(ApiDesignWorkflow.get_state)).document == DOCUMENT
+    return progress
 
 
 async def progress(env, handle) -> DeliveryProgress:

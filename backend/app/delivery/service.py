@@ -1,35 +1,42 @@
 """A session's delivery: its progress, and the manual retry of a failed stage."""
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
 
-from temporalio.client import WorkflowExecutionStatus
+from temporalio.client import Client, WorkflowExecutionDescription, WorkflowExecutionStatus
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from app.delivery.models import (
-    RETRY_STAGES, DeliveryProgress, DeliveryState, RetryStage, delivery_id,
+    RETRY_STAGES, DeliveryProgress, DeliveryState, RetryStage, delivery_id, interrupted,
 )
 from app.requirements.models import CHANGE_KINDS
 from app.temporal.client import connect_temporal
-from app.temporal.sessions import SessionBusy, start_update
+from app.temporal.sessions import SessionBusy, is_running, start_update
 
 logger = logging.getLogger(__name__)
 
 
 async def get_progress(session_id: str) -> DeliveryProgress | None:
-    """None in the moment between the session finishing and its delivery starting."""
+    """None in the moment between the session finishing and its delivery starting. A
+    delivery stopped from outside reports the stage it stopped in as failed, which is
+    how a retry finds it."""
     client = await connect_temporal()
+    handle = client.get_workflow_handle(delivery_id(session_id))
     try:
-        state = await client.get_workflow_handle(delivery_id(session_id)).query(
-            'get_state', result_type=DeliveryState,
-        )
+        description = await handle.describe()
+        state = await client.get_workflow_handle(
+            delivery_id(session_id), run_id=description.run_id,
+        ).query('get_state', result_type=DeliveryState)
     except RPCError as exc:
         if exc.status != RPCStatusCode.NOT_FOUND:
             raise
         return None
+    if description.status not in (WorkflowExecutionStatus.RUNNING,
+                                  WorkflowExecutionStatus.COMPLETED):
+        state = interrupted(state)
     return state.progress
 
 
@@ -43,8 +50,17 @@ async def answer(session_id: str, workflow_id: str, answers: list[str]) -> None:
     logger.info('Sent answers to %s of session %s', workflow_id, session_id)
 
 
-async def _finished(session_id: str, busy: str) -> tuple[Any, str, DeliveryState]:
-    """The client, the task queue and the state of a delivery that is not running."""
+@dataclass
+class _Finished:
+    """A delivery that is not working: its latest run waits for the user's decision, or
+    closed. `state` is what the next run starts from."""
+
+    client: Client
+    description: WorkflowExecutionDescription
+    state: DeliveryState
+
+
+async def _finished(session_id: str, busy: str) -> _Finished:
     client = await connect_temporal()
     try:
         description = await client.get_workflow_handle(delivery_id(session_id)).describe()
@@ -52,39 +68,64 @@ async def _finished(session_id: str, busy: str) -> tuple[Any, str, DeliveryState
         if exc.status != RPCStatusCode.NOT_FOUND:
             raise
         raise SessionBusy(busy) from exc
-    if description.status != WorkflowExecutionStatus.COMPLETED:
-        raise SessionBusy(busy)
     # Pin the query to the run we checked, rather than a concurrent restart.
     state = await client.get_workflow_handle(
         delivery_id(session_id), run_id=description.run_id,
     ).query('get_state', result_type=DeliveryState)
-    return client, description.task_queue, state
+    if description.status == WorkflowExecutionStatus.RUNNING:
+        if not state.waiting:
+            raise SessionBusy(busy)
+    elif description.status != WorkflowExecutionStatus.COMPLETED:
+        # Stopped from outside, such as terminated while a stage was stuck.
+        state = interrupted(state)
+    return _Finished(client, description, state)
 
 
-async def _restart(client: Any, task_queue: str, session_id: str,
-                   state: DeliveryState) -> None:
+async def _restart(finished: _Finished, session_id: str) -> None:
+    """Start the next run of the delivery where the task's workflow tree keeps it: a
+    waiting delivery continues as new, and a stopped one is started again by its session.
+    A delivery whose session closed, such as one from before sessions waited for their
+    deliveries, can only run on its own."""
+    workflow_id = delivery_id(session_id)
+    busy = 'Generation is already running for this session.'
+    description = finished.description
+    if description.status == WorkflowExecutionStatus.RUNNING:
+        try:
+            await start_update(workflow_id, 'restart', finished.state)
+        except SessionBusy as exc:
+            raise SessionBusy(busy) from exc
+        return
+    parent = description.parent_id
+    if parent and await is_running(parent):
+        try:
+            await start_update(parent, 'restart_delivery', finished.state)
+        except SessionBusy as exc:
+            raise SessionBusy(busy) from exc
+        return
     try:
-        await client.start_workflow(
-            'DeliveryWorkflow', state, id=delivery_id(session_id), task_queue=task_queue,
+        await finished.client.start_workflow(
+            'DeliveryWorkflow', finished.state, id=workflow_id,
+            task_queue=description.task_queue,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
             id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
         )
     except WorkflowAlreadyStartedError as exc:
-        raise SessionBusy('Generation is already running for this session.') from exc
+        raise SessionBusy(busy) from exc
 
 
-async def _flagged(session_id: str) -> tuple[Any, str, DeliveryState]:
-    client, task_queue, state = await _finished(
+async def _flagged(session_id: str) -> _Finished:
+    finished = await _finished(
         session_id, 'Wait for the delivery to finish before deciding about its findings.')
-    if not state.progress.open_findings:
+    if not finished.state.progress.open_findings:
         raise SessionBusy('The delivery has no open review findings.')
-    return client, task_queue, state
+    return finished
 
 
 async def accept_findings(session_id: str, login: str) -> DeliveryProgress:
     """Keep the delivery pushed with open review findings as it is: the flag is cleared,
     the publication stays unverified and the acceptance is recorded."""
-    client, task_queue, state = await _flagged(session_id)
+    finished = await _flagged(session_id)
+    state = finished.state
     progress = state.progress
     progress.open_findings = False
     progress.findings_acceptance = {
@@ -94,7 +135,7 @@ async def accept_findings(session_id: str, login: str) -> DeliveryProgress:
     state.retry_stage = None
     state.instructions = None
     state.record_only = True
-    await _restart(client, task_queue, session_id, state)
+    await _restart(finished, session_id)
     logger.info('Open review findings accepted for session %s', session_id)
     return progress
 
@@ -102,7 +143,8 @@ async def accept_findings(session_id: str, login: str) -> DeliveryProgress:
 async def instruct_findings(session_id: str, instructions: str) -> DeliveryProgress:
     """Start a fix round from the user's instructions about the open review findings,
     then verification and code review; the result is pushed to the same branch."""
-    client, task_queue, state = await _flagged(session_id)
+    finished = await _flagged(session_id)
+    state = finished.state
     if not state.spec.language:
         raise SessionBusy('No implementation language was chosen for this session.')
     progress = state.progress
@@ -117,7 +159,7 @@ async def instruct_findings(session_id: str, instructions: str) -> DeliveryProgr
     state.retry_stage = None
     state.record_only = False
     state.instructions = instructions
-    await _restart(client, task_queue, session_id, state)
+    await _restart(finished, session_id)
     logger.info('Instructions about open review findings sent for session %s', session_id)
     return progress
 
@@ -127,8 +169,9 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
     if stage not in RETRY_STAGES:
         raise SessionBusy('Choose server generation, tests generation, the documentation, '
                           'the code review or the push to retry.')
-    client, task_queue, state = await _finished(
+    finished = await _finished(
         session_id, 'Wait for the current generation to finish before retrying.')
+    state = finished.state
     progress = state.progress
     state.instructions = None
     state.record_only = False
@@ -146,7 +189,7 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
             progress.pull_request_error = None
             progress.pull_request_status = 'waiting'
         state.retry_stage = stage
-        await _restart(client, task_queue, session_id, state)
+        await _restart(finished, session_id)
         logger.info('Restarted the code review for session %s', session_id)
         return progress
     change = state.spec.kind == 'bugfix'
@@ -205,6 +248,6 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
             progress.baseline = None
             progress.baseline_error = None
             progress.baseline_status = 'waiting'
-    await _restart(client, task_queue, session_id, state)
+    await _restart(finished, session_id)
     logger.info('Restarted %s generation for session %s', stage, session_id)
     return progress

@@ -14,8 +14,8 @@ with workflow.unsafe.imports_passed_through():
     )
     from app.delivery.contract import with_requirements
     from app.delivery.models import (
-        AgentQuestions, DeliveryProgress, DeliveryState, judge_baseline, judge_kept,
-        open_review_findings, unproven_green,
+        TASK_IDLE_TIMEOUT, AgentQuestions, DeliveryProgress, DeliveryState, judge_baseline,
+        judge_kept, open_review_findings, unproven_green,
     )
     from app.diagnosis.models import repair_request
     from app.github.checkout import SNAPSHOT_DIR
@@ -46,7 +46,9 @@ class DeliveryWorkflow:
     later comparison is with that copy. A documentation task has one author, limited to
     documentation files, and no check yet: what it wrote is pushed marked as unverified.
     A stage that fails records its own error instead of failing the run, so it can be
-    retried on its own."""
+    retried on its own. A finished run stays open, as its session does, for the user's
+    next decision: the restart update continues it as a new run, so every retry stays a
+    child of the session the task belongs to."""
 
     @workflow.init
     def __init__(self, state: DeliveryState) -> None:
@@ -55,13 +57,42 @@ class DeliveryWorkflow:
         self.progress = state.progress
         # How often each child workflow ID was used in this run, to keep them unique.
         self._child_ids: dict[str, int] = {}
+        self._next: DeliveryState | None = None
 
     @workflow.run
     async def run(self, state: DeliveryState) -> DeliveryProgress:
-        if self.state.record_only:
-            # A decision of the user's, such as accepting open findings, is recorded as it
-            # is: nothing runs and nothing is pushed.
+        # A decision of the user's, such as accepting open findings, is recorded as it
+        # is: nothing runs and nothing is pushed.
+        if not self.state.record_only:
+            await self._deliver()
+        # Histories from before deliveries waited end with their work.
+        if not workflow.patched('delivery-waits'):
             return self.progress
+        self.state.waiting = True
+        try:
+            await workflow.wait_condition(lambda: self._next is not None,
+                                          timeout=TASK_IDLE_TIMEOUT)
+        except asyncio.TimeoutError:
+            workflow.logger.info('Delivery idle, closing')
+            self.state.waiting = False
+            return self.progress
+        await workflow.wait_condition(workflow.all_handlers_finished)
+        workflow.continue_as_new(self._next)
+
+    @workflow.update
+    def restart(self, state: DeliveryState) -> None:
+        """Continue the finished delivery as a new run from `state`: the user's retry,
+        acceptance of open findings or instructions about them."""
+        state.waiting = False
+        self.state.waiting = False
+        self._next = state
+
+    @restart.validator
+    def validate_restart(self, state: DeliveryState) -> None:
+        if not self.state.waiting:
+            raise ValueError('Wait for the current generation to finish.')
+
+    async def _deliver(self) -> None:
         if not await self._snapshot():
             self.progress.verification_status = 'skipped'
         elif self.state.instructions:
@@ -79,7 +110,6 @@ class DeliveryWorkflow:
             else:
                 await self._generate()
         await self._publish()
-        return self.progress
 
     @workflow.query
     def get_state(self) -> DeliveryState:
