@@ -5,6 +5,8 @@ import logging
 import uuid
 from typing import Any
 
+from temporalio.client import WorkflowUpdateStage
+
 from app.api_design.models import ApiDesignState
 from app.api_design.openapi import design_problems
 from app.config import TASK_QUEUE
@@ -18,7 +20,7 @@ from app.requirements.models import DIRECT_KINDS
 from app.temporal.client import TemporalUnavailable, connect_temporal
 from app.temporal.registry import is_registered, register
 from app.temporal.sessions import (
-    SessionBusy, SessionNotFound, fork_messages, start_update, state_at_message,
+    SessionBusy, SessionNotFound, fork_messages, is_running, start_update, state_at_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,17 +75,24 @@ async def start_session(requirements_session_id: str) -> str:
 
 
 async def _start(state: ApiDesignState) -> str:
+    """Start the session as a child of the requirements session its task began with, so
+    the task stays one workflow tree; a requirements session closed before that existed
+    can only have it on its own."""
     session_id = f"api-design-session-{uuid.uuid4().hex}"
-    client = await connect_temporal()
-    handle = await client.start_workflow(
-        "ApiDesignWorkflow",
-        state,
-        id=session_id,
-        task_queue=TASK_QUEUE,
-    )
-    await register(handle.id)
+    if await is_running(state.source_session_id):
+        await start_update(state.source_session_id, "start_api_design", session_id, state,
+                           wait_for_stage=WorkflowUpdateStage.COMPLETED)
+    else:
+        client = await connect_temporal()
+        await client.start_workflow(
+            "ApiDesignWorkflow",
+            state,
+            id=session_id,
+            task_queue=TASK_QUEUE,
+        )
+    await register(session_id)
     logger.info("Started API design session %s from %s", session_id, state.source_session_id)
-    return handle.id
+    return session_id
 
 
 async def fork_session(session_id: str, message_index: int) -> str:

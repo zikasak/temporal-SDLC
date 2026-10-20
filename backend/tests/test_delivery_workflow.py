@@ -2,13 +2,14 @@
 delivers a bugfix or a documentation task."""
 import asyncio
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from temporalio import activity
-from temporalio.client import WorkflowUpdateFailedError
+from temporalio.client import WorkflowExecutionStatus, WorkflowUpdateFailedError
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
@@ -17,16 +18,18 @@ from app.api.routes.requirements import router
 from app.api_design import service as api_design_service
 from app.api_design.models import empty_api
 from app.delivery import service as delivery_service
-from app.delivery.models import DeliveryProgress, DeliveryState, TaskSpec, delivery_id
+from app.delivery.models import (
+    STOPPED, DeliveryProgress, DeliveryState, TaskSpec, delivery_id,
+)
 from app.delivery.workflows import DeliveryWorkflow
 from app.requirements import service as requirements_service
 from app.requirements.document import render_requirements_markdown
 from app.requirements.models import RequirementsState
 from app.temporal import sessions
-from app.temporal.workflows import RequirementsWorkflow
+from app.temporal.workflows import ApiDesignWorkflow, RequirementsWorkflow
 from tests.pipeline import (
     ADDED_TESTS, BASELINE_IMAGE, BROKEN_TEST, CODE, FakeCodegenWorkflow, FakeStages,
-    stage_workers,
+    finished, stage_workers,
 )
 
 TASK_QUEUE = "delivery-test"
@@ -98,6 +101,15 @@ class FakeActivities(FakeStages):
             raise ApplicationError(NO_CONTRACT, type="ContractError", non_retryable=True)
         return CONTRACT
 
+    @activity.defn(name="api_design_turn")
+    async def api_design_turn(self, state: Any) -> dict[str, Any]:
+        return {"reply": "Draft ready.", "api": API, "language": "java"}
+
+    @activity.defn(name="write_openapi_document")
+    async def write_openapi_document(self, session_id: str, api: dict[str, Any]
+                                     ) -> dict[str, Any]:
+        return DOCUMENT
+
 
 @pytest.fixture(scope="session")
 async def env():
@@ -107,19 +119,41 @@ async def env():
 
 @pytest.fixture
 async def worker(env, monkeypatch):
+    async with workers(env, monkeypatch) as activities:
+        yield activities
+
+
+@pytest.fixture(scope="module")
+async def server():
+    """The dev server, for what the time-skipping one does not do: tell a parent that its
+    child was terminated, and terminate children with their parent."""
+    async with await WorkflowEnvironment.start_local() as server:
+        yield server
+
+
+@pytest.fixture
+async def live(server, monkeypatch):
+    async with workers(server, monkeypatch) as activities:
+        yield activities
+
+
+@asynccontextmanager
+async def workers(env, monkeypatch):
     activities = FakeActivities()
 
     async def connect():
         return env.client
 
-    for module in (requirements_service, delivery_service, sessions):
+    for module in (requirements_service, api_design_service, delivery_service, sessions):
         monkeypatch.setattr(module, "connect_temporal", connect)
     async with Worker(
-        env.client, task_queue=TASK_QUEUE, workflows=[RequirementsWorkflow, DeliveryWorkflow],
+        env.client, task_queue=TASK_QUEUE,
+        workflows=[RequirementsWorkflow, ApiDesignWorkflow, DeliveryWorkflow],
         activities=[activities.requirements_turn, activities.write_requirements_document,
                     activities.read_requirements_document, activities.read_repository_contract,
                     activities.checkout_repository, activities.update_repository_checkout,
-                    activities.publish_repository, activities.publish_documentation],
+                    activities.publish_repository, activities.publish_documentation,
+                    activities.api_design_turn, activities.write_openapi_document],
     ), stage_workers(env, activities):
         yield activities
 
@@ -138,9 +172,7 @@ async def deliver(env, repository=None, language: str | None = "java",
 
 
 async def delivered(env, session_id: str) -> DeliveryProgress:
-    """The outcome of the session's delivery; it follows the latest manual retry."""
-    return await env.client.get_workflow_handle(
-        delivery_id(session_id), result_type=DeliveryProgress).result()
+    return await finished(env, session_id)
 
 
 # Only a documentation task is pushed without a check of it.
@@ -302,7 +334,7 @@ async def test_failed_coding_branches_preserve_other_artifacts(env, worker, fail
             delivery_service.retry(session_id, stage),
             return_exceptions=True,
         )
-        assert sum(result is None for result in attempts) == 1
+        assert sum(isinstance(result, DeliveryProgress) for result in attempts) == 1
         assert sum(isinstance(result, sessions.SessionBusy) for result in attempts) == 1
         await asyncio.wait_for(getattr(worker, f'{branch}_started').wait(), timeout=10)
         with pytest.raises(sessions.SessionBusy):
@@ -408,9 +440,11 @@ async def fixed(env, repository) -> tuple[Any, DeliveryProgress]:
     """The outcome of delivering a finalized bugfix session."""
     handle = await specify_bugfix(env, repository)
     await handle.execute_update(RequirementsWorkflow.finalize)
-    # The session stays open until its delivery has ended.
-    assert await handle.result() == DOCUMENT
-    return handle, await delivered(env, handle.id)
+    progress = await delivered(env, handle.id)
+    # The session stays open while its delivery does.
+    assert (await handle.describe()).status == WorkflowExecutionStatus.RUNNING
+    assert (await handle.query(RequirementsWorkflow.get_state)).document == DOCUMENT
+    return handle, progress
 
 
 async def test_bugfix_is_delivered_red_to_green_from_the_requirements_session(env, worker, repository_selection):
@@ -667,7 +701,7 @@ async def test_a_session_blocked_on_its_contract_goes_on_from_the_latest_commit(
     await handle.execute_update(RequirementsWorkflow.finalize)
     state = await handle.query(RequirementsWorkflow.get_state)
     assert state.status == "completed" and state.contract_commit == "2" * 40
-    await handle.result()
+    await delivered(env, handle.id)
     # Nothing can change what a finished session was finalized against.
     with pytest.raises(sessions.SessionBusy):
         await requirements_service.update_checkout(handle.id)
@@ -677,8 +711,8 @@ async def test_api_change_keeps_the_contract_for_its_design_and_delivers_nothing
     worker.kind = "api_change"
     handle = await specify_bugfix(env, repository_selection)
     await handle.execute_update(RequirementsWorkflow.finalize)
-    assert await handle.result() == DOCUMENT
     state = await handle.query(RequirementsWorkflow.get_state)
+    assert state.status == "completed" and state.document == DOCUMENT
     # The design starts from this contract, and the change's requirements join it.
     assert state.contract == CONTRACT
     # The commit it was read at lets the design notice a branch that moved since.
@@ -735,6 +769,71 @@ async def test_agent_questions_wait_for_the_users_answers(env, worker):
     assert all("answers" not in context for context in worker.test_contexts)
     with pytest.raises(sessions.SessionBusy, match="no longer open"):
         await delivery_service.answer(session_id, asked["workflow_id"], ["MySQL"])
+
+
+async def test_a_task_is_one_workflow_tree_open_until_its_delivery_closes(env, worker, monkeypatch, repository_selection):
+    """Requirements → API design → delivery, retries included, stay under one root, so no
+    part of a task falls to the namespace's retention while another goes on."""
+    async def document(*args):
+        return {"parsed_text": "# Requirements"}
+
+    monkeypatch.setattr(api_design_service, "get_generated_document", document)
+    monkeypatch.setattr(api_design_service, "TASK_QUEUE", TASK_QUEUE)
+    worker.kind = "new_service"
+    worker.fail_tests = True
+    requirements = await specify_bugfix(env, repository_selection)
+    await requirements.execute_update(RequirementsWorkflow.finalize)
+    design = env.client.get_workflow_handle(
+        await api_design_service.start_session(requirements.id))
+    assert (await design.describe()).parent_id == requirements.id
+    for _ in range(100):
+        if (await design.query(ApiDesignWorkflow.get_state)).status == "interviewing":
+            break
+        await asyncio.sleep(0.05)
+    await design.execute_update(ApiDesignWorkflow.finalize)
+    progress = await delivered(env, design.id)
+    assert progress.tests_error and progress.verification_status == "skipped"
+
+    # The retry continues the delivery as new, still the design's child.
+    first_run = (await delivery(env, design.id).describe()).run_id
+    worker.fail_tests = False
+    await delivery_service.retry(design.id, "tests")
+    progress = await delivered(env, design.id)
+    assert progress.tests_error is None and progress.verification["status"] == "passed"
+    retried = await delivery(env, design.id).describe()
+    assert retried.run_id != first_run and retried.parent_id == design.id
+    for handle in (requirements, design, delivery(env, design.id)):
+        assert (await handle.describe()).status == WorkflowExecutionStatus.RUNNING
+    await requirements.terminate()
+
+async def test_a_stopped_delivery_is_retried_from_the_stage_it_stopped_in(server, live, repository_selection):
+    """Terminating a stuck delivery leaves its session open, the stage it was in failed."""
+    live.release_tests.clear()
+    handle = await specify_bugfix(server, repository_selection)
+    await handle.execute_update(RequirementsWorkflow.finalize)
+    await asyncio.wait_for(live.tests_started.wait(), timeout=10)
+    await delivery(server, handle.id).terminate()
+    progress = await delivery_service.get_progress(handle.id)
+    assert progress.tests_error == STOPPED and progress.verification_status == "error"
+    assert (await handle.describe()).status == WorkflowExecutionStatus.RUNNING
+
+    live.release_tests.set()
+    await delivery_service.retry(handle.id, "tests")
+    progress = await delivered(server, handle.id)
+    assert progress.tests_error is None and progress.verification["status"] == "passed"
+    assert (await delivery(server, handle.id).describe()).parent_id == handle.id
+    await handle.terminate()
+    # The root takes the whole task with it.
+    for _ in range(100):
+        if (await delivery(server, handle.id).describe()).status != WorkflowExecutionStatus.RUNNING:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise AssertionError("the delivery outlived its session")
+
+
+def delivery(env, session_id: str) -> Any:
+    return env.client.get_workflow_handle(delivery_id(session_id))
 
 
 async def test_only_the_first_of_answers_sent_together_resumes_the_agent():

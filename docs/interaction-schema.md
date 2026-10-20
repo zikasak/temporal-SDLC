@@ -135,7 +135,7 @@ Brace notation groups routes for readability; it is not literal URL syntax.
 
 ## Storage and deployment notes
 
-- **Temporal owns execution state:** transcripts, requirements/API state, activity results, and workflow history are retained through Temporal. The local namespace is configured with one-day retention.
+- **Temporal owns execution state:** transcripts, requirements/API state, activity results, and workflow history are retained through Temporal. The local namespace is configured with one-day retention, which only counts from when a workflow closes: a task's requirements session is the root of its API designs and delivery and stays open as long as they do, and a finished delivery waits 14 days for retries (see [one workflow tree per task](service-implementation.md#one-workflow-tree-per-task)).
 - **PostgreSQL owns document data:** `app.documents` stores metadata, extracted upload text, generated text, and revisions; `app.session_passages` stores remembered retrieved passages. The default app connection uses the same PostgreSQL service/database as Temporal, but a separate `app` schema.
 - **Uploaded bytes live on disk:** API and main worker must share `DOCUMENT_STORAGE_DIR` if deployed separately. The API cleans up expired documents hourly.
 - **Repository checkouts live beside them:** `GENERATED_CODE_DIR/<session_id>/repository`, cloned and pushed by the main worker, which needs `git` and shares `GENERATED_CODE_DIR` with the coding workers.

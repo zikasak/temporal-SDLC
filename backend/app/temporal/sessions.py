@@ -113,15 +113,20 @@ async def state_at_message(
     return value
 
 
-async def start_update(session_id: str, update: str, *args: Any) -> None:
+async def start_update(session_id: str, update: str, *args: Any,
+                       wait_for_stage: WorkflowUpdateStage = WorkflowUpdateStage.ACCEPTED,
+                       ) -> None:
     client = await connect_temporal()
     handle = client.get_workflow_handle(session_id)
     try:
-        await handle.start_update(
-            update, args=list(args), wait_for_stage=WorkflowUpdateStage.ACCEPTED
-        )
+        update_handle = await handle.start_update(update, args=list(args),
+                                                  wait_for_stage=wait_for_stage)
+        # A rejected update returns at once with its outcome known; only its result
+        # raises the validator's error.
+        if update_handle._known_outcome is not None:
+            await update_handle.result()
     except WorkflowUpdateFailedError as exc:
-        # The workflow's validator rejected the update.
+        # The workflow's validator rejected the update, or its handler failed.
         logger.warning("Session %s rejected %s: %s", session_id, update, exc.cause or exc)
         raise SessionBusy(str(exc.cause or exc)) from exc
     except RPCError as exc:
@@ -133,3 +138,15 @@ async def start_update(session_id: str, update: str, *args: Any) -> None:
             raise
         logger.warning("Session %s has ended; %s rejected", session_id, update)
         raise SessionBusy("This session has ended.") from exc
+
+
+async def is_running(workflow_id: str) -> bool:
+    """Whether the workflow's latest run is open; false when there is none."""
+    client = await connect_temporal()
+    try:
+        description = await client.get_workflow_handle(workflow_id).describe()
+    except RPCError as exc:
+        if exc.status != RPCStatusCode.NOT_FOUND:
+            raise
+        return False
+    return description.status == WorkflowExecutionStatus.RUNNING

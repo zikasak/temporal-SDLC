@@ -5,6 +5,7 @@ from typing import Any
 
 from temporalio import activity, workflow
 from temporalio.exceptions import ApplicationError
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from app.config import (
@@ -12,6 +13,7 @@ from app.config import (
     IMPLEMENTATION_TASK_QUEUE, REVIEW_TASK_QUEUE, TEST_GENERATION_TASK_QUEUE,
     VERIFICATION_TASK_QUEUE,
 )
+from app.delivery.models import DeliveryProgress, DeliveryState, delivery_id
 from app.diagnosis.workflows import DiagnosisWorkflow
 from app.documentation.workflows import DocumentationWorkflow
 from app.implementation.workflows import ImplementationWorkflow
@@ -25,6 +27,24 @@ BASELINE_IMAGE = "sha256:" + "e" * 64
 REPOSITORY_TESTS_IMAGE = "sha256:" + "f" * 64
 ADDED_TESTS = ["com.example.RoomsTest#refusesDoubleBooking", "com.example.OverlapTest#refuses"]
 BROKEN_TEST = {"class_name": "RoomsTest", "name": "lists"}
+
+
+async def finished(env, session_id: str) -> DeliveryProgress:
+    """The outcome of the session's delivery once its latest run waits for the user's
+    next decision; it follows the latest manual retry."""
+    handle = env.client.get_workflow_handle(delivery_id(session_id))
+    for _ in range(600):
+        try:
+            state = await handle.query('get_state', result_type=DeliveryState)
+        except RPCError as exc:
+            # The session has not started its delivery yet.
+            if exc.status != RPCStatusCode.NOT_FOUND:
+                raise
+        else:
+            if state.waiting:
+                return state.progress
+        await asyncio.sleep(0.05)
+    raise AssertionError("the delivery never finished")
 
 
 class FakeStages:
