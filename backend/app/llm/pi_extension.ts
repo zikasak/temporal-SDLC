@@ -17,6 +17,12 @@ export default function (pi: any) {
 			},
 		});
 	}
+	// The caller owns the conversation and its compaction. Pi's own would only summarize the
+	// placeholder prompt, and its recovery from a response cut off at the output limit (or a
+	// context overflow) is a second request, which the handler below aborts: the caller saw
+	// "This operation was aborted" instead of the cut-off response. Cancelling it also
+	// cancels that recovery request.
+	pi.on("session_before_compact", async () => ({ cancel: true }));
 	let requests = 0;
 	let lastStopReason: string | undefined;
 	pi.on("message_end", async (event: any) => {
