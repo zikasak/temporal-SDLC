@@ -10,7 +10,12 @@ MAX_FINDINGS = 50
 SUMMARY_CHARS = 2000
 REASON_CHARS = 500
 PATH_CHARS = 500
+# The user's instructions about open findings have at most 10000 characters, as the
+# HTTP API accepts them.
 INSTRUCTIONS_CHARS = 10000
+# A fix request from a pull request comment has up to GitHub's 65536 characters, and the
+# review reads all of it; this bounds instructions the review receives internally.
+REVIEW_INSTRUCTIONS_CHARS = 65536
 # The open findings a pushed commit's message lists.
 COMMIT_FINDINGS = 20
 
@@ -35,6 +40,10 @@ class ReviewRound(TypedDict):
     findings: list[ReviewFinding]
     # The user's instructions the reviewed fixes were made from; absent otherwise.
     instructions: NotRequired[str]
+    # A round a pull request comment started: the comment whose text its instructions
+    # are. The workflow keeps this reference instead of the text, which the delivery's
+    # progress fills in from the mention history.
+    mention: NotRequired[dict[str, Any]]
 
 
 class FindingsAcceptance(TypedDict):

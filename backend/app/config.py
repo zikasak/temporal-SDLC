@@ -1,6 +1,7 @@
 """Environment-driven settings shared by the API and the worker."""
 
 import os
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -72,6 +73,14 @@ GITHUB_ALLOWED_ORIGINS = frozenset(
         "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000",
     ).split(",") if origin.strip()
 )
+
+# The public address GitHub delivers webhook events to, such as
+# https://app.example.com/api/connectors/github/events behind the web client. Without
+# it, a connection check derives it from the request and its proxy headers.
+GITHUB_WEBHOOK_URL = os.getenv("GITHUB_WEBHOOK_URL", "").strip()
+if not re.fullmatch(r"https?://[^\s/?#]+(/[^\s?#]*)?", GITHUB_WEBHOOK_URL):
+    # Not an http or https URL: derived from the request instead.
+    GITHUB_WEBHOOK_URL = ""
 
 # Signs session tokens: at least 32 random characters, the same for every API replica.
 # Changing it signs everyone out.

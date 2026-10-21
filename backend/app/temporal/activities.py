@@ -282,6 +282,8 @@ async def open_pull_request(
             pull = await github_client.create_pull_request(
                 token, full_name, branch, base, title, body, draft=not verified)
             action = 'Opened'
+        # Mentions of the app on the pull request find their delivery by it.
+        await github_storage.record_pull_request(full_name, pull['number'], session_id)
     except GitHubError as exc:
         activity.logger.warning("Could not open or update the pull request of %s: %s",
                                 branch, exc)

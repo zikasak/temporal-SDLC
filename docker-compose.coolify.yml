@@ -40,6 +40,9 @@ x-app: &app
     CONTRACT_EMBED_CHARS: ${CONTRACT_EMBED_CHARS:-32000}
     GITHUB_TOKEN_ENCRYPTION_KEY: ${GITHUB_TOKEN_ENCRYPTION_KEY:-}
     GITHUB_ALLOWED_ORIGINS: ${GITHUB_ALLOWED_ORIGINS:-}
+    # Optional, such as https://app.example.com/api/connectors/github/events; derived
+    # from the request through the frontend's proxy otherwise.
+    GITHUB_WEBHOOK_URL: ${GITHUB_WEBHOOK_URL:-}
     AUTH_JWT_SECRET: ${SERVICE_PASSWORD_64_JWT}
     AUTH_TOKEN_TTL_HOURS: ${AUTH_TOKEN_TTL_HOURS:-12}
     AUTH_LOGIN_ATTEMPTS_PER_MINUTE: ${AUTH_LOGIN_ATTEMPTS_PER_MINUTE:-10}

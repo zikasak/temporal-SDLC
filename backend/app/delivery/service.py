@@ -1,6 +1,8 @@
 """A session's delivery: its progress, and the manual retry of a failed stage."""
 
+import asyncio
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -10,11 +12,14 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from app.delivery.models import (
-    RETRY_STAGES, DeliveryProgress, DeliveryState, RetryStage, delivery_id, interrupted,
+    MENTION_HANDLED, OUTCOME_OWED, RETRY_STAGES, DeliveryProgress, DeliveryState, RetryStage, delivery_id, interrupted,
 )
+from app.delivery import mentions as mention_history
+from app.github.errors import GitHubError
+from app.github.models import PullRequestMention
 from app.requirements.models import CHANGE_KINDS
 from app.temporal.client import connect_temporal
-from app.temporal.sessions import SessionBusy, is_running, start_update
+from app.temporal.sessions import SessionBusy, SessionEnded, is_running, start_update
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +42,40 @@ async def get_progress(session_id: str) -> DeliveryProgress | None:
     if description.status not in (WorkflowExecutionStatus.RUNNING,
                                   WorkflowExecutionStatus.COMPLETED):
         state = interrupted(state)
-    return state.progress
+    return await with_mention_history(session_id, state.progress)
+
+
+async def with_mention_history(session_id: str,
+                               progress: DeliveryProgress) -> DeliveryProgress:
+    """The progress with every mention of the delivery, oldest first, from the mention
+    history, as the workflow last reported those it still works on, and with the text of
+    the comments that review rounds refer to as their instructions."""
+    history = await mention_history.history(session_id)
+    key = lambda item: (item['comment_type'], item['comment_id'])  # noqa: E731
+    texts = {key(item): item.get('body', '') for item in history}
+    current = {key(item): item for item in progress.mentions}
+    merged = []
+    for item in history:
+        live = current.pop(key(item), None)
+        merged.append({**item, **live, 'body': item.get('body', '')} if live else item)
+    # Mentions the history does not have yet, as the workflow reports them.
+    merged.extend({'body': '', **item} for item in current.values())
+    # What the workflow still owes a mention is its own bookkeeping, not shown.
+    progress.mentions = [{name: value for name, value in item.items() if name != OUTCOME_OWED}
+                         for item in merged]
+    progress.reviews = [
+        _with_instructions(item, texts) for item in progress.reviews]
+    return progress
+
+
+def _with_instructions(round_: dict, texts: dict) -> dict:
+    reference = round_.get('mention')
+    if not isinstance(reference, dict):
+        return round_
+    result = {key: value for key, value in round_.items() if key != 'mention'}
+    result['instructions'] = texts.get(
+        (reference.get('comment_type'), reference.get('comment_id')), '')
+    return result
 
 
 async def answer(session_id: str, workflow_id: str, answers: list[str]) -> None:
@@ -134,6 +172,8 @@ async def accept_findings(session_id: str, login: str) -> DeliveryProgress:
     progress.agent_questions = []
     state.retry_stage = None
     state.instructions = None
+    state.mention = None
+    state.mention_type = None
     state.record_only = True
     await _restart(finished, session_id)
     logger.info('Open review findings accepted for session %s', session_id)
@@ -159,6 +199,8 @@ async def instruct_findings(session_id: str, instructions: str) -> DeliveryProgr
     state.retry_stage = None
     state.record_only = False
     state.instructions = instructions
+    state.mention = None
+    state.mention_type = None
     await _restart(finished, session_id)
     logger.info('Instructions about open review findings sent for session %s', session_id)
     return progress
@@ -174,6 +216,8 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
     state = finished.state
     progress = state.progress
     state.instructions = None
+    state.mention = None
+    state.mention_type = None
     state.record_only = False
     if stage == 'review':
         if not (progress.review_error or progress.correction_failed) or state.spec.kind == 'docs':
@@ -251,3 +295,102 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
     await _restart(finished, session_id)
     logger.info('Restarted %s generation for session %s', stage, session_id)
     return progress
+
+
+# How long a mention waits for a closed delivery to run again before it is handed over.
+MENTION_RESTART_POLLS = 40
+MENTION_RESTART_POLL_SECONDS = 0.25
+# How often a mention tries again when the delivery closed or was reopened concurrently.
+MENTION_HANDOVER_ATTEMPTS = 3
+# How long a handover waits for the delivery to record the mention it accepted.
+MENTION_ADMISSION_POLLS = 120
+MENTION_ADMISSION_POLL_SECONDS = 0.25
+
+
+class MentionHandled(SessionBusy):
+    """The delivery already has this mention, such as from an earlier handover."""
+
+
+async def _reopen(client: Client, description: WorkflowExecutionDescription,
+                  session_id: str) -> None:
+    """Start the closed delivery's next run, changing nothing, and wait until it runs. A
+    concurrent handover or decision of the user's that reopened it first is as good."""
+    workflow_id = delivery_id(session_id)
+    state = await client.get_workflow_handle(
+        workflow_id, run_id=description.run_id,
+    ).query('get_state', result_type=DeliveryState)
+    if description.status != WorkflowExecutionStatus.COMPLETED:
+        state = interrupted(state)
+    state.waiting = False
+    state.retry_stage = None
+    state.instructions = None
+    state.mention = None
+    state.mention_type = None
+    state.record_only = True
+    state.progress.agent_questions = []
+    try:
+        await _restart(_Finished(client, description, state), session_id)
+    except SessionBusy:
+        # Another request restarted it in the meantime; its run takes the mention.
+        logger.info('Delivery of session %s was reopened concurrently', session_id)
+    for _ in range(MENTION_RESTART_POLLS):
+        if await is_running(workflow_id):
+            return
+        await asyncio.sleep(MENTION_RESTART_POLL_SECONDS)
+
+
+async def _admitted(session_id: str, mention: PullRequestMention, update_id: str) -> None:
+    """Wait until the delivery durably recorded the mention handed over by the update
+    `update_id`, without waiting for its classification or reply. MentionHandled when it
+    was recorded by another handover, which handled the comment before; a GitHubError
+    (503) when the recording is not known in time, leaving the claim to be handed over
+    again, which the delivery then admits or rejects."""
+    for _ in range(MENTION_ADMISSION_POLLS):
+        recorded_by = await mention_history.recording(
+            session_id, mention['comment_type'], mention['comment_id'])
+        if recorded_by is not None:
+            # The workflow records as '<run ID>:<update ID>'.
+            if recorded_by.rpartition(':')[2] == update_id:
+                return
+            raise MentionHandled(MENTION_HANDLED)
+        await asyncio.sleep(MENTION_ADMISSION_POLL_SECONDS)
+    raise GitHubError(503, 'The delivery has not recorded the mention yet.')
+
+
+async def receive_mention(session_id: str, mention: PullRequestMention) -> bool:
+    """Hand an authorised mention of the app on the delivery's pull request to the
+    delivery, which classifies it and replies or queues its fix round. A delivery that
+    closed, such as one idle for long, runs again first, changing nothing; concurrent
+    mentions that find it closed each hand theirs to the run that one of them started.
+    False when the session has no delivery; MentionHandled when it already has the
+    mention."""
+    client = await connect_temporal()
+    workflow_id = delivery_id(session_id)
+    for attempt in range(1, MENTION_HANDOVER_ATTEMPTS + 1):
+        try:
+            description = await client.get_workflow_handle(workflow_id).describe()
+        except RPCError as exc:
+            if exc.status != RPCStatusCode.NOT_FOUND:
+                raise
+            return False
+        if description.status != WorkflowExecutionStatus.RUNNING:
+            await _reopen(client, description, session_id)
+        update_id = f'mention-{uuid.uuid4().hex}'
+        try:
+            await start_update(workflow_id, 'mention', mention, update_id=update_id)
+        except SessionEnded:
+            # It closed before the update reached it: reopen it and try again.
+            if attempt == MENTION_HANDOVER_ATTEMPTS:
+                raise
+            continue
+        except SessionBusy as exc:
+            if MENTION_HANDLED in str(exc):
+                raise MentionHandled(str(exc)) from exc
+            raise
+        # Accepted is not yet admitted: a comment the delivery handled before, which has
+        # left its live state, is only found by its durable recording.
+        await _admitted(session_id, mention, update_id)
+        logger.info('Mention %s on the pull request of session %s handed to its delivery',
+                    mention['comment_id'], session_id)
+        return True
+    return False

@@ -77,7 +77,51 @@ export type DeliveryProgress = {
   pull_request: PullRequest | null;
   pull_request_error: string | null;
   pull_request_status: PublicationStatus;
+  // Authorised mentions of the app on the pull request and what they led to.
+  mentions: PullRequestMention[];
 };
+
+export type PullRequestMention = {
+  comment_id: number;
+  comment_type: "conversation" | "review";
+  url: string;
+  author: string;
+  body: string;
+  received_at: string;
+  classification: "pending" | "fix" | "clarification" | "unclear";
+  status: "classifying" | "queued" | "running" | "replied" | "completed" | "error";
+  round: number | null;
+  reply_url: string | null;
+  error: string | null;
+};
+
+function githubLink(value: unknown): string | null {
+  return typeof value === "string" && value.startsWith("https://github.com/") ? value : null;
+}
+
+function pullRequestMentions(value: unknown): PullRequestMention[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (typeof item !== "object" || item === null) return [];
+    const record = item as Record<string, unknown>;
+    const url = githubLink(record.url);
+    if (!Number.isSafeInteger(record.comment_id) || !url || typeof record.author !== "string"
+        || typeof record.body !== "string") return [];
+    return [{
+      comment_id: record.comment_id as number,
+      comment_type: record.comment_type === "review" ? "review" : "conversation",
+      url, author: record.author, body: record.body,
+      received_at: typeof record.received_at === "string" ? record.received_at : "",
+      classification: ["fix", "clarification", "unclear"].includes(record.classification as string)
+        ? record.classification as PullRequestMention["classification"] : "pending",
+      status: ["queued", "running", "replied", "completed", "error"].includes(record.status as string)
+        ? record.status as PullRequestMention["status"] : "classifying",
+      round: Number.isSafeInteger(record.round) ? record.round as number : null,
+      reply_url: githubLink(record.reply_url),
+      error: typeof record.error === "string" ? record.error : null,
+    } satisfies PullRequestMention];
+  });
+}
 
 const verificationStatuses: VerificationStatus[] = [
   "not_applicable", "waiting", "running", "diagnosing", "repairing", "reviewing", "completed",
@@ -208,6 +252,7 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     pull_request_error: text(value.pull_request_error),
     pull_request_status: publicationStatuses.includes(value.pull_request_status as PublicationStatus)
       ? value.pull_request_status as PublicationStatus : "not_applicable",
+    mentions: pullRequestMentions(value.mentions),
   };
 }
 
@@ -421,6 +466,19 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
         {retrying === "repository" ? "Pushing again…" : "Push again and retry the pull request"}
       </button>}
     </div>}
+    {progress.mentions.length > 0 && <section aria-label="Mentions in the pull request">
+      <h3>Mentions in the pull request</h3>
+      <ul>
+        {progress.mentions.map((mention) => <li key={`${mention.comment_type}-${mention.comment_id}`}>
+          <a href={mention.url} target="_blank" rel="noreferrer">{mention.author}</a>{" "}
+          ({mention.comment_type === "review" ? "inline review comment" : "comment"}):{" "}
+          {mention.classification === "pending" ? "being classified" : mention.classification}, {mention.status}
+          {mention.round !== null && <> — review round {mention.round}</>}
+          {mention.reply_url && <> — <a href={mention.reply_url} target="_blank" rel="noreferrer">reply</a></>}
+          {mention.error && <p role="alert">{mention.error}</p>}
+        </li>)}
+      </ul>
+    </section>}
   </>;
 }
 

@@ -16,13 +16,6 @@
   },
   {
     "category": "functional",
-    "description": "Every endpoint other than sign-in, registration, its status and sign-out requires a valid, unexpired token, sent as a bearer token or the session cookie, and answers 401 with WWW-Authenticate: Bearer otherwise.",
-    "id": "FR-3",
-    "priority": "must",
-    "title": "Require a signed-in user"
-  },
-  {
-    "category": "functional",
     "description": "GET /auth/me returns the signed-in user's login, when the session expires and whether the user is the administrator.",
     "id": "FR-4",
     "priority": "must",
@@ -48,13 +41,6 @@
     "id": "FR-7",
     "priority": "must",
     "title": "Validate account details"
-  },
-  {
-    "category": "functional",
-    "description": "All users share one GitHub App connection. It is created from an app ID, its PEM private key and optionally the account it is installed on, or from the code GitHub returns after creating an app from this instance's manifest. It can be checked against GitHub and removed. Its status shows whether it is configured, whether the key can be encrypted, the app, the installation and when it was last validated.",
-    "id": "FR-8",
-    "priority": "must",
-    "title": "Connect GitHub"
   },
   {
     "category": "functional",
@@ -357,11 +343,107 @@
     "title": "Pull request link in delivery progress"
   },
   {
-    "category": "technical",
-    "description": "The GitHub App manifest this instance offers requests the pull_requests: write permission in addition to its existing permissions.",
-    "id": "TR-4",
+    "category": "functional",
+    "description": "When a comment on a pull request mentions the GitHub App and asks for a fix, the comment's text is passed to a new round of fixes, followed by verification and code review, and the result is pushed to the pull request's branch, as with the user's instructions on open review findings.",
+    "id": "FR-40",
     "priority": "must",
-    "rationale": "Opening pull requests requires pull_requests: write; the manifest currently grants only contents and metadata.",
-    "title": "Pull request permission in the app manifest"
+    "rationale": "User: mention the app in the PR asking for a fix; behave like instructions on open findings.",
+    "title": "Mention the app to request a fix"
+  },
+  {
+    "category": "functional",
+    "description": "When a comment on a pull request mentions the GitHub App and asks for clarification, the app replies in the pull request with an LLM-generated answer based on the delivery's sessions and code.",
+    "id": "FR-41",
+    "priority": "must",
+    "rationale": "User chose an LLM reply in the PR based on the delivery's session and code.",
+    "title": "Mention the app to ask for clarification"
+  },
+  {
+    "category": "functional",
+    "description": "The app acts on a mention only when it is on a pull request the app opened for a delivery and its author has write access to the repository; any other mention is ignored.",
+    "id": "FR-42",
+    "priority": "must",
+    "rationale": "User chose: only PRs the app opened, from users with write access.",
+    "title": "Act only on authorised mentions on the app's PRs"
+  },
+  {
+    "category": "functional",
+    "description": "Every endpoint other than sign-in, registration, its status, sign-out and POST /connectors/github/events requires a valid, unexpired token, sent as a bearer token or the session cookie, and answers 401 with WWW-Authenticate: Bearer otherwise.",
+    "id": "FR-43",
+    "priority": "must",
+    "rationale": "Replaces FR-3: GitHub must be able to deliver webhook events without a user token.",
+    "title": "Require a signed-in user"
+  },
+  {
+    "category": "functional",
+    "description": "POST /connectors/github/events accepts a GitHub webhook delivery only when its X-Hub-Signature-256 signature matches the connected app's webhook secret, and rejects any unsigned or wrongly signed delivery without acting on it.",
+    "id": "FR-44",
+    "priority": "must",
+    "rationale": "User chose a signed webhook endpoint to receive mentions.",
+    "title": "Receive GitHub webhook events"
+  },
+  {
+    "category": "functional",
+    "description": "A mention of the app counts in both pull request conversation comments and inline review comments.",
+    "id": "FR-45",
+    "priority": "must",
+    "rationale": "User chose conversation and inline review comments.",
+    "title": "Mentions in conversation and inline review comments"
+  },
+  {
+    "category": "functional",
+    "description": "An LLM classifies each authorised mention as a fix request or a request for clarification; when it cannot tell, the app replies in the pull request asking which one is meant and takes no other action.",
+    "id": "FR-46",
+    "priority": "must",
+    "rationale": "User chose LLM classification with a reply when unsure.",
+    "title": "Classify a mention as fix or clarification"
+  },
+  {
+    "category": "functional",
+    "description": "When a fix is requested by a mention while a fix round for the same delivery is running, the request is queued and its round starts after the current round ends, in the order the requests arrived.",
+    "id": "FR-47",
+    "priority": "must",
+    "rationale": "User chose to queue requests that arrive during a running round.",
+    "title": "Queue fix requests during a running round"
+  },
+  {
+    "category": "functional",
+    "description": "When a fix round requested by a mention starts, the app replies in the pull request that it has started, and when the round ends it replies again with the outcome: that the result was pushed, or what failed.",
+    "id": "FR-48",
+    "priority": "must",
+    "rationale": "User chose a reply when the round starts and another with the outcome.",
+    "title": "Acknowledge fix requests in the pull request"
+  },
+  {
+    "category": "functional",
+    "description": "A GitHub App connection created from an app ID and private key accepts an optional webhook secret, stored encrypted and never returned; while a connection has no webhook secret, POST /connectors/github/events rejects every delivery and mentions are not handled.",
+    "id": "FR-49",
+    "priority": "must",
+    "rationale": "User chose an optional webhook secret entered with the app ID and key.",
+    "title": "Optional webhook secret for a manual connection"
+  },
+  {
+    "category": "functional",
+    "description": "All users share one GitHub App connection. It is created from an app ID, its PEM private key, optionally the account it is installed on and optionally a webhook secret, or from the code GitHub returns after creating an app from this instance's manifest. It can be checked against GitHub and removed. Its status shows whether it is configured, whether the key can be encrypted, the app, the installation, when it was last validated and whether a webhook secret is set.",
+    "id": "FR-50",
+    "priority": "must",
+    "rationale": "Replaces FR-8: the user confirmed a manual connection takes an optional webhook secret and the status shows whether one is set.",
+    "title": "Connect GitHub"
+  },
+  {
+    "category": "functional",
+    "description": "The delivery progress shows each authorised mention on the delivery's pull request, how it was classified (fix, clarification or unclear) and the fix round or reply it led to.",
+    "id": "FR-51",
+    "priority": "must",
+    "rationale": "User chose to show each mention, its classification and the round or reply it led to.",
+    "title": "Mentions shown in delivery progress"
+  },
+  {
+    "category": "technical",
+    "description": "The GitHub App manifest this instance offers requests the pull_requests: write permission in addition to its existing permissions, turns on the webhook pointing at POST /connectors/github/events, and subscribes to pull request conversation comment and inline review comment events; the webhook secret GitHub returns with the created app is stored encrypted with the connection.",
+    "id": "TR-5",
+    "priority": "must",
+    "rationale": "Replaces TR-4: mentions arrive through the app's webhook.",
+    "title": "Pull request permission and comment webhook in the app manifest"
   }
 ]

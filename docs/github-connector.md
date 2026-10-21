@@ -32,11 +32,11 @@ The clone is shallow (`--depth 1`) and does not fetch submodules. Each clone and
    ```
 
 3. Put the result in `backend/.env` as `GITHUB_TOKEN_ENCRYPTION_KEY=...` (it encrypts the app's private key). Never commit this file. Keep the same key across API restarts and back it up separately from the database. Restart the API after environment changes.
-4. Open the frontend's **GitHub** tab and choose **Create GitHub App**, optionally naming the organization that should own it. GitHub shows the app this instance asks for (private, **Contents: read and write**, **Pull requests: read and write**, no active webhook) for confirmation and sends the browser back to `/github-app` with a one-time code, which the backend exchanges for the app's ID and private key. Then follow **Install the app on GitHub** and pick the repositories; GitHub returns to the same page and the connection is complete. If it does not (an organization owner has to approve the installation first, or the tab was closed), use **Check connection** afterwards. The app's addresses are those of the page it was created from, so create it from the address the instance is normally used at, in a signed-in tab.
+4. Open the frontend's **GitHub** tab and choose **Create GitHub App**, optionally naming the organization that should own it. GitHub shows the app this instance asks for (private, **Contents: read and write**, **Pull requests: read and write**, and an active webhook pointing at `/api/connectors/github/events` subscribed to **Issue comment** and **Pull request review comment** events) for confirmation and sends the browser back to `/github-app` with a one-time code, which the backend exchanges for the app's ID, private key and webhook secret (stored encrypted). For an app the connection records as created from the manifest but without a webhook secret, **Check connection** turns its webhook on with a newly generated secret, generated, set at GitHub and stored under the connection's lock so that concurrent checks always store the secret GitHub uses. The webhook URL it sets is `GITHUB_WEBHOOK_URL` when configured, else the backend's address as the check reached it under the prefix the proxy reports in `X-Forwarded-Prefix` (the frontend's nginx and Vite proxies send `/api`). A connection saved before the backend recorded how its app was created (before mentions were supported) has its origin resolved by its first check: an app whose webhook has no address, or already points at a `/connectors/github/events` endpoint, and whose homepage is on this instance's host (as the manifest set it) counts as created from the manifest, gets its webhook turned on the same way and is recorded as such; any other app counts as manually connected and keeps its webhook settings. Then follow **Install the app on GitHub** and pick the repositories; GitHub returns to the same page and the connection is complete. If it does not (an organization owner has to approve the installation first, or the tab was closed), use **Check connection** afterwards. The app's addresses are those of the page it was created from, so create it from the address the instance is normally used at, in a signed-in tab.
 
 To use an app that already exists instead, expand **Use an existing GitHub App**:
 
-1. Create a [GitHub App](https://github.com/settings/apps/new) (for an organization: its settings, **Developer settings → GitHub Apps**). Give it the repository permissions **Contents: read and write** (sessions push their result to a new branch; a read-only app fails at that last step) and **Pull requests: read and write** (each pushed delivery opens or updates a pull request to the default branch; without it the push still succeeds and the delivery progress reports the missing permission); Metadata read access is added automatically. Untick **Webhook → Active**; no callback URL, webhook or user authorization is used. On the app's page note the **App ID** and **Generate a private key**, which downloads a `.pem` file.
+1. Create a [GitHub App](https://github.com/settings/apps/new) (for an organization: its settings, **Developer settings → GitHub Apps**). Give it the repository permissions **Contents: read and write** (sessions push their result to a new branch; a read-only app fails at that last step) and **Pull requests: read and write** (each pushed delivery opens or updates a pull request to the default branch; without it the push still succeeds and the delivery progress reports the missing permission); Metadata read access is added automatically. To have the app act on mentions in its pull requests, keep **Webhook → Active**, set the webhook URL to this instance's `/api/connectors/github/events`, choose a webhook secret and subscribe to **Issue comment** and **Pull request review comment** events; enter the same secret when connecting. Without a secret every webhook delivery is rejected and mentions are not handled. No callback URL or user authorization is used. On the app's page note the **App ID** and **Generate a private key**, which downloads a `.pem` file.
 2. **Install** the app on the account or organization that owns the repositories, limited to the repositories it needs. An organization may require an owner's approval. Repositories added to or removed from the installation later are picked up without reconnecting.
 3. Submit the App ID and the `.pem` file. If the app is installed on several accounts, also name the one to use; the connection works with a single installation. Choose a repository/branch in **Requirements** (required) or **Chat** (optional) before starting a new session. Branch lists are paginated; Refresh and Load more are available. Empty repositories cannot be selected until they have a branch.
 
@@ -103,3 +103,30 @@ env/bin/python -m pytest tests/test_github_connector.py tests/test_github_storag
 GitHub HTTP is mocked; no real GitHub App or model calls are made. Checkout and push tests run the real `git` against a repository on disk. Real storage tests require an explicit `TEST_DATABASE_URL` pointing to a **disposable** PostgreSQL database whose name starts with `github_test_`. They initialize the connector schema and clear the connector table between tests. They never default to `APP_DATABASE_URL`. Without the variable, storage tests skip; do not mistake that for persistence verification.
 
 Run `npm run build` from `frontend/`. Manually inspect settings/picker/summary flows on desktop/mobile, including a wrong App ID or key, a missing encryption key, an uninstalled app, repositories removed from the installation, multi-page lists, branches containing `/`, empty repositories, stale requests during repository changes, and Disconnect. Verify independent sessions retain their own immutable selections after retrieval, branching, derivation, and restart.
+
+## Mentions in pull requests
+
+GitHub delivers pull request comments to `POST /connectors/github/events`, which needs no
+sign-in: a delivery is accepted only when `X-Hub-Signature-256` is the HMAC-SHA256 of its
+raw body with the connection's webhook secret. A newly created comment that mentions the
+app (`@<slug>` or `@<slug>[bot]`) on an open pull request the app opened for a delivery, by
+a user with write access, is handed to that delivery (202); every other signed delivery is
+ignored (204) and only logged. A delivery ID or comment already handled answers 409.
+
+The delivery's LLM classifies each mention as a fix request, a clarification or unclear.
+A clarification is answered in the pull request from the delivery's session and the code as
+last pushed; an unclear mention gets a reply asking which is meant. A fix request starts a
+round of fixes with the comment as its instructions, then verification and code review, and
+pushes to the same branch; requests arriving while a round runs are queued in order. The
+app replies when the round starts and again with its outcome; a mention whose reply could
+not be posted ends with status `error`, saying which reply failed, even when its fix was
+pushed. The LLM reads the whole comment, up to GitHub's 65536 characters. Every mention,
+its classification and what it led to are listed in the delivery progress as `mentions`.
+They are kept, with their full text, in the `app.delivery_mentions` table: the delivery
+workflow carries only the mentions it still works on, without their text, and review
+rounds a comment started refer to it, so that its state stays bounded however many
+comments its pull request receives.
+
+Connecting or checking the connection sets `webhook_events_missing` when the app is not
+subscribed to both comment events or the installation lacks `pull_requests: write`; GitHub's
+API cannot change these, so the app's owner adds them in the app's settings.

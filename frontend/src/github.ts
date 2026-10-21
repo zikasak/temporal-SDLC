@@ -28,6 +28,10 @@ export type Connection = {
   // Null while the app is created but not installed yet.
   installation: { id: number; account: string } | null;
   validated_at: string | null;
+  // Whether webhook deliveries can be verified, and so mentions handled.
+  webhook_secret_set: boolean;
+  // The app misses a comment event or the installation the pull_requests: write permission.
+  webhook_events_missing: boolean;
 };
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -77,7 +81,8 @@ export function connectionRecord(value: unknown): Connection {
       value.configured !== (value.app !== null) || (!value.configured && value.installation !== null)) {
     throw new Error("The backend returned invalid GitHub connection metadata.");
   }
-  return value as Connection;
+  return { ...value, webhook_secret_set: value.webhook_secret_set === true,
+    webhook_events_missing: value.webhook_events_missing === true } as Connection;
 }
 
 function nextPage(value: unknown): number | null {
@@ -126,9 +131,11 @@ export function createGitHubApp(name: string, organization: string) {
   const manifest = {
     name, url: origin, public: false,
     redirect_url: origin + APP_RETURN_PATH, setup_url: origin + APP_RETURN_PATH,
-    // GitHub wants a webhook address; nothing is delivered to it.
-    hook_attributes: { url: `${origin}/api/connectors/github/events`, active: false },
-    default_permissions: { contents: "write", metadata: "read", pull_requests: "write" }, default_events: [],
+    // Mentions of the app in pull request comments arrive here, signed with the webhook
+    // secret GitHub returns with the created app.
+    hook_attributes: { url: `${origin}/api/connectors/github/events`, active: true },
+    default_permissions: { contents: "write", metadata: "read", pull_requests: "write" },
+    default_events: ["issue_comment", "pull_request_review_comment"],
   };
   const form = document.createElement("form");
   form.method = "post";

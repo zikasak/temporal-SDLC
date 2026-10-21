@@ -47,5 +47,35 @@ class PullRequest(TypedDict):
     base: str
 
 
+class PullRequestMention(TypedDict):
+    """An authorised mention of the app on a delivery's pull request and what it led to."""
+
+    comment_id: int
+    # A pull request conversation comment or an inline review comment.
+    comment_type: Literal['conversation', 'review']
+    url: str
+    author: str
+    # The comment's full text. A delivery's workflow carries its mentions without it;
+    # the mention history keeps it, and the delivery progress shows it from there.
+    body: NotRequired[str]
+    received_at: str
+    # pending until the LLM has classified the mention.
+    classification: Literal['pending', 'fix', 'clarification', 'unclear']
+    status: Literal['classifying', 'queued', 'running', 'replied', 'completed', 'error']
+    # The first review round of the fix round the mention started.
+    round: NotRequired[int]
+    reply_url: NotRequired[str]
+    error: NotRequired[str]
+    # Where replies go, whatever pull request the delivery links to later: the repository
+    # and pull request the comment was made on and, for an inline comment, the top-level
+    # comment of its thread.
+    repository: NotRequired[str]
+    pull_number: NotRequired[int]
+    reply_to: NotRequired[int]
+    # Set by the delivery while the outcome of a stopped fix round is still to be replied
+    # in the pull request; never shown.
+    outcome_owed: NotRequired[bool]
+
+
 PublicationStatus = Literal['not_applicable', 'waiting', 'running', 'completed', 'skipped',
                             'error']

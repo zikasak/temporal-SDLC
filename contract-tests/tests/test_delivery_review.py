@@ -62,8 +62,7 @@ def test_findings_instructions_are_validated(admin, session_prefix, body):
 
 
 def test_findings_instructions_are_limited_to_10000_characters(admin, session_prefix):
-    response = admin.post(f"{unknown_session(session_prefix)}/delivery/findings/instructions",
-                          json={"instructions": "x" * 10001})
+    response = admin.post(f'{unknown_session(session_prefix)}/delivery/findings/instructions', json={'instructions': 'x' * 10001})
     assert response.status_code in (413, 422)
     assert_error_detail(response)
 
