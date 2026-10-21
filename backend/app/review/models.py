@@ -50,15 +50,19 @@ def for_worker(findings: list[ReviewFinding], worker: str) -> list[ReviewFinding
 
 
 def review_request(findings: list[ReviewFinding], worker: str, attempt: int,
-                   instructions: str | None = None) -> dict[str, Any]:
+                   instructions: str | None = None,
+                   restore: list[str] | None = None) -> dict[str, Any]:
     """What an author receives to correct review findings. The test author never sees
     the implementation and the implementation author never sees the tests: only the
-    findings' own words reach them."""
+    findings' own words reach them. `restore` names repository tests the test author has
+    to put back as the repository holds them."""
     review: dict[str, Any] = {
         'findings': [{key: value for key, value in item.items() if key != 'target'}
                      for item in for_worker(findings, worker)]}
     if instructions:
         review['instructions'] = instructions
+    if restore and worker == 'tests':
+        review['restore'] = restore
     return {'attempt': attempt, 'review': review}
 
 

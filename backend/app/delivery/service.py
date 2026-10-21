@@ -182,6 +182,9 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
         # correction of review findings goes on.
         progress.agent_questions = []
         progress.verification_status = 'repairing' if progress.correction_failed else 'reviewing'
+        # The run says by the status that it goes on from the correction; the page would
+        # otherwise show the failure again until the run gets there.
+        progress.correction_failed = False
         progress.review_error = None
         if state.spec.checkout and not progress.open_findings:
             progress.publication_error = None

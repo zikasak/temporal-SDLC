@@ -15,7 +15,7 @@ with workflow.unsafe.imports_passed_through():
     from app.delivery.contract import with_requirements
     from app.delivery.models import (
         TASK_IDLE_TIMEOUT, AgentQuestions, DeliveryProgress, DeliveryState, judge_baseline,
-        judge_kept, open_review_findings, unproven_green,
+        judge_kept, kept_tests, open_review_findings, unproven_green,
     )
     from app.diagnosis.models import repair_request
     from app.github.checkout import SNAPSHOT_DIR
@@ -278,7 +278,9 @@ class DeliveryWorkflow:
             # Generation and verification already succeeded; only the push is repeated.
             return
         if self.state.retry_stage == 'review':
-            if self.progress.correction_failed:
+            # The retry clears the flag at once, for the page; it says so by the status.
+            if (self.progress.correction_failed
+                    or self.progress.verification_status == 'repairing'):
                 await self._retry_correction()
             else:
                 # The verified delivery is reviewed again; a new run of review rounds.
@@ -376,7 +378,8 @@ class DeliveryWorkflow:
         return findings
 
     async def _correct(self, findings: list[ReviewFinding], number: int,
-                       instructions: str | None = None) -> bool:
+                       instructions: str | None = None,
+                       restore: list[str] | None = None) -> bool:
         """Have each worker the findings concern correct them, or with the user's
         instructions both, then verify again. True when verification passed again.
         A correction of the review's own findings that did not pass is left for the user
@@ -386,7 +389,7 @@ class DeliveryWorkflow:
                    if instructions or for_worker(findings, worker)]
         await asyncio.gather(*(
             (self._implement_service if worker == 'implementation' else self._generate_tests)(
-                review_request(findings, worker, number, instructions))
+                review_request(findings, worker, number, instructions, restore))
             for worker in workers))
         if await self._verify_correction(workers, number):
             return True
@@ -396,21 +399,54 @@ class DeliveryWorkflow:
     async def _retry_correction(self) -> None:
         """Go on from a correction of review findings that did not pass, then with the
         review rounds. A worker that failed, or corrected tests of a bugfix that no longer
-        failed without the fix, correct the findings again; otherwise the corrected
-        delivery is only verified again."""
+        failed without the fix, correct the findings again. A suite that verification ran
+        and rejected goes back to the test author with the reason, as the same suite would
+        be rejected again. Otherwise the corrected delivery is only verified again."""
         self.progress.correction_failed = False
         number = self.progress.reviews[-1]['round']
+        rejected = self._rejected_suite() if workflow.patched('correct-rejected-suite') else None
         if (self.progress.implementation_error or self.progress.tests_error
                 or self.spec.kind == 'bugfix' and self.progress.baseline_status != 'reproduced'):
             self.progress.implementation_error = None
             self.progress.tests_error = None
             corrected = await self._correct(open_review_findings(self.progress), number)
+        elif rejected:
+            finding, restore = rejected
+            corrected = await self._correct([finding], number, restore=restore)
         else:
             self.progress.verification_status = 'repairing'
             corrected = await self._verify_correction([], number)
             self.progress.correction_failed = not corrected
         if corrected:
             await self._review_rounds()
+
+    def _rejected_suite(self) -> tuple[ReviewFinding, list[str]] | None:
+        """Why the last verification, which ran and passed, still rejected the suite of a
+        change, as a finding for the test author, with the repository's tests it has to
+        put back as they were: those it changed or removed that the changed service
+        still passes. None when the verification proved nothing about the suite."""
+        result = self.progress.verification
+        if (self.spec.kind not in CHANGE_KINDS or not result
+                or result['status'] != 'passed' or not self.progress.tests):
+            return None
+        reason = 'Verification of the corrected delivery rejected its tests.'
+        unrun = unproven_green(result)
+        if unrun:
+            return {'summary': unrun, 'target': 'tests', 'reason': reason}, []
+        existing = self.progress.existing_tests
+        if self.spec.kind != 'api_change' or not existing:
+            return None
+        tests = self.progress.tests
+        touched = [*tests['changed_tests'], *tests['removed_tests']]
+        kept = kept_tests(existing, touched)
+        if not kept:
+            return None
+        return {'summary': (
+            'These tests of the repository were changed or removed, but the changed service '
+            f'still passes them as the repository holds them: {", ".join(kept)}. A test the '
+            'contract still supports has to stay exactly as the repository holds it: put '
+            'each one back as the `restore` entry gives it.'),
+            'target': 'tests', 'reason': reason}, kept
 
     async def _verify_correction(self, workers: list[str], number: int) -> bool:
         """Verify the delivery as the workers corrected it; true when it passed again."""
@@ -424,6 +460,7 @@ class DeliveryWorkflow:
             return False
         self.progress.verification = None
         self.progress.verification_error = None
+        self.progress.existing_tests = None
         await self._verify_and_repair()
         if self.spec.kind == 'api_change':
             await self._prove_kept()

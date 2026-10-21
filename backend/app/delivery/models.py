@@ -178,6 +178,16 @@ def unproven_green(result: VerificationResult) -> str | None:
     return None
 
 
+def kept_tests(result: VerificationResult, touched: list[str]) -> list[str]:
+    """The repository's tests in `touched`, changed or removed by an API change, that ran
+    as they were against the changed service, in `result`, and passed there."""
+    tracked = result['tracked']
+    if result['status'] == 'error' or tracked is None:
+        return []
+    return [case for case in touched
+            if tracked.get(case, {}).get('tests') and not tracked[case]['failed']]
+
+
 def judge_kept(result: VerificationResult, touched: list[str]) -> str | None:
     """Why an API change may not publish its suite: `touched` are the repository's tests
     it changed or removed, and `result` their run, as they were, against the changed
@@ -191,7 +201,7 @@ def judge_kept(result: VerificationResult, touched: list[str]) -> str | None:
         return ('Tests of the repository that were changed or removed did not run, as they '
                 f'were, against the changed service: {", ".join(unrun[:NAMED_TESTS])} '
                 f'({len(unrun)}). Nothing shows that the new contract no longer supports them.')
-    kept = [case for case in touched if not tracked[case]['failed']]
+    kept = kept_tests(result, touched)
     if not kept:
         return None
     return ('Tests of the repository that the changed service still passes were changed or '

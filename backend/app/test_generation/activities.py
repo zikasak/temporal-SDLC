@@ -140,6 +140,14 @@ async def generate_service_tests(session_id: str, context: dict[str, Any]) -> di
             published = await run_sync(suite.test_cases, session_dir / 'tests/suite')
             frozen = {case: source for case, source in repository.items()
                       if published.get(case) == source}
+        # Repository tests the suite has to put back: the author gets each one's source,
+        # and a suite in which one of them still differs from it is rejected.
+        restore = {case: repository[case] for case in repair['review'].get('restore', [])
+                   if case in repository}
+        if restore:
+            frozen = {**(frozen or {}), **restore}
+            context = {**context, 'repair': {
+                **repair, 'review': {**repair['review'], 'restore': restore}}}
     elif repair:
         # Only the tests the diagnosis found broken may differ from the published suite.
         broken = {suite.case_id(item['class_name'], item['name'])
