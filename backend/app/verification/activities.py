@@ -1,5 +1,6 @@
 """Host-only execution of the published service and independent HTTP test image."""
 import asyncio
+import contextlib
 import fnmatch
 import io
 import json
@@ -242,12 +243,15 @@ async def run_verification(session_id: str, service_image: str, test_image: str,
                         *options, image, timeout=30,
                     )
                     created.add(name)
-                await docker_agents.docker('start', service, timeout=30)
-                await docker_agents.docker('start', runner, timeout=30)
-                runner_started = True
-                logger.info('Verification containers running (session=%s); waiting for readiness/tests', session_id)
-                # Includes readiness, test execution, and its forced-kill grace period.
-                await docker_agents.docker('wait', runner, timeout=750)
+                async with contextlib.AsyncExitStack() as forwarded:
+                    for name, role in ((service, 'service'), (runner, 'tests')):
+                        await docker_agents.docker('start', name, timeout=30)
+                        runner_started = name == runner
+                        await forwarded.enter_async_context(docker_agents.forward_logs(
+                            name, f'verification {role} {session_id}'))
+                    logger.info('Verification containers running (session=%s); waiting for readiness/tests', session_id)
+                    # Includes readiness, test execution, and its forced-kill grace period.
+                    await docker_agents.docker('wait', runner, timeout=750)
             except Exception as exc:
                 result['error'] = str(exc)[-2000:]
                 logger.error('Verification Docker execution failed (session=%s): %s',

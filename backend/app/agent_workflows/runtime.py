@@ -3,6 +3,7 @@ import asyncio
 import fnmatch
 import itertools
 import json
+import logging
 import os
 import re
 import signal
@@ -426,6 +427,18 @@ def _resume(directory: Path) -> dict[str, Any] | None:
 def _completion_written(profile: AgentProfile) -> bool:
     return (profile.completion_file is not None
             and (profile.root / profile.completion_file).is_file())
+
+
+def configure_container_logging() -> None:
+    """Log at the worker's LOG_LEVEL to stderr, each record led by its level name, which
+    the worker reads to re-log the container's output at the same level."""
+    level = os.getenv('LOG_LEVEL', 'INFO').upper()
+    logging.basicConfig(
+        level=level if isinstance(logging.getLevelName(level), int) else logging.INFO,
+        format='%(levelname)s %(name)s: %(message)s', stream=sys.stderr, force=True,
+    )
+    for name in ('httpx', 'httpcore', 'openai'):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 async def run_agent(profile: AgentProfile) -> None:

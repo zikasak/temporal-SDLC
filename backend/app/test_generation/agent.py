@@ -5,7 +5,7 @@ from functools import partial
 from pathlib import Path
 
 from app.asyncio_utils import run_sync
-from app.agent_workflows.runtime import AgentProfile, run_agent
+from app.agent_workflows.runtime import AgentProfile, configure_container_logging, run_agent
 
 ROOT = Path('/workspace/tests')
 OPENAPI = Path('/workspace/openapi.yaml')
@@ -167,4 +167,5 @@ async def main() -> None:
 
 
 if __name__ == '__main__':
+    configure_container_logging()
     asyncio.run(main())

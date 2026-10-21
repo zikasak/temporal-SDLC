@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from app.asyncio_utils import run_sync
-from app.agent_workflows.runtime import AgentProfile, run_agent
+from app.agent_workflows.runtime import AgentProfile, configure_container_logging, run_agent
 
 ROOT = Path('/workspace/repository')
 # Present only when the contracts were too large to embed in input.json.
@@ -54,4 +54,5 @@ async def main() -> None:
 
 
 if __name__ == '__main__':
+    configure_container_logging()
     asyncio.run(main())
