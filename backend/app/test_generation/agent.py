@@ -122,6 +122,12 @@ take precedence over the findings. Correct each finding with targeted edits; do 
 over or change tests the findings do not concern. Never weaken a test to make it pass. The
 requirements and OpenAPI contract remain the authority. The implementation stays
 unavailable.
+When `repair.review` holds `restore`, it maps tests of the repository, by identity
+(`module.Class#test` or `package.Class#method`), to their source as the repository holds
+them, with layout and comments normalized (a method's source may follow the headers of the
+classes it runs in). Put each one back in your suite exactly as
+given, in the file and class it belongs to, replacing your version of it: the outer
+worker rejects a suite in which one of them still differs.
 """
 
 

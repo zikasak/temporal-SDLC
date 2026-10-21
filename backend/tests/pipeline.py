@@ -104,6 +104,8 @@ class FakeStages:
         # that still pass, as they were, against the changed service.
         self.rewritten_tests: list[str] = []
         self.still_passing: list[str] = []
+        # Those of them that a corrected service passes again, as they were.
+        self.passing_after_correction: list[str] = []
         # Those the runner of the repository's tests leaves out of its reports.
         self.not_run: list[str] = []
         self.existing_runs: list[tuple[str, list[str]]] = []
@@ -175,6 +177,9 @@ class FakeStages:
         if 'repair' in context:
             self.repairs.append(('tests', context['repair']))
             changed["changed_tests"] = self.corrected_tests
+            # Tests put back as the repository holds them are no longer rewritten.
+            restore = context['repair'].get('review', {}).get('restore', [])
+            self.rewritten_tests = [case for case in self.rewritten_tests if case not in restore]
         if 'brief' not in context:
             changed = {"added_tests": [], "changed_tests": self.rewritten_tests,
                        "removed_tests": []}
@@ -240,8 +245,10 @@ class FakeStages:
         if test_image == REPOSITORY_TESTS_IMAGE:
             # The repository's own tests, of which the changed service fails some.
             self.existing_runs.append((suite_dir, tracked_tests))
+            passing = self.still_passing + (
+                self.passing_after_correction if service_image == "sha256:" + "c" * 64 else [])
             failed = [case for case in tracked_tests
-                      if case not in self.still_passing and case not in self.not_run]
+                      if case not in passing and case not in self.not_run]
             return {**details, 'status': 'failed' if failed else 'passed', 'tests': 3,
                     'passed': 3 - len(failed), 'failures': len(failed), 'errors': 0,
                     'skipped': 0, 'error': None, 'missing_tests': [],

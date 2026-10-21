@@ -251,6 +251,32 @@ async def test_a_correction_that_did_not_pass_goes_on_when_retried(env, worker):
     assert [item['findings'] for item in state.reviews] == [[finding], []]
 
 
+async def test_a_retried_correction_restores_repository_tests_the_service_passes_again(env, worker, repository_selection):
+    finding = {'summary': 'Instructions are not limited.', 'target': 'implementation',
+               'reason': 'The service checks them.'}
+    worker.review_findings = [[finding], []]
+    lists, books = "com.example.RoomsTest#lists", "com.example.RoomsTest#books"
+    worker.rewritten_tests = [lists, books]
+    # The corrected service passes one rewritten test again, as the repository held it.
+    worker.passing_after_correction = [lists]
+    session_id = await deliver(env, repository_selection, kind="api_change")
+    state = await delivered(env, session_id)
+    assert state.correction_failed and "still passes were changed or removed" in state.verification_error
+
+    retried = await delivery_service.retry(session_id, 'review')
+    # The page sees the correction going on, not its failure.
+    assert not retried.correction_failed and retried.verification_status == 'repairing'
+    state = await delivered(env, session_id)
+    # Verifying the same suite again would fail the same way: the test author puts the
+    # test back, told why; the implementation is not corrected again.
+    assert [stage for stage, _ in worker.repairs] == ['implementation', 'tests']
+    review = worker.repairs[-1][1]['review']
+    assert review['restore'] == [lists] and lists in review['findings'][0]['summary']
+    assert worker.existing_runs[-1] == ("repository-tests", [books])
+    assert not state.correction_failed and state.verification_error is None
+    assert state.verification_status == 'completed' and state.publication_status == 'completed'
+
+
 async def test_only_a_failed_review_or_correction_is_retried(env, worker):
     session_id = await deliver(env)
     state = await delivered(env, session_id)

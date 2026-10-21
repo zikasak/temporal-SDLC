@@ -309,3 +309,53 @@ async def test_only_tests_found_broken_may_differ_from_what_they_were(tmp_path, 
         'added_tests': ['com.example.OrdersTest#refusesDoubleBooking'],
         'changed_tests': ['com.example.OrdersTest#lists'] if written.get('lists') == 'corrected();' else [],
         'removed_tests': [] if 'lists' in written else ['com.example.OrdersTest#lists']}
+
+
+@pytest.mark.parametrize('written, refused', [
+    ('get();', None),
+    ('changed();', 'may not touch: com.example.OrdersTest#lists'),
+])
+async def test_a_review_correction_puts_back_the_repository_tests_it_is_given(tmp_path, monkeypatch, written, refused):
+    monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
+    source = 'src/test/java/com/example/OrdersTest.java'
+    existing = tmp_path / 'session/repository/contract-tests' / source
+    existing.parent.mkdir(parents=True)
+    existing.write_text(java_tests(lists='get();'))
+    await record_repository_tests(tmp_path, monkeypatch)
+    # The API change rewrote the test, which its corrected service passes again as it was.
+    published = tmp_path / 'session/tests/suite' / source
+    published.parent.mkdir(parents=True)
+    published.write_text(java_tests(lists='changed();'))
+    (tmp_path / 'session/tests/suite/pom.xml').write_text('pom')
+    case = 'com.example.OrdersTest#lists'
+    context = {'requirements': [], 'api_design': empty_api(), 'language': 'java',
+               'repository': {'full_name': 'octocat/project', 'branch': 'main'},
+               'repair': {'attempt': 1, 'review': {
+                   'findings': [{'summary': 'Put it back.', 'reason': 'Still passes.'}],
+                   'restore': [case]}}}
+    sent = {}
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': 0})
+        if args[0] == 'cp' and args[1] == '-a':
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.update(json.loads(archive.extractfile('input.json').read()))
+        if args[0] == 'cp' and args[1].endswith(':/workspace/tests/.'):
+            (Path(args[2]) / source).parent.mkdir(parents=True)
+            (Path(args[2]) / source).write_text(java_tests(lists=written))
+            (Path(args[2]) / 'pom.xml').write_text('pom')
+        if args[0] == 'build' and '--iidfile' in args:
+            Path(args[args.index('--iidfile') + 1]).write_text('sha256:' + 'd' * 64)
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    run = ActivityEnvironment().run(activities.generate_service_tests, 'session', context)
+    if refused:
+        with pytest.raises(RuntimeError, match=refused):
+            await run
+    else:
+        assert (await run)['changed_tests'] == []
+    # The author is given the test as the repository holds it.
+    assert set(sent['repair']['review']['restore']) == {case}
+    assert 'get();' in sent['repair']['review']['restore'][case]
