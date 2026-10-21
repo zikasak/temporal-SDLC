@@ -27,7 +27,7 @@ from app.implementation.activities import copy_service
 from app.test_generation.activities import copy_test_suite
 from app.languages import Language, TestReports, UnsupportedLanguage, get_language
 from app.config import GENERATED_CODE_DIR
-from app.verification.models import TestFailure, TrackedTest, VerificationResult
+from app.verification.models import TestFailure, TestSkip, TrackedTest, VerificationResult
 from app.temporal.tracing import trace_activity
 
 logger = logging.getLogger(__name__)
@@ -102,6 +102,7 @@ def summarize_reports(directory: Path, reports: TestReports,
     totals = dict(tests=0, passed=0, failures=0, errors=0, skipped=0)
     reported: set[str] = set()
     failures: list[TestFailure] = []
+    skips: list[TestSkip] = []
     files = sorted(directory.glob(reports.pattern))
     if not files or len(files) > MAX_REPORT_FILES:
         raise RuntimeError('Valid test reports are unavailable')
@@ -134,6 +135,12 @@ def summarize_reports(directory: Path, reports: TestReports,
             if watched:
                 watched['tests'] += 1
                 watched['failed'] += key in ('failures', 'errors')
+            if key == 'skipped' and len(skips) < MAX_FAILURE_DETAILS:
+                skips.append({
+                    'class_name': case.get('classname', '')[:256],
+                    'name': case.get('name', '')[:256],
+                    'message': (outcome.get('message') or outcome.text or '')[:2000],
+                })
             if key in ('failures', 'errors'):
                 kind = outcome.tag
                 if len(failures) < MAX_FAILURE_DETAILS:
@@ -145,7 +152,7 @@ def summarize_reports(directory: Path, reports: TestReports,
     if not totals['tests'] or totals['tests'] == totals['skipped']:
         raise RuntimeError('No tests were executed')
     missing = None if suite_tests is None else sorted(suite_tests - reported)[:MAX_MISSING_TESTS]
-    return {**totals, 'missing_tests': missing, 'test_failures': failures,
+    return {**totals, 'missing_tests': missing, 'test_failures': failures, 'test_skips': skips,
             'details_truncated': totals['failures'] + totals['errors'] > len(failures)}
 
 
@@ -208,7 +215,7 @@ async def run_verification(session_id: str, service_image: str, test_image: str,
     result: VerificationResult = {
         'session_id': session_id, 'status': 'error',
         'tests': 0, 'passed': 0, 'failures': 0, 'errors': 0, 'skipped': 0,
-        'duration_seconds': 0, 'exit_code': None, 'test_failures': [],
+        'duration_seconds': 0, 'exit_code': None, 'test_failures': [], 'test_skips': [],
         'details_truncated': False, 'tracked': tracked, 'missing_tests': None,
         'service_log': '', 'runner_log': '',
         'error': None, 'path': str(run_dir),
@@ -351,7 +358,7 @@ async def verify_documentation(session_id: str) -> VerificationResult:
     real check goes here."""
     return {'session_id': session_id, 'status': 'not_implemented', 'tests': 0, 'passed': 0,
             'failures': 0, 'errors': 0, 'skipped': 0, 'duration_seconds': 0.0,
-            'exit_code': None, 'test_failures': [], 'details_truncated': False,
+            'exit_code': None, 'test_failures': [], 'test_skips': [], 'details_truncated': False,
             'tracked': None, 'missing_tests': None, 'service_log': '', 'runner_log': '',
             'error': None, 'path': ''}
 

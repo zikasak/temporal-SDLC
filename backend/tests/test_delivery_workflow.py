@@ -277,6 +277,27 @@ async def test_a_retried_correction_restores_repository_tests_the_service_passes
     assert state.verification_status == 'completed' and state.publication_status == 'completed'
 
 
+async def test_a_retried_correction_tells_the_test_author_which_test_skipped_and_why(env, worker, repository_selection):
+    finding = {'summary': 'Instructions are not limited.', 'target': 'implementation',
+               'reason': 'The service checks them.'}
+    worker.review_findings = [[finding], []]
+    # The corrected delivery passes, but one of its tests skipped itself.
+    worker.verification_results = ['passed', 'skipped', 'passed']
+    session_id = await deliver(env, repository_selection, kind="api_change")
+    state = await delivered(env, session_id)
+    assert state.correction_failed
+    assert 'RoomsTest#books (skip reason: GitHub is not configured)' in state.verification_error
+
+    await delivery_service.retry(session_id, 'review')
+    state = await delivered(env, session_id)
+    # The same suite would skip the same test again: its author is told which one and why.
+    assert [stage for stage, _ in worker.repairs] == ['implementation', 'tests']
+    summary = worker.repairs[-1][1]['review']['findings'][0]['summary']
+    assert 'RoomsTest#books (skip reason: GitHub is not configured)' in summary
+    assert not state.correction_failed and state.verification_error is None
+    assert state.publication_status == 'completed'
+
+
 async def test_only_a_failed_review_or_correction_is_retried(env, worker):
     session_id = await deliver(env)
     state = await delivered(env, session_id)

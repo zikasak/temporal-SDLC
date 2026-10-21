@@ -286,6 +286,8 @@ class FakeStages:
                 'failures': int(failed), 'errors': 0, 'skipped': int(skipped),
                 'test_failures': [{'class_name': 'RoomsTest', 'name': 'lists', 'kind': 'failure',
                                    'message': 'Expected 200, got 500'}] if failed else [],
+                'test_skips': [{'class_name': 'RoomsTest', 'name': 'books',
+                                'message': 'GitHub is not configured'}] if skipped else [],
                 'tracked': None if tracked_tests is None else {
                     case: {'tests': 1, 'failed': 0} for case in tracked_tests},
                 'missing_tests': None if tracked_tests is None else [],
