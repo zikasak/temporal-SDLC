@@ -95,7 +95,7 @@ async def worker(env):
         env.client, task_queue=TASK_QUEUE, workflows=[ApiDesignWorkflow, DeliveryWorkflow],
         activities=[activities.api_design_turn, activities.write_openapi_document,
                     activities.checkout_repository, activities.publish_repository,
-                    activities.read_repository_contract],
+                    activities.open_pull_request, activities.read_repository_contract],
     ), stage_workers(env, activities):
         yield activities
 

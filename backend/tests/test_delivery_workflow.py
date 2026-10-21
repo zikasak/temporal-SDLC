@@ -153,7 +153,7 @@ async def workers(env, monkeypatch):
                     activities.read_requirements_document, activities.read_repository_contract,
                     activities.checkout_repository, activities.update_repository_checkout,
                     activities.publish_repository, activities.publish_documentation,
-                    activities.api_design_turn, activities.write_openapi_document],
+                    activities.open_pull_request, activities.api_design_turn, activities.write_openapi_document],
     ), stage_workers(env, activities):
         yield activities
 

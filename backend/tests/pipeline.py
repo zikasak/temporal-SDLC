@@ -133,6 +133,13 @@ class FakeStages:
         return {"branch": "generated/abc", "commit": "2" * 40,
                 "url": repository["html_url"] + "/tree/generated/abc"}
 
+    @activity.defn(name="open_pull_request")
+    async def open_pull_request(self, session_id: str, repository: dict[str, Any],
+                                publication: dict[str, Any], change: dict[str, Any]
+                                ) -> dict[str, Any]:
+        return {"number": 1, "title": "Change", "url": repository["html_url"] + "/pull/1",
+                "draft": not publication.get("verified", True), "base": "main"}
+
     @activity.defn(name="publish_documentation")
     async def publish_documentation(self, session_id: str, repository: dict[str, Any],
                                     language: str, verified: bool) -> dict[str, Any]:
