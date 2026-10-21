@@ -11,6 +11,8 @@ SUMMARY_CHARS = 2000
 REASON_CHARS = 500
 PATH_CHARS = 500
 INSTRUCTIONS_CHARS = 10000
+# How much of each earlier finding a later review round receives.
+PREVIOUS_SUMMARY_CHARS = 1000
 # The open findings a pushed commit's message lists.
 COMMIT_FINDINGS = 20
 
@@ -25,6 +27,9 @@ class ReviewFinding(TypedDict):
     target: ReviewTarget
     # Briefly, why it goes to that worker.
     reason: str
+    # The number of the earlier finding of the same run of review rounds that this one
+    # reports again: a correction did not settle it, so it is not sent for another.
+    repeats: NotRequired[int]
 
 
 class ReviewRound(TypedDict):
@@ -49,6 +54,14 @@ def for_worker(findings: list[ReviewFinding], worker: str) -> list[ReviewFinding
     return [item for item in findings if item['target'] in (worker, 'both')]
 
 
+def earlier_findings(findings: list[ReviewFinding]) -> list[dict[str, Any]]:
+    """The findings a run of review rounds already had corrected, numbered from 1, as the
+    next review receives them to tell whether they are settled."""
+    return [{'number': number, 'summary': item['summary'][:PREVIOUS_SUMMARY_CHARS],
+             'target': item['target'], **({'path': item['path']} if item.get('path') else {})}
+            for number, item in enumerate(findings, start=1)]
+
+
 def review_request(findings: list[ReviewFinding], worker: str, attempt: int,
                    instructions: str | None = None,
                    restore: list[str] | None = None) -> dict[str, Any]:
@@ -57,7 +70,8 @@ def review_request(findings: list[ReviewFinding], worker: str, attempt: int,
     findings' own words reach them. `restore` names repository tests the test author has
     to put back as the repository holds them."""
     review: dict[str, Any] = {
-        'findings': [{key: value for key, value in item.items() if key != 'target'}
+        'findings': [{key: value for key, value in item.items()
+                      if key not in ('target', 'repeats')}
                      for item in for_worker(findings, worker)]}
     if instructions:
         review['instructions'] = instructions

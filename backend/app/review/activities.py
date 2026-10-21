@@ -27,8 +27,8 @@ from app.languages import Language
 from app.requirements.document import without_repeated_tables
 from app.review.agent import FINDINGS
 from app.review.models import (
-    INSTRUCTIONS_CHARS, MAX_FINDINGS, PATH_CHARS, REASON_CHARS, REVIEW_TARGETS, SUMMARY_CHARS,
-    ReviewFinding,
+    INSTRUCTIONS_CHARS, MAX_FINDINGS, PATH_CHARS, PREVIOUS_SUMMARY_CHARS, REASON_CHARS,
+    REVIEW_TARGETS, SUMMARY_CHARS, ReviewFinding,
 )
 from app.temporal.tracing import activity_metadata
 from app.tracing import trace_operation
@@ -47,6 +47,8 @@ LISTED_CHANGES = 500
 PART_DIFF_CHARS = 60_000
 # Which part of the changes a review run takes, counted from 0, in the activity context.
 PART_KEY = 'review_part'
+# The findings earlier rounds of the same run had corrected, in the activity context.
+PREVIOUS_KEY = 'previous_findings'
 
 
 def record_baseline(language: Language, session_dir: Path) -> Path:
@@ -157,7 +159,7 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
     others = [path for path in diffs if path not in own]
     contracts = without_repeated_tables(
         {key: value for key, value in context.items()
-         if key not in ('instructions', 'repository', 'language')})
+         if key not in ('instructions', 'repository', 'language', PREVIOUS_KEY)})
     index, files = on_demand_contracts(contracts, len(json.dumps(contracts))) or (contracts, {})
     write_language(workspace, language, label=language.label)
     if files:
@@ -167,14 +169,37 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
         {**index, 'changes': changes,
          **({PART_KEY: {'part': part + 1, 'of': len(parts), 'other_changes': by_side(others)}}
             if len(parts) > 1 else {}),
-         **({'instructions': instructions} if instructions else {})},
+         **({'instructions': instructions} if instructions else {}),
+         **({PREVIOUS_KEY: context[PREVIOUS_KEY]} if context.get(PREVIOUS_KEY) else {})},
         ensure_ascii=False))
     return changes, max(len(parts), 1)
 
 
-def read_findings(output: Path, changed: set[str]) -> list[ReviewFinding]:
+def _same(summary: str) -> str:
+    return ' '.join(summary.lower().split())
+
+
+def _repeated(item: dict[str, Any], finding: ReviewFinding,
+              previous: list[dict[str, Any]]) -> int | None:
+    """The number of the earlier finding this one reports again: the one the reviewer
+    names, or one with the very same target, file and summary."""
+    numbers = {entry.get('number') for entry in previous}
+    named = item.get('repeats')
+    if isinstance(named, int) and not isinstance(named, bool) and named in numbers:
+        return named
+    for entry in previous:
+        if (entry.get('target') == finding['target']
+                and (entry.get('path') or '') == finding.get('path', '')
+                and _same(str(entry.get('summary') or ''))
+                == _same(finding['summary'][:PREVIOUS_SUMMARY_CHARS])):
+            return entry.get('number')
+    return None
+
+
+def read_findings(output: Path, changed: set[str],
+                  previous: list[dict[str, Any]] | None = None) -> list[ReviewFinding]:
     """The agent's output is untrusted: accept bounded, well-formed findings about the
-    delivery's own changes only."""
+    delivery's own changes only, each marked with the earlier finding it repeats."""
     file = output / FINDINGS
     if file.is_symlink() or not file.is_file() or file.stat().st_size > MAX_FINDINGS_BYTES:
         raise RuntimeError('The code review did not produce its findings')
@@ -201,6 +226,9 @@ def read_findings(output: Path, changed: set[str]) -> list[ReviewFinding]:
                 logger.info('Dropped a review finding about unchanged %s', path[:PATH_CHARS])
                 continue
             finding['path'] = path[:PATH_CHARS]
+        repeats = _repeated(item, finding, previous or [])
+        if repeats is not None:
+            finding['repeats'] = repeats
         findings.append(finding)
         if len(findings) == MAX_FINDINGS:
             break
@@ -229,11 +257,13 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
             await run_sync(docker_agents.resume_workspace, paused, workspace, answers)
             inputs = json.loads(await run_sync((workspace / 'input.json').read_text))
             changes = inputs.get('changes') or {}
+            previous = inputs.get(PREVIOUS_KEY) or []
             count = int((inputs.get(PART_KEY) or {}).get('of') or 1)
         else:
             await run_sync(workspace.mkdir)
             changes, count = await run_sync(
                 prepare_review, language, session_dir, context, workspace, part)
+            previous = context.get(PREVIOUS_KEY) or []
         changed = {path for paths in changes.values() for path in paths}
         # The workflow runs the next part's review with this in its context.
         following = {'next_part': part + 1} if part + 1 < count else {}
@@ -253,7 +283,7 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
                         dockerfile=language.agent_dockerfile))
             except docker_agents.AgentPaused as exc:
                 return paused_result(session_id, exc)
-        findings = await run_sync(read_findings, output, changed)
+        findings = await run_sync(read_findings, output, changed, previous)
     result = {'session_id': session_id, 'findings': findings, 'path': str(artifact_dir)}
     manifest = artifact_dir / f'{uuid.uuid4().hex}.json'
     await run_sync(

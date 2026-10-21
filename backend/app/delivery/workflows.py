@@ -21,7 +21,8 @@ with workflow.unsafe.imports_passed_through():
     from app.github.checkout import SNAPSHOT_DIR
     from app.requirements.models import CHANGE_KINDS
     from app.review.models import (
-        MAX_REVIEW_ROUNDS, ReviewFinding, ReviewRound, for_worker, review_request,
+        MAX_REVIEW_ROUNDS, ReviewFinding, ReviewRound, earlier_findings, for_worker,
+    review_request,
     )
     from app.temporal.activities import (
         open_pull_request, publish_documentation, publish_repository,
@@ -283,8 +284,9 @@ class DeliveryWorkflow:
                     or self.progress.verification_status == 'repairing'):
                 await self._retry_correction()
             else:
-                # The verified delivery is reviewed again; a new run of review rounds.
-                await self._review_rounds()
+                # The verified delivery is reviewed again; a new run of review rounds,
+                # which knows what the last completed round found and had corrected.
+                await self._review_rounds(corrected=open_review_findings(self.progress))
             return
         if self.spec.kind == 'docs':
             await self._document()
@@ -328,34 +330,49 @@ class DeliveryWorkflow:
                     and (self.spec.kind != 'bugfix'
                          or self.progress.baseline_status == 'reproduced'))
 
-    async def _review_rounds(self, instructions: str | None = None) -> None:
-        """Review the verified delivery's changes; while findings remain, send them to the
-        worker they concern, verify again and review again, at most MAX_REVIEW_ROUNDS
-        times. Findings left after the last round are open: the delivery is pushed as
-        unverified and the user decides about them."""
+    async def _review_rounds(self, instructions: str | None = None,
+                             corrected: list[ReviewFinding] | None = None) -> None:
+        """Review the verified delivery's changes; while new findings remain, send them to
+        the worker they concern, verify again and review again, at most MAX_REVIEW_ROUNDS
+        times. Each round knows the findings already `corrected` in this run, and a
+        finding reported again is not sent for another correction: a round with nothing
+        new ends the run. Findings left are open: the delivery is pushed as unverified
+        and the user decides about them."""
+        earlier = [{key: value for key, value in item.items() if key != 'repeats'}
+                   for item in corrected or []]
         for count in range(1, MAX_REVIEW_ROUNDS + 1):
-            findings = await self._review(instructions)
-            # Only the first round reviews fixes made from the user's instructions.
-            instructions = None
+            # The user's instructions hold for every round of the run they started.
+            findings = await self._review(instructions, earlier, record=count == 1)
             if findings is None:
                 return
             if not findings:
                 self.progress.verification_status = 'completed'
                 return
-            if count == MAX_REVIEW_ROUNDS:
+            new = [item for item in findings if 'repeats' not in item]
+            if not new:
+                workflow.logger.info('The review only repeats findings already corrected')
                 break
-            if not await self._correct(findings, self.progress.reviews[-1]['round']):
+            if count == MAX_REVIEW_ROUNDS:
+                workflow.logger.info('Review findings remain after %d rounds',
+                                     MAX_REVIEW_ROUNDS)
+                break
+            if not await self._correct(new, self.progress.reviews[-1]['round']):
                 return
-        workflow.logger.info('Review findings remain after %d rounds', MAX_REVIEW_ROUNDS)
+            earlier += new
         self.progress.verification_status = 'findings_open'
 
-    async def _review(self, instructions: str | None) -> list[ReviewFinding] | None:
-        """One review round; None when the review could not run."""
+    async def _review(self, instructions: str | None, earlier: list[ReviewFinding],
+                      record: bool = True) -> list[ReviewFinding] | None:
+        """One review round, told the findings already corrected; None when the review
+        could not run. `record` keeps the instructions with the round whose reviewed
+        fixes were made from them."""
         self.progress.verification_status = 'reviewing'
         number = len(self.progress.reviews) + 1
         context = self._coding_context()
         if instructions:
             context['instructions'] = instructions
+        if earlier:
+            context['previous_findings'] = earlier_findings(earlier)
         try:
             result = await workflow.execute_child_workflow(
                 'ReviewWorkflow', args=[self.spec.session_id, context],
@@ -371,7 +388,7 @@ class DeliveryWorkflow:
         self.progress.review_error = None
         findings: list[ReviewFinding] = list(result.get('findings') or [])
         round_: ReviewRound = {'round': number, 'findings': findings}
-        if instructions:
+        if instructions and record:
             round_['instructions'] = instructions
         self.progress.reviews.append(round_)
         workflow.logger.info('Review round %d: %d findings', number, len(findings))
@@ -418,7 +435,7 @@ class DeliveryWorkflow:
             corrected = await self._verify_correction([], number)
             self.progress.correction_failed = not corrected
         if corrected:
-            await self._review_rounds()
+            await self._review_rounds(corrected=open_review_findings(self.progress))
 
     def _rejected_suite(self) -> tuple[ReviewFinding, list[str]] | None:
         """Why the last verification, which ran and passed, still rejected the suite of a
@@ -482,7 +499,7 @@ class DeliveryWorkflow:
         number = len(self.progress.reviews) + 1
         instructions = self.state.instructions
         if await self._correct(findings, number, instructions):
-            await self._review_rounds(instructions)
+            await self._review_rounds(instructions, findings)
 
     def _tests_failed(self) -> bool:
         return bool(self.progress.verification_status == 'completed'

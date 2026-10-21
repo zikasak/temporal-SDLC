@@ -19,7 +19,8 @@ LANGUAGE = Path('/workspace/language.json')
 FINDINGS_FORMAT = """{"findings": [{"summary": "what is wrong and why it needs a correction",
               "path": "service/... or tests/... the changed file, when it is about one",
               "target": "implementation" or "tests" or "both",
-              "reason": "briefly, why that worker"}]}"""
+              "reason": "briefly, why that worker",
+              "repeats": the number of the earlier finding it reports again, only then}]}"""
 PROMPT = """You review the changes a delivery made to a {label} service and to its HTTP
 contract tests. The implementation and the tests were written independently from the
 same requirements and OpenAPI design, and the tests already pass against the service.
@@ -108,8 +109,18 @@ change ends: they no longer hold, whatever the contract still says.
 
 INSTRUCTIONS_PROMPT = """
 The user gave instructions about the findings of the previous review, in the
-`instructions` entry of the input. The latest fixes were made from them: take them into
-account and do not report again what the user decided should stay as it is.
+`instructions` entry of the input. The fixes were made from them: take them into account
+and do not report again what the user decided should stay as it is.
+"""
+
+PREVIOUS_PROMPT = """
+This is a later review round. The `previous_findings` entry of the input lists, numbered,
+what earlier rounds found and what has since been corrected. Check each one in the changed
+code first. A corrected one is settled: do not report it again, nor the same concern in
+other words, nor the opposite of a correction you asked for. Report an earlier finding
+again only when the code still clearly has the problem, and then set its `repeats` to that
+finding's number. Otherwise hold new findings to a high bar: report only what is clearly
+wrong, not further hardening of code an earlier round already judged.
 """
 
 
@@ -125,6 +136,9 @@ def validate_completion(root: Path) -> None:
                 or not str(item.get('summary') or '').strip()):
             raise RuntimeError('Every finding needs a summary and a target of '
                                'implementation, tests or both')
+        repeats = item.get('repeats')
+        if repeats is not None and (not isinstance(repeats, int) or isinstance(repeats, bool)):
+            raise RuntimeError('A finding\'s repeats must be the number of an earlier finding')
 
 
 async def main() -> None:
@@ -135,7 +149,8 @@ async def main() -> None:
         root=ROOT, prompt=(PROMPT.format(label=language['label'], findings_format=FINDINGS_FORMAT)
                            + (PART_PROMPT if inputs.get('review_part') else '')
                            + (CHANGE_PROMPT if inputs.get('brief') else '')
-                           + (INSTRUCTIONS_PROMPT if inputs.get('instructions') else '')),
+                           + (INSTRUCTIONS_PROMPT if inputs.get('instructions') else '')
+                           + (PREVIOUS_PROMPT if inputs.get('previous_findings') else '')),
         initial_messages=[context],
         max_turns_env='REVIEW_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Code review completed',
