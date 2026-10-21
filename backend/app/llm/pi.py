@@ -186,6 +186,7 @@ def _final_reply(stdout: str) -> dict[str, Any]:
     it is only the extension stopping the run; otherwise the last one, since earlier
     messages are attempts Pi retried."""
     reply = None
+    failure = None
     # Records are split on LF only: other Unicode line separators may occur inside strings.
     for line in stdout.split('\n'):
         if not line.strip():
@@ -195,6 +196,11 @@ def _final_reply(stdout: str) -> dict[str, Any]:
             reply = event['message']
             if reply.get('stopReason') == 'toolUse':
                 break
+            if reply.get('stopReason') == 'error':
+                failure = reply
     if reply is None:
         raise RuntimeError('pi produced no assistant response')
+    # An aborted retry says nothing; the failure that caused it is the error to report.
+    if reply.get('stopReason') == 'aborted' and failure is not None:
+        return failure
     return reply
