@@ -2,8 +2,8 @@
 # domain to `frontend` (port 80); nothing else needs one. `temporal-ui` has no
 # authentication: give it a domain only behind access control.
 #
-# The host's Docker socket is not mounted anywhere. Coding and verification workers drive
-# `sandbox`, a separate Docker daemon whose socket lives in a volume only they mount. The
+# The host's Docker socket is not mounted anywhere. `sandbox-worker`, which runs the coding
+# and verification stages, drives `sandbox`, a separate Docker daemon whose socket lives in a volume only they mount. The
 # daemon does not listen on TCP, so the containers it runs cannot reach its API. The
 # server needs the Sysbox runtime (https://github.com/nestybox/sysbox) installed.
 #
@@ -62,8 +62,8 @@ x-app: &app
     temporal-namespace:
       condition: service_completed_successfully
 
-# Workers that build and run containers. All four must share one daemon: images pass
-# between stages as local image IDs.
+# The worker that builds and runs containers: images pass between stages as local image
+# IDs, so every sandboxed stage uses this one daemon.
 x-sandbox-worker: &sandbox-worker
   <<: *app
   environment:
@@ -112,29 +112,10 @@ services:
     <<: *app
     command: ["python", "-m", "app.codegen.worker"]
 
-  implementation-worker:
+  # Implementation, test generation, verification, diagnosis, review and documentation.
+  sandbox-worker:
     <<: *sandbox-worker
-    command: ["python", "-m", "app.implementation.worker"]
-
-  test-generation-worker:
-    <<: *sandbox-worker
-    command: ["python", "-m", "app.test_generation.worker"]
-
-  verification-worker:
-    <<: *sandbox-worker
-    command: ["python", "-m", "app.verification.worker"]
-
-  diagnosis-worker:
-    <<: *sandbox-worker
-    command: ["python", "-m", "app.diagnosis.worker"]
-
-  review-worker:
-    <<: *sandbox-worker
-    command: ["python", "-m", "app.review.worker"]
-
-  documentation-worker:
-    <<: *sandbox-worker
-    command: ["python", "-m", "app.documentation.worker"]
+    command: ["python", "-m", "app.agent_workflows.worker"]
 
   sandbox:
     image: docker:29-dind
