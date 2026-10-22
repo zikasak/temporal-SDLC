@@ -32,6 +32,7 @@ from app.documents import (
     parse_stored_document,
     read_document_text,
 )
+from app.delivery.pull_request import PullRequestText
 from app.delivery.pull_request import describe as pull_request_description
 from app.github import checkout as repository_checkout
 from app.github import client as github_client
@@ -255,16 +256,17 @@ async def publish_documentation(
 @trace_activity('open-pull-request', feature='repository', input_parameter='repository')
 async def open_pull_request(
     session_id: str, repository: RepositorySelection, publication: RepositoryPublication,
-    change: dict[str, Any],
+    change: dict[str, Any], text: PullRequestText | None = None,
 ) -> PullRequest:
     """Open a pull request from the pushed branch to the repository's default branch, or
-    update the open one of that branch: its description says what the delivery changed.
-    An unverified delivery opens a draft; a verified push marks a draft ready for review."""
+    update the open one of that branch, rewriting its title and description: the `text`
+    the LLM wrote of what the delivery changed and why, or without it the generic text of
+    the task kind, followed by the open review findings when there are any. An unverified
+    delivery opens a draft; a verified push marks a draft ready for review."""
     kind = change.get('kind')
     subject = (DOCUMENTATION_SUBJECT if kind == 'docs'
                else COMMIT_SUBJECTS.get(kind, COMMIT_SUBJECT))
-    title, body = pull_request_description(subject, change, publication, session_id,
-                                           repository['branch'])
+    title, body = pull_request_description(subject, change, publication, text)
     verified = bool(publication['verified'])
     token, _ = await _github_token()
     full_name, branch = repository['full_name'], publication['branch']

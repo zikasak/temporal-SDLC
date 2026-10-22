@@ -445,5 +445,37 @@
     "priority": "must",
     "rationale": "Replaces TR-4: mentions arrive through the app's webhook.",
     "title": "Pull request permission and comment webhook in the app manifest"
+  },
+  {
+    "category": "functional",
+    "description": "The title and description of the pull request opened or updated at the end of a delivery are written by an LLM from the task, its requirements and the delivery's code diff: the description says what the delivery changed and the purpose of the change, and the title names the specific change instead of a fixed phrase for the task kind.",
+    "id": "FR-52",
+    "priority": "must",
+    "rationale": "User: PR descriptions and titles should describe what changed and why; chose an LLM writing them from the task, requirements and diff.",
+    "title": "Meaningful pull request title and description"
+  },
+  {
+    "category": "functional",
+    "description": "The pull request description consists of the LLM-written summary, followed only by the list of open review findings when the delivery has any; it no longer contains the requirement list, the verification status section or the branch and commit details it contains today.",
+    "id": "FR-53",
+    "priority": "must",
+    "rationale": "User chose to replace everything with the new summary, but to keep listing open findings below it (FR-38 stays).",
+    "title": "Summary replaces the current description sections"
+  },
+  {
+    "category": "functional",
+    "description": "When the LLM cannot write the pull request title or description (for example, it is unavailable), the pull request is opened or updated with today's generic title and description, and the delivery does not fail.",
+    "id": "FR-54",
+    "priority": "must",
+    "rationale": "User chose a fallback that keeps the delivery from failing.",
+    "title": "Fall back to the generic title and description"
+  },
+  {
+    "category": "functional",
+    "description": "The title of a pull request for an unverified delivery carries an \"(unverified)\" marker in addition to the LLM-written title, as today's generic title does.",
+    "id": "FR-55",
+    "priority": "must",
+    "rationale": "User chose to keep the \"(unverified)\" marker in the title of draft pull requests.",
+    "title": "Unverified marker in the pull request title"
   }
 ]

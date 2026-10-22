@@ -78,6 +78,8 @@ export type DeliveryProgress = {
   pull_request: PullRequest | null;
   pull_request_error: string | null;
   pull_request_status: PublicationStatus;
+  // Set when the generic title and description were used because the LLM could not write them.
+  pull_request_text_error: string | null;
   // Authorised mentions of the app on the pull request and what they led to.
   mentions: PullRequestMention[];
 };
@@ -251,6 +253,7 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     open_findings: value.open_findings === true,
     pull_request: pullRequest(value.pull_request, repository),
     pull_request_error: text(value.pull_request_error),
+    pull_request_text_error: text(value.pull_request_text_error),
     pull_request_status: publicationStatuses.includes(value.pull_request_status as PublicationStatus)
       ? value.pull_request_status as PublicationStatus : "not_applicable",
     mentions: pullRequestMentions(value.mentions),
@@ -465,6 +468,13 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
       {!progress.publication_error && <button type="button" className="generate-button" disabled={disabled}
         onClick={() => onRetry("repository")}>
         {retrying === "repository" ? "Pushing again…" : "Push again and retry the pull request"}
+      </button>}
+    </div>}
+    {progress.pull_request_text_error && !progress.pull_request_error && <div className="generation-failure">
+      <p role="alert">{progress.pull_request_text_error}</p>
+      {!progress.publication_error && <button type="button" className="generate-button" disabled={disabled}
+        onClick={() => onRetry("repository")}>
+        {retrying === "repository" ? "Pushing again…" : "Push again and rewrite the pull request text"}
       </button>}
     </div>}
     {progress.mentions.length > 0 && <section aria-label="Mentions in the pull request">

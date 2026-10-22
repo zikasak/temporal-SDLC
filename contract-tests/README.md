@@ -99,6 +99,13 @@ Contract ambiguities and how the suite reads them:
 - Logins allow letters, digits and `. _ % + -`, 3 to 254 characters; passwords 8 to
   1024. The boundaries are tested with new unique accounts, because accounts can't be
   deleted through the API. Each run adds a few accounts.
+- Browsing repositories/branches and checking the connection while no app is connected
+  (`tests/test_access_and_unconfigured_github.py`): the contract does not say which
+  refusal applies. For the repository listing only 409 and 503 are documented (besides
+  401 and 422), so one of those is required; for the branch listing 404 is documented
+  as well, so 404, 409 or 503 is accepted. Every refusal needs a `detail`, never 200.
+  Connection check accepts 409 or 503. A JSON array as the body of check/disconnect is expected to be
+  rejected with 422 (FR-50, NFR-6: "the body is an empty JSON object").
 - Unknown IDs are well formed (prefix and 32 hex digits) so that they are treated as
   unknown rather than malformed.
 

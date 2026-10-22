@@ -104,6 +104,18 @@ GitHub HTTP is mocked; no real GitHub App or model calls are made. Checkout and 
 
 Run `npm run build` from `frontend/`. Manually inspect settings/picker/summary flows on desktop/mobile, including a wrong App ID or key, a missing encryption key, an uninstalled app, repositories removed from the installation, multi-page lists, branches containing `/`, empty repositories, stale requests during repository changes, and Disconnect. Verify independent sessions retain their own immutable selections after retrieval, branching, derivation, and restart.
 
+## Pull request title and description
+
+After every push the delivery opens a pull request to the default branch, or updates the
+open one of its branch. The `write_pull_request_text` activity
+(`app.delivery.pull_request_activities`, the review model) has the LLM write the title and
+a summary of what changed and why from the task, its requirements and the delivery's diff
+against the commit the session checked out. The description is that summary followed only
+by the open review findings, if any; an unverified delivery's title ends with
+` (unverified)`. When the LLM fails, the generic title of the task kind and a fixed sentence
+are used, the step still completes and `pull_request_text_error` says why; retrying the
+repository stage then pushes again and has the LLM write the text again.
+
 ## Mentions in pull requests
 
 GitHub delivers pull request comments to `POST /connectors/github/events`, which needs no
