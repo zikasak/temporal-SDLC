@@ -1,5 +1,5 @@
 """Bounded verification payloads stored in Temporal and exposed by the session API."""
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 # `reviewing` while the code review runs; `findings_open` when the tests pass but review
 # findings remained after the last review round.
@@ -11,6 +11,13 @@ class TestFailure(TypedDict):
     class_name: str
     name: str
     kind: Literal['failure', 'error']
+    message: str
+
+
+class TestSkip(TypedDict):
+    """A test the run skipped, with the reason its report gives."""
+    class_name: str
+    name: str
     message: str
 
 
@@ -41,6 +48,9 @@ class VerificationResult(TypedDict):
     exit_code: int | None
     test_failures: list[TestFailure]
     details_truncated: bool
+    # The skipped tests (the first few) and why: a skip passes nothing, so the author has
+    # to know which test it was. Absent from results recorded before it existed.
+    test_skips: NotRequired[list[TestSkip]]
     # The outcome of each test the caller named, by the language's test case identity;
     # None when it named none.
     tracked: dict[str, TrackedTest] | None

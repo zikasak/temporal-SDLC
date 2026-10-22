@@ -16,6 +16,8 @@ INSTRUCTIONS_CHARS = 10000
 # A fix request from a pull request comment has up to GitHub's 65536 characters, and the
 # review reads all of it; this bounds instructions the review receives internally.
 REVIEW_INSTRUCTIONS_CHARS = 65536
+# How much of each earlier finding a later review round receives.
+PREVIOUS_SUMMARY_CHARS = 1000
 # The open findings a pushed commit's message lists.
 COMMIT_FINDINGS = 20
 
@@ -30,6 +32,9 @@ class ReviewFinding(TypedDict):
     target: ReviewTarget
     # Briefly, why it goes to that worker.
     reason: str
+    # The number of the earlier finding of the same run of review rounds that this one
+    # reports again: a correction did not settle it, so it is not sent for another.
+    repeats: NotRequired[int]
 
 
 class ReviewRound(TypedDict):
@@ -58,16 +63,29 @@ def for_worker(findings: list[ReviewFinding], worker: str) -> list[ReviewFinding
     return [item for item in findings if item['target'] in (worker, 'both')]
 
 
+def earlier_findings(findings: list[ReviewFinding]) -> list[dict[str, Any]]:
+    """The findings a run of review rounds already had corrected, numbered from 1, as the
+    next review receives them to tell whether they are settled."""
+    return [{'number': number, 'summary': item['summary'][:PREVIOUS_SUMMARY_CHARS],
+             'target': item['target'], **({'path': item['path']} if item.get('path') else {})}
+            for number, item in enumerate(findings, start=1)]
+
+
 def review_request(findings: list[ReviewFinding], worker: str, attempt: int,
-                   instructions: str | None = None) -> dict[str, Any]:
+                   instructions: str | None = None,
+                   restore: list[str] | None = None) -> dict[str, Any]:
     """What an author receives to correct review findings. The test author never sees
     the implementation and the implementation author never sees the tests: only the
-    findings' own words reach them."""
+    findings' own words reach them. `restore` names repository tests the test author has
+    to put back as the repository holds them."""
     review: dict[str, Any] = {
-        'findings': [{key: value for key, value in item.items() if key != 'target'}
+        'findings': [{key: value for key, value in item.items()
+                      if key not in ('target', 'repeats')}
                      for item in for_worker(findings, worker)]}
     if instructions:
         review['instructions'] = instructions
+    if restore and worker == 'tests':
+        review['restore'] = restore
     return {'attempt': attempt, 'review': review}
 
 

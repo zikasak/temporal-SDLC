@@ -149,8 +149,9 @@ def judge_baseline(result: VerificationResult, added: list[str], changed: list[s
         return 'error', 'The baseline run could not complete.'
     if result['skipped']:
         # However it came to be skipped, a test that does not run protects nothing.
-        return 'error', (f'Tests skipped in the baseline run: {result["skipped"]}. Every '
-                         'test of the suite has to run for the baseline to prove anything.')
+        return 'error', (f'Tests skipped in the baseline run: {result["skipped"]}'
+                         f'{named_skips(result)}. Every test of the suite has to run for '
+                         'the baseline to prove anything.')
     missing = result['missing_tests']
     if missing:
         return 'error', ('Tests of the suite that did not run in the baseline run: '
@@ -172,16 +173,45 @@ def judge_baseline(result: VerificationResult, added: list[str], changed: list[s
     return 'reproduced', None
 
 
+SKIP_REASON_CHARS = 300
+
+
+def named_skips(result: VerificationResult) -> str:
+    """The first skipped tests of `result` with the reasons their reports give, for the
+    author who has to make them run; empty for a result recorded without them."""
+    skips = result.get('test_skips') or []
+    if not skips:
+        return ''
+    named = '; '.join(
+        f'{item["class_name"]}#{item["name"]}'
+        + (f' (skip reason: {" ".join(item["message"].split())[:SKIP_REASON_CHARS]})'
+           if item['message'].strip() else '')
+        for item in skips[:NAMED_TESTS])
+    more = len(skips) - NAMED_TESTS
+    return f' ({named}{f"; {more} more" if more > 0 else ""})'
+
+
 def unproven_green(result: VerificationResult) -> str | None:
     """Why a passed run of a change's suite does not show the change working: a test that
     did not run, such as one skipped by an assumption once the fix is in, passed nothing."""
     if result['skipped']:
-        return (f'Tests skipped in the run against the changed service: {result["skipped"]}. '
-                'Every test of the suite has to run and pass.')
+        return (f'Tests skipped in the run against the changed service: {result["skipped"]}'
+                f'{named_skips(result)}. Every test of the suite has to run and pass: remove '
+                'the skip, or whatever makes the test skip itself, rather than the test.')
     if result['missing_tests']:
         return ('Tests of the suite that did not run against the changed service: '
                 f'{", ".join(result["missing_tests"][:NAMED_TESTS])}.')
     return None
+
+
+def kept_tests(result: VerificationResult, touched: list[str]) -> list[str]:
+    """The repository's tests in `touched`, changed or removed by an API change, that ran
+    as they were against the changed service, in `result`, and passed there."""
+    tracked = result['tracked']
+    if result['status'] == 'error' or tracked is None:
+        return []
+    return [case for case in touched
+            if tracked.get(case, {}).get('tests') and not tracked[case]['failed']]
 
 
 def judge_kept(result: VerificationResult, touched: list[str]) -> str | None:
@@ -197,7 +227,7 @@ def judge_kept(result: VerificationResult, touched: list[str]) -> str | None:
         return ('Tests of the repository that were changed or removed did not run, as they '
                 f'were, against the changed service: {", ".join(unrun[:NAMED_TESTS])} '
                 f'({len(unrun)}). Nothing shows that the new contract no longer supports them.')
-    kept = [case for case in touched if not tracked[case]['failed']]
+    kept = kept_tests(result, touched)
     if not kept:
         return None
     return ('Tests of the repository that the changed service still passes were changed or '

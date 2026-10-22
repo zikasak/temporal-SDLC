@@ -17,12 +17,24 @@ export default function (pi: any) {
 			},
 		});
 	}
+	// The caller owns the conversation and its compaction. Pi's own would only summarize the
+	// placeholder prompt, and its recovery from a response cut off at the output limit (or a
+	// context overflow) is a second request, which the handler below aborts: the caller saw
+	// "This operation was aborted" instead of the cut-off response. Cancelling it also
+	// cancels that recovery request.
+	pi.on("session_before_compact", async () => ({ cancel: true }));
 	let requests = 0;
+	let lastStopReason: string | undefined;
+	pi.on("message_end", async (event: any) => {
+		if (event.message?.role === "assistant") lastStopReason = event.message.stopReason;
+	});
 	// Replaces the placeholder prompt with the caller's history as native messages.
 	pi.on("context", async (_event: unknown, ctx: any) => {
 		// A call Pi rejects itself (such as invalid arguments) does not end the run, and
-		// a second request would only repeat the first.
-		if (++requests > 1) ctx.abort();
+		// a second request would only repeat the first. A request following a failed one
+		// is Pi's auto-retry of a transient error (rate limit, overload) and must go ahead:
+		// aborting it would also hide the original error behind "operation was aborted".
+		if (++requests > 1 && lastStopReason !== "error") ctx.abort();
 		return { messages: input.messages };
 	});
 }

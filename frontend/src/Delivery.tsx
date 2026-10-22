@@ -38,7 +38,8 @@ type VerificationResult = {
 
 // `review` runs a failed code review again, or goes on from a failed correction of its findings.
 export type GenerationStage = "server" | "tests" | "documentation" | "repository" | "review";
-type ReviewFinding = { summary: string; path?: string; target: "implementation" | "tests" | "both"; reason: string };
+// `repeats`: the finding was reported again after a correction did not settle it.
+type ReviewFinding = { summary: string; path?: string; target: "implementation" | "tests" | "both"; reason: string; repeats?: number };
 type ReviewRound = { round: number; findings: ReviewFinding[]; instructions?: string };
 // Questions a coding agent asked; its run is paused until they are answered, and only
 // that agent sees the answers.
@@ -509,7 +510,7 @@ function CodeReview({ progress, retrying, disabled, onRetry, onFindings }: {
     </p>}
     {last && last.findings.length > 0 && (open || stage === "repairing") && <ul className="verification-failures">
       {last.findings.map((item, index) => <li key={index}>
-        <strong>{item.path ?? "General"} ({findingTargets[item.target]})</strong>
+        <strong>{item.path ?? "General"} ({findingTargets[item.target]}){item.repeats !== undefined && ", reported again after a correction"}</strong>
         <span>{item.summary}</span>
       </li>)}
     </ul>}

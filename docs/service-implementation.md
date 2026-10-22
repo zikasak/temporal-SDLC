@@ -47,16 +47,16 @@ From `backend`, using the same environment/database settings as the existing wor
 ```sh
 python -m app.temporal.worker
 python -m app.codegen.worker
-python -m app.implementation.worker
-python -m app.test_generation.worker
-python -m app.verification.worker
-python -m app.diagnosis.worker
-python -m app.documentation.worker
+python -m app.agent_workflows.worker
 ```
 
 Run each command in a separate terminal/process. `backend/tools/dev_stack.py` launches
-all seven workers, and `.zed/debug.json` includes individual worker launch profiles.
-Both coding workers need the Docker CLI, a running Docker daemon and writable
+all three workers, and `.zed/debug.json` includes individual worker launch profiles.
+`app.agent_workflows.worker` is the sandbox worker: one process that polls the task
+queues of every sandboxed stage (implementation, test generation, verification,
+diagnosis, review and documentation), each with its own one-activity-at-a-time Temporal
+`Worker`. The stage requirements below therefore all apply to that one process.
+Both coding stages need the Docker CLI, a running Docker daemon and writable
 `GENERATED_CODE_DIR`. The implementation worker also needs access to codegen's server
 tree. The test worker uses only contract inputs and the static test-suite template of the
 session's language (`backend/app/languages/<language>/test_suite`: Java's Maven/JUnit 5 or
@@ -166,8 +166,9 @@ agent, and automatic Temporal/model retries remain disabled.
   prepare → isolated authoring → sanitize/validate → image build → publish.
 - `runtime.py`: `AgentProfile`, workspace tools, and the bounded synchronous tool loop.
   It has no Temporal, database, Docker, or host-config imports.
-- `workflows.py` and `worker.py`: deterministic activity execution and dedicated worker
-  bootstrap, used by the existing named workflows and worker entrypoints.
+- `workflows.py`: deterministic activity execution, used by the named stage workflows.
+- `worker.py`: the sandbox worker entrypoint; `STAGES` lists each sandboxed stage's task
+  queue, workflow and activities.
 - `Dockerfile`: the shared default for every registered language (Python 3.12, Java 21 and
   Maven). The role entrypoint and workspace
   are selected through `AGENT_ROLE` and `WORKSPACE_NAME` build arguments.
@@ -679,8 +680,9 @@ change. Helpers, fixtures and build files are not tests and are not protected.
    10001, a writable `/workspace`, provider environment variables, and the selected output
    tree at `/workspace/<workspace_name>`; no Java/Maven assumptions are required.
 4. Add a thin decorated activity calling `run_stage(spec, session_id, context,
-   GENERATED_CODE_DIR)`, a named workflow using `execute_agent_activity`, and a worker
-   entrypoint using `run_agent_worker`. Register/schedule the new stage explicitly.
+   GENERATED_CODE_DIR)`, a named workflow using `execute_agent_activity`, and an entry
+   in `STAGES` of `app/agent_workflows/worker.py` with its own task queue. Register/schedule
+   the new stage explicitly.
    Specs/callbacks are host-side definitions, never Temporal input payloads.
 
 For a variant that intentionally retains implementation's input/output policies:

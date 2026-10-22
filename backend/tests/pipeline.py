@@ -104,6 +104,8 @@ class FakeStages:
         # that still pass, as they were, against the changed service.
         self.rewritten_tests: list[str] = []
         self.still_passing: list[str] = []
+        # Those of them that a corrected service passes again, as they were.
+        self.passing_after_correction: list[str] = []
         # Those the runner of the repository's tests leaves out of its reports.
         self.not_run: list[str] = []
         self.existing_runs: list[tuple[str, list[str]]] = []
@@ -130,6 +132,13 @@ class FakeStages:
         self.published_findings = findings
         return {"branch": "generated/abc", "commit": "2" * 40,
                 "url": repository["html_url"] + "/tree/generated/abc"}
+
+    @activity.defn(name="open_pull_request")
+    async def open_pull_request(self, session_id: str, repository: dict[str, Any],
+                                publication: dict[str, Any], change: dict[str, Any]
+                                ) -> dict[str, Any]:
+        return {"number": 1, "title": "Change", "url": repository["html_url"] + "/pull/1",
+                "draft": not publication.get("verified", True), "base": "main"}
 
     @activity.defn(name="publish_documentation")
     async def publish_documentation(self, session_id: str, repository: dict[str, Any],
@@ -175,6 +184,9 @@ class FakeStages:
         if 'repair' in context:
             self.repairs.append(('tests', context['repair']))
             changed["changed_tests"] = self.corrected_tests
+            # Tests put back as the repository holds them are no longer rewritten.
+            restore = context['repair'].get('review', {}).get('restore', [])
+            self.rewritten_tests = [case for case in self.rewritten_tests if case not in restore]
         if 'brief' not in context:
             changed = {"added_tests": [], "changed_tests": self.rewritten_tests,
                        "removed_tests": []}
@@ -240,8 +252,10 @@ class FakeStages:
         if test_image == REPOSITORY_TESTS_IMAGE:
             # The repository's own tests, of which the changed service fails some.
             self.existing_runs.append((suite_dir, tracked_tests))
+            passing = self.still_passing + (
+                self.passing_after_correction if service_image == "sha256:" + "c" * 64 else [])
             failed = [case for case in tracked_tests
-                      if case not in self.still_passing and case not in self.not_run]
+                      if case not in passing and case not in self.not_run]
             return {**details, 'status': 'failed' if failed else 'passed', 'tests': 3,
                     'passed': 3 - len(failed), 'failures': len(failed), 'errors': 0,
                     'skipped': 0, 'error': None, 'missing_tests': [],
@@ -272,6 +286,8 @@ class FakeStages:
                 'failures': int(failed), 'errors': 0, 'skipped': int(skipped),
                 'test_failures': [{'class_name': 'RoomsTest', 'name': 'lists', 'kind': 'failure',
                                    'message': 'Expected 200, got 500'}] if failed else [],
+                'test_skips': [{'class_name': 'RoomsTest', 'name': 'books',
+                                'message': 'GitHub is not configured'}] if skipped else [],
                 'tracked': None if tracked_tests is None else {
                     case: {'tests': 1, 'failed': 0} for case in tracked_tests},
                 'missing_tests': None if tracked_tests is None else [],

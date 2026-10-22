@@ -6,27 +6,33 @@ from app import docker_agents
 from app.llm.claude import ChatClaude
 
 
-@pytest.mark.parametrize('thinking_level', ['default', 'off', 'high'])
-async def test_native_reply_and_thinking_options(claude_http, thinking_level, tmp_path):
+# The CLI always sends adaptive thinking to Opus 5 models, so 'off' is checked on a
+# model that accepts disabled thinking.
+@pytest.mark.parametrize('thinking_level,model', [('default', 'claude-opus-5-5'),
+                                                  ('off', 'claude-sonnet-4-6'),
+                                                  ('high', 'claude-opus-5-5')])
+async def test_native_reply_and_thinking_options(claude_http, thinking_level, model, tmp_path):
     replies, requests = claude_http
     replies.append([{'type': 'text', 'text': 'A complete '},
                     {'type': 'text', 'text': 'reply.'}])
-    reply = await ChatClaude(model='claude-opus-5-5', thinking_level=thinking_level,
+    reply = await ChatClaude(model=model, thinking_level=thinking_level,
                              timeout=10).ainvoke([
         SystemMessage('Be brief.'), HumanMessage('@notes.md /help question')])
     assert reply.text == 'A complete reply.'
     assert not reply.tool_calls
     assert reply.response_metadata['session_id']
-    assert reply.response_metadata['model_name'] == 'claude-opus-5-5'
+    assert reply.response_metadata['model_name'] == model
     [request] = requests
-    assert request['messages'][0]['content'] == '@notes.md /help question'
+    content = request['messages'][0]['content']
+    # Known models get CLI system reminders before the prompt; the prompt stays verbatim.
+    assert (content if isinstance(content, str) else content[-1]['text']) == '@notes.md /help question'
     assert not request.get('tools')
     assert not list((tmp_path / 'claude-config' / 'projects').rglob('*.jsonl'))
     if thinking_level == 'high':
         assert request['thinking']['type'] == 'adaptive'
         assert request['output_config']['effort'] == 'high'
     elif thinking_level == 'off':
-        assert request.get('thinking', {}).get('type', 'disabled') == 'disabled'
+        assert request['thinking']['type'] == 'disabled'
 
 
 async def test_claude_harness_forwards_credentials_by_name(created_container, monkeypatch, saved_model_settings):

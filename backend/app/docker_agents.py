@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import tarfile
 import tempfile
@@ -29,7 +30,19 @@ from app.settings.storage import get_workflow_settings
 from app.tracing import container_trace_environment
 
 logger = logging.getLogger(__name__)
-AGENT_SETTINGS = ('AGENT_CONTEXT_TOKENS',)
+# Output of sandboxed containers, re-logged line by line at each line's own level.
+container_logger = logging.getLogger('app.containers')
+# Forwarded by name; LOG_LEVEL sets the agent's own logging, which forward_logs re-logs.
+AGENT_SETTINGS = ('AGENT_CONTEXT_TOKENS', 'LOG_LEVEL')
+CONTAINER_LINE_CHARS = 4000
+# How long a container's remaining output may take to arrive once it was waited for.
+LOG_DRAIN_SECONDS = 2
+# A level name near the start of a line: Python's `INFO name: ...`, Logback's
+# `12:00:00.000 [main] WARN ...`, Spring Boot's `<timestamp>  ERROR 1 --- ...`.
+_LINE_LEVEL = re.compile(r'\b(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL|CRITICAL)\b')
+_LEVELS = {'TRACE': logging.DEBUG, 'DEBUG': logging.DEBUG, 'INFO': logging.INFO,
+           'WARN': logging.WARNING, 'WARNING': logging.WARNING, 'ERROR': logging.ERROR,
+           'FATAL': logging.CRITICAL, 'CRITICAL': logging.CRITICAL}
 # Pi's configuration directory for the container's `agent` user.
 PI_CONTAINER_DIR = '/home/agent/.pi/agent'
 # Subdirectory of PI_CREDENTIALS_DIR that every container gets as its Pi directory.
@@ -119,14 +132,105 @@ def redact_output(output: str, env: Mapping[str, str] | None = None) -> str:
     Values shorter than MIN_SECRET_LENGTH are left alone: settings such as
     AGENT_CONTEXT_TOKENS=46000 match the names but are no secrets, and replacing them
     would corrupt ordinary output, such as a PID in `docker inspect` JSON."""
+    return _redact(output, _secret_values(env))
+
+
+def _secret_values(env: Mapping[str, str] | None) -> list[str]:
     secrets = {OPENAI_API_KEY} if OPENAI_API_KEY else set()
     for key, value in (env if env is not None else os.environ).items():
         if (len(value) >= MIN_SECRET_LENGTH
                 and any(part in key.upper() for part in ('KEY', 'TOKEN', 'PASSWORD', 'SECRET'))):
             secrets.add(value)
-    for secret in sorted(secrets, key=len, reverse=True):
+    return sorted(secrets, key=len, reverse=True)
+
+
+def _redact(output: str, secrets: list[str]) -> str:
+    for secret in secrets:
         output = output.replace(secret, '[redacted]')
     return output
+
+
+def line_level(line: str, previous: int, default: int) -> int:
+    """The level a container's output line is logged at: the level it names near its
+    start; for an indented line, such as a stack frame, that of the line before it."""
+    match = _LINE_LEVEL.search(line, 0, 64)
+    if match:
+        return _LEVELS[match.group(1)]
+    return previous if line[:1].isspace() else default
+
+
+async def _forward_stream(stream: asyncio.StreamReader, label: str, default: int,
+                          secrets: list[str]) -> None:
+    level = default
+
+    def emit(raw: bytes) -> None:
+        nonlocal level
+        line = _redact(raw.decode('utf-8', 'replace').rstrip('\r'), secrets)
+        if not line.strip():
+            return
+        level = line_level(line, level, default)
+        container_logger.log(level, '[%s] %s', label, line[:CONTAINER_LINE_CHARS])
+
+    pending = b''
+    while chunk := await stream.read(65536):
+        *lines, pending = (pending + chunk).split(b'\n')
+        for line in lines:
+            emit(line)
+        if len(pending) > CONTAINER_LINE_CHARS * 4:
+            emit(pending)
+            pending = b''
+    if pending:
+        emit(pending)
+
+
+async def _follow(name: str, label: str, secrets: list[str]) -> None:
+    try:
+        process = await asyncio.create_subprocess_exec(
+            'docker', 'logs', '--follow', name,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError as exc:
+        logger.warning('Could not follow the logs of container %s: %s', name, exc)
+        return
+    try:
+        # Without a TTY, Docker keeps the container's stdout and stderr apart.
+        await asyncio.gather(
+            _forward_stream(process.stdout, label, logging.INFO, secrets),
+            _forward_stream(process.stderr, label, logging.WARNING, secrets),
+        )
+        await process.wait()
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+
+
+@asynccontextmanager
+async def forward_logs(name: str, label: str, env: Mapping[str, str] | None = None):
+    """Re-log a started container's output, as it is written, on `app.containers`: so it
+    reaches the worker's own log, filtered by LOG_LEVEL. A line is logged at the level it
+    names, else stdout at INFO and stderr at WARNING. Known secrets of `env` (default:
+    the worker's environment) are redacted. Never fails the run it observes."""
+    follower = asyncio.create_task(_follow(name, label, _secret_values(env)))
+
+    async def stop() -> None:
+        follower.cancel()
+        await asyncio.gather(follower, return_exceptions=True)
+
+    try:
+        yield
+    except BaseException:
+        await stop()
+        raise
+    try:
+        # The container has stopped or is removed next: let its last lines arrive.
+        await asyncio.wait_for(asyncio.shield(follower), LOG_DRAIN_SECONDS)
+    except TimeoutError:
+        pass
+    except Exception:
+        logger.warning('Could not forward the logs of container %s', name, exc_info=True)
+    finally:
+        await stop()
 
 
 async def docker(*args: str, timeout: int = 1800, env: dict | None = None,
@@ -322,7 +426,8 @@ async def run_agent(role: str, session_id: str, workspace: Path,
             await docker('cp', '-a', '-', name + ':/workspace', stdin=stream)
         await docker('start', name)
         logger.info('%s agent running (session=%s, container=%s)', role, session_id, name)
-        await docker('wait', name, timeout=3600)
+        async with forward_logs(name, f'{label} agent {session_id}', environment):
+            await docker('wait', name, timeout=3600)
         state = json.loads(await docker('inspect', '--format', '{{json .State}}', name))
         try:
             agent_log = await docker('logs', '--tail', '200', name, timeout=30)

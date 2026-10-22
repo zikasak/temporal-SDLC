@@ -153,7 +153,7 @@ async def workers(env, monkeypatch):
                     activities.read_requirements_document, activities.read_repository_contract,
                     activities.checkout_repository, activities.update_repository_checkout,
                     activities.publish_repository, activities.publish_documentation,
-                    activities.api_design_turn, activities.write_openapi_document],
+                    activities.open_pull_request, activities.api_design_turn, activities.write_openapi_document],
     ), stage_workers(env, activities):
         yield activities
 
@@ -249,6 +249,87 @@ async def test_a_correction_that_did_not_pass_goes_on_when_retried(env, worker):
     assert not state.correction_failed and state.verification_error is None
     assert state.verification_status == 'completed'
     assert [item['findings'] for item in state.reviews] == [[finding], []]
+
+
+async def test_a_retried_correction_restores_repository_tests_the_service_passes_again(env, worker, repository_selection):
+    finding = {'summary': 'Instructions are not limited.', 'target': 'implementation',
+               'reason': 'The service checks them.'}
+    worker.review_findings = [[finding], []]
+    lists, books = "com.example.RoomsTest#lists", "com.example.RoomsTest#books"
+    worker.rewritten_tests = [lists, books]
+    # The corrected service passes one rewritten test again, as the repository held it.
+    worker.passing_after_correction = [lists]
+    session_id = await deliver(env, repository_selection, kind="api_change")
+    state = await delivered(env, session_id)
+    assert state.correction_failed and "still passes were changed or removed" in state.verification_error
+
+    retried = await delivery_service.retry(session_id, 'review')
+    # The page sees the correction going on, not its failure.
+    assert not retried.correction_failed and retried.verification_status == 'repairing'
+    state = await delivered(env, session_id)
+    # Verifying the same suite again would fail the same way: the test author puts the
+    # test back, told why; the implementation is not corrected again.
+    assert [stage for stage, _ in worker.repairs] == ['implementation', 'tests']
+    review = worker.repairs[-1][1]['review']
+    assert review['restore'] == [lists] and lists in review['findings'][0]['summary']
+    assert worker.existing_runs[-1] == ("repository-tests", [books])
+    assert not state.correction_failed and state.verification_error is None
+    assert state.verification_status == 'completed' and state.publication_status == 'completed'
+
+
+async def test_a_retried_correction_tells_the_test_author_which_test_skipped_and_why(env, worker, repository_selection):
+    finding = {'summary': 'Instructions are not limited.', 'target': 'implementation',
+               'reason': 'The service checks them.'}
+    worker.review_findings = [[finding], []]
+    # The corrected delivery passes, but one of its tests skipped itself.
+    worker.verification_results = ['passed', 'skipped', 'passed']
+    session_id = await deliver(env, repository_selection, kind="api_change")
+    state = await delivered(env, session_id)
+    assert state.correction_failed
+    assert 'RoomsTest#books (skip reason: GitHub is not configured)' in state.verification_error
+
+    await delivery_service.retry(session_id, 'review')
+    state = await delivered(env, session_id)
+    # The same suite would skip the same test again: its author is told which one and why.
+    assert [stage for stage, _ in worker.repairs] == ['implementation', 'tests']
+    summary = worker.repairs[-1][1]['review']['findings'][0]['summary']
+    assert 'RoomsTest#books (skip reason: GitHub is not configured)' in summary
+    assert not state.correction_failed and state.verification_error is None
+    assert state.publication_status == 'completed'
+
+
+async def test_review_rounds_end_when_a_review_only_repeats_corrected_findings(env, worker, repository_selection):
+    unsorted = {'summary': 'Rooms are listed unsorted.', 'target': 'implementation',
+                'reason': 'The service orders them.', 'path': 'service/Rooms.java'}
+    again = {**unsorted, 'summary': 'GET /rooms still does not sort.', 'repeats': 1}
+    paged = {'summary': 'GET /rooms ignores the page size.', 'target': 'implementation',
+             'reason': 'The service pages.'}
+    worker.review_findings = [[unsorted], [again], [paged], []]
+    session_id = await deliver(env, repository_selection)
+    state = await delivered(env, session_id)
+    # The repeated finding is not sent for another correction: it is left to the user.
+    assert [stage for stage, _ in worker.repairs] == ['implementation']
+    assert state.verification_status == 'findings_open' and state.open_findings
+    assert [item['findings'] for item in state.reviews] == [[unsorted], [again]]
+    # The second review knew what the first had corrected.
+    assert 'previous_findings' not in worker.reviewed[0]
+    assert worker.reviewed[1]['previous_findings'] == [
+        {'number': 1, 'summary': unsorted['summary'], 'target': 'implementation',
+         'path': 'service/Rooms.java'}]
+
+    await delivery_service.instruct_findings(session_id, 'Sort by room number.')
+    state = await delivered(env, session_id)
+    # Every round of the instructed run reviews under the user's instructions, and knows
+    # the findings corrected from them as well as those corrected since.
+    assert [context['instructions'] for context in worker.reviewed[2:]] == [
+        'Sort by room number.'] * 2
+    assert [item['summary'] for item in worker.reviewed[3]['previous_findings']] == [
+        again['summary'], paged['summary']]
+    # The author of the next correction never sees the bookkeeping.
+    assert worker.repairs[-1][1]['review']['findings'] == [
+        {key: value for key, value in paged.items() if key != 'target'}]
+    assert state.verification_status == 'completed' and not state.open_findings
+    assert 'instructions' in state.reviews[2] and 'instructions' not in state.reviews[3]
 
 
 async def test_only_a_failed_review_or_correction_is_retried(env, worker):

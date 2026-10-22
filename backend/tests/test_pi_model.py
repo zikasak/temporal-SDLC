@@ -224,6 +224,26 @@ def test_failed_response_raises(fake_pi):
         model.invoke('hi')
 
 
+# What Pi emits when the extension stops its recovery request after a cut-off response.
+CUT_OFF = [assistant('I will', stop='length'),
+           assistant(stop='aborted', errorMessage='This operation was aborted')]
+
+
+def test_a_response_cut_off_at_the_output_limit_is_requested_again(fake_pi):
+    install, calls = fake_pi
+    model = ChatPi(command=install(CUT_OFF, [assistant('Done.')]))
+    assert model.invoke('hi').content == 'Done.'
+    assert len(calls()) == 2
+
+
+def test_a_response_cut_off_every_time_fails_saying_so(fake_pi):
+    install, calls = fake_pi
+    model = ChatPi(command=install(CUT_OFF, CUT_OFF, CUT_OFF, [assistant('Done.')]))
+    with pytest.raises(RuntimeError, match='cut off at the output limit 3 times'):
+        model.invoke('hi')
+    assert len(calls()) == 3
+
+
 def test_process_failure_reports_stderr(fake_pi):
     install, _ = fake_pi
     with pytest.raises(RuntimeError, match='code 3: No API key'):

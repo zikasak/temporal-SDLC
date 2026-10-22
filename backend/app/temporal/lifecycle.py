@@ -1,4 +1,4 @@
-"""Run a Temporal worker as a container's main process."""
+"""Run Temporal workers as a container's main process."""
 import asyncio
 import signal
 
@@ -8,21 +8,29 @@ from app.asyncio_utils import run_sync
 from app.tracing import shutdown_tracing
 
 
-async def run_worker(worker: Worker) -> None:
-    """Run until SIGTERM or SIGINT, then shut the worker down and flush tracing.
+async def run_worker(*workers: Worker) -> None:
+    """Run until SIGTERM or SIGINT, then shut the workers down and flush tracing.
 
     A container's main process ignores SIGTERM unless it installs a handler: without one,
-    `docker stop` waits out its whole timeout and then kills the worker.
+    `docker stop` waits out its whole timeout and then kills the worker. The workers run
+    together: when one stops or fails, the others are shut down and a failure is raised.
     """
     loop = asyncio.get_running_loop()
-    run = asyncio.ensure_future(worker.run())
+    stopped = asyncio.Event()
     for signum in (signal.SIGTERM, signal.SIGINT):
-        # Cancelling a running worker makes it shut down.
-        loop.add_signal_handler(signum, run.cancel)
+        loop.add_signal_handler(signum, stopped.set)
+    runs = [asyncio.ensure_future(worker.run()) for worker in workers]
+    stop = asyncio.ensure_future(stopped.wait())
     try:
-        await run
-    except asyncio.CancelledError:
-        if not run.cancelled():
-            raise
+        await asyncio.wait([*runs, stop], return_when=asyncio.FIRST_COMPLETED)
     finally:
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            loop.remove_signal_handler(signum)
+        # Cancelling a running worker makes it shut down.
+        for task in (*runs, stop):
+            task.cancel()
+        results = await asyncio.gather(*runs, stop, return_exceptions=True)
         await run_sync(shutdown_tracing)
+    for result in results:
+        if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+            raise result

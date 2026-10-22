@@ -78,3 +78,50 @@ def test_short_settings_named_like_secrets_do_not_corrupt_output(monkeypatch):
            'PRIVATE_TOKEN': 'hidden-provider-token'}
     assert docker_agents.redact_output(state, env) == state
     assert docker_agents.redact_output('hidden-provider-token', env) == '[redacted]'
+
+
+async def test_container_output_reaches_the_worker_log_at_its_own_level(tmp_path, monkeypatch, caplog):
+    """A sandboxed container's output, as `docker logs --follow` streams it, is re-logged
+    line by line at the level each line names, with known secrets redacted."""
+    executable = tmp_path / 'docker'
+    executable.write_text(
+        f'#!{sys.executable}\n'
+        'import sys\n'
+        'assert sys.argv[1:] == ["logs", "--follow", "agent-1"], sys.argv\n'
+        'print("Implementation completed")\n'
+        'print("2025-01-01T00:00:00Z  ERROR 1 --- [main] o.s.Boot: Port in use")\n'
+        'print("\\tat o.s.Boot.run(Boot.java:1)")\n'
+        'print("12:00:00.000 [main] WARN  c.e.Orders - Slow query")\n'
+        'print("DEBUG app.llm.pi: request sent", file=sys.stderr)\n'
+        'print("ERROR app.agent: failed with hidden-provider-token", file=sys.stderr)\n'
+        'print("  File \\"/opt/agent.py\\", line 1", file=sys.stderr)\n'
+        'print("npm notice something", file=sys.stderr, end="")\n'
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv('PATH', str(tmp_path) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setattr(docker_agents, 'OPENAI_API_KEY', '')
+    caplog.set_level(logging.DEBUG, logger='app.containers')
+
+    async with docker_agents.forward_logs('agent-1', 'implementation agent s1',
+                                          {'PRIVATE_TOKEN': 'hidden-provider-token'}):
+        await asyncio.sleep(0)
+
+    records = {(record.levelname, record.getMessage()) for record in caplog.records
+               if record.name == 'app.containers'}
+    label = '[implementation agent s1] '
+    assert records == {(level, label + line) for level, line in [
+        ('INFO', 'Implementation completed'),
+        ('ERROR', '2025-01-01T00:00:00Z  ERROR 1 --- [main] o.s.Boot: Port in use'),
+        ('ERROR', '\tat o.s.Boot.run(Boot.java:1)'),
+        ('WARNING', '12:00:00.000 [main] WARN  c.e.Orders - Slow query'),
+        ('DEBUG', 'DEBUG app.llm.pi: request sent'),
+        ('ERROR', 'ERROR app.agent: failed with [redacted]'),
+        ('ERROR', '  File "/opt/agent.py", line 1'),
+        ('WARNING', 'npm notice something'),
+    ]}
+
+
+async def test_unavailable_container_logs_never_fail_the_observed_run(tmp_path, monkeypatch):
+    monkeypatch.setenv('PATH', str(tmp_path))  # no docker executable at all
+    async with docker_agents.forward_logs('agent-1', 'agent'):
+        pass

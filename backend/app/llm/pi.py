@@ -35,6 +35,8 @@ PLACEHOLDER_PROMPT = 'continue'
 NO_USAGE = {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0, 'totalTokens': 0,
             'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0, 'total': 0}}
 MAX_ERROR_CHARS = 2000
+# Requests made for one generation while Pi's response is cut off at the output limit.
+TRUNCATED_ATTEMPTS = 3
 # Pi's cost categories under the usage names Langfuse derives from `usage_metadata`.
 COST_KEYS = {'input': 'input', 'output': 'output', 'cacheRead': 'input_cache_read',
              'cacheWrite': 'input_cache_creation', 'total': 'total'}
@@ -85,9 +87,24 @@ class ChatPi(BaseChatModel):
             command += ['--system-prompt', system]
         command += ['--session-id', _session_id(system, messages)]
         env = {**os.environ, AGENT_DIR_ENV: self.agent_dir} if self.agent_dir else os.environ
+        payload = {'tools': list(tools), 'messages': _pi_messages(messages)}
+        for _ in range(TRUNCATED_ATTEMPTS):
+            reply = await self._request(command, env, payload)
+            # A response cut off at the output limit has no usable answer or tool call; a
+            # fresh request usually reasons less and finishes.
+            if reply.get('stopReason') != 'length':
+                break
+        else:
+            raise RuntimeError(
+                f'pi response was cut off at the output limit {TRUNCATED_ATTEMPTS} times '
+                f'({(reply.get("usage") or {}).get("output", 0)} output tokens)')
+        return _chat_result(reply)
+
+    async def _request(self, command: list[str], env: Any,
+                       payload: dict[str, Any]) -> dict[str, Any]:
+        """One `pi` process and its final assistant message."""
         async with async_context(tempfile.NamedTemporaryFile, 'w', suffix='.json') as request:
-            await run_sync(json.dump, {'tools': list(tools), 'messages': _pi_messages(messages)},
-                           request)
+            await run_sync(json.dump, payload, request)
             await run_sync(request.flush)
             process = await asyncio.create_subprocess_exec(
                 *command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -114,30 +131,35 @@ class ChatPi(BaseChatModel):
         if reply.get('stopReason') in {'error', 'aborted'}:
             raise RuntimeError(f'pi response failed: '
                                f'{reply.get("errorMessage") or reply["stopReason"]}')
-        content = reply['content']
-        usage = reply.get('usage') or {}
-        prompt_tokens = sum(usage.get(key, 0) for key in ('input', 'cacheRead', 'cacheWrite'))
-        message = AIMessage(
-            content=''.join(block['text'] for block in content if block['type'] == 'text'),
-            tool_calls=[{'name': block['name'], 'args': block['arguments'], 'id': block['id'],
-                         'type': 'tool_call'}
-                        for block in content if block['type'] == 'toolCall'],
-            usage_metadata={'input_tokens': prompt_tokens,
-                            'output_tokens': usage.get('output', 0),
-                            'total_tokens': prompt_tokens + usage.get('output', 0),
-                            'input_token_details': {
-                                'cache_read': usage.get('cacheRead', 0),
-                                'cache_creation': usage.get('cacheWrite', 0)}},
-            response_metadata={'model_name': reply.get('model'),
-                               'model_provider': reply.get('provider'),
-                               'finish_reason': reply.get('stopReason')},
-        )
-        cost = usage.get('cost') or {}
-        # Pi prices the request itself; a zero total means it had no price for the model,
-        # so the tracer is left to infer one.
-        info = {'cost_details': {COST_KEYS[key]: value for key, value in cost.items()
-                                 if key in COST_KEYS}} if cost.get('total') else None
-        return ChatResult(generations=[ChatGeneration(message=message, generation_info=info)])
+        return reply
+
+
+def _chat_result(reply: dict[str, Any]) -> ChatResult:
+    """Pi's final assistant message as LangChain's."""
+    content = reply['content']
+    usage = reply.get('usage') or {}
+    prompt_tokens = sum(usage.get(key, 0) for key in ('input', 'cacheRead', 'cacheWrite'))
+    message = AIMessage(
+        content=''.join(block['text'] for block in content if block['type'] == 'text'),
+        tool_calls=[{'name': block['name'], 'args': block['arguments'], 'id': block['id'],
+                     'type': 'tool_call'}
+                    for block in content if block['type'] == 'toolCall'],
+        usage_metadata={'input_tokens': prompt_tokens,
+                        'output_tokens': usage.get('output', 0),
+                        'total_tokens': prompt_tokens + usage.get('output', 0),
+                        'input_token_details': {
+                            'cache_read': usage.get('cacheRead', 0),
+                            'cache_creation': usage.get('cacheWrite', 0)}},
+        response_metadata={'model_name': reply.get('model'),
+                           'model_provider': reply.get('provider'),
+                           'finish_reason': reply.get('stopReason')},
+    )
+    cost = usage.get('cost') or {}
+    # Pi prices the request itself; a zero total means it had no price for the model,
+    # so the tracer is left to infer one.
+    info = {'cost_details': {COST_KEYS[key]: value for key, value in cost.items()
+                             if key in COST_KEYS}} if cost.get('total') else None
+    return ChatResult(generations=[ChatGeneration(message=message, generation_info=info)])
 
 
 def _session_id(system: str, messages: list[BaseMessage]) -> str:
@@ -184,8 +206,10 @@ def _pi_messages(messages: list[BaseMessage]) -> list[dict[str, Any]]:
 def _final_reply(stdout: str) -> dict[str, Any]:
     """The assistant message to return: the first one asking for tools, as whatever follows
     it is only the extension stopping the run; otherwise the last one, since earlier
-    messages are attempts Pi retried."""
+    messages are attempts Pi retried. A last one the extension aborted says nothing: the
+    one before it, after which Pi tried again, is the answer."""
     reply = None
+    answer = None
     # Records are split on LF only: other Unicode line separators may occur inside strings.
     for line in stdout.split('\n'):
         if not line.strip():
@@ -195,6 +219,10 @@ def _final_reply(stdout: str) -> dict[str, Any]:
             reply = event['message']
             if reply.get('stopReason') == 'toolUse':
                 break
+            if reply.get('stopReason') != 'aborted':
+                answer = reply
     if reply is None:
         raise RuntimeError('pi produced no assistant response')
+    if reply.get('stopReason') == 'aborted' and answer is not None:
+        return answer
     return reply

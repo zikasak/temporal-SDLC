@@ -99,7 +99,8 @@ async def test_verified_sources_are_pushed_to_a_new_branch(tmp_path, remote, rep
                               CONTRACT)
     assert published == {"branch": BRANCH, "commit": git("rev-parse", BRANCH, cwd=remote),
                          "url": f"{repository_selection['html_url']}/tree/{BRANCH}",
-                         "ignored": ["build/"], "ignored_count": 1, "verified": True}
+                         "ignored": ["build/"], "ignored_count": 1, "verified": True,
+                         "findings": [], "findings_count": 0}
     files = set(git("ls-tree", "-r", "--name-only", BRANCH, cwd=remote).splitlines())
     # The author's tree replaces what it was shown (Old.java and README.md are gone, as
     # it removed them); the unit tests it never saw stay, and the suite replaces the

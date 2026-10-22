@@ -95,7 +95,8 @@ def transport(tmp_path, monkeypatch):
     (FAIL, 1, 'failed', (1, 0, 1, 0, 0)),
     (ERROR, 1, 'failed', (1, 0, 0, 1, 0)),
     (b'<testsuites tests="99"><testsuite tests="99"><testcase name="ok"/>'
-     b'<testcase name="later"><skipped/></testcase></testsuite></testsuites>',
+     b'<testcase classname="Contract" name="later"><skipped message="needs GitHub"/>'
+     b'</testcase></testsuite></testsuites>',
      0, 'passed', (2, 1, 0, 0, 1)),
     (FAIL, 0, 'error', (1, 0, 1, 0, 0)),
     (PASS, 1, 'error', (1, 1, 0, 0, 0)),
@@ -111,6 +112,9 @@ async def test_verification_publishes_test_outcomes_and_releases_resources(
     if counts[2] or counts[3]:
         assert result['test_failures'][0]['name'] == 'http'
         assert result['test_failures'][0]['message']
+    # A skipped test is named with its reason: the run proved nothing about it.
+    assert result['test_skips'] == ([{'class_name': 'Contract', 'name': 'later',
+                                      'message': 'needs GitHub'}] if counts[4] else [])
     manifest = Path(result['path']).parent / 'result.json'
     assert json.loads(manifest.read_text()) == result
     assert (Path(result['path']) / 'reports/TEST-Contract.xml').read_bytes() == data

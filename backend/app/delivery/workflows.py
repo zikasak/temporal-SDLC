@@ -15,7 +15,7 @@ with workflow.unsafe.imports_passed_through():
     from app.delivery.contract import with_requirements
     from app.delivery.models import (
         MENTION_HANDLED, OUTCOME_OWED, STOPPED, TASK_IDLE_TIMEOUT, AgentQuestions, DeliveryProgress,
-        DeliveryState, is_mention, judge_baseline, judge_kept, mention_key,
+        DeliveryState, is_mention, judge_baseline, judge_kept, kept_tests, mention_key,
         open_review_findings, unproven_green,
     )
     from app.diagnosis.models import repair_request
@@ -23,7 +23,8 @@ with workflow.unsafe.imports_passed_through():
     from app.github.models import PullRequestMention
     from app.requirements.models import CHANGE_KINDS
     from app.review.models import (
-        MAX_REVIEW_ROUNDS, ReviewFinding, ReviewRound, for_worker, review_request,
+        MAX_REVIEW_ROUNDS, ReviewFinding, ReviewRound, earlier_findings, for_worker,
+        review_request,
     )
     from app.temporal.activities import (
         open_pull_request, publish_documentation, publish_repository,
@@ -702,11 +703,14 @@ class DeliveryWorkflow:
             # Generation and verification already succeeded; only the push is repeated.
             return
         if self.state.retry_stage == 'review':
-            if self.progress.correction_failed:
+            # The retry clears the flag at once, for the page; it says so by the status.
+            if (self.progress.correction_failed
+                    or self.progress.verification_status == 'repairing'):
                 await self._retry_correction()
             else:
-                # The verified delivery is reviewed again; a new run of review rounds.
-                await self._review_rounds()
+                # The verified delivery is reviewed again; a new run of review rounds,
+                # which knows what the last completed round found and had corrected.
+                await self._review_rounds(corrected=open_review_findings(self.progress))
             return
         if self.spec.kind == 'docs':
             # A failed fix requested in the pull request is retried as that fix.
@@ -755,34 +759,49 @@ class DeliveryWorkflow:
                     and (self.spec.kind != 'bugfix'
                          or self.progress.baseline_status == 'reproduced'))
 
-    async def _review_rounds(self, instructions: str | None = None) -> None:
-        """Review the verified delivery's changes; while findings remain, send them to the
-        worker they concern, verify again and review again, at most MAX_REVIEW_ROUNDS
-        times. Findings left after the last round are open: the delivery is pushed as
-        unverified and the user decides about them."""
+    async def _review_rounds(self, instructions: str | None = None,
+                             corrected: list[ReviewFinding] | None = None) -> None:
+        """Review the verified delivery's changes; while new findings remain, send them to
+        the worker they concern, verify again and review again, at most MAX_REVIEW_ROUNDS
+        times. Each round knows the findings already `corrected` in this run, and a
+        finding reported again is not sent for another correction: a round with nothing
+        new ends the run. Findings left are open: the delivery is pushed as unverified
+        and the user decides about them."""
+        earlier = [{key: value for key, value in item.items() if key != 'repeats'}
+                   for item in corrected or []]
         for count in range(1, MAX_REVIEW_ROUNDS + 1):
-            findings = await self._review(instructions)
-            # Only the first round reviews fixes made from the user's instructions.
-            instructions = None
+            # The user's instructions hold for every round of the run they started.
+            findings = await self._review(instructions, earlier, record=count == 1)
             if findings is None:
                 return
             if not findings:
                 self.progress.verification_status = 'completed'
                 return
-            if count == MAX_REVIEW_ROUNDS:
+            new = [item for item in findings if 'repeats' not in item]
+            if not new:
+                workflow.logger.info('The review only repeats findings already corrected')
                 break
-            if not await self._correct(findings, self.progress.reviews[-1]['round']):
+            if count == MAX_REVIEW_ROUNDS:
+                workflow.logger.info('Review findings remain after %d rounds',
+                                     MAX_REVIEW_ROUNDS)
+                break
+            if not await self._correct(new, self.progress.reviews[-1]['round']):
                 return
-        workflow.logger.info('Review findings remain after %d rounds', MAX_REVIEW_ROUNDS)
+            earlier += new
         self.progress.verification_status = 'findings_open'
 
-    async def _review(self, instructions: str | None) -> list[ReviewFinding] | None:
-        """One review round; None when the review could not run."""
+    async def _review(self, instructions: str | None, earlier: list[ReviewFinding],
+                      record: bool = True) -> list[ReviewFinding] | None:
+        """One review round, told the findings already corrected; None when the review
+        could not run. `record` keeps the instructions with the round whose reviewed
+        fixes were made from them."""
         self.progress.verification_status = 'reviewing'
         number = len(self.progress.reviews) + 1
         context = self._coding_context()
         if instructions:
             context['instructions'] = instructions
+        if earlier:
+            context['previous_findings'] = earlier_findings(earlier)
         try:
             result = await workflow.execute_child_workflow(
                 'ReviewWorkflow', args=[self.spec.session_id, context],
@@ -798,18 +817,19 @@ class DeliveryWorkflow:
         self.progress.review_error = None
         findings: list[ReviewFinding] = list(result.get('findings') or [])
         round_: ReviewRound = {'round': number, 'findings': findings}
-        if instructions and self._mention_ref is not None:
+        if instructions and record and self._mention_ref is not None:
             # A comment's text, up to GitHub's 65536 characters per comment, stays in the
             # mention history; the round refers to it so that the state stays bounded.
             round_['mention'] = dict(self._mention_ref)
-        elif instructions:
+        elif instructions and record:
             round_['instructions'] = instructions
         self.progress.reviews.append(round_)
         workflow.logger.info('Review round %d: %d findings', number, len(findings))
         return findings
 
     async def _correct(self, findings: list[ReviewFinding], number: int,
-                       instructions: str | None = None) -> bool:
+                       instructions: str | None = None,
+                       restore: list[str] | None = None) -> bool:
         """Have each worker the findings concern correct them, or with the user's
         instructions both, then verify again. True when verification passed again.
         A correction of the review's own findings that did not pass is left for the user
@@ -819,7 +839,7 @@ class DeliveryWorkflow:
                    if instructions or for_worker(findings, worker)]
         await asyncio.gather(*(
             (self._implement_service if worker == 'implementation' else self._generate_tests)(
-                review_request(findings, worker, number, instructions))
+                review_request(findings, worker, number, instructions, restore))
             for worker in workers))
         if await self._verify_correction(workers, number):
             return True
@@ -829,21 +849,54 @@ class DeliveryWorkflow:
     async def _retry_correction(self) -> None:
         """Go on from a correction of review findings that did not pass, then with the
         review rounds. A worker that failed, or corrected tests of a bugfix that no longer
-        failed without the fix, correct the findings again; otherwise the corrected
-        delivery is only verified again."""
+        failed without the fix, correct the findings again. A suite that verification ran
+        and rejected goes back to the test author with the reason, as the same suite would
+        be rejected again. Otherwise the corrected delivery is only verified again."""
         self.progress.correction_failed = False
         number = self.progress.reviews[-1]['round']
+        rejected = self._rejected_suite() if workflow.patched('correct-rejected-suite') else None
         if (self.progress.implementation_error or self.progress.tests_error
                 or self.spec.kind == 'bugfix' and self.progress.baseline_status != 'reproduced'):
             self.progress.implementation_error = None
             self.progress.tests_error = None
             corrected = await self._correct(open_review_findings(self.progress), number)
+        elif rejected:
+            finding, restore = rejected
+            corrected = await self._correct([finding], number, restore=restore)
         else:
             self.progress.verification_status = 'repairing'
             corrected = await self._verify_correction([], number)
             self.progress.correction_failed = not corrected
         if corrected:
-            await self._review_rounds()
+            await self._review_rounds(corrected=open_review_findings(self.progress))
+
+    def _rejected_suite(self) -> tuple[ReviewFinding, list[str]] | None:
+        """Why the last verification, which ran and passed, still rejected the suite of a
+        change, as a finding for the test author, with the repository's tests it has to
+        put back as they were: those it changed or removed that the changed service
+        still passes. None when the verification proved nothing about the suite."""
+        result = self.progress.verification
+        if (self.spec.kind not in CHANGE_KINDS or not result
+                or result['status'] != 'passed' or not self.progress.tests):
+            return None
+        reason = 'Verification of the corrected delivery rejected its tests.'
+        unrun = unproven_green(result)
+        if unrun:
+            return {'summary': unrun, 'target': 'tests', 'reason': reason}, []
+        existing = self.progress.existing_tests
+        if self.spec.kind != 'api_change' or not existing:
+            return None
+        tests = self.progress.tests
+        touched = [*tests['changed_tests'], *tests['removed_tests']]
+        kept = kept_tests(existing, touched)
+        if not kept:
+            return None
+        return {'summary': (
+            'These tests of the repository were changed or removed, but the changed service '
+            f'still passes them as the repository holds them: {", ".join(kept)}. A test the '
+            'contract still supports has to stay exactly as the repository holds it: put '
+            'each one back as the `restore` entry gives it.'),
+            'target': 'tests', 'reason': reason}, kept
 
     async def _verify_correction(self, workers: list[str], number: int) -> bool:
         """Verify the delivery as the workers corrected it; true when it passed again."""
@@ -857,6 +910,7 @@ class DeliveryWorkflow:
             return False
         self.progress.verification = None
         self.progress.verification_error = None
+        self.progress.existing_tests = None
         await self._verify_and_repair()
         if self.spec.kind == 'api_change':
             await self._prove_kept()
@@ -893,7 +947,7 @@ class DeliveryWorkflow:
             'mention': dict(self._mention_ref) if self._mention_ref else None}
         if await self._correct(findings, number, instructions):
             self.state.code_fix = None
-            await self._review_rounds(instructions)
+            await self._review_rounds(instructions, findings)
 
     async def _retry_fix(self) -> None:
         """Retry the failed stage of a fix round from instructions or a mention: the
@@ -912,7 +966,7 @@ class DeliveryWorkflow:
             if not await self._verify_correction([worker], number):
                 return
             self.state.code_fix = None
-            await self._review_rounds(instructions)
+            await self._review_rounds(instructions, fix['findings'])
         finally:
             self._mention_ref = None
 

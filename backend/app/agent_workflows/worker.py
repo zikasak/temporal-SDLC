@@ -1,23 +1,65 @@
-"""Host-only bootstrap for a dedicated single-stage Temporal worker."""
+"""Host-only Temporal worker for every sandboxed stage, in one process.
+
+Each stage keeps its own task queue and a Worker that runs one activity at a time, so
+stages neither wait on one another nor run two containers of the same stage at once.
+Run with `python -m app.agent_workflows.worker`.
+"""
+import asyncio
 import logging
-from collections.abc import Callable
-from typing import Any
 
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from app.config import TEMPORAL_ADDRESS
+from app.config import (
+    DIAGNOSIS_TASK_QUEUE, DOCUMENTATION_TASK_QUEUE, IMPLEMENTATION_TASK_QUEUE,
+    REVIEW_TASK_QUEUE, TEMPORAL_ADDRESS, TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
+)
+from app.diagnosis.activities import diagnose_failure
+from app.diagnosis.workflows import DiagnosisWorkflow
+from app.documentation.activities import write_documentation
+from app.documentation.workflows import DocumentationWorkflow
+from app.implementation.activities import implement_service
+from app.implementation.workflows import ImplementationWorkflow
 from app.logging_setup import configure_logging
-from app.temporal.lifecycle import run_worker
+from app.review.activities import review_changes
+from app.review.workflows import ReviewWorkflow
 from app.settings.storage import ensure_schema as ensure_settings_schema
+from app.temporal.lifecycle import run_worker
+from app.test_generation.activities import generate_service_tests
+from app.test_generation.workflows import TestGenerationWorkflow
+from app.verification.activities import (
+    build_baseline, build_repository_tests, snapshot_repository_tests, verify_documentation,
+    verify_service,
+)
+from app.verification.workflows import VerificationWorkflow
+
+logger = logging.getLogger(__name__)
+
+# (label, task queue, workflow, activities) of each sandboxed stage.
+STAGES = (
+    ('Implementation', IMPLEMENTATION_TASK_QUEUE, ImplementationWorkflow, [implement_service]),
+    ('Test generation', TEST_GENERATION_TASK_QUEUE, TestGenerationWorkflow,
+     [generate_service_tests]),
+    ('Verification', VERIFICATION_TASK_QUEUE, VerificationWorkflow,
+     [verify_service, build_baseline, snapshot_repository_tests, build_repository_tests,
+      verify_documentation]),
+    ('Diagnosis', DIAGNOSIS_TASK_QUEUE, DiagnosisWorkflow, [diagnose_failure]),
+    ('Code review', REVIEW_TASK_QUEUE, ReviewWorkflow, [review_changes]),
+    ('Documentation', DOCUMENTATION_TASK_QUEUE, DocumentationWorkflow, [write_documentation]),
+)
 
 
-async def run_agent_worker(*, task_queue: str, workflow_type: type,
-                           activities: list[Callable[..., Any]], label: str) -> None:
+async def main() -> None:
     configure_logging()
     await ensure_settings_schema()
     client = await Client.connect(TEMPORAL_ADDRESS)
-    worker = Worker(client, task_queue=task_queue, workflows=[workflow_type],
-                    activities=activities, max_concurrent_activities=1)
-    logging.getLogger(__name__).info('%s worker started on %s', label, task_queue)
-    await run_worker(worker)
+    workers = []
+    for label, task_queue, workflow_type, activities in STAGES:
+        workers.append(Worker(client, task_queue=task_queue, workflows=[workflow_type],
+                              activities=activities, max_concurrent_activities=1))
+        logger.info('%s worker started on %s', label, task_queue)
+    await run_worker(*workers)
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
