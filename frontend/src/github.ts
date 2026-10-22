@@ -134,7 +134,7 @@ export function createGitHubApp(name: string, organization: string) {
     // Mentions of the app in pull request comments arrive here, signed with the webhook
     // secret GitHub returns with the created app.
     hook_attributes: { url: `${origin}/api/connectors/github/events`, active: true },
-    default_permissions: { contents: "write", metadata: "read", pull_requests: "write" },
+    default_permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "read" },
     default_events: ["issue_comment", "pull_request_review_comment"],
   };
   const form = document.createElement("form");
