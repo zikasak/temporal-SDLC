@@ -15,6 +15,7 @@ with workflow.unsafe.imports_passed_through():
         save_mention,
     )
     from app.delivery.mentions import ensure_schema as ensure_mention_schema
+    from app.delivery.pull_request_activities import write_pull_request_text
     from app.delivery.workflows import DeliveryWorkflow
     from app.documents import ensure_document_schema
     from app.settings.storage import ensure_schema as ensure_settings_schema
@@ -63,7 +64,7 @@ async def main():
             requirements_turn, write_requirements_document,
             api_design_turn, write_openapi_document,
             checkout_repository, update_repository_checkout, publish_repository,
-            publish_documentation, open_pull_request,
+            publish_documentation, open_pull_request, write_pull_request_text,
             read_repository_contract, read_requirements_document,
             classify_mention, answer_mention, reply_to_mention,
             record_new_mention, save_mention, mention_body,

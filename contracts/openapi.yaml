@@ -105,6 +105,9 @@ paths:
       - FR-37
       - FR-38
       - FR-39
+      - FR-52
+      - FR-54
+      - FR-55
   /api-design/sessions/{session_id}/answers:
     post:
       operationId: postApiDesignSessionsBySessionIdAnswers
@@ -494,7 +497,11 @@ paths:
       description: Starts the named stage of the delivery over. The review stage runs
         a failed code review again; 409 when the delivery has no failed review. The
         repository stage pushes again and then opens or updates the pull request,
-        which also recovers a pull request step that ended in error.
+        which also recovers a pull request step that ended in error; it has the LLM
+        write the pull request's title and description again, and is also allowed
+        when only pull_request_text_error is set (the generic text was used). 409
+        for the repository stage when there is no publication error, pull request
+        error or pull request text error.
       tags:
       - api-design
       parameters:
@@ -554,6 +561,8 @@ paths:
       - FR-34
       - FR-36
       - FR-37
+      - FR-52
+      - FR-54
   /api-design/sessions/{session_id}/messages:
     post:
       operationId: postApiDesignSessionsBySessionIdMessages
@@ -1791,6 +1800,9 @@ paths:
       - FR-37
       - FR-38
       - FR-39
+      - FR-52
+      - FR-54
+      - FR-55
   /requirements/sessions/{session_id}/answers:
     post:
       operationId: postRequirementsSessionsBySessionIdAnswers
@@ -2230,7 +2242,11 @@ paths:
       description: Starts the named stage of the delivery over. The review stage runs
         a failed code review again; 409 when the delivery has no failed review. The
         repository stage pushes again and then opens or updates the pull request,
-        which also recovers a pull request step that ended in error.
+        which also recovers a pull request step that ended in error; it has the LLM
+        write the pull request's title and description again, and is also allowed
+        when only pull_request_text_error is set (the generic text was used). 409
+        for the repository stage when there is no publication error, pull request
+        error or pull request text error.
       tags:
       - requirements
       parameters:
@@ -2290,6 +2306,8 @@ paths:
       - FR-34
       - FR-36
       - FR-37
+      - FR-52
+      - FR-54
   /requirements/sessions/{session_id}/messages:
     post:
       operationId: postRequirementsSessionsBySessionIdMessages
@@ -2880,7 +2898,9 @@ components:
           - review
           description: review runs a failed code review again on the verified delivery.
             repository pushes the delivery again and then opens or updates its pull
-            request, such as after pull_request_status became error.
+            request, such as after pull_request_status became error; it also has the
+            LLM write the pull request's title and description again, such as after
+            pull_request_text_error was set.
       required:
       - stage
     ForkInput:
@@ -2999,9 +3019,9 @@ components:
             (RepositoryPublication) with its verified flag, the first 20 open findings
             its commit message lists and findings_count, as in ApiDesignSession. Every
             delivery's progress also holds pull_request_status and, once a pushed
-            delivery's pull request is open, pull_request (PullRequest), and pull_request_error,
-            and mentions (PullRequestMention list) of the app on that pull request,
-            as in ApiDesignSession.
+            delivery's pull request is open, pull_request (PullRequest), pull_request_error,
+            pull_request_text_error, and mentions (PullRequestMention list) of the
+            app on that pull request, as in ApiDesignSession.
       required:
       - session_id
       - status
@@ -3139,15 +3159,17 @@ components:
             skipped when nothing was pushed, error when it could not be opened or
             updated (see pull_request_error). An error never fails the push or the
             delivery; retrying the repository stage pushes again and retries the pull
-            request.'
+            request. Falling back to the generic title and description is not an error:
+            the step still completes (see pull_request_text_error).'
         pull_request:
           $ref: '#/components/schemas/PullRequest'
           description: The pull request opened from the pushed branch to the default
             branch, once it is open. A later push to the same branch keeps an open
-            pull request and updates its description, and marks a draft ready for
-            review when that push is verified. If the earlier pull request was closed
-            or merged, the later push opens a new one and this field links to it.
-            When updating it fails, this field keeps the existing pull request.
+            pull request and rewrites both its title and its description, and marks
+            a draft ready for review when that push is verified. If the earlier pull
+            request was closed or merged, the later push opens a new one and this
+            field links to it. When updating it fails, this field keeps the existing
+            pull request.
         pull_request_error:
           type: string
           description: 'Why the pull request could not be opened or updated, such
@@ -3156,6 +3178,18 @@ components:
             or updating failed. The push and the delivery do not fail because of it;
             retrying the repository stage tries again. Cleared when the pull request
             step completes.'
+        pull_request_text_error:
+          type: string
+          description: 'Why the LLM could not write the pull request''s title and
+            description at the last open or update, such as the LLM being unavailable,
+            so the generic text was used instead: today''s generic title for the task
+            kind (with the " (unverified)" marker for an unverified delivery) and
+            a generic description made of today''s fixed sentence of what the delivery
+            changed, followed only by the open review findings when there are any.
+            The push, the pull request step and the delivery do not fail because of
+            it. While it is set, the repository stage can be retried: it pushes again
+            and has the LLM write the title and description again. Cleared when a
+            later open or update uses LLM-written text.'
         mentions:
           type: array
           items:
@@ -3401,7 +3435,12 @@ components:
           description: The pull request's number in the repository.
         title:
           type: string
-          description: The pull request's title on GitHub.
+          description: The pull request's title on GitHub, at most 200 characters.
+            Written by an LLM from the task, its requirements and the delivery's code
+            diff, naming the specific change, and written again on every later push
+            that updates the pull request; for an unverified delivery followed by
+            the " (unverified)" marker. When the LLM cannot write it, today's generic
+            title for the task kind is used instead, with the same marker (see pull_request_text_error).
         url:
           type: string
           format: uri

@@ -171,6 +171,30 @@ async def snapshot(session_dir: Path, repository: RepositorySelection, commit: s
     await run_sync(shutil.rmtree, target / '.git')
 
 
+async def delivery_diff(session_dir: Path, commit: str, limit: int) -> str:
+    """What the delivery changed: the diff of the pushed `commit` against the commit the
+    session's working copy was checked out at, its file summary first, cut at `limit`
+    characters. Raises CheckoutError when either commit cannot be read."""
+    if not re.fullmatch(r'[0-9a-f]{40,64}', commit):
+        raise CheckoutError('Invalid commit')
+    try:
+        manifest = json.loads(await run_sync((session_dir / MANIFEST).read_text))
+    except (OSError, ValueError) as exc:
+        raise CheckoutError('The checkout the delivery started from is unknown') from exc
+    base = manifest.get('commit') if isinstance(manifest, dict) else None
+    if not isinstance(base, str) or not re.fullmatch(r'[0-9a-f]{40,64}', base):
+        raise CheckoutError('The checkout the delivery started from is unknown')
+    source = session_dir / CHECKOUT_DIR
+    if not await run_sync((source / '.git').is_dir):
+        raise CheckoutError('The repository checkout is unavailable')
+    stat = await _git('diff', '--no-color', '--no-ext-diff', '--stat=200', base, commit,
+                      cwd=source)
+    patch = await _git('diff', '--no-color', '--no-ext-diff', '--unified=2', base, commit,
+                       cwd=source)
+    text = f'{stat}\n\n{patch}'
+    return text if len(text) <= limit else text[:limit] + '\n… (the diff goes on)'
+
+
 def replace_files(source: Path, target: Path, include: Callable[[Path], bool]) -> None:
     """Make the included files under `target` exactly those of `source`.
 

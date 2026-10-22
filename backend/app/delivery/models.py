@@ -132,6 +132,10 @@ class DeliveryProgress:
     pull_request: PullRequest | None = None
     pull_request_error: str | None = None
     pull_request_status: PublicationStatus = 'not_applicable'
+    # Why the LLM could not write the pull request's title and description at the last
+    # open or update, so the generic text was used. Never an error of the step; retrying
+    # the repository stage has the LLM write them again. Cleared once LLM text is used.
+    pull_request_text_error: str | None = None
     # The authorised mentions of the app on the pull request that the delivery still works
     # on, without their text; every mention, with its text, is in the mention history
     # (app.delivery.mentions), and the progress the session API reports shows them all.

@@ -1225,11 +1225,37 @@ class DeliveryWorkflow:
             'requirements': brief['requirements'] if brief else self.spec.requirements,
             'retired': brief['retired'] if brief else [],
         }
+        args = [self.spec.session_id, self.spec.repository, self.progress.publication, change]
+        text = None
+        if workflow.patched('pull-request-text'):
+            # The LLM writes the title and description; without them the generic text is
+            # used, which is reported but fails neither the step nor the delivery.
+            try:
+                text = await workflow.execute_activity(
+                    'write_pull_request_text',
+                    args=[self.spec.session_id, self.progress.publication,
+                          {**change, 'task': (brief['requirements_document'] if brief
+                                              else self.spec.requirements_document)}],
+                    start_to_close_timeout=timedelta(minutes=10),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                    result_type=dict,
+                )
+            except ActivityError as exc:
+                workflow.logger.warning('The pull request text could not be written: %s',
+                                        exc.cause or exc)
+                # Only the activity's own explanations are shown: a provider's error
+                # message may carry credentials (NFR-2).
+                reason = (str(getattr(exc.cause, 'message', '') or '')[:500]
+                          if isinstance(exc.cause, ApplicationError)
+                          and exc.cause.type == 'PullRequestTextError' else '')
+                self.progress.pull_request_text_error = (
+                    'The LLM could not write the pull request title and description, so the '
+                    'generic text was used.' + (f' {reason}' if reason else ''))
+            args.append(text)
         try:
             self.progress.pull_request = await workflow.execute_activity(
                 open_pull_request,
-                args=[self.spec.session_id, self.spec.repository, self.progress.publication,
-                      change],
+                args=args,
                 start_to_close_timeout=timedelta(minutes=2),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -1242,6 +1268,9 @@ class DeliveryWorkflow:
         else:
             workflow.logger.info('Pull request #%d is open', self.progress.pull_request['number'])
             self.progress.pull_request_status = 'completed'
+            if text:
+                # The pull request now carries LLM-written text.
+                self.progress.pull_request_text_error = None
 
     @staticmethod
     def _stage_name(stage: str, repair: dict[str, Any] | None) -> str:

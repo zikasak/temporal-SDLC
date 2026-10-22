@@ -254,8 +254,10 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
               # of it that could not complete.
               'documentation': (progress.documentation_error
                                 or state.spec.kind == 'docs' and unverified),
-              # A pull request step that ended in error is retried with a new push.
-              'repository': progress.publication_error or progress.pull_request_error}[stage]
+              # A pull request step that ended in error is retried with a new push, and so
+              # is one that fell back to the generic title and description.
+              'repository': (progress.publication_error or progress.pull_request_error
+                             or progress.pull_request_text_error)}[stage]
     if not failed:
         raise SessionBusy('Only failed generation can be retried.')
     if stage == 'tests' and not progress.code and not change:
