@@ -24,6 +24,7 @@ from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.host import build_image, publish_manifest, session_language
 from app.github.checkout import CHECKOUT_DIR, SNAPSHOT_DIR, TESTS_DIR
 from app.implementation.activities import copy_service
+from app.review.activities import record_baseline
 from app.test_generation.activities import copy_test_suite
 from app.languages import Language, TestReports, UnsupportedLanguage, get_language
 from app.config import GENERATED_CODE_DIR
@@ -417,8 +418,11 @@ async def build_repository_tests(session_id: str, language: str) -> dict[str, st
 @activity.defn
 @trace_activity('build-baseline', feature='verification', input_parameter='language')
 async def build_baseline(session_id: str, language: str) -> dict[str, str]:
-    """Build the service as the repository holds it: what the baseline run of a change
-    executes the tests against, from the same files the implementation author sees."""
+    """Build the service as the repository held it before the delivery: what the baseline
+    run of a change executes the tests against. The service is recorded once, before any
+    author ran, and every later baseline (a retry, a fix round after the delivery was
+    pushed and the checkout updated) is built from that record, so a fix the delivery
+    already pushed never makes its own regression tests pass the baseline."""
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
         raise ApplicationError('Invalid session ID', non_retryable=True)
     stack = session_language(language)
@@ -431,7 +435,9 @@ async def build_baseline(session_id: str, language: str) -> dict[str, str]:
     async with docker_agents.keep_activity_alive('Building the repository service'):
         async with async_context(tempfile.TemporaryDirectory, dir=artifact_dir) as temporary:
             clean = Path(temporary) / 'build'
-            await run_sync(copy_service, stack, checkout, clean)
+            # The same record the code review compares the delivery's changes with.
+            recorded = await run_sync(record_baseline, stack, session_dir)
+            await run_sync(copy_service, stack, recorded, clean)
             if not await run_sync((clean / 'Dockerfile').is_file):
                 raise ApplicationError('The repository has no Dockerfile to build its service',
                                        non_retryable=True)

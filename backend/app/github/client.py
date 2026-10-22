@@ -114,7 +114,27 @@ def _installation(value: Any) -> dict[str, Any]:
             or not isinstance(account.get("login"), str)
             or not LOGIN_PATTERN.fullmatch(account["login"])):
         raise _invalid_response()
-    return {"id": value["id"], "account": account["login"]}
+    return {"id": value["id"], "account": account["login"],
+            "permissions": _permissions(value.get("permissions"))}
+
+
+def _permissions(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {key: item for key, item in value.items()
+            if isinstance(key, str) and isinstance(item, str)}
+
+
+# The events and the permission mentions of the app need.
+MENTION_EVENTS = frozenset({"issue_comment", "pull_request_review_comment"})
+
+
+def events_missing(app: dict[str, Any], installation: dict[str, Any] | None) -> bool:
+    """Whether the app misses an event mentions arrive by, or the permission to reply:
+    the installation's when it is installed, else the app's own."""
+    permissions = installation["permissions"] if installation else app.get("permissions", {})
+    return (not MENTION_EVENTS <= set(app.get("events") or ())
+            or permissions.get("pull_requests") != "write")
 
 
 def _removed(exc: GitHubError) -> GitHubError:
@@ -137,7 +157,11 @@ async def convert_manifest(code: str) -> dict[str, Any]:
             or not isinstance(data.get("slug"), str) or not SLUG_PATTERN.fullmatch(data["slug"])
             or not isinstance(data.get("pem"), str) or not 1 <= len(data["pem"]) <= 8192):
         raise _invalid_response()
-    return {"id": data["id"], "slug": data["slug"], "private_key": data["pem"]}
+    secret = data.get("webhook_secret")
+    return {"id": data["id"], "slug": data["slug"], "private_key": data["pem"],
+            "webhook_secret": secret if isinstance(secret, str) and secret else None,
+            "events": [item for item in data.get("events") or [] if isinstance(item, str)],
+            "permissions": _permissions(data.get("permissions"))}
 
 
 async def get_app(app_token: str) -> dict[str, Any]:
@@ -145,7 +169,29 @@ async def get_app(app_token: str) -> dict[str, Any]:
     if (not isinstance(data, dict) or not _positive(data.get("id"))
             or not isinstance(data.get("slug"), str) or not SLUG_PATTERN.fullmatch(data["slug"])):
         raise _invalid_response()
-    return {"id": data["id"], "slug": data["slug"]}
+    events = data.get("events")
+    external_url = data.get("external_url")
+    return {"id": data["id"], "slug": data["slug"],
+            "external_url": external_url if isinstance(external_url, str) else None,
+            "events": [item for item in events if isinstance(item, str)]
+            if isinstance(events, list) else [],
+            "permissions": _permissions(data.get("permissions"))}
+
+
+async def get_hook_config(app_token: str) -> dict[str, Any]:
+    """The app's webhook configuration: its URL, without the secret GitHub masks."""
+    data, _ = await _request("GET", app_token, "/app/hook/config")
+    if not isinstance(data, dict):
+        raise _invalid_response()
+    url = data.get("url")
+    return {"url": url if isinstance(url, str) else None}
+
+
+async def update_hook_config(app_token: str, url: str, secret: str) -> None:
+    """Point the app's webhook at `url`, signed with `secret`."""
+    await _request("PATCH", app_token, "/app/hook/config",
+                   json={"url": url, "content_type": "json", "secret": secret,
+                         "insecure_ssl": "0"})
 
 
 async def list_installations(app_token: str) -> list[dict[str, Any]]:
@@ -333,3 +379,81 @@ async def set_pull_request_draft(token: str, node_id: str, draft: bool) -> bool:
     if not isinstance(pull, dict) or type(pull.get("isDraft")) is not bool:
         raise _invalid_response()
     return pull["isDraft"]
+
+
+async def get_pull_request_state(token: str, full_name: str,
+                                 number: int) -> dict[str, Any] | None:
+    """The pull request's current state, merged flag and author; None when it is gone."""
+    validate_selection(full_name, "main")
+    try:
+        data, _ = await _request("GET", token, f"{_repo_path(full_name)}/pulls/{number}")
+    except GitHubError as exc:
+        if exc.status_code == 404:
+            return None
+        raise
+    if not isinstance(data, dict) or not isinstance(data.get("state"), str):
+        raise _invalid_response()
+    user = data.get("user")
+    author = user.get("login") if isinstance(user, dict) else None
+    return {"state": data["state"], "merged": data.get("merged") is True,
+            "author": author if isinstance(author, str) else None}
+
+
+WRITE_PERMISSIONS = frozenset({"admin", "maintain", "write"})
+COMMENT_CHARS = 65000
+
+
+async def has_write_access(token: str, full_name: str, login: str) -> bool:
+    """Whether the GitHub user `login` may write to the repository."""
+    validate_selection(full_name, "main")
+    if not LOGIN_PATTERN.fullmatch(login):
+        return False
+    try:
+        data, _ = await _request(
+            "GET", token,
+            f"{_repo_path(full_name)}/collaborators/{quote(login, safe='')}/permission")
+    except GitHubError as exc:
+        # Not a collaborator at all.
+        if exc.status_code == 404:
+            return False
+        raise
+    if not isinstance(data, dict):
+        raise _invalid_response()
+    role = data.get("role_name")
+    return data.get("permission") in WRITE_PERMISSIONS or role in WRITE_PERMISSIONS
+
+
+def _comment_url(data: Any, full_name: str, number: int) -> str:
+    if not isinstance(data, dict) or not _positive(data.get("id")):
+        raise _invalid_response()
+    url = data.get("html_url")
+    # Kept only when it is a link to this repository on GitHub.
+    prefix = f"https://github.com/{full_name}/pull/{number}"
+    if isinstance(url, str) and url.startswith(prefix):
+        return url
+    return f"{prefix}#issuecomment-{data['id']}"
+
+
+async def comment_on_pull_request(token: str, full_name: str, number: int, body: str) -> str:
+    """Add a conversation comment to the pull request; returns its link."""
+    validate_selection(full_name, "main")
+    try:
+        data, _ = await _request("POST", token, f"{_repo_path(full_name)}/issues/{number}/comments",
+                                 json={"body": body[:COMMENT_CHARS]})
+    except GitHubError as exc:
+        raise _pull_request_denied(exc) from None
+    return _comment_url(data, full_name, number)
+
+
+async def reply_to_review_comment(token: str, full_name: str, number: int, comment_id: int,
+                                  body: str) -> str:
+    """Reply in the thread of an inline review comment; returns the reply's link.
+    `comment_id` must be the thread's top-level comment: GitHub takes no reply to a reply."""
+    validate_selection(full_name, "main")
+    try:
+        data, _ = await _request(
+            "POST", token, f"{_repo_path(full_name)}/pulls/{number}/comments/{comment_id}/replies",
+            json={"body": body[:COMMENT_CHARS]})
+    except GitHubError as exc:
+        raise _pull_request_denied(exc) from None
+    return _comment_url(data, full_name, number)

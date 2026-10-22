@@ -1,5 +1,6 @@
 """Connector operations stay outside workflows; sessions retain only metadata."""
 
+import secrets
 from typing import Any
 
 from app.github import client, storage
@@ -7,6 +8,8 @@ from app.github.errors import GitHubError
 from app.github.models import RepositorySelection
 
 LISTED_ACCOUNTS = 10
+# Where GitHub delivers webhook events to this instance.
+EVENTS_PATH = "/connectors/github/events"
 
 
 async def connection_status() -> dict:
@@ -28,7 +31,9 @@ async def _choose_installation(app_token: str, account: str | None) -> dict[str,
     return installations[0]
 
 
-async def connect(app_id: int, private_key: str, account: str | None = None) -> dict:
+async def connect(app_id: int, private_key: str, account: str | None = None,
+                  webhook_secret: str | None = None) -> dict:
+    """Connect a manually created app; without `webhook_secret` it is saved without one."""
     if not storage.encryption_ready():
         raise GitHubError(503, "Configure a valid GITHUB_TOKEN_ENCRYPTION_KEY in the backend.")
     app_token = client.app_token(app_id, private_key)
@@ -39,12 +44,15 @@ async def connect(app_id: int, private_key: str, account: str | None = None) -> 
     return await storage.save_connection(private_key, {
         "app_id": app["id"], "app_slug": app["slug"], "installation_id": installation["id"],
         "account": installation["account"], "bot_user_id": bot_user_id,
-    })
+        "manifest_created": False,
+        "webhook_events_missing": client.events_missing(app, installation),
+    }, webhook_secret)
 
 
 async def connect_created_app(code: str) -> dict:
-    """Save the app GitHub just created from this instance's manifest. It is not installed
-    anywhere yet: checking the connection picks its installation up."""
+    """Save the app GitHub just created from this instance's manifest, with the webhook
+    secret GitHub returns. It is not installed anywhere yet: checking the connection
+    picks its installation up."""
     if not storage.encryption_ready():
         raise GitHubError(503, "Configure a valid GITHUB_TOKEN_ENCRYPTION_KEY in the backend.")
     app = await client.convert_manifest(code)
@@ -52,8 +60,9 @@ async def connect_created_app(code: str) -> dict:
     client.app_token(app["id"], app["private_key"])
     return await storage.save_connection(app["private_key"], {
         "app_id": app["id"], "app_slug": app["slug"], "installation_id": None,
-        "account": None, "bot_user_id": None,
-    })
+        "account": None, "bot_user_id": None, "manifest_created": True,
+        "webhook_events_missing": client.events_missing(app, None),
+    }, app["webhook_secret"])
 
 
 def _app_token(row: dict[str, Any] | None) -> str:
@@ -61,7 +70,20 @@ def _app_token(row: dict[str, Any] | None) -> str:
     return client.app_token(row["app_id"], private_key)
 
 
-async def check_connection() -> dict:
+async def _enable_webhook(app_token: str, events_url: str) -> str:
+    """Turn on the webhook of an app created from the manifest before mentions were
+    supported, with a new secret, pointing at this instance's events endpoint
+    `events_url`: an address the hook had before, such as one of another instance or of
+    this one before it moved, is replaced, so that deliveries reach this instance."""
+    secret = secrets.token_hex(32)
+    await client.update_hook_config(app_token, events_url, secret)
+    return secret
+
+
+async def check_connection(events_url: str | None = None) -> dict:
+    """Validate the saved app and pick up its installation. `events_url` is where this
+    instance receives webhook deliveries, for an app created from the manifest without
+    a webhook secret."""
     row = await storage.get_connection()
     app_token = _app_token(row)
     app = await client.get_app(app_token)
@@ -77,9 +99,24 @@ async def check_connection() -> dict:
     installation = installation or await _choose_installation(app_token, row["account"])
     token = await client.installation_token(app_token, installation["id"])
     bot_user_id = row["bot_user_id"] or await client.get_bot_user_id(token, app["slug"])
+    # Only a connection created from this instance's manifest has its webhook turned on; a
+    # manual app keeps its webhook settings, its secret changing only by connecting again.
+    # A connection saved before its origin was recorded (manifest_created is null) has no
+    # reliable provenance: an app's homepage or webhook address does not prove that this
+    # instance's manifest created it, so it is left unchanged like a manual app. Its owner
+    # connects again, with a webhook secret or from the manifest, to handle mentions.
+    manifest_created = row.get("manifest_created")
+    if (manifest_created is True and row.get("encrypted_webhook_secret") is None
+            and events_url):
+        # The secret is generated, configured at GitHub and saved under the connection's
+        # lock, so that concurrent checks never save another secret than GitHub's.
+        await storage.initialize_webhook_secret(
+            row, lambda: _enable_webhook(app_token, events_url))
     return await storage.mark_validated(row, {
         "app_slug": app["slug"], "installation_id": installation["id"],
         "account": installation["account"], "bot_user_id": bot_user_id,
+        "webhook_events_missing": client.events_missing(app, installation),
+        "manifest_created": None,
     })
 
 

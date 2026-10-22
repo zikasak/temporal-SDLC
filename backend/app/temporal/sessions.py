@@ -21,6 +21,10 @@ class SessionBusy(Exception):
     pass
 
 
+class SessionEnded(SessionBusy):
+    """The workflow closed before the update reached it."""
+
+
 class InvalidForkPoint(ValueError):
     pass
 
@@ -115,11 +119,11 @@ async def state_at_message(
 
 async def start_update(session_id: str, update: str, *args: Any,
                        wait_for_stage: WorkflowUpdateStage = WorkflowUpdateStage.ACCEPTED,
-                       ) -> None:
+                       update_id: str | None = None) -> None:
     client = await connect_temporal()
     handle = client.get_workflow_handle(session_id)
     try:
-        update_handle = await handle.start_update(update, args=list(args),
+        update_handle = await handle.start_update(update, args=list(args), id=update_id,
                                                   wait_for_stage=wait_for_stage)
         # A rejected update returns at once with its outcome known; only its result
         # raises the validator's error.
@@ -137,7 +141,7 @@ async def start_update(session_id: str, update: str, *args: Any,
         if description.status == WorkflowExecutionStatus.RUNNING:
             raise
         logger.warning("Session %s has ended; %s rejected", session_id, update)
-        raise SessionBusy("This session has ended.") from exc
+        raise SessionEnded("This session has ended.") from exc
 
 
 async def is_running(workflow_id: str) -> bool:

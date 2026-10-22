@@ -27,8 +27,8 @@ from app.languages import Language
 from app.requirements.document import without_repeated_tables
 from app.review.agent import FINDINGS
 from app.review.models import (
-    INSTRUCTIONS_CHARS, MAX_FINDINGS, PATH_CHARS, PREVIOUS_SUMMARY_CHARS, REASON_CHARS,
-    REVIEW_TARGETS, SUMMARY_CHARS, ReviewFinding,
+    MAX_FINDINGS, PATH_CHARS, PREVIOUS_SUMMARY_CHARS, REASON_CHARS, REVIEW_TARGETS,
+    SUMMARY_CHARS, REVIEW_INSTRUCTIONS_CHARS, ReviewFinding,
 )
 from app.temporal.tracing import activity_metadata
 from app.tracing import trace_operation
@@ -164,7 +164,7 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
     write_language(workspace, language, label=language.label)
     if files:
         write_contracts(workspace, files)
-    instructions = str(context.get('instructions') or '')[:INSTRUCTIONS_CHARS]
+    instructions = str(context.get('instructions') or '')[:REVIEW_INSTRUCTIONS_CHARS]
     (workspace / 'input.json').write_text(json.dumps(
         {**index, 'changes': changes,
          **({PART_KEY: {'part': part + 1, 'of': len(parts), 'other_changes': by_side(others)}}

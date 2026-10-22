@@ -10,6 +10,11 @@ from app.logging_setup import configure_logging
 from app.temporal.lifecycle import run_worker
 
 with workflow.unsafe.imports_passed_through():
+    from app.delivery.mention_activities import (
+        answer_mention, classify_mention, mention_body, record_new_mention, reply_to_mention,
+        save_mention,
+    )
+    from app.delivery.mentions import ensure_schema as ensure_mention_schema
     from app.delivery.workflows import DeliveryWorkflow
     from app.documents import ensure_document_schema
     from app.settings.storage import ensure_schema as ensure_settings_schema
@@ -44,6 +49,7 @@ async def main():
     configure_logging()
     await ensure_document_schema()
     await ensure_settings_schema()
+    await ensure_mention_schema()
     client = await Client.connect(TEMPORAL_ADDRESS)
     worker = Worker(
         client,
@@ -59,6 +65,8 @@ async def main():
             checkout_repository, update_repository_checkout, publish_repository,
             publish_documentation, open_pull_request,
             read_repository_contract, read_requirements_document,
+            classify_mention, answer_mention, reply_to_mention,
+            record_new_mention, save_mention, mention_body,
         ],
     )
     logger.info("Worker started on task queue %s at %s", TASK_QUEUE, TEMPORAL_ADDRESS)

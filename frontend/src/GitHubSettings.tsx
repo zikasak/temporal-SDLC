@@ -7,6 +7,7 @@ export default function GitHubSettings() {
   const [appId, setAppId] = useState("");
   const [account, setAccount] = useState("");
   const [privateKey, setPrivateKey] = useState("");
+  const [webhookSecret, setWebhookSecret] = useState("");
   const keyInput = useRef<HTMLInputElement>(null);
   const [appName, setAppName] = useState(() => `service-generator-${crypto.randomUUID().slice(0, 4)}`);
   const [organization, setOrganization] = useState("");
@@ -59,9 +60,11 @@ export default function GitHubSettings() {
     setError("");
     setNotice("");
     const credentials = { app_id: Number(appId), private_key: privateKey,
-      ...(account.trim() ? { account: account.trim() } : {}) };
+      ...(account.trim() ? { account: account.trim() } : {}),
+      ...(webhookSecret ? { webhook_secret: webhookSecret } : {}) };
     if (action === "connect") {
       setPrivateKey("");
+      setWebhookSecret("");
       if (keyInput.current) keyInput.current.value = "";
     }
     try {
@@ -73,7 +76,8 @@ export default function GitHubSettings() {
       });
       if (controller.signal.aborted) return;
       if (action === "disconnect") setConnection({ configured: false,
-        encryption_ready: connection?.encryption_ready ?? false, app: null, installation: null, validated_at: null });
+        encryption_ready: connection?.encryption_ready ?? false, app: null, installation: null, validated_at: null,
+        webhook_secret_set: false, webhook_events_missing: false });
       else setConnection(connectionRecord(body));
       setNotice(action === "disconnect" ? "GitHub disconnected. Existing session selections are unchanged." :
         action === "check" ? "The app is installed and its key is valid." : "GitHub connected. Choose a repository when starting a session.");
@@ -124,6 +128,11 @@ export default function GitHubSettings() {
         {connection.installation
           ? <p>Last validated {connection.validated_at ? new Date(connection.validated_at).toLocaleString() : "not yet"}. This is a saved configuration, not a continuous access check.</p>
           : <p>Install it on the repositories sessions may use. GitHub returns you here; otherwise check the connection afterwards.</p>}
+        <p>{connection.webhook_secret_set
+          ? "Mentions of the app in its pull requests are handled."
+          : "No webhook secret is set, so mentions of the app in its pull requests are not handled."}</p>
+        {connection.webhook_events_missing && <p className="connector-error" role="alert">
+          The app is not subscribed to Issue comment and Pull request review comment events, or its installation lacks the Pull requests: write permission. Add them in the app's settings on GitHub, then check the connection again.</p>}
         <a className="github-token-link" href={installUrl(connection.app.slug)}>
           {connection.installation ? "Change its repositories on GitHub" : "Install the app on GitHub"}</a>
         <div className="repository-actions">
@@ -143,7 +152,7 @@ export default function GitHubSettings() {
         <label htmlFor="github-app-organization">Organization (leave empty for your own account)</label>
         <input id="github-app-organization" type="text" value={organization} autoComplete="off" spellCheck={false}
           maxLength={39} disabled={disabled} onChange={(event) => setOrganization(event.target.value)} />
-        <p id="github-create-help" className="field-hint">GitHub asks you to confirm a private app with Contents read and write permission (sessions push their verified code to a new branch) and no webhook, then returns here with its key. Install it next on the repositories you need. The key is saved encrypted and never returned to this browser.</p>
+        <p id="github-create-help" className="field-hint">GitHub asks you to confirm a private app with Contents read and write permission (sessions push their verified code to a new branch) and a webhook for pull request comments that mention it, then returns here with its key. Install it next on the repositories you need. The key is saved encrypted and never returned to this browser.</p>
         <button type="submit" className="run-button" disabled={disabled || !appName.trim()}>Create GitHub App</button>
       </form>
       <details className="github-existing-app">
@@ -160,7 +169,10 @@ export default function GitHubSettings() {
         <input id="github-app-account" type="text" value={account} autoComplete="off" spellCheck={false}
           maxLength={39} placeholder="user or organization" disabled={disabled}
           onChange={(event) => setAccount(event.target.value)} />
-        <p id="github-token-help" className="field-hint">The app needs Contents read and write permission, a generated private key and an installation on the repositories you need. No webhook or callback URL is required.</p>
+        <label htmlFor="github-app-webhook-secret">Webhook secret (optional; without it mentions of the app are not handled)</label>
+        <input id="github-app-webhook-secret" type="password" value={webhookSecret} autoComplete="off" spellCheck={false}
+          maxLength={1024} disabled={disabled} onChange={(event) => setWebhookSecret(event.target.value)} />
+        <p id="github-token-help" className="field-hint">The app needs Contents read and write permission, a generated private key and an installation on the repositories you need. To handle mentions in its pull requests, make its webhook point at this instance's /api/connectors/github/events with a secret, subscribe it to Issue comment and Pull request review comment events and grant Pull requests read and write permission.</p>
         <button type="submit" className="run-button" disabled={disabled || !ready}>
           {busy === "connect" ? "Connecting…" : connection?.configured ? "Replace app" : "Connect GitHub"}
         </button>

@@ -6,8 +6,8 @@ from typing import Any, Literal, TypedDict
 from app.api_design.models import ApiModel
 from app.diagnosis.models import RepairRound
 from app.github.models import (
-    PublicationStatus, PullRequest, RepositoryCheckout, RepositoryPublication,
-    RepositorySelection,
+    PublicationStatus, PullRequest, PullRequestMention, RepositoryCheckout,
+    RepositoryPublication, RepositorySelection,
 )
 from app.llm.questions import Question
 from app.requirements.models import Requirement, TaskKind
@@ -22,6 +22,8 @@ NAMED_TESTS = 5
 # How long a finished delivery waits for the user's next decision, such as a retry, and
 # its sessions with it. Only a closed workflow falls to the namespace's retention.
 TASK_IDLE_TIMEOUT = timedelta(days=14)
+# How a delivery rejects a mention it already has; handing a mention over is idempotent.
+MENTION_HANDLED = 'This comment was already handled.'
 # How the tests a change added fared against the service as the repository holds it.
 # `reproduced`: they all fail and the existing tests pass, so the change has something to
 # turn green. `not_reproduced`: one of them does not fail, so nothing may be fixed.
@@ -130,6 +132,10 @@ class DeliveryProgress:
     pull_request: PullRequest | None = None
     pull_request_error: str | None = None
     pull_request_status: PublicationStatus = 'not_applicable'
+    # The authorised mentions of the app on the pull request that the delivery still works
+    # on, without their text; every mention, with its text, is in the mention history
+    # (app.delivery.mentions), and the progress the session API reports shows them all.
+    mentions: list[PullRequestMention] = field(default_factory=list)
 
 
 def judge_baseline(result: VerificationResult, added: list[str], changed: list[str],
@@ -242,12 +248,49 @@ class DeliveryState:
     # A run that only records the progress as it is given, such as the user's acceptance
     # of open review findings.
     record_only: bool = False
+    # The comment ID of the pull request mention whose fix request this run carries out,
+    # with its text as the instructions, and its comment type: conversation and inline
+    # review comments are numbered apart, so only both identify a comment. A state from
+    # before the type was recorded has none.
+    mention: int | None = None
+    mention_type: str | None = None
+    # The mentions waiting for their round, in the order they arrived, each as
+    # [comment type, comment ID]; a state from before has bare comment IDs.
+    mention_queue: list[Any] = field(default_factory=list)
+    # The instructions of a requested documentation fix whose run ended without a push,
+    # kept apart from the mention bookkeeping: retrying the documentation stage carries
+    # out that fix again instead of the original task. Cleared once documentation is
+    # written and checked.
+    documentation_fix: str | None = None
+    # The fix of a code delivery from the user's instructions or a mention's comment,
+    # kept from when its round starts until its correction passed verification: its
+    # instructions, the open findings it came with, its review round number and, for a
+    # mention, the comment it refers to. Retrying the server or tests stage after it
+    # failed carries out that fix again on the delivered sources, not the original task.
+    code_fix: dict[str, Any] | None = None
     # Raised once the run has done its work and waits for the user's next decision; a
     # restart continues the delivery as a new run of the same workflow.
     waiting: bool = False
 
 
+def mention_key(item: Any) -> tuple[str | None, int]:
+    """The identity of a queued mention: its comment type, None for a bare comment ID
+    from a state recorded before the type was, and its comment ID."""
+    if isinstance(item, (list, tuple)):
+        return item[0], int(item[1])
+    return None, int(item)
+
+
+def is_mention(entry: dict[str, Any], key: tuple[str | None, int]) -> bool:
+    comment_type, comment_id = key
+    return entry['comment_id'] == comment_id and (
+        comment_type is None or entry['comment_type'] == comment_type)
+
+
 STOPPED = 'The delivery was stopped before this stage finished.'
+# Marks a mention whose fix round was stopped: the next run of the delivery replies in
+# the pull request with that outcome before the mention is settled.
+OUTCOME_OWED = 'outcome_owed'
 
 
 def interrupted(state: DeliveryState) -> DeliveryState:
@@ -256,6 +299,20 @@ def interrupted(state: DeliveryState) -> DeliveryState:
     progress = state.progress
     state.waiting = False
     progress.agent_questions = []
+    for mention in progress.mentions:
+        if mention['status'] in ('classifying', 'running'):
+            if mention['status'] == 'running':
+                # A reviewer was told its fix round started and is owed its outcome.
+                mention[OUTCOME_OWED] = True
+            mention['status'] = 'error'
+            mention['error'] = STOPPED
+    if state.mention is not None:
+        if state.spec.kind == 'docs' and state.instructions:
+            # The stopped fix is what retrying the documentation stage carries out.
+            state.documentation_fix = state.instructions
+        state.mention = None
+        state.mention_type = None
+        state.instructions = None
     if progress.publication_status == 'running':
         progress.publication_error = STOPPED
         progress.publication_status = 'error'

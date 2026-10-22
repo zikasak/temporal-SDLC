@@ -33,10 +33,21 @@ runs modules in name order) and makes failed sign-ins until it gets 429 with
 that sort after it. Wait a minute before running the suite again. The service must run
 with the default `AUTH_LOGIN_ATTEMPTS_PER_MINUTE` of 10.
 
+The webhook tests assume the connection has no webhook secret, so they run against a
+service without a connected app. Raw-body signature verification (a signature over the
+transmitted bytes passes, one over a re-serialised copy is rejected) is not tested: it
+needs a connection with a known webhook secret, which the suite cannot create without a
+real GitHub App, and no test may skip itself.
+
 Endpoints that need Temporal, an LLM or GitHub are covered only as far as the service
 answers without them: authentication, input validation and unknown IDs.
 
 Contract ambiguities and how the suite reads them:
+
+- The contract does not say whether an unknown session (404) is checked before the
+  10000-character limit of findings instructions (413/422). The oversize test uses an
+  unknown session, because a session with raised findings cannot be created without
+  GitHub and Temporal, so it accepts 404, 413 or 422.
 
 - NFR-1 does not say what form `Retry-After` takes. Either delay-seconds (0 or more) or
   an HTTP-date is accepted.
@@ -57,8 +68,17 @@ Contract ambiguities and how the suite reads them:
   sent to unknown session IDs.
 - Text over 10000 characters may answer 413 or 422 (NFR-5); both are accepted.
 - `/start` answers 503 with a `detail`, because the service image has no Temporal (NFR-4).
+- `POST /connectors/github/events` (FR-44, FR-49) is covered only for rejected deliveries:
+  the suite never connects a GitHub App, so the connection has no webhook secret and every
+  delivery, unsigned, wrongly signed or signed with a guessed key, must answer 401. A
+  correctly signed delivery (202/204), mention authorisation, classification, queueing
+  and replies (FR-40 to FR-48, FR-51) need a real secret, GitHub and an LLM, so they
+  aren't tested (`tests/test_github_webhook.py`). The suite also assumes that a
+  rejected delivery does not use up its `X-GitHub-Delivery` ID (a repeat answers 401,
+  not 409). The suite does not assert the order of 401 and 422 for a delivery with an
+  invalid body, because the contract does not state it.
 - Pull requests (FR-34 to FR-39) and the manifest's `pull_requests: write` permission
-  (TR-4) need a pushed delivery or GitHub, and no endpoint exposes the manifest. So the
+  (TR-5) need a pushed delivery or GitHub, and no endpoint exposes the manifest. So the
   suite checks only that the retry stages pass validation and reach the session lookup
   (404 for unknown sessions): `server`, `tests`, `documentation` and `repository` (which
   pushes again and retries the pull request) in

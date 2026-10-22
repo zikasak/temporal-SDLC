@@ -35,6 +35,19 @@ verified. Only finish once the brief is met.
 """
 
 
+FIX_PROMPT = """
+This is a fix round requested in the pull request of an earlier documentation delivery.
+/workspace/repository holds the documentation as that delivery pushed it. The
+`fix_request.instructions` entry of the input is the reviewer's comment saying what should
+change; it takes precedence over the brief where they differ, within what the contract
+supports. Make that change with targeted edits and leave the rest as it is.
+"""
+
+
+def fix_prompt(inputs: dict) -> str:
+    return FIX_PROMPT if isinstance(inputs.get('fix_request'), dict) else ''
+
+
 def validate_completion(root: Path) -> None:
     """Nothing to build; the host checks that the documentation changed."""
 
@@ -42,8 +55,9 @@ def validate_completion(root: Path) -> None:
 async def main() -> None:
     context = await run_sync(Path('/workspace/input.json').read_text)
     language = json.loads(await run_sync(LANGUAGE.read_text))
+    inputs = json.loads(context)
     await run_agent(AgentProfile(
-        root=ROOT, prompt=PROMPT.format(suffixes=language['suffixes']),
+        root=ROOT, prompt=PROMPT.format(suffixes=language['suffixes']) + fix_prompt(inputs),
         initial_messages=[context],
         max_turns_env='DOCUMENTATION_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Documentation completed',

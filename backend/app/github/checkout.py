@@ -12,7 +12,7 @@ import os
 import re
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from app.asyncio_utils import async_context, run_sync
@@ -139,6 +139,36 @@ async def checkout(session_dir: Path, repository: RepositorySelection,
                                         'branch': repository['branch'], 'commit': commit}))
         await run_sync(os.replace, manifest, session_dir / MANIFEST)
     return {'commit': commit}
+
+
+async def snapshot(session_dir: Path, repository: RepositorySelection, commit: str,
+                   target: Path, token: Callable[[], Awaitable[str]]) -> None:
+    """Write the files of `commit` to the empty directory `target`, a copy of its own that
+    later changes of the session's working copy leave as it is. The commit is read from
+    the working copy that pushed it, or else fetched from GitHub."""
+    validate_selection(repository['full_name'], repository['branch'])
+    if not re.fullmatch(r'[0-9a-f]{40,64}', commit):
+        raise CheckoutError('Invalid commit')
+    source = session_dir / CHECKOUT_DIR
+    await _git('init', '--quiet', str(target), cwd=target.parent)
+    fetched = False
+    if await run_sync((source / '.git').is_dir):
+        try:
+            # A local fetch by commit, with the objects copied, not shared.
+            await _git('-c', 'uploadpack.allowAnySHA1InWant=true', 'fetch', '--quiet',
+                       '--no-tags', '--depth', '1', f'file://{source.resolve()}', commit,
+                       cwd=target)
+            fetched = True
+        except CheckoutError:
+            fetched = False
+    if not fetched:
+        await _git('fetch', '--quiet', '--no-tags', '--depth', '1',
+                   f'{GITHUB_URL}{repository["full_name"]}.git', commit,
+                   cwd=target, token=await token())
+    await _git('-c', 'core.symlinks=false', 'checkout', '--quiet', '--detach', commit,
+               cwd=target)
+    # Only the files are read; the copy keeps no Git metadata.
+    await run_sync(shutil.rmtree, target / '.git')
 
 
 def replace_files(source: Path, target: Path, include: Callable[[Path], bool]) -> None:

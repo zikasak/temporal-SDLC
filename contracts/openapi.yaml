@@ -754,7 +754,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
       x-requirements:
-      - FR-3
       - FR-4
   /auth/register:
     post:
@@ -919,7 +918,8 @@ paths:
     get:
       operationId: getConnectorsGithubConnection
       summary: GitHub connection status
-      description: The shared connection, without its private key.
+      description: The shared connection, without its private key or webhook secret;
+        webhook_secret_set tells whether a secret is set.
       tags:
       - github
       responses:
@@ -942,13 +942,18 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
       x-requirements:
-      - FR-8
       - NFR-2
+      - FR-50
     put:
       operationId: putConnectorsGithubConnection
       summary: Connect a GitHub App
-      description: Saves the app after GitHub confirms its key and installation. The
-        request must be application/json and come from an allowed origin, if any.
+      description: 'Saves the app after GitHub confirms its key and installation,
+        with its optional webhook secret stored encrypted. This is the only way to
+        add or change the webhook secret: connect again with the key and the new secret;
+        leaving it out saves the connection without one. Connecting also fills in
+        webhook_events_missing from the app''s subscribed events and the installation''s
+        pull_requests permission. The request must be application/json and come from
+        an allowed origin, if any.'
       tags:
       - github
       requestBody:
@@ -966,12 +971,6 @@ paths:
                 $ref: '#/components/schemas/GitHubConnection'
         '401':
           description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
           content:
             application/json:
               schema:
@@ -1012,10 +1011,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
       x-requirements:
-      - FR-8
       - NFR-2
       - NFR-5
+      - FR-49
+      - FR-50
     delete:
       operationId: deleteConnectorsGithubConnection
       summary: Disconnect GitHub
@@ -1061,14 +1067,22 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-8
   /connectors/github/connection/check:
     post:
       operationId: postConnectorsGithubConnectionCheck
       summary: Check the GitHub connection
-      description: Validates the saved app against GitHub and picks up its installation.
-        The body is an empty JSON object.
+      description: 'Validates the saved app against GitHub and picks up its installation.
+        The body is an empty JSON object. For an app created from the manifest without
+        a webhook secret (created before mentions were supported), it also turns on
+        the app''s webhook pointing at POST /connectors/github/events with a newly
+        generated secret, stored encrypted, through GitHub''s app webhook configuration.
+        GitHub''s API cannot change an app''s event subscriptions or permissions,
+        so for every connection, manifest-created or manual, the check reads the app''s
+        subscribed events and the installation''s permissions and sets webhook_events_missing
+        when issue_comment or pull_request_review_comment is missing or pull_requests:
+        write is not granted; the app''s owner must then fix this in GitHub''s app
+        settings and check again. A manually connected app keeps its webhook settings;
+        its secret changes only by connecting again.'
       tags:
       - github
       requestBody:
@@ -1086,12 +1100,6 @@ paths:
                 $ref: '#/components/schemas/GitHubConnection'
         '401':
           description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
           content:
             application/json:
               schema:
@@ -1120,13 +1128,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
       x-requirements:
-      - FR-8
+      - FR-50
+      - TR-5
   /connectors/github/connection/manifest:
     post:
       operationId: postConnectorsGithubConnectionManifest
       summary: Connect a created GitHub App
-      description: Saves the app GitHub created from this instance's manifest.
+      description: Saves the app GitHub created from this instance's manifest, with
+        the webhook secret GitHub returns stored encrypted. The manifest turns on
+        the webhook pointing at POST /connectors/github/events and subscribes to issue_comment
+        and pull_request_review_comment events. Connecting also fills in webhook_events_missing
+        from the app's subscribed events and the installation's pull_requests permission.
       tags:
       - github
       requestBody:
@@ -1144,12 +1163,6 @@ paths:
                 $ref: '#/components/schemas/GitHubConnection'
         '401':
           description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
           content:
             application/json:
               schema:
@@ -1178,8 +1191,110 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
       x-requirements:
-      - FR-8
+      - FR-50
+      - TR-5
+  /connectors/github/events:
+    post:
+      operationId: postConnectorsGithubEvents
+      summary: Receive a GitHub webhook delivery
+      description: 'No sign-in required; called by GitHub. Accepted only when X-Hub-Signature-256
+        matches the connection''s webhook secret, computed over the raw body. A comment
+        mentions the app when it contains @<app slug> or @<app slug>[bot], case-insensitive,
+        as a whole word. Answers 202 with no body when the delivery was accepted and
+        is acted on: a newly created comment (action created) mentioning the app in
+        an issue_comment or pull_request_review_comment event on an open pull request
+        the app opened, by an author with write access, which is then classified and
+        handled. A clarification is answered right away from the code as last pushed,
+        even while a fix round of the delivery is running or queued. Answers 204 with
+        no body when a correctly signed delivery is ignored: other events, edited
+        or deleted comments, mentions on a closed or merged pull request, and mentions
+        that are not authorised or not on the app''s pull requests. Ignored mentions
+        are only logged on the server and not shown in any delivery. Fix requests
+        already queued when the pull request is closed or merged still run. Answers
+        401 without acting on it when the delivery is unsigned or wrongly signed,
+        or while the connection has no webhook secret. Answers 409 when the delivery
+        (the same X-GitHub-Delivery) or its comment was already handled, such as a
+        GitHub redelivery.'
+      tags:
+      - github
+      parameters:
+      - name: X-Hub-Signature-256
+        in: header
+        required: false
+        schema:
+          type: string
+        description: sha256= followed by the HMAC-SHA256 of the body with the webhook
+          secret, in hex.
+      - name: X-GitHub-Event
+        in: header
+        required: false
+        schema:
+          type: string
+        description: The event type, such as issue_comment or pull_request_review_comment.
+      - name: X-GitHub-Delivery
+        in: header
+        required: false
+        schema:
+          type: string
+        description: GitHub's ID of the delivery; a delivery ID already handled answers
+          409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GitHubWebhookEvent'
+      responses:
+        '202':
+          description: Accepted
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Request Entity Too Large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-40
+      - FR-41
+      - FR-42
+      - FR-43
+      - FR-44
+      - FR-45
+      - FR-46
+      - FR-47
+      - FR-48
+      - FR-49
   /connectors/github/repositories:
     get:
       operationId: getConnectorsGithubRepositories
@@ -2451,6 +2566,10 @@ components:
           type: string
           description: The account the app is installed on, when it is installed on
             several.
+        webhook_secret:
+          type: string
+          description: The app's webhook secret, stored encrypted and never returned.
+            Without it, webhook deliveries are rejected and mentions are not handled.
       required:
       - app_id
       - private_key
@@ -2490,7 +2609,8 @@ components:
       - account
     GitHubConnection:
       type: object
-      description: The shared GitHub connection; never its private key.
+      description: The shared GitHub connection; never its private key or webhook
+        secret.
       properties:
         configured:
           type: boolean
@@ -2505,9 +2625,25 @@ components:
         validated_at:
           type: string
           format: date-time
+        webhook_secret_set:
+          type: boolean
+          description: Whether the connection has a webhook secret; false when not
+            configured. Mentions are handled only while it is true.
+        webhook_events_missing:
+          type: boolean
+          description: 'True when the last connect or check found the app not subscribed
+            to issue_comment or pull_request_review_comment events, or its installation
+            without the pull_requests: write permission, which its owner must add
+            in GitHub''s app settings because GitHub''s API cannot; mentions in comments
+            of a missing event type do not arrive, and without the permission the
+            app cannot reply. Filled in for every connection, manifest-created or
+            manual, by connecting or checking the connection; false when not configured
+            or until checked.'
       required:
       - configured
       - encryption_ready
+      - webhook_secret_set
+      - webhook_events_missing
     Repository:
       type: object
       description: A repository the GitHub App can access.
@@ -2864,6 +3000,7 @@ components:
             its commit message lists and findings_count, as in ApiDesignSession. Every
             delivery's progress also holds pull_request_status and, once a pushed
             delivery's pull request is open, pull_request (PullRequest), and pull_request_error,
+            and mentions (PullRequestMention list) of the app on that pull request,
             as in ApiDesignSession.
       required:
       - session_id
@@ -3019,6 +3156,15 @@ components:
             or updating failed. The push and the delivery do not fail because of it;
             retrying the repository stage tries again. Cleared when the pull request
             step completes.'
+        mentions:
+          type: array
+          items:
+            $ref: '#/components/schemas/PullRequestMention'
+          description: Every authorised mention of the GitHub App on the delivery's
+            pull request, oldest first, with its classification and the fix round
+            or reply it led to. Fix rounds a mention starts are recorded in reviews
+            like rounds started by instructions, with the comment's text as their
+            instructions.
       required:
       - session_id
       - status
@@ -3275,6 +3421,99 @@ components:
       - url
       - draft
       - base
+    PullRequestMention:
+      type: object
+      description: An authorised mention of the GitHub App on the delivery's pull
+        request and what it led to.
+      properties:
+        comment_id:
+          type: integer
+          description: GitHub's ID of the comment.
+        comment_type:
+          type: string
+          enum:
+          - conversation
+          - review
+          description: A pull request conversation comment or an inline review comment.
+        url:
+          type: string
+          format: uri
+          description: Link to the comment on GitHub.
+        author:
+          type: string
+          description: GitHub login of the comment's author.
+        body:
+          type: string
+          description: The comment's text.
+        received_at:
+          type: string
+          format: date-time
+        classification:
+          type: string
+          enum:
+          - pending
+          - fix
+          - clarification
+          - unclear
+          description: pending until the LLM has classified the mention.
+        status:
+          type: string
+          enum:
+          - classifying
+          - queued
+          - running
+          - replied
+          - completed
+          - error
+          description: queued while a fix request waits for the running fix round;
+            running while its round runs; replied once a clarification or an unclear
+            mention was answered; completed once a fix round's result was pushed;
+            error when classifying, replying or the fix round failed (see error).
+        round:
+          type: integer
+          description: The first review round of the fix round the mention started,
+            as numbered in reviews.
+        reply_url:
+          type: string
+          format: uri
+          description: Link to the app's last reply to the mention in the pull request.
+        error:
+          type: string
+          description: What failed, as also replied in the pull request.
+      required:
+      - comment_id
+      - comment_type
+      - url
+      - author
+      - body
+      - received_at
+      - classification
+      - status
+    GitHubWebhookEvent:
+      type: object
+      description: A GitHub webhook payload, as GitHub sends it; only the fields used
+        are listed and any others are allowed.
+      properties:
+        action:
+          type: string
+          description: Such as created.
+        comment:
+          type: object
+          description: The conversation or inline review comment, with its id, body,
+            html_url and user.
+        issue:
+          type: object
+          description: 'For issue_comment: the pull request as an issue, with number
+            and pull_request.'
+        pull_request:
+          type: object
+          description: 'For pull_request_review_comment: the pull request.'
+        repository:
+          type: object
+        installation:
+          type: object
+        sender:
+          type: object
     Error:
       type: object
       properties:
