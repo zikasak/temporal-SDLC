@@ -29,7 +29,13 @@ CHANGES = {
                'as the default branch holds it; the contract in contracts/ records the fix.'),
     'docs': ('Changes the documentation only; the service, its tests and its contract stay '
              'as they are.'),
+    'onboarding': ('Onboards the existing service: the contract in contracts/ drafted from '
+                   'its code, contract tests in contract-tests/ that pass against it and a '
+                   'root Dockerfile that builds it.'),
 }
+# Said in the description of an onboarding that changed the existing code.
+CODE_CHANGED = ('The existing code was changed: the user confirmed that failing contract '
+                'tests revealed bugs in it.')
 
 
 class PullRequestText(TypedDict):
@@ -85,6 +91,8 @@ def describe(subject: str, change: dict[str, Any], publication: dict[str, Any],
     else:
         title = _title(subject, verified)
         summary = CHANGES.get(kind, CHANGES['new_service'])
+    if change.get('existing_code_changed') and CODE_CHANGED not in summary:
+        summary = f'{summary}\n\n{CODE_CHANGED}'
     lines = [summary, *findings]
     return title, '\n'.join(lines) + '\n'
 

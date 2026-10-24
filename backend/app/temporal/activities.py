@@ -43,6 +43,7 @@ from app.github.models import (
     PullRequest, RepositoryCheckout, RepositoryPublication, RepositorySelection,
 )
 from app.implementation.activities import is_service_file
+from app.onboarding.models import onboarding_branch
 from app.llm.graph import get_message_graph, interview, native_session
 from app.llm.model import get_model
 from app.llm.prompt import INLINE_DOCUMENT_CHARS, MAX_REMEMBERED_CHARS, model_messages
@@ -64,6 +65,10 @@ COMMIT_SUBJECT = "Add generated service, contract tests and contract"
 COMMIT_SUBJECTS = {"api_change": "Change the service's API, contract tests and contract",
                    "bugfix": "Fix the service and add regression tests"}
 DOCUMENTATION_SUBJECT = "Change the documentation"
+ONBOARDING_SUBJECT = "Onboard the service: contract, contract tests and Dockerfile"
+# Added to the commit of an onboarding that changed the repository's existing code.
+CODE_CHANGED_NOTE = ("The existing code was changed: the user confirmed that failing "
+                     "contract tests revealed bugs in it.")
 # Added to the commit of sources that were pushed without a check of them.
 UNVERIFIED_NOTE = "Not verified: no check exists for this kind of change yet."
 # Added to the commit of sources whose tests pass but whose code review left findings.
@@ -174,7 +179,8 @@ async def _checkout(session_id: str, repository: RepositorySelection,
 
 async def _publish(session_id: str, repository: RepositorySelection, subject: str,
                    update: Callable[[], None], verified: bool = True,
-                   note: str = UNVERIFIED_NOTE) -> RepositoryPublication:
+                   note: str = UNVERIFIED_NOTE, branch: str | None = None,
+                   details: str = "") -> RepositoryPublication:
     """Apply `update` to the session's checkout, commit it to a new branch and push it."""
     target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
     token, connection = await _github_token()
@@ -183,9 +189,10 @@ async def _publish(session_id: str, repository: RepositorySelection, subject: st
         await run_sync(update)
         result = await repository_checkout.push(
             target, repository, token,
-            branch=repository_checkout.publication_branch(session_id),
+            branch=branch or repository_checkout.publication_branch(session_id),
             message=(f"{subject}\n\n"
                      f"Generated from {repository['branch']} by session {session_id}."
+                     + (f"\n\n{details}" if details else "")
                      + ("" if verified else f"\n\n{note}")),
             author=(bot, f"{connection['bot_user_id']}+{bot}@users.noreply.github.com"),
             verified=verified,
@@ -232,6 +239,42 @@ async def publish_repository(
 
 
 @activity.defn
+@trace_activity('publish-onboarding', feature='repository', input_parameter='repository')
+async def publish_onboarding(
+    session_id: str, repository: RepositorySelection, contract: RepositoryContract,
+    findings: list[ReviewFinding] | None = None, code_changed: bool = False,
+) -> RepositoryPublication:
+    """Commit an onboarding's verified result to its own new branch and push it: the
+    contract drafted from the existing code, the contract tests that replace the
+    repository's, the root Dockerfile and, where the user confirmed bugs, the existing
+    code as it was fixed. Open review `findings` mark the commit as unverified."""
+    service_files = partial(is_service_file, session_language(contract['language']))
+    target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
+    service = target.parent / 'implementation/service'
+    suite = target.parent / 'tests/suite'
+    if not await run_sync(all, (item.is_dir() for item in (target, service, suite))):
+        raise ApplicationError("The verified sources or the repository checkout are unavailable.",
+                               non_retryable=True)
+
+    def update() -> None:
+        repository_checkout.replace_files(service, target, service_files)
+        repository_checkout.replace_files(suite, target / repository_checkout.TESTS_DIR,
+                                          lambda relative: True)
+        write_contract(target, contract)
+
+    branch = onboarding_branch(repository['branch'], session_id)
+    details = CODE_CHANGED_NOTE if code_changed else ""
+    if not findings:
+        result = await _publish(session_id, repository, ONBOARDING_SUBJECT, update,
+                                branch=branch, details=details)
+        return {**result, 'findings': [], 'findings_count': 0}
+    result = await _publish(
+        session_id, repository, f"{ONBOARDING_SUBJECT} (unverified)", update, verified=False,
+        note=f"{FINDINGS_NOTE}\n\n{commit_findings(findings)}", branch=branch, details=details)
+    return {**result, 'findings': findings[:COMMIT_FINDINGS], 'findings_count': len(findings)}
+
+
+@activity.defn
 @trace_activity('publish-documentation', feature='repository', input_parameter='repository')
 async def publish_documentation(
     session_id: str, repository: RepositorySelection, language: str, verified: bool,
@@ -265,6 +308,7 @@ async def open_pull_request(
     delivery opens a draft; a verified push marks a draft ready for review."""
     kind = change.get('kind')
     subject = (DOCUMENTATION_SUBJECT if kind == 'docs'
+               else ONBOARDING_SUBJECT if kind == 'onboarding'
                else COMMIT_SUBJECTS.get(kind, COMMIT_SUBJECT))
     title, body = pull_request_description(subject, change, publication, text)
     verified = bool(publication['verified'])

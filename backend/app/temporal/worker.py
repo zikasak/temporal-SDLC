@@ -18,6 +18,8 @@ with workflow.unsafe.imports_passed_through():
     from app.delivery.pull_request_activities import write_pull_request_text
     from app.delivery.workflows import DeliveryWorkflow
     from app.documents import ensure_document_schema
+    from app.onboarding.activities import find_onboarding_artifacts, onboarding_turn
+    from app.onboarding.workflows import OnboardingWorkflow
     from app.settings.storage import ensure_schema as ensure_settings_schema
     from app.temporal.activities import (
         api_design_turn,
@@ -26,6 +28,7 @@ with workflow.unsafe.imports_passed_through():
         open_pull_request,
         parse_document,
         publish_documentation,
+        publish_onboarding,
         publish_repository,
         read_repository_contract,
         read_requirements_document,
@@ -57,15 +60,16 @@ async def main():
         task_queue=TASK_QUEUE,
         workflows=[
             SayHelloWorkflow, LLMRequestWorkflow, RequirementsWorkflow, ApiDesignWorkflow,
-            DeliveryWorkflow,
+            DeliveryWorkflow, OnboardingWorkflow,
         ],
         activities=[
             greet, parse_document, send_llm_message,
             requirements_turn, write_requirements_document,
             api_design_turn, write_openapi_document,
             checkout_repository, update_repository_checkout, publish_repository,
-            publish_documentation, open_pull_request, write_pull_request_text,
+            publish_documentation, publish_onboarding, open_pull_request, write_pull_request_text,
             read_repository_contract, read_requirements_document,
+            find_onboarding_artifacts, onboarding_turn,
             classify_mention, answer_mention, reply_to_mention,
             record_new_mention, save_mention, mention_body,
         ],

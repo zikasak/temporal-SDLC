@@ -26,7 +26,9 @@ DIFF_CHARS = 60000
 SAFE_ERROR = 'PullRequestTextError'
 
 KIND_NAMES = {'new_service': 'a new service', 'api_change': 'a change of the API',
-              'bugfix': 'a bug fix', 'docs': 'a documentation change'}
+              'bugfix': 'a bug fix', 'docs': 'a documentation change',
+              'onboarding': ('an onboarding of an existing service: its contract drafted '
+                             'from the code, contract tests and a root Dockerfile')}
 
 PROMPT = f"""You write the title and the description of a GitHub pull request that a
 code-generating pipeline opens for its delivery. Base them on the task, its requirements
@@ -78,6 +80,8 @@ async def write_pull_request_text(session_id: str, publication: dict[str, Any],
     parts = [
         PROMPT,
         f'The task is {KIND_NAMES.get(kind, KIND_NAMES["new_service"])}.',
+        ('The existing code was changed to fix bugs the user confirmed; say so in the '
+         'description.' if change.get('existing_code_changed') else ''),
         'The task, as its requirements document states it:\n'
         + _bounded(str(change.get('task') or '(not available)'), TASK_CHARS),
         _requirements(list(change.get('requirements') or []), 'Requirements delivered'),

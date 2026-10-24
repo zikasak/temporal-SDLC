@@ -27,7 +27,7 @@ with workflow.unsafe.imports_passed_through():
         review_request,
     )
     from app.temporal.activities import (
-        open_pull_request, publish_documentation, publish_repository,
+        open_pull_request, publish_documentation, publish_onboarding, publish_repository,
     )
 
 # Each round is a diagnosis, a repair of one side and a new verification.
@@ -46,6 +46,13 @@ UNCLEAR_REPLY = ('I could not tell what you would like me to do. Mention me agai
                  'an explanation of it.')
 FIX_STARTED = ('Started a fix round from your comment: the changes, then verification and '
                'code review. I will reply here again with the outcome.')
+# What an onboarding asks the user when the diagnosis finds the existing code at fault.
+BUG_QUESTION = ('A contract test fails against the existing code. Does the failure reveal a '
+                'bug in the existing code?')
+BUG_CONFIRMED = 'Yes: it is a bug, change the existing code'
+SETUP_AT_FAULT = 'No: the Dockerfile or the service setup is at fault, keep the code'
+TESTS_AT_FAULT = 'No: the code is right, repair the tests and the contract'
+BUG_SUMMARY_CHARS = 600
 DOCS_FIX_STARTED = ('Started a fix round of the documentation from your comment: the '
                     'changes, then their check. I will reply here again with the outcome.')
 
@@ -89,6 +96,10 @@ class DeliveryWorkflow:
         # Whether this run's own push succeeded, whether or not its commit changed: a
         # round whose correction was already present pushes the same SHA again.
         self._pushed = False
+        # An onboarding's question whether a failing test reveals a bug in the existing
+        # code, and the user's answer to it.
+        self._bug_question = False
+        self._bug_answer: str | None = None
 
     @workflow.run
     async def run(self, state: DeliveryState) -> DeliveryProgress:
@@ -162,7 +173,9 @@ class DeliveryWorkflow:
             if self.spec.checkout:
                 self.progress.publication_status = 'waiting'
                 self.progress.pull_request_status = 'waiting'
-            if self.spec.kind == 'bugfix':
+            if self.spec.onboarding:
+                await self._onboard()
+            elif self.spec.kind == 'bugfix':
                 await self._change()
             elif self.spec.kind == 'docs':
                 await self._document()
@@ -180,6 +193,19 @@ class DeliveryWorkflow:
         self.progress.agent_questions = [
             *(item for item in self.progress.agent_questions
               if item['workflow_id'] != asked['workflow_id']), asked]
+
+    @workflow.update
+    def answer_questions(self, answers: list[str]) -> None:
+        """The user's answer to the onboarding's question whether a failing contract test
+        reveals a bug in the existing code."""
+        self._bug_answer = answers[0].strip()
+
+    @answer_questions.validator
+    def validate_answer_questions(self, answers: list[str]) -> None:
+        if not self._bug_question or self._bug_answer is not None:
+            raise ValueError('These questions are no longer open.')
+        if len(answers) != 1 or not answers[0].strip():
+            raise ValueError('Answer the question with one answer.')
 
     @workflow.signal
     def agent_answered(self, workflow_id: str) -> None:
@@ -538,8 +564,10 @@ class DeliveryWorkflow:
     async def _snapshot(self) -> bool:
         """Record the repository's tests before any author runs; the activity keeps the
         first record, so a retried delivery compares with the same one."""
-        # A documentation task neither reads nor writes a test.
-        if not self.spec.checkout or not self.spec.language or self.spec.kind == 'docs':
+        # A documentation task neither reads nor writes a test, and an onboarding writes
+        # its suite anew.
+        if (not self.spec.checkout or not self.spec.language or self.spec.kind == 'docs'
+                or self.spec.onboarding):
             return True
         try:
             await workflow.execute_activity(
@@ -581,6 +609,17 @@ class DeliveryWorkflow:
             return
         workflow.logger.info("Server code generated")
         # Each branch records its own failure, so one never cancels the other.
+        await asyncio.gather(self._implement_service(), self._generate_tests())
+        await self._verify_built()
+
+    async def _onboard(self) -> None:
+        """Onboard the existing code: its Dockerfile and the contract tests written apart,
+        then verification against each other, as for a generated service."""
+        self.progress.verification_status = 'waiting'
+        if not self.spec.language:
+            self.progress.implementation_error = 'No implementation language was chosen.'
+            self.progress.verification_status = 'skipped'
+            return
         await asyncio.gather(self._implement_service(), self._generate_tests())
         await self._verify_built()
 
@@ -725,7 +764,8 @@ class DeliveryWorkflow:
                 # New tests have to be shown to fail without the fix again.
                 await self._change()
                 return
-        elif self.state.retry_stage == 'server' and not self.progress.code:
+        elif (self.state.retry_stage == 'server' and not self.progress.code
+              and not self.spec.onboarding):
             # A failed codegen never started either authoring branch.
             await self._generate()
             return
@@ -1041,12 +1081,19 @@ class DeliveryWorkflow:
             self.progress.verification_status = 'completed'
             return False
         target = diagnosis['target']
+        code_change = False
+        if self.spec.onboarding and target == 'implementation':
+            # The existing code changes only when the user confirms a bug in it.
+            diagnosis, code_change = await self._confirm_bug(diagnosis)
+            target = diagnosis['target']
         workflow.logger.info('Repair round %d: correcting the %s', attempt, target)
         self.progress.repairs.append(
             {'attempt': attempt, 'target': target, 'tests': diagnosis['tests'],
              'summary': diagnosis['summary']})
         self.progress.verification_status = 'repairing'
         repair = repair_request(diagnosis, self.progress.verification, attempt)
+        if code_change:
+            repair['code_change'] = True
         # A failed repair keeps the previous image and records the stage's own error.
         if target == 'implementation':
             await self._implement_service(repair)
@@ -1061,6 +1108,47 @@ class DeliveryWorkflow:
             self.progress.verification_status = 'completed'
             return False
         return True
+
+    async def _confirm_bug(self, diagnosis: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Ask the user whether the failure the diagnosis traced to the existing code is a
+        bug in it, and wait for the answer without a timeout. Returns the diagnosis as the
+        answer settles it, and whether the existing code may change."""
+        workflow_id = workflow.info().workflow_id
+        summary = ' '.join(str(diagnosis.get('summary') or '').split())
+        if len(summary) > BUG_SUMMARY_CHARS:
+            summary = summary[:BUG_SUMMARY_CHARS - 1] + '…'
+        question = BUG_QUESTION + (f' The diagnosis: {summary}' if summary else '')
+        self._bug_answer = None
+        self._bug_question = True
+        self.progress.agent_questions = [
+            *(item for item in self.progress.agent_questions
+              if item['workflow_id'] != workflow_id),
+            {'workflow_id': workflow_id, 'stage': 'diagnosis',
+             'questions': [{'question': question,
+                            'options': [BUG_CONFIRMED, SETUP_AT_FAULT, TESTS_AT_FAULT]}]}]
+        await workflow.wait_condition(lambda: self._bug_answer is not None)
+        self._bug_question = False
+        self.progress.agent_questions = [item for item in self.progress.agent_questions
+                                         if item['workflow_id'] != workflow_id]
+        answer = self._bug_answer or ''
+        workflow.logger.info('The user answered whether the failure is a bug: %s', answer[:80])
+        own = '' if answer in (BUG_CONFIRMED, SETUP_AT_FAULT, TESTS_AT_FAULT) else (
+            f' The user answered: {answer}')
+        if answer == BUG_CONFIRMED or (own and answer.lower().startswith('yes')):
+            return {**diagnosis, 'instructions': (
+                f'{diagnosis["instructions"]}\n\nThe user confirmed that this is a bug in '
+                f'the existing code: fix it there.{own}')}, True
+        if answer == SETUP_AT_FAULT:
+            return {**diagnosis, 'instructions': (
+                f'{diagnosis["instructions"]}\n\nThe user said the existing code is right: '
+                f'correct the Dockerfile or the service setup only.{own}')}, False
+        failing = [{'class_name': item['class_name'], 'name': item['name']}
+                   for item in (self.progress.verification or {}).get('test_failures') or []]
+        return {**diagnosis, 'target': 'tests', 'tests': failing, 'instructions': (
+            f'The user confirmed that the existing service behaves correctly here, so the '
+            f'failing tests are wrong: correct them to expect what the service does, as far '
+            f'as the contract allows. What the diagnosis found: '
+            f'{diagnosis["summary"]}{own}')}, False
 
     async def _verify_service(self, repair: int = 0) -> None:
         self.progress.verification_status = 'running'
@@ -1102,6 +1190,9 @@ class DeliveryWorkflow:
         if self.spec.brief:
             # A change to an existing service: the contract above is the repository's.
             context['brief'] = self.spec.brief
+        if self.spec.onboarding:
+            # The contract was drafted from the repository's existing code.
+            context['onboarding'] = True
         return context
 
     def _stage_context(self, repair: dict[str, Any] | None) -> dict[str, Any]:
@@ -1175,7 +1266,11 @@ class DeliveryWorkflow:
                 # The repository's contract grows by what the change required of the service.
                 contract = with_requirements(contract, self.spec.brief['requirements'],
                                              self.spec.brief['retired'])
-            push, args = publish_repository, [contract, self.spec.kind, findings]
+            if self.spec.onboarding:
+                push, args = publish_onboarding, [
+                    contract, findings, self.progress.existing_code_changed]
+            else:
+                push, args = publish_repository, [contract, self.spec.kind, findings]
         try:
             self.progress.publication = await workflow.execute_activity(
                 push,
@@ -1221,10 +1316,12 @@ class DeliveryWorkflow:
         self.progress.pull_request_error = None
         brief = self.spec.brief
         change = {
-            'kind': self.spec.kind,
+            'kind': 'onboarding' if self.spec.onboarding else self.spec.kind,
             'requirements': brief['requirements'] if brief else self.spec.requirements,
             'retired': brief['retired'] if brief else [],
         }
+        if self.spec.onboarding and self.progress.existing_code_changed:
+            change['existing_code_changed'] = True
         args = [self.spec.session_id, self.spec.repository, self.progress.publication, change]
         text = None
         if workflow.patched('pull-request-text'):
@@ -1287,6 +1384,9 @@ class DeliveryWorkflow:
                 task_queue=IMPLEMENTATION_TASK_QUEUE,
                 result_type=dict,
             )
+            if self.spec.onboarding:
+                self.progress.existing_code_changed = bool(
+                    self.progress.implementation.get('code_changed'))
         except ChildWorkflowError as exc:
             workflow.logger.warning("Service implementation failed: %s", exc.cause or exc)
             self.progress.implementation_error = "The service could not be implemented or built."

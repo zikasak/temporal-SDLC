@@ -260,7 +260,8 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
                              or progress.pull_request_text_error)}[stage]
     if not failed:
         raise SessionBusy('Only failed generation can be retried.')
-    if stage == 'tests' and not progress.code and not change:
+    # An onboarding generates no code: its tests are written for the existing code.
+    if stage == 'tests' and not progress.code and not change and not state.spec.onboarding:
         raise SessionBusy('Retry server generation first.')
     if not state.spec.language:
         # A completed session takes no messages, so only a fork can choose one.

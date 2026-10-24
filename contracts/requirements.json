@@ -232,14 +232,6 @@
   },
   {
     "category": "functional",
-    "description": "The code review step runs for new service, API change and bugfix deliveries, and does not run for documentation-only deliveries.",
-    "id": "FR-26",
-    "priority": "must",
-    "rationale": "User: all kinds touching the code.",
-    "title": "Review applies to every code-producing task kind"
-  },
-  {
-    "category": "functional",
     "description": "After a round that corrects review findings, the pipeline runs verification again and, once verification passes, runs the code review step again.",
     "id": "FR-27",
     "priority": "must",
@@ -477,5 +469,93 @@
     "priority": "must",
     "rationale": "User chose to keep the \"(unverified)\" marker in the title of draft pull requests.",
     "title": "Unverified marker in the pull request title"
+  },
+  {
+    "category": "functional",
+    "description": "A signed-in user can start onboarding an existing repository as its own action on a chosen repository and branch, outside requirements sessions and the requirements intake.",
+    "id": "FR-56",
+    "priority": "must",
+    "rationale": "User chose a separate action on a repository/branch.",
+    "title": "Start onboarding from a repository and branch"
+  },
+  {
+    "category": "functional",
+    "description": "Onboarding produces for the repository the full contract in contracts/ (requirements.json, requirements.md, api.json, openapi.yaml, language.json), contract tests and a root Dockerfile, and the contract tests are verified to pass against the existing code built with that Dockerfile.",
+    "id": "FR-57",
+    "priority": "must",
+    "rationale": "User chose the full contract plus contract tests and Dockerfile, all verified against the existing code.",
+    "title": "Onboarding produces the full contract, tests and Dockerfile"
+  },
+  {
+    "category": "functional",
+    "description": "An LLM drafts the requirements and the API from the repository's existing code, and the user reviews and corrects the drafts in an interview before the onboarding is finalized.",
+    "id": "FR-58",
+    "priority": "must",
+    "rationale": "User chose LLM drafting followed by user review in an interview.",
+    "title": "LLM drafts the contract, user reviews it"
+  },
+  {
+    "category": "functional",
+    "description": "When a contract test fails against the existing code during onboarding, the repair changes the tests (and the drafted contract); the existing code is changed only after the user confirms that the failure reveals a bug in it.",
+    "id": "FR-59",
+    "priority": "must",
+    "rationale": "User chose: the tests, or the code if the user confirms it is a bug.",
+    "title": "Repair tests, or code only when the user confirms a bug"
+  },
+  {
+    "category": "functional",
+    "description": "The onboarding result goes through the code review step and is pushed to a new branch with a pull request to the repository's default branch, in the same way as a delivery.",
+    "id": "FR-60",
+    "priority": "must",
+    "rationale": "User chose: new branch and pull request like a delivery, including code review.",
+    "title": "Publish onboarding like a delivery"
+  },
+  {
+    "category": "functional",
+    "description": "When the chosen branch already has a contract in contracts/, the user is warned before onboarding proceeds and chooses whether to replace it; if the user declines, the onboarding does not proceed and the existing contract is left unchanged.",
+    "id": "FR-61",
+    "priority": "must",
+    "rationale": "User chose: warn and let the user choose whether to replace it.",
+    "title": "Warn before replacing an existing contract"
+  },
+  {
+    "category": "functional",
+    "description": "The code review step runs for new service, API change and bugfix deliveries and for onboarding, and does not run for documentation-only deliveries.",
+    "id": "FR-62",
+    "priority": "must",
+    "rationale": "Replaces FR-26: user confirmed onboarding is included in code review.",
+    "title": "Review applies to code-producing deliveries and onboarding"
+  },
+  {
+    "category": "functional",
+    "description": "When a coding agent considers that a failing contract test during onboarding reveals a bug in the existing code, it asks the user in the onboarding's progress, like other agent questions, and changes the code only after the user confirms; until answered, it waits.",
+    "id": "FR-63",
+    "priority": "must",
+    "rationale": "User chose: the coding agent asks in the progress and waits for the answer.",
+    "title": "Agent asks the user to confirm a bug in the existing code"
+  },
+  {
+    "category": "functional",
+    "description": "Mentions of the GitHub App on a pull request opened for an onboarding (fix requests and clarifications) are handled the same way as mentions on delivery pull requests.",
+    "id": "FR-64",
+    "priority": "must",
+    "rationale": "User chose: the same as for delivery pull requests.",
+    "title": "Mentions on onboarding pull requests"
+  },
+  {
+    "category": "functional",
+    "description": "Onboarding's verification works like a delivery's: test repair rounds and review rounds are each capped at 5, its progress is shown, its agents' questions can be answered and a failed stage can be retried.",
+    "id": "FR-65",
+    "priority": "must",
+    "rationale": "User chose: exactly like a delivery.",
+    "title": "Onboarding verification and progress like a delivery"
+  },
+  {
+    "category": "functional",
+    "description": "Signed-in users can list onboardings and reopen any of them to see its state and progress, in the same way as requirements sessions.",
+    "id": "FR-66",
+    "priority": "must",
+    "rationale": "User chose: listed and reopened like sessions.",
+    "title": "List and reopen onboardings"
   }
 ]
