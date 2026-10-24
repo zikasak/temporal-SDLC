@@ -14,6 +14,7 @@ from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import (
     StageInputs, StageSpec, copy_regular_files, run_stage, session_language, write_language,
 )
+from app.agent_workflows.parts import repository_parts
 from app.config import GENERATED_CODE_DIR
 from app.docker_agents import default_agent_image
 from app.github.checkout import CHECKOUT_DIR, CONTRACTS_DIR, TESTS_DIR
@@ -43,6 +44,13 @@ def takes_generated_code(language: Language, checkout: Path) -> bool:
     return all(BARE_REPOSITORY.fullmatch(item.name) for item in checkout.iterdir())
 
 
+def checkout_parts(language: Language, checkout: Path) -> list[dict[str, Any]]:
+    """The projects of a checkout its authors work in, when it holds more than one: the
+    service and the others beside it, such as a web frontend in another language."""
+    parts = repository_parts(checkout, partial(is_service_file, language))
+    return parts if len(parts) > 1 else []
+
+
 def copy_service(language: Language, source: Path, target: Path) -> None:
     """Copy regular source files only: never tests, symlinks, build metadata or agent logs."""
     copy_regular_files(source, target, include=partial(is_service_file, language))
@@ -69,6 +77,12 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
     if checkout and not change:
         # The author is told whether the generated contract was added to the checkout.
         context = {**context, 'generated_code': generated}
+    # The task covers every project of the repository, not only the service; an
+    # onboarding's author writes the service's Dockerfile alone.
+    parts = (checkout_parts(language, checkout)
+             if checkout and not context.get('onboarding') else [])
+    if parts:
+        context = {**context, 'repository_parts': parts}
     context = without_repeated_tables(context)
     index, files = on_demand_contracts(context, len(json.dumps(context))) or (context, {})
     contract_paths = language.implementation.contract_paths

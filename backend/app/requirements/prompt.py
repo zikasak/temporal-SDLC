@@ -128,6 +128,14 @@ KIND_KNOWN = (
     "when the user says it is a different kind."
 )
 
+# The service may be one project of several in its repository, such as a web frontend
+# beside the backend, and a task that changes what the users can do concerns them too.
+PARTS_INTERVIEW = (
+    " The task covers the whole project, not only its API: when the project has a user "
+    "interface or other parts that use the service, such as a web frontend, also gather "
+    "what changes in them (the pages, forms and user actions, and what they show)."
+)
+
 KIND_INTERVIEWS: dict[str, str] = {
     "new_service": (
         " Gather the requirements for the whole system, in three categories:\n"
@@ -139,14 +147,14 @@ KIND_INTERVIEWS: dict[str, str] = {
         "and migration, deployment and hosting, and other constraints.\n"
         "Each turn, ask one to three focused questions about the least covered topics. "
         "Once all three categories are reasonably covered, tell the user they can press "
-        "\"Generate document\"."
+        "\"Generate document\"." + PARTS_INTERVIEW
     ),
     "api_change": (
         " Keep the interview short and gather only what changes: which endpoints or "
         "fields are added, changed or removed, the behaviour expected of each, and "
         "what must stay as it is. Do not re-gather requirements the existing service "
         "already meets. Each turn, ask one to three focused questions. Once the change "
-        "is clear, tell the user they can press \"Generate document\"."
+        "is clear, tell the user they can press \"Generate document\"." + PARTS_INTERVIEW
     ),
     "bugfix": (
         " Keep the interview to a short brief with three parts: the problem (what "

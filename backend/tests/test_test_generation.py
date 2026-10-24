@@ -11,7 +11,7 @@ from app import docker_agents
 from app.api_design.models import empty_api
 from app.api_design.openapi import render_openapi
 from app.requirements.document import render_requirements_markdown
-from app.languages import get_language
+from app.languages import OTHER_PARTS_BUILD_DIRS, get_language
 from app.test_generation import activities
 from app.verification import activities as verification
 
@@ -76,7 +76,7 @@ async def test_contract_only_generation_publishes_compiled_suite(tmp_path, monke
                     render_openapi(context['api_design']))
                 # The stack is the registered language's, not the test author's choice.
                 assert json.loads(archive.extractfile('language.json').read()) == {
-                    'name': 'java', 'build_dirs': ['target'], 'instructions': get_language('java').test_suite.instructions,
+                    'name': 'java', 'build_dirs': ['target', *OTHER_PARTS_BUILD_DIRS], 'instructions': get_language('java').test_suite.instructions,
                     'test_glob': 'src/test/java/**/*Test.java'}
         if args[0] == 'wait' and failure == 'cancel':
             raise asyncio.CancelledError()

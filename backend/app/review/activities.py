@@ -22,7 +22,7 @@ from app.agent_workflows.host import (
 )
 from app.config import GENERATED_CODE_DIR
 from app.github.checkout import CHECKOUT_DIR, SNAPSHOT_DIR
-from app.implementation.activities import copy_service
+from app.implementation.activities import checkout_parts, copy_service
 from app.languages import Language
 from app.requirements.document import without_repeated_tables
 from app.review.agent import FINDINGS
@@ -165,8 +165,13 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
     if files:
         write_contracts(workspace, files)
     instructions = str(context.get('instructions') or '')[:REVIEW_INSTRUCTIONS_CHARS]
+    # An onboarding changes no part of the repository but the service's Dockerfile.
+    checkout = session_dir / CHECKOUT_DIR
+    projects = (checkout_parts(language, checkout)
+                if checkout.is_dir() and not context.get('onboarding') else [])
     (workspace / 'input.json').write_text(json.dumps(
         {**index, 'changes': changes,
+         **({'repository_parts': projects} if projects else {}),
          **({PART_KEY: {'part': part + 1, 'of': len(parts), 'other_changes': by_side(others)}}
             if len(parts) > 1 else {}),
          **({'instructions': instructions} if instructions else {}),

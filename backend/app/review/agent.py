@@ -107,6 +107,18 @@ more precisely. The brief's `retired` entry lists the requirements of the contra
 change ends: they no longer hold, whatever the contract still says.
 """
 
+PARTS_PROMPT = """
+The repository holds more than the service: the `repository_parts` entry of the input lists
+its projects by directory and toolchain, such as a web frontend beside the service, and
+service/ holds all of them. Review the delivery's changes to every part alike. The
+requirements apply to the whole repository: a requirement that a part other than the service
+has to meet, such as a page, form or user action of a frontend, or a client's use of an
+endpoint the delivery added or changed, is a finding when the delivery left it unmet, even
+if it changed no file of that part; give such a finding no path when no changed file is
+about it. Send these findings to "implementation". The contract tests check only the
+service's HTTP API, so nothing but this review checks the other parts.
+"""
+
 ONBOARDING_PROMPT = """
 This delivery onboards an existing service: the contract was drafted from its code, and
 the delivery writes the contract tests and the root Dockerfile for it. The existing code is
@@ -156,6 +168,7 @@ async def main() -> None:
         root=ROOT, prompt=(PROMPT.format(label=language['label'], findings_format=FINDINGS_FORMAT)
                            + (PART_PROMPT if inputs.get('review_part') else '')
                            + (CHANGE_PROMPT if inputs.get('brief') else '')
+                           + (PARTS_PROMPT if inputs.get('repository_parts') else '')
                            + (ONBOARDING_PROMPT if inputs.get('onboarding') else '')
                            + (INSTRUCTIONS_PROMPT if inputs.get('instructions') else '')
                            + (PREVIOUS_PROMPT if inputs.get('previous_findings') else '')),

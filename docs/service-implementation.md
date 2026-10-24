@@ -398,6 +398,22 @@ and both authors work inside it. Containers still receive copies, never host mou
   implementation in it, stays out of the test author's workspace.
 - **Repairs and diagnosis** continue from the published trees as before.
 
+A repository may hold more than the service, such as this one's `backend/` beside its
+React `frontend/`. `repository_parts` in `app/agent_workflows/parts.py` finds its projects
+by their build manifests (`package.json`, `pyproject.toml`, `requirements.txt`, `pom.xml`
+and others), at most two directories deep, in the files the implementation author sees.
+When there is more than one, the implementation author's input lists them as
+`repository_parts` (except in an onboarding), and its prompt makes every part the task's:
+pages, forms and user actions belong to the part that shows them, and a client of an
+endpoint the task adds or changes must be changed to use it. The Dockerfile and the
+contract tests cover the service alone, so the author builds each other part it changes
+with that part's own toolchain (the agent image has Node.js and npm beside Python and
+Java). The reviewer gets the same list and reports a requirement left unmet in a part
+other than the service as a finding for the implementation. The requirements interview of
+a new service or an API change asks what changes in such parts too. Dependency and build
+directories of the other toolchains (`node_modules`, `dist`, `.venv` and others) are build
+output in every language, so they are never published.
+
 The checkout itself is untouched until verification passes. Then the main worker makes the
 files the implementation author could see equal to `implementation/service` (files it
 removed are deleted; tests it never saw stay), replaces `contract-tests/` with

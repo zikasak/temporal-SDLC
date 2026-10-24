@@ -6,8 +6,8 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from app import docker_agents
-from app.implementation import activities
-from app.languages import get_language
+from app.implementation import activities, agent
+from app.languages import OTHER_PARTS_BUILD_DIRS, get_language
 
 
 @pytest.mark.parametrize('previous', [False, True])
@@ -194,7 +194,7 @@ async def test_session_with_a_repository_is_implemented_inside_its_checkout(tmp_
     # filling gaps only; never Git metadata or either kind of tests.
     # The stack is the registered language's, not the author's choice.
     assert json.loads(sent.pop('language.json')) == {
-        'name': 'java', 'build_dirs': ['target'], 'instructions': get_language('java').implementation.instructions}
+        'name': 'java', 'build_dirs': ['target', *OTHER_PARTS_BUILD_DIRS], 'instructions': get_language('java').implementation.instructions}
     sent.pop('llm-settings.json')
     assert sent == {'service/src/main/Api.java': 'generated contract',
                     'service/src/main/Orders.java': 'existing code',
@@ -296,3 +296,53 @@ async def test_change_edits_the_checkout_without_generated_code(tmp_path, monkey
     # The repository's service as it is; never either kind of tests or the contract.
     assert sent == {'service/src/main/Api.java': 'published contract code',
                     'service/Dockerfile': 'FROM scratch'}
+
+
+@pytest.mark.parametrize('kind, told', [
+    ({'brief': {'requirements': [], 'requirements_document': 'Show the order total.'}}, True),
+    ({}, True),
+    # An onboarding writes the service's Dockerfile and changes no other part.
+    ({'onboarding': True}, False),
+])
+async def test_every_project_of_the_checkout_is_the_authors_to_change(tmp_path, monkeypatch,
+                                                                      kind, told):
+    monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
+    (tmp_path / 'session/server').mkdir(parents=True)
+    checkout = tmp_path / 'session/repository'
+    for name, text in {'backend/requirements.txt': 'fastapi', 'backend/app/main.py': 'app',
+                       'frontend/package.json': '{}', 'frontend/src/App.tsx': 'page',
+                       'frontend/node_modules/react/package.json': '{}',
+                       'contract-tests/requirements.txt': 'pytest', 'Dockerfile': 'FROM scratch',
+                       'README.md': 'project readme'}.items():
+        (checkout / name).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / name).write_text(text)
+    context = {'requirements': [], 'language': 'python', **kind,
+               'repository': {'full_name': 'octocat/project', 'branch': 'main'}}
+    sent = {}
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': 0})
+        if args[0] == 'cp' and args[1] == '-a':
+            import tarfile
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.update({item.name: archive.extractfile(item).read().decode()
+                             for item in archive.getmembers() if item.isfile()})
+        if args[0] == 'cp' and args[1].endswith(':/workspace/service/.'):
+            (Path(args[2]) / 'Dockerfile').write_text('FROM scratch')
+        if args[0] == 'build' and '--iidfile' in args:
+            Path(args[args.index('--iidfile') + 1]).write_text('sha256:' + 'c' * 64)
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    await ActivityEnvironment().run(activities.implement_service, 'session', context)
+    inputs = json.loads(sent['input.json'])
+    # The frontend reaches the author beside the service; its dependencies and the
+    # contract tests never do.
+    assert sent['service/frontend/src/App.tsx'] == 'page'
+    assert not any('node_modules' in name or 'contract-tests' in name for name in sent)
+    assert inputs.get('repository_parts') == ([
+        {'path': 'backend', 'toolchain': 'Python'},
+        {'path': 'frontend', 'toolchain': 'Node.js (npm)'}] if told else None)
+    prompt = agent.base_prompt(inputs, '')
+    assert (agent.PARTS_PROMPT.splitlines()[1] in prompt) is told
