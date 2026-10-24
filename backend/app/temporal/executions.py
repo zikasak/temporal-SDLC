@@ -12,6 +12,7 @@ WORKFLOW_TYPES = (
     "LLMRequestWorkflow",
     "RequirementsWorkflow",
     "ApiDesignWorkflow",
+    "OnboardingWorkflow",
     "DeliveryWorkflow",
     "CodegenWorkflow",
     "SayHelloWorkflow",

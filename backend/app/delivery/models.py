@@ -80,6 +80,10 @@ class TaskSpec:
     language: str | None = None
     repository: RepositorySelection | None = None
     checkout: RepositoryCheckout | None = None
+    # An onboarding of the repository's existing code: no code is generated, the contract
+    # tests and a root Dockerfile are written and verified against that code, which
+    # changes only where the user confirmed a bug in it.
+    onboarding: bool = False
 
 
 @dataclass
@@ -140,6 +144,9 @@ class DeliveryProgress:
     # on, without their text; every mention, with its text, is in the mention history
     # (app.delivery.mentions), and the progress the session API reports shows them all.
     mentions: list[PullRequestMention] = field(default_factory=list)
+    # Whether an onboarding changed the repository's existing code, which it does only
+    # after the user confirmed a bug in it; the commit and pull request then say so.
+    existing_code_changed: bool = False
 
 
 def judge_baseline(result: VerificationResult, added: list[str], changed: list[str],
@@ -337,6 +344,8 @@ def interrupted(state: DeliveryState) -> DeliveryState:
             progress.documentation_error = STOPPED
         elif state.spec.kind == 'bugfix':
             progress.tests_error = STOPPED
+        elif state.spec.onboarding:
+            progress.implementation_error = STOPPED
         elif not progress.code:
             progress.code_error = STOPPED
         else:

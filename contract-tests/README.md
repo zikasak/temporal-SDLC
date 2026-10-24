@@ -106,6 +106,16 @@ Contract ambiguities and how the suite reads them:
   as well, so 404, 409 or 503 is accepted. Every refusal needs a `detail`, never 200.
   Connection check accepts 409 or 503. A JSON array as the body of check/disconnect is expected to be
   rejected with 422 (FR-50, NFR-6: "the body is an empty JSON object").
+- Onboarding (FR-56 to FR-66, `tests/test_onboarding.py`) needs GitHub, Temporal and an
+  LLM to get past the first step, so the suite covers sign-in, input validation (boolean
+  `replace_contract`, `message_index`, answers, instructions, stage enum, messages of 1 to
+  10000 characters) and unknown onboardings (404) on every onboarding endpoint. Starting an
+  onboarding on a repository the service cannot reach must be refused; the contract lists
+  404, 409 and 503, and any of them is accepted. `GET /workflows?type=OnboardingWorkflow`
+  must not be rejected as an unknown type: 200 (listing only onboardings) or 503 without
+  Temporal are accepted. Contract decisions, forks, the one-unfinished-onboarding rule
+  (409), existing artifacts, checkout updates and the pushed branch name
+  `onboarding/<source branch>-<short id>` need a real repository and are not tested.
 - Unknown IDs are well formed (prefix and 32 hex digits) so that they are treated as
   unknown rather than malformed.
 

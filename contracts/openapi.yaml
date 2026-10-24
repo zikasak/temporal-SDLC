@@ -557,7 +557,6 @@ paths:
       x-requirements:
       - FR-14
       - FR-20
-      - FR-26
       - FR-34
       - FR-36
       - FR-37
@@ -1219,18 +1218,20 @@ paths:
         as a whole word. Answers 202 with no body when the delivery was accepted and
         is acted on: a newly created comment (action created) mentioning the app in
         an issue_comment or pull_request_review_comment event on an open pull request
-        the app opened, by an author with write access, which is then classified and
-        handled. A clarification is answered right away from the code as last pushed,
-        even while a fix round of the delivery is running or queued. Answers 204 with
-        no body when a correctly signed delivery is ignored: other events, edited
-        or deleted comments, mentions on a closed or merged pull request, and mentions
-        that are not authorised or not on the app''s pull requests. Ignored mentions
-        are only logged on the server and not shown in any delivery. Fix requests
-        already queued when the pull request is closed or merged still run. Answers
-        401 without acting on it when the delivery is unsigned or wrongly signed,
-        or while the connection has no webhook secret. Answers 409 when the delivery
-        (the same X-GitHub-Delivery) or its comment was already handled, such as a
-        GitHub redelivery.'
+        the app opened for a delivery or an onboarding, by an author with write access,
+        which is then classified and handled; mentions on an onboarding''s pull request
+        are handled exactly like those on a delivery''s and shown in the onboarding''s
+        delivery progress. A clarification is answered right away from the code as
+        last pushed, even while a fix round of the delivery is running or queued.
+        Answers 204 with no body when a correctly signed delivery is ignored: other
+        events, edited or deleted comments, mentions on a closed or merged pull request,
+        and mentions that are not authorised or not on the app''s pull requests. Ignored
+        mentions are only logged on the server and not shown in any delivery. Fix
+        requests already queued when the pull request is closed or merged still run.
+        Answers 401 without acting on it when the delivery is unsigned or wrongly
+        signed, or while the connection has no webhook secret. Answers 409 when the
+        delivery (the same X-GitHub-Delivery) or its comment was already handled,
+        such as a GitHub redelivery.'
       tags:
       - github
       parameters:
@@ -1304,6 +1305,7 @@ paths:
       - FR-47
       - FR-48
       - FR-49
+      - FR-64
   /connectors/github/repositories:
     get:
       operationId: getConnectorsGithubRepositories
@@ -1672,6 +1674,775 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-16
+  /onboarding/sessions:
+    post:
+      operationId: postOnboardingSessions
+      summary: Start onboarding a repository
+      description: Starts onboarding on the repository and branch, outside requirements
+        sessions and the intake. Any signed-in user can start one, and every signed-in
+        user can list (GET /workflows?type=OnboardingWorkflow) and reopen all onboardings.
+        When the branch already has a contract in contracts/, contract tests in contract-tests/
+        or a root Dockerfile, the onboarding waits as awaiting_confirmation, with
+        existing_artifacts saying which were found, until the user decides through
+        POST /onboarding/sessions/{session_id}/contract-decision; otherwise the LLM
+        drafts the requirements, the API and the language from the existing code.
+        409 while another onboarding of the same repository and branch is unfinished.
+      tags:
+      - onboarding
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOnboardingSession'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionCreated'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-56
+      - FR-58
+      - FR-61
+      - FR-66
+  /onboarding/sessions/{session_id}:
+    get:
+      operationId: getOnboardingSessionsBySessionId
+      summary: Get an onboarding
+      description: The onboarding's drafts, conversation, state and delivery progress.
+      tags:
+      - onboarding
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: onboarding-session- followed by 32 hex digits.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnboardingSession'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-57
+      - FR-58
+      - FR-60
+      - FR-65
+      - FR-66
+  /onboarding/sessions/{session_id}/answers:
+    post:
+      operationId: postOnboardingSessionsBySessionIdAnswers
+      summary: Answer the interviewer's questions
+      description: Answers the questions of the last assistant message and starts
+        a turn.
+      tags:
+      - onboarding
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: onboarding-session- followed by 32 hex digits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnswersInput'
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-58
+  /onboarding/sessions/{session_id}/checkout:
+    post:
+      operationId: postOnboardingSessionsBySessionIdCheckout
+      summary: Update the onboarding's checkout
+      description: Checks the onboarding's branch out again at its latest commit,
+        which the interview reads from the next turn on and the onboarding is finalized
+        against from then on; the onboarding is preparing until it is. The drafts
+        stay as they are. existing_artifacts is refreshed from the new commit; when
+        it now lists a contract, contract tests or a root Dockerfile that were not
+        there before, the onboarding waits as awaiting_confirmation again until POST
+        /onboarding/sessions/{session_id}/contract-decision. A failed update keeps
+        the earlier checkout and says so in error. Refused with 409 while a message
+        is unanswered, a turn or drafting is running, or once the onboarding is finalized,
+        declined or superseded.
+      tags:
+      - onboarding
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: onboarding-session- followed by 32 hex digits.
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-56
+      - FR-58
+      - FR-61
+  /onboarding/sessions/{session_id}/contract-decision:
+    post:
+      operationId: postOnboardingSessionsBySessionIdContractDecision
+      summary: Decide whether to replace the existing contract
+      description: Replacing starts drafting at the start, or returns to the interview
+        with the drafts kept after a checkout update, and the onboarding then replaces
+        every artifact listed in existing_artifacts (contract, contract tests, root
+        Dockerfile). Declining always ends the onboarding as declined, also after
+        a checkout update, which ends its interview and drafts too, and leaves the
+        existing files unchanged. 409 unless the onboarding is awaiting_confirmation.
+      tags:
+      - onboarding
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: onboarding-session- followed by 32 hex digits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContractDecisionInput'
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-61
+  /onboarding/sessions/{session_id}/delivery/answers:
+    post:
+      operationId: postOnboardingSessionsBySessionIdDeliveryAnswers
+      summary: Answer an onboarding agent's questions
+      description: Resumes the paused coding agent of the named stage workflow, including
+        an agent asking whether a failing contract test reveals a bug in the existing
+        code. Like other agent questions, the agent waits for the answer without a
+        timeout. The code is changed only when the answer confirms the bug; otherwise
+        the tests and drafted contract are repaired. A result whose existing code
+        was changed is verified as usual once the tests pass, and its commit message
+        and pull request description say that the existing code was changed.
+      tags:
+      - onboarding
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: onboarding-session- followed by 32 hex digits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentAnswersInput'
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionCreated'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-59
+      - FR-63
+      - FR-65
+  /onboarding/sessions/{session_id}/delivery/findings/accept:
+    post:
+      operationId: postOnboardingSessionsBySessionIdDeliveryFindingsAccept
+      summary: Accept the onboarding with open review findings
+      description: 'As for a delivery: clears the open-findings flag and records findings_acceptance;
+        the publication stays unverified. 409 while no flag is raised.'
+      tags:
+      - onboarding
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: onboarding-session- followed by 32 hex digits.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-60
+      - FR-62
+  /onboarding/sessions/{session_id}/delivery/findings/instructions:
+    post:
+      operationId: postOnboardingSessionsBySessionIdDeliveryFindingsInstructions
+      summary: Give instructions about open review findings
+      description: 'As for a delivery: starts a fix round from the instructions, then
+        verification and code review, pushing to the same branch. 409 while no flag
+        is raised.'
+      tags:
+      - onboarding
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: onboarding-session- followed by 32 hex digits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FindingsInstructionsInput'
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Request Entity Too Large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-60
+      - FR-62
+  /onboarding/sessions/{session_id}/finalize:
+    post:
+      operationId: postOnboardingSessionsBySessionIdFinalize
+      summary: Finalize the onboarding
+      description: 'Fixes the reviewed drafts as the contract and starts the delivery:
+        contract tests and a root Dockerfile are written and verified against the
+        existing code, then code review, push to a new branch named onboarding/<source
+        branch>-<short id> (the short id taken from the onboarding''s session ID)
+        and a pull request to the default branch, as for a delivery. 409 while problems
+        remain or a turn is running.'
+      tags:
+      - onboarding
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: onboarding-session- followed by 32 hex digits.
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-57
+      - FR-58
+      - FR-60
+      - FR-62
+      - FR-65
+  /onboarding/sessions/{session_id}/fork:
+    post:
+      operationId: postOnboardingSessionsBySessionIdFork
+      summary: Fork the onboarding
+      description: 'Starts a new onboarding of the same repository and branch with
+        the conversation, drafts and contract decision up to the given message. Only
+        an unfinished onboarding can be forked: 409 when it is completed, failed,
+        declined or superseded. Forking ends the original as superseded, so that only
+        the fork stays unfinished and the one-at-a-time rule of POST /onboarding/sessions
+        holds.'
+      tags:
+      - onboarding
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: onboarding-session- followed by 32 hex digits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForkInput'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionCreated'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-58
+      - FR-66
+  /onboarding/sessions/{session_id}/generation/retry:
+    post:
+      operationId: postOnboardingSessionsBySessionIdGenerationRetry
+      summary: Retry an onboarding stage
+      description: Starts the named stage of the onboarding's delivery over, with
+        the same rules as a delivery's stage retry (review and repository stages included).
+      tags:
+      - onboarding
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: onboarding-session- followed by 32 hex digits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetryStageInput'
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-60
+      - FR-65
+  /onboarding/sessions/{session_id}/messages:
+    post:
+      operationId: postOnboardingSessionsBySessionIdMessages
+      summary: Send a message
+      description: Starts the interviewer's turn on the user's correction or remark
+        about the drafts.
+      tags:
+      - onboarding
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: onboarding-session- followed by 32 hex digits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageInput'
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Request Entity Too Large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-58
+  /onboarding/sessions/{session_id}/retry:
+    post:
+      operationId: postOnboardingSessionsBySessionIdRetry
+      summary: Retry the last turn
+      description: Runs the failed drafting or interviewer turn again.
+      tags:
+      - onboarding
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: onboarding-session- followed by 32 hex digits.
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusChange'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-58
   /requirements/intake:
     get:
       operationId: getRequirementsIntake
@@ -2302,7 +3073,6 @@ paths:
       x-requirements:
       - FR-14
       - FR-20
-      - FR-26
       - FR-34
       - FR-36
       - FR-37
@@ -2452,7 +3222,9 @@ paths:
     get:
       operationId: getWorkflows
       summary: List workflow executions
-      description: Newest first, 50 per page.
+      description: Newest first, 50 per page. type OnboardingWorkflow lists onboardings,
+        whose workflow_id is the onboarding's session_id, as RequirementsWorkflow
+        lists requirements sessions.
       tags:
       - workflows
       parameters:
@@ -2481,20 +3253,21 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
         '422':
           description: Unprocessable Entity
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-17
+      - FR-66
 security:
 - bearer: []
 components:
@@ -2922,11 +3695,17 @@ components:
           type: string
           enum:
           - preparing
+          - awaiting_confirmation
+          - declined
+          - drafting
           - interviewing
           - turn_running
           - finalizing
           - completed
           - failed
+          - superseded
+          description: awaiting_confirmation, declined, drafting and superseded occur
+            only for onboardings.
         verification_status:
           type: string
           description: As in ApiDesignSession, including reviewing and findings_open.
@@ -3553,6 +4332,131 @@ components:
           type: object
         sender:
           type: object
+    CreateOnboardingSession:
+      type: object
+      description: The repository and branch to onboard.
+      properties:
+        repository:
+          $ref: '#/components/schemas/RepositoryInput'
+      required:
+      - repository
+    OnboardingSession:
+      type: object
+      description: 'An onboarding of an existing repository: the drafted contract,
+        the review interview and the delivery of the contract, contract tests and
+        Dockerfile. Every signed-in user can reopen any onboarding.'
+      properties:
+        session_id:
+          type: string
+        status:
+          type: string
+          enum:
+          - preparing
+          - awaiting_confirmation
+          - declined
+          - drafting
+          - interviewing
+          - turn_running
+          - finalizing
+          - completed
+          - failed
+          - superseded
+          description: awaiting_confirmation while the branch has a contract in contracts/,
+            contract tests or a root Dockerfile and the user has not yet chosen whether
+            to replace them, at the start or again after a checkout update found ones
+            not there before; declined once the user chose to keep them, which ends
+            the onboarding without changing anything; drafting while the LLM drafts
+            the requirements, the API and the language from the existing code; preparing
+            also while the checkout is updated; superseded once the onboarding was
+            forked, which ends it so that only the fork stays unfinished.
+        repository:
+          $ref: '#/components/schemas/RepositorySelection'
+        checkout:
+          type: object
+          description: The commit the onboarding is checked out at; changes when the
+            checkout is updated.
+        forked_from:
+          type: object
+          description: The onboarding and message this one was forked from.
+        existing_contract:
+          type: boolean
+          description: Whether the branch had a contract in contracts/, contract tests
+            in contract-tests/ or a root Dockerfile at the start or the last checkout
+            update; true exactly when existing_artifacts is not empty.
+        existing_artifacts:
+          type: array
+          items:
+            type: string
+            enum:
+            - contract
+            - contract_tests
+            - dockerfile
+          description: What the branch had at the start, refreshed by each checkout
+            update, and the onboarding would replace; empty when it had none of them.
+        replaced_contract:
+          type: boolean
+          description: Whether the user chose to replace what existing_artifacts lists.
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+        requirements:
+          type: array
+          items:
+            $ref: '#/components/schemas/Requirement'
+          description: The drafted requirements, as corrected in the interview.
+        api:
+          type: object
+          description: The drafted endpoints and schemas, as corrected in the interview.
+        language:
+          type: string
+          description: The implementation language of the existing code, as the LLM
+            detected it from the code and the user may correct it in the interview;
+            written to contracts/language.json.
+        problems:
+          type: array
+          items:
+            type: string
+          description: What must be settled before the onboarding can be finalized.
+        error:
+          type: string
+        delivery:
+          type: object
+          description: 'Progress of verifying and publishing the contract, contract
+            tests and Dockerfile, with the same fields as an ApiDesignSession''s delivery
+            progress: verification_status, publication_status, verification, publication
+            (its branch named onboarding/<source branch>-<short id>), agent_questions
+            (including a coding agent''s question whether a failing test reveals a
+            bug in the existing code, which waits for an answer without a timeout),
+            reviews, review_error, open_findings, findings_acceptance, pull_request_status,
+            pull_request, pull_request_error, pull_request_text_error and mentions.
+            When the existing code was changed after the user confirmed a bug, the
+            result is still verified as usual once the tests pass, and the pushed
+            commit''s message and the pull request''s description say that the existing
+            code was changed.'
+      required:
+      - session_id
+      - status
+      - repository
+      - existing_contract
+      - existing_artifacts
+      - replaced_contract
+      - messages
+      - requirements
+      - api
+      - problems
+    ContractDecisionInput:
+      type: object
+      description: The user's choice about the contract, contract tests or root Dockerfile
+        the branch already has.
+      properties:
+        replace_contract:
+          type: boolean
+          description: 'true replaces everything listed in existing_artifacts and
+            the onboarding proceeds to drafting; false declines: the onboarding ends
+            as declined and the existing files are left unchanged.'
+      required:
+      - replace_contract
     Error:
       type: object
       properties:

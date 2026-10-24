@@ -107,6 +107,13 @@ more precisely. The brief's `retired` entry lists the requirements of the contra
 change ends: they no longer hold, whatever the contract still says.
 """
 
+ONBOARDING_PROMPT = """
+This delivery onboards an existing service: the contract was drafted from its code, and
+the delivery writes the contract tests and the root Dockerfile for it. The existing code is
+not part of the changes unless the user confirmed a bug in it: do not report how the
+existing code could be better, only problems in what the delivery changed.
+"""
+
 INSTRUCTIONS_PROMPT = """
 The user gave instructions about the findings of the previous review, in the
 `instructions` entry of the input. The fixes were made from them: take them into account
@@ -149,6 +156,7 @@ async def main() -> None:
         root=ROOT, prompt=(PROMPT.format(label=language['label'], findings_format=FINDINGS_FORMAT)
                            + (PART_PROMPT if inputs.get('review_part') else '')
                            + (CHANGE_PROMPT if inputs.get('brief') else '')
+                           + (ONBOARDING_PROMPT if inputs.get('onboarding') else '')
                            + (INSTRUCTIONS_PROMPT if inputs.get('instructions') else '')
                            + (PREVIOUS_PROMPT if inputs.get('previous_findings') else '')),
         initial_messages=[context],

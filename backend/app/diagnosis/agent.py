@@ -65,6 +65,14 @@ more precisely. The brief's `retired` entry lists the requirements of the contra
 they no longer hold once it is made, whatever the contract still says.
 """
 
+ONBOARDING_PROMPT = """
+The service is the repository's existing code, being onboarded: the contract was drafted
+from that code, and the code is presumed right. Choose the tests unless the service did
+not build or start with its Dockerfile, or the failure plainly reveals a bug in the
+existing code. The user is asked to confirm such a bug before the code is changed, so
+explain in `summary` what the code does and why that contradicts the contract.
+"""
+
 
 def validate_completion(root: Path) -> None:
     try:
@@ -83,7 +91,9 @@ async def main() -> None:
     await run_agent(AgentProfile(
         root=ROOT, prompt=(PROMPT.format(label=language['label'],
                                          report_pattern=language['report_pattern'])
-                           + (CHANGE_PROMPT if json.loads(context).get('brief') else '')),
+                           + (CHANGE_PROMPT if json.loads(context).get('brief') else '')
+                           + (ONBOARDING_PROMPT if json.loads(context).get('onboarding')
+                              else '')),
         initial_messages=[context],
         max_turns_env='DIAGNOSIS_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Diagnosis completed',

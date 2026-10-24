@@ -90,11 +90,67 @@ requirements and OpenAPI design remain the authority. The test sources stay unav
 """
 
 
+ONBOARDING_PROMPT = """Onboard the existing service in /workspace/service, a checkout of the
+project's Git repository named by the `repository` entry of the input. The supplied
+requirements and OpenAPI design are the contract drafted from that code; independently
+written HTTP contract tests run against the service built with your Dockerfile.
+{instructions}
+Do not change the existing code. Write only the Dockerfile at the project root and its
+.dockerignore, replacing any the repository has. Read the build files, configuration and
+entry point before writing them. The Dockerfile builds the service as a self-contained
+image that the contract tests can run against alone: a multi-stage build that skips
+tests, with everything the service needs to start (such as its own database inside the
+image when it uses one, with any required configuration given safe defaults), serving
+the API on 0.0.0.0:8080 as a non-root user. Exclude build output, tests and local
+environments in .dockerignore. Do not put secrets in files.
+Locate code with list_files and search_files and read only the relevant line ranges with
+read_file. Use shell for builds and anything else. Do not generate, read, or execute
+tests. You have no Docker daemon; the outer worker will build the Dockerfile.
+Every file you write is pushed to a new branch of the repository once the tests pass.
+Only finish once the Dockerfile is complete.
+"""
+
+ONBOARDING_REPAIR_PROMPT = """
+This is a repair run. /workspace/service already holds your previous Dockerfile. The
+`repair` entry of the input says why the service did not build, start or pass the contract
+tests: its `instructions`, the failing `test_failures` and the `service_log` tail. The
+existing code is right and stays exactly as it is: correct only the Dockerfile and its
+.dockerignore.
+"""
+
+ONBOARDING_REVIEW_PROMPT = """
+This is a correction run after a code review. The `repair.review` entry of the input holds
+the `findings` sent to you. Correct those about the Dockerfile and its .dockerignore; the
+existing code stays exactly as it is.
+"""
+
+CODE_CHANGE_PROMPT = """
+This run may change the existing code. The `repair` entry of the input describes what to
+correct: a failing contract test that the user confirmed reveals a bug in the existing
+code, or the user's own `instructions` in `repair.review`, which take precedence. Make
+that correction with targeted edits using edit_file, keep the Dockerfile building and
+serving the service, and change nothing else of the existing code.
+"""
+
+
 def repair_prompt(inputs: dict) -> str:
     repair = inputs.get('repair')
     if not repair:
         return ''
+    if inputs.get('onboarding'):
+        if repair.get('code_change') or (repair.get('review') or {}).get('instructions'):
+            return CODE_CHANGE_PROMPT
+        return ONBOARDING_REVIEW_PROMPT if repair.get('review') else ONBOARDING_REPAIR_PROMPT
     return REVIEW_PROMPT if repair.get('review') else REPAIR_PROMPT
+
+
+def base_prompt(inputs: dict, instructions: str) -> str:
+    if inputs.get('onboarding'):
+        return ONBOARDING_PROMPT.format(instructions=instructions)
+    # A change to an existing service is told about its checkout by its own prompt.
+    if inputs.get('brief'):
+        return CHANGE_PROMPT.format(instructions=instructions)
+    return PROMPT.format(instructions=instructions) + repository_prompt(inputs)
 
 
 def repository_prompt(inputs: dict) -> str:
@@ -115,12 +171,7 @@ async def main() -> None:
     inputs = json.loads(context)
     language = json.loads(await run_sync(LANGUAGE.read_text))
     await run_agent(AgentProfile(
-        # A change to an existing service is told about its checkout by its own prompt.
-        root=ROOT, prompt=((CHANGE_PROMPT.format(instructions=language['instructions'])
-                            if inputs.get('brief')
-                            else PROMPT.format(instructions=language['instructions'])
-                            + repository_prompt(inputs))
-                           + repair_prompt(inputs)),
+        root=ROOT, prompt=base_prompt(inputs, language['instructions']) + repair_prompt(inputs),
         initial_messages=[context],
         max_turns_env='IMPLEMENTATION_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Implementation completed',

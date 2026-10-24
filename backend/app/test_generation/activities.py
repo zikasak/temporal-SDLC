@@ -61,7 +61,11 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
     # checkout stays out of its workspace.
     repository = context.get('repository')
     snapshot = session_dir / SNAPSHOT_DIR / 'suite'
-    if repository:
+    # An onboarding writes the contract tests anew, replacing any the repository has.
+    onboarding = bool(context.get('onboarding'))
+    if onboarding:
+        contracts['onboarding'] = True
+    if repository and not onboarding:
         if not snapshot.is_dir():
             raise ApplicationError('The repository tests were not recorded', non_retryable=True)
         contracts['repository'] = repository
@@ -75,7 +79,7 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
         if repair:
             # A repair continues from the published suite; runner files stay the template's.
             copy_test_suite(suite, previous, workspace / 'tests')
-        elif repository:
+        elif repository and not onboarding:
             copy_test_suite(suite, snapshot, workspace / 'tests')
         write_language(workspace, language, instructions=suite.instructions,
                        test_glob=suite.test_glob)
@@ -128,7 +132,7 @@ async def generate_service_tests(session_id: str, context: dict[str, Any]) -> di
     change = bool(context.get('brief'))
     # The repository's tests as they were before any author ran. A change that leaves the
     # API as it is adds to them and leaves them alone.
-    continued = bool(context.get('repository'))
+    continued = bool(context.get('repository')) and not context.get('onboarding')
     repository = (
         await run_sync(suite.test_cases, session_dir / SNAPSHOT_DIR / 'suite') if continued else {}
     )

@@ -56,6 +56,13 @@ do not rename, restructure or rewrite it. Every existing test you change or remo
 afterwards run, as it was, against the new service, and the task fails if it still passes.
 """
 
+ONBOARDING_PROMPT = """
+The service already exists: the supplied requirements and OpenAPI contract were drafted
+from its code, and the suite is written anew for it, replacing any contract tests the
+repository had. It must pass against the service as it is. Test only behaviour the
+contract states precisely, and never rely on a detail it leaves open.
+"""
+
 CHANGE_PROMPT = """Add regression tests to the HTTP test suite in /workspace/tests, the
 contract-tests directory of the project's Git repository named by the `repository` entry
 of the input. The `brief` entry of the input describes a change to the running service:
@@ -152,7 +159,8 @@ async def main() -> None:
         root=ROOT, prompt=((CHANGE_PROMPT.format(instructions=language['instructions'])
                             if inputs.get('brief')
                             else PROMPT.format(instructions=language['instructions'])
-                            + (REPOSITORY_PROMPT if inputs.get('repository') else ''))
+                            + (ONBOARDING_PROMPT if inputs.get('onboarding')
+                               else REPOSITORY_PROMPT if inputs.get('repository') else ''))
                            + repair_prompt(inputs)),
         initial_messages=[context,
                           *(['OpenAPI contract:\n' + (await run_sync(OPENAPI.read_text))]

@@ -8,13 +8,15 @@ from fastapi import Depends, FastAPI, Request
 
 from app.api.errors import TemporalUnavailableError, temporal_unavailable_response
 from app.api.routes import (
-    api_design, auth, github, hello, llm_requests, requirements, settings, workflows,
+    api_design, auth, github, hello, llm_requests, onboarding, requirements, settings,
+    workflows,
 )
 from app.auth.storage import ensure_schema as ensure_auth_schema
 from app.delivery.mentions import ensure_schema as ensure_mention_schema
 from app.documents import cleanup_expired_documents, ensure_document_schema
 from app.logging_setup import configure_logging
 from app.github.storage import ensure_schema as ensure_github_schema
+from app.onboarding.storage import ensure_schema as ensure_onboarding_schema
 from app.llm.pi_credentials import refresh_pi_credentials_loop
 from app.temporal.client import TemporalUnavailable
 from app.temporal.registry import ensure_schema as ensure_registry_schema
@@ -41,6 +43,7 @@ async def lifespan(_: FastAPI):
     await ensure_registry_schema()
     await ensure_settings_schema()
     await ensure_mention_schema()
+    await ensure_onboarding_schema()
     tasks = [asyncio.create_task(_cleanup_loop()), asyncio.create_task(refresh_pi_credentials_loop()),
              asyncio.create_task(github.recover_mentions_loop())]
     logger.info("API started")
@@ -63,7 +66,8 @@ app.include_router(auth.router)
 # Called by GitHub, authenticated by its signature instead of a user token.
 app.include_router(github.events_router)
 # Everything else requires a signed-in user.
-for route_module in (hello, llm_requests, requirements, api_design, workflows, github, settings):
+for route_module in (hello, llm_requests, requirements, api_design, onboarding, workflows, github,
+                     settings):
     app.include_router(route_module.router, dependencies=[Depends(auth.require_user)])
 
 

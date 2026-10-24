@@ -1,0 +1,402 @@
+import asyncio
+from datetime import timedelta
+from typing import Any
+
+from temporalio import workflow
+from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError, ApplicationError
+
+with workflow.unsafe.imports_passed_through():
+    from app.delivery.models import DeliveryState, TaskSpec
+    from app.llm.questions import answers_text
+    from app.onboarding.activities import find_onboarding_artifacts, onboarding_turn
+    from app.onboarding.models import FINISHED_STATUSES, OnboardingState, onboarding_problems
+    from app.requirements.document import render_requirements_markdown
+    from app.temporal.activities import checkout_repository, update_repository_checkout
+    from app.temporal.workflows import (
+        SESSION_IDLE_TIMEOUT, _Delivering, assistant_message, check_answers, check_message,
+        pending_questions,
+    )
+
+REVIEW_TOO_LONG = "This review is too long to continue. Finalize the onboarding."
+CHECKOUT_FAILED = ("The repository could not be checked out. Check the GitHub connection "
+                   "and start a new onboarding.")
+CHECKOUT_UPDATE_FAILED = ("The repository could not be checked out again, so the earlier "
+                          "checkout is kept. Check the GitHub connection and try again.")
+ARTIFACTS_FAILED = "The repository's existing files could not be read. Retry."
+ARTIFACTS_UPDATE_FAILED = ("The checkout was updated, but its existing contract, contract "
+                           "tests and Dockerfile could not be read. Update the checkout "
+                           "again before finalizing.")
+DRAFT_FAILED = "The LLM could not draft the contract. Retry."
+TURN_FAILED = "The LLM could not answer. Retry this message."
+
+
+@workflow.defn
+class OnboardingWorkflow(_Delivering):
+    """One onboarding of an existing repository: the branch is checked out, the user
+    confirms replacing a contract, contract tests or Dockerfile it already has, the LLM
+    drafts the requirements, the API and the language from the code, and the user reviews
+    the drafts in an interview of updates. Finalizing fixes the drafts as the contract and
+    hands it to a DeliveryWorkflow, which writes and verifies the contract tests and the
+    Dockerfile against the existing code, reviews and publishes them; the onboarding stays
+    open as long as its delivery is."""
+
+    @workflow.init
+    def __init__(self, state: OnboardingState) -> None:
+        self.state = state
+        # A new onboarding or a fork checks out first; a continued run goes on as it was.
+        if not self.state.checkout:
+            self.state.status = "preparing"
+        self._updates = 0
+        self._turn_lock = asyncio.Lock()
+        self._init_delivery()
+
+    @workflow.run
+    async def run(self, state: OnboardingState) -> dict[str, Any] | None:
+        if not self.state.checkout:
+            await self._check_out()
+            if self.state.status == "preparing":
+                await self._after_checkout(self.state.existing_artifacts)
+        while self.state.status not in FINISHED_STATUSES:
+            seen = self._updates
+            try:
+                await workflow.wait_condition(
+                    lambda: self._updates != seen
+                    or self.state.status in FINISHED_STATUSES
+                    or workflow.info().is_continue_as_new_suggested(),
+                    timeout=SESSION_IDLE_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                if self.state.status in ("interviewing", "awaiting_confirmation"):
+                    self.state.status = "failed"
+                    self.state.error = ("The onboarding expired after a day without "
+                                        "activity. Start a new one.")
+                continue
+            if workflow.info().is_continue_as_new_suggested():
+                await workflow.wait_condition(workflow.all_handlers_finished)
+                workflow.logger.info("Continuing as new")
+                workflow.continue_as_new(self.state)
+        await workflow.wait_condition(workflow.all_handlers_finished)
+        if self.state.status == "completed":
+            await self._deliver()
+        return None
+
+    async def _check_out(self) -> None:
+        try:
+            self.state.checkout = await workflow.execute_activity(
+                checkout_repository,
+                args=[workflow.info().workflow_id, self.state.repository],
+                start_to_close_timeout=timedelta(minutes=10),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except ActivityError as exc:
+            workflow.logger.warning("Repository checkout failed: %s", exc.cause or exc)
+            self.state.status = "failed"
+            self.state.error = CHECKOUT_FAILED
+
+    async def _artifacts(self) -> list[str] | None:
+        try:
+            return await workflow.execute_activity(
+                find_onboarding_artifacts, workflow.info().workflow_id,
+                start_to_close_timeout=timedelta(minutes=1),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except ActivityError as exc:
+            workflow.logger.warning("Existing artifacts unknown: %s", exc.cause or exc)
+            return None
+
+    async def _after_checkout(self, known: list[str]) -> None:
+        """Find what the branch has: what was not `known` before needs the user's decision;
+        otherwise the onboarding goes on with drafting or the interview."""
+        found = await self._artifacts()
+        if found is None:
+            self.state.status = "failed"
+            self.state.error = ARTIFACTS_FAILED
+            return
+        self.state.existing_artifacts = found
+        accepted = known if self.state.replaced_contract else []
+        if any(item not in accepted for item in found):
+            self.state.replaced_contract = False
+            self.state.status = "awaiting_confirmation"
+            workflow.logger.info("The branch already has %s; awaiting the user", found)
+            return
+        await self._proceed()
+
+    async def _proceed(self) -> None:
+        """Draft the contract, or go on with the interview of the drafts."""
+        async with self._turn_lock:
+            if self._ended():
+                return
+            if not self.state.drafted:
+                await self._draft()
+            elif self.state.messages and self.state.messages[-1]["role"] == "user":
+                await self._turn()
+            else:
+                self.state.status = "interviewing"
+
+    async def _draft(self) -> bool:
+        self.state.status = "drafting"
+        self.state.error = None
+        try:
+            result = await self._execute_turn()
+        except ActivityError as exc:
+            workflow.logger.warning("Drafting failed: %s", exc.cause or exc)
+            if self._ended():
+                return False
+            self.state.error = DRAFT_FAILED
+            self.state.status = "interviewing"
+            return False
+        if self._ended():
+            return False
+        self._apply(result)
+        self.state.drafted = True
+        self.state.status = "interviewing"
+        workflow.logger.info("Contract drafted: %d requirements, %d endpoints",
+                             len(self.state.requirements), len(self.state.api["endpoints"]))
+        return True
+
+    async def _turn(self) -> bool:
+        self.state.status = "turn_running"
+        self.state.error = None
+        try:
+            result = await self._execute_turn()
+        except ActivityError as exc:
+            workflow.logger.warning("Onboarding turn failed: %s", exc.cause or exc)
+            if self._ended():
+                return False
+            self.state.error = TURN_FAILED
+            self.state.status = "interviewing"
+            return False
+        if self._ended():
+            return False
+        self._apply(result)
+        self.state.status = "interviewing"
+        return True
+
+    def _ended(self) -> bool:
+        """Whether the onboarding ended, such as superseded by a fork, while a handler
+        waited; its status then stays as it is."""
+        return self.state.status in FINISHED_STATUSES
+
+    async def _execute_turn(self) -> dict[str, Any]:
+        return await workflow.execute_activity(
+            onboarding_turn,
+            self.state,
+            start_to_close_timeout=timedelta(minutes=12),
+            schedule_to_close_timeout=timedelta(minutes=13),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+        )
+
+    def _apply(self, result: dict[str, Any]) -> None:
+        self.state.messages.append(assistant_message(result))
+        self.state.requirements = result["requirements"]
+        self.state.api = result["api"]
+        self.state.language = result["language"]
+
+    @workflow.query
+    def get_state(self) -> OnboardingState:
+        return self.state
+
+    def _check_open(self) -> None:
+        if self.state.status != "interviewing" or not self.state.drafted:
+            raise ValueError("The onboarding is not waiting for a message.")
+        if self.state.messages and self.state.messages[-1]["role"] == "user":
+            raise ValueError("Retry the unanswered message before sending another.")
+
+    @workflow.update
+    async def send_message(self, message: str) -> None:
+        self._updates += 1
+        async with self._turn_lock:
+            if self.state.status != "interviewing":
+                raise ApplicationError("This onboarding is no longer accepting messages.")
+            self.state.messages.append({"role": "user", "content": message.strip()})
+            await self._turn()
+
+    @send_message.validator
+    def validate_send_message(self, message: str) -> None:
+        self._check_open()
+        if pending_questions(self.state.messages):
+            raise ValueError("Answer the interviewer's questions first.")
+        check_message(self.state.messages, message.strip(), REVIEW_TOO_LONG)
+
+    @workflow.update
+    async def answer_questions(self, answers: list[str]) -> None:
+        self._updates += 1
+        async with self._turn_lock:
+            if self.state.status != "interviewing":
+                raise ApplicationError("This onboarding is no longer accepting messages.")
+            questions = pending_questions(self.state.messages)
+            self.state.messages.append(
+                {"role": "user", "content": answers_text(questions, answers)})
+            await self._turn()
+
+    @answer_questions.validator
+    def validate_answer_questions(self, answers: list[str]) -> None:
+        self._check_open()
+        check_answers(self.state.messages, answers, REVIEW_TOO_LONG)
+
+    def _retryable(self) -> bool:
+        return self.state.status == "interviewing" and (
+            not self.state.drafted
+            or bool(self.state.messages) and self.state.messages[-1]["role"] == "user")
+
+    @workflow.update
+    async def retry_message(self) -> None:
+        """Run the failed drafting or interviewer turn again."""
+        self._updates += 1
+        async with self._turn_lock:
+            if not self._retryable():
+                raise ApplicationError("There is no failed turn to retry.")
+            if not self.state.drafted:
+                await self._draft()
+            else:
+                await self._turn()
+
+    @retry_message.validator
+    def validate_retry_message(self) -> None:
+        if not self._retryable():
+            raise ValueError("There is no failed drafting or turn to retry.")
+
+    @workflow.update
+    async def contract_decision(self, replace: bool) -> None:
+        """The user's choice about what the branch already has."""
+        self._updates += 1
+        if self.state.status != "awaiting_confirmation":
+            raise ApplicationError("The onboarding is not awaiting a decision.")
+        if not replace:
+            workflow.logger.info("The user kept the existing contract; onboarding declined")
+            self.state.status = "declined"
+            self.state.error = None
+            return
+        workflow.logger.info("The user chose to replace %s", self.state.existing_artifacts)
+        self.state.replaced_contract = True
+        await self._proceed()
+
+    @contract_decision.validator
+    def validate_contract_decision(self, replace: bool) -> None:
+        if self.state.status != "awaiting_confirmation":
+            raise ValueError("The onboarding is not awaiting a decision about the existing "
+                             "contract.")
+
+    @workflow.update
+    async def update_checkout(self) -> None:
+        """Check the branch out again at its latest commit; the drafts stay as they are."""
+        self._updates += 1
+        async with self._turn_lock:
+            status = self.state.status
+            if status not in ("interviewing", "awaiting_confirmation"):
+                raise ApplicationError("This onboarding is no longer accepting changes.")
+            self.state.status = "preparing"
+            self.state.error = None
+            try:
+                self.state.checkout = await workflow.execute_activity(
+                    update_repository_checkout,
+                    args=[workflow.info().workflow_id, self.state.repository],
+                    start_to_close_timeout=timedelta(minutes=10),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            except ActivityError as exc:
+                workflow.logger.warning("Repository checkout update failed: %s",
+                                        exc.cause or exc)
+                if self._ended():
+                    return
+                self.state.error = CHECKOUT_UPDATE_FAILED
+                self.state.status = status
+                return
+            workflow.logger.info("Checked out again at %s", self.state.checkout["commit"])
+            known = list(self.state.existing_artifacts)
+            found = await self._artifacts()
+            if self._ended():
+                return
+            if found is None:
+                # The new commit may have added a contract, contract tests or a Dockerfile:
+                # finalizing waits until a later update reads them and asks about new ones.
+                self.state.artifacts_unknown = True
+                self.state.error = ARTIFACTS_UPDATE_FAILED
+                self.state.status = status
+                return
+            self.state.artifacts_unknown = False
+            self.state.existing_artifacts = found
+            accepted = known if self.state.replaced_contract else []
+            newly = [item for item in found if item not in accepted]
+            if newly or (status == "awaiting_confirmation" and found):
+                workflow.logger.info("The branch now has %s; awaiting the user", newly)
+                self.state.replaced_contract = False
+                self.state.status = "awaiting_confirmation"
+                return
+            self.state.status = "interviewing"
+        if not self.state.drafted and status == "awaiting_confirmation":
+            # Nothing is left to decide about, so drafting starts.
+            await self._proceed()
+
+    @update_checkout.validator
+    def validate_update_checkout(self) -> None:
+        if not self.state.checkout:
+            raise ValueError("This onboarding has no checkout to update yet.")
+        if self.state.status == "awaiting_confirmation":
+            return
+        if self.state.status != "interviewing" or not self.state.drafted and not self.state.error:
+            raise ValueError("Wait for the running turn or drafting to finish.")
+        if self.state.messages and self.state.messages[-1]["role"] == "user":
+            raise ValueError("Retry the unanswered message before updating the checkout.")
+
+    @workflow.update
+    async def finalize(self) -> None:
+        """Fix the drafts as the contract; the delivery starts once the run sees it."""
+        self._updates += 1
+        async with self._turn_lock:
+            problems = onboarding_problems(self.state)
+            if self.state.status != "interviewing" or problems:
+                raise ApplicationError("The onboarding cannot be finalized now.")
+            self.state.status = "finalizing"
+            self.state.error = None
+            workflow.logger.info("Onboarding finalized")
+            self.state.status = "completed"
+
+    @finalize.validator
+    def validate_finalize(self) -> None:
+        if self.state.status != "interviewing":
+            raise ValueError("Wait for the running turn to finish before finalizing.")
+        if self.state.messages and self.state.messages[-1]["role"] == "user":
+            raise ValueError("Retry the unanswered message before finalizing.")
+        problems = onboarding_problems(self.state)
+        if problems:
+            raise ValueError("Fix these problems first: " + " ".join(problems))
+
+    @workflow.update
+    def supersede(self) -> None:
+        """End the onboarding for the fork that replaces it."""
+        self._updates += 1
+        self.state.status = "superseded"
+
+    @supersede.validator
+    def validate_supersede(self) -> None:
+        if self.state.status in FINISHED_STATUSES:
+            raise ValueError("Only an unfinished onboarding can be forked.")
+        # A running turn, drafting or checkout update would write its status over it.
+        if (self.state.status not in ("interviewing", "awaiting_confirmation")
+                or self._turn_lock.locked()):
+            raise ValueError("Wait for the running turn, drafting or checkout update to "
+                             "finish before forking.")
+
+    @workflow.update
+    def restart_delivery(self, state: DeliveryState) -> None:
+        """Start this onboarding's stopped delivery again from `state`."""
+        self._restart_delivery(state)
+
+    @restart_delivery.validator
+    def validate_restart_delivery(self, state: DeliveryState) -> None:
+        self._validate_restart_delivery()
+
+    async def _deliver(self) -> None:
+        """Hand the contract to the delivery and stay open until that ends."""
+        await self._run_delivery(DeliveryState(spec=TaskSpec(
+            session_id=workflow.info().workflow_id,
+            requirements=self.state.requirements,
+            requirements_document=render_requirements_markdown(self.state.requirements),
+            api=self.state.api,
+            language=self.state.language,
+            repository=self.state.repository,
+            checkout=self.state.checkout,
+            onboarding=True,
+        )))

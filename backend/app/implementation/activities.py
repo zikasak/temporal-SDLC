@@ -9,6 +9,7 @@ from typing import Any
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from app.asyncio_utils import run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import (
     StageInputs, StageSpec, copy_regular_files, run_stage, session_language, write_language,
@@ -53,8 +54,9 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
     if checkout and not checkout.is_dir():
         raise ApplicationError('The repository checkout is unavailable', non_retryable=True)
     repair = context.get('repair')
-    # A change to an existing service generates no code: the checkout alone is edited.
-    change = bool(context.get('brief'))
+    # A change to an existing service generates no code: the checkout alone is edited. Nor
+    # does an onboarding, whose author writes the Dockerfile of the existing code.
+    change = bool(context.get('brief')) or bool(context.get('onboarding'))
     if change and not checkout:
         raise ApplicationError('The repository checkout is unavailable', non_retryable=True)
     # A repair continues from the published implementation, not the generated skeleton.
@@ -109,7 +111,60 @@ def stage(language: Language) -> StageSpec:
     )
 
 
+# What an onboarding's author writes of its own: the root Dockerfile and its ignore file.
+ONBOARDING_FILES = (Path('Dockerfile'), Path('.dockerignore'))
+
+
+def code_change_allowed(context: dict[str, Any]) -> bool:
+    """Whether an onboarding's author may change the existing code: only to fix a bug the
+    user confirmed, or as the user's own instructions ask."""
+    repair = context.get('repair') or {}
+    return bool(repair.get('code_change') or (repair.get('review') or {}).get('instructions'))
+
+
+def keep_existing_code(language: Language, source: Path, output: Path, clean: Path) -> None:
+    """The onboarding author's output as allowed: the code as `source` holds it, with only
+    the Dockerfile and its ignore file taken from what the author wrote."""
+    copy_service(language, source, clean)
+    for relative in ONBOARDING_FILES:
+        written = output / relative
+        if written.is_file() and not written.is_symlink():
+            copy_regular_files(output, clean, include=lambda item, name=relative: item == name)
+        elif relative != Path('Dockerfile') and (clean / relative).is_file():
+            (clean / relative).unlink()
+
+
+def _service_files(language: Language, root: Path) -> dict[Path, bytes]:
+    if not root.is_dir():
+        return {}
+    return {item.relative_to(root): item.read_bytes() for item in root.rglob('*')
+            if item.is_file() and not item.is_symlink()
+            and is_service_file(language, item.relative_to(root))
+            and item.relative_to(root) not in ONBOARDING_FILES}
+
+
+def existing_code_changed(language: Language, checkout: Path, published: Path) -> bool:
+    """Whether the onboarding's service differs from the repository's code apart from the
+    Dockerfile and its ignore file."""
+    return _service_files(language, checkout) != _service_files(language, published)
+
+
 @activity.defn
 async def implement_service(session_id: str, context: dict[str, Any]) -> dict[str, Any]:
     language = session_language(context.get('language'))
-    return await run_stage(stage(language), session_id, context, GENERATED_CODE_DIR)
+    if not context.get('onboarding'):
+        return await run_stage(stage(language), session_id, context, GENERATED_CODE_DIR)
+    session_dir = GENERATED_CODE_DIR / session_id
+    checkout = session_dir / CHECKOUT_DIR
+    spec = stage(language)
+    if not code_change_allowed(context):
+        source = (session_dir / 'implementation/service' if context.get('repair')
+                  else checkout)
+        spec = dataclasses.replace(
+            spec, sanitize_output=lambda output, clean: keep_existing_code(
+                language, source, output, clean))
+    result = await run_stage(spec, session_id, context, GENERATED_CODE_DIR)
+    if 'questions' in result:
+        return result
+    changed = await run_sync(existing_code_changed, language, checkout, Path(result['path']))
+    return {**result, 'code_changed': changed}
