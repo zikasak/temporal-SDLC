@@ -21,6 +21,7 @@ with workflow.unsafe.imports_passed_through():
     from app.onboarding.activities import find_onboarding_artifacts, onboarding_turn
     from app.onboarding.workflows import OnboardingWorkflow
     from app.settings.storage import ensure_schema as ensure_settings_schema
+    from app.temporal.namespace_setup import prepare_namespace
     from app.temporal.activities import (
         api_design_turn,
         checkout_repository,
@@ -55,6 +56,8 @@ async def main():
     await ensure_settings_schema()
     await ensure_mention_schema()
     client = await Client.connect(TEMPORAL_ADDRESS)
+    # Executions are started with their labels, which the namespace must know first.
+    await prepare_namespace(client)
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,

@@ -11,9 +11,12 @@ with workflow.unsafe.imports_passed_through():
     from app.api_design.models import ApiDesignState
     from app.api_design.openapi import api_problems, design_problems
     from app.api_design.prompt import opening_fallback
-    from app.delivery.models import TASK_IDLE_TIMEOUT, DeliveryState, TaskSpec, delivery_id
+    from app.delivery.models import (
+        TASK_IDLE_TIMEOUT, DeliveryState, TaskSpec, delivery_id, delivery_labels,
+    )
     from app.github.models import RepositorySelection
     from app.requirements.document import render_requirements_markdown
+    from app.temporal.labels import labels
     from app.requirements.models import (
         CHANGE_KINDS, CONTRACT_KINDS, DIRECT_KINDS, KIND_PROBLEM, RequirementsState,
         numbered_after,
@@ -133,7 +136,8 @@ class _Delivering:
             stopped = False
             try:
                 await workflow.execute_child_workflow(
-                    "DeliveryWorkflow", state, id=delivery_id(session_id))
+                    "DeliveryWorkflow", state, id=delivery_id(session_id),
+                    **delivery_labels(state.spec))
             except ChildWorkflowError as exc:
                 # Stage failures are results of the delivery; only an aborted one ends here.
                 workflow.logger.warning("Delivery did not finish: %s", exc.cause or exc)
@@ -293,7 +297,7 @@ class RequirementsWorkflow(_Delivering):
         """Start an API design of this task, or a fork of one, as this session's child;
         done once it has started."""
         handle = await workflow.start_child_workflow(
-            "ApiDesignWorkflow", state, id=session_id)
+            "ApiDesignWorkflow", state, id=session_id, **labels(state.repository))
         workflow.logger.info("API design %s started", session_id)
         self._designs.append(asyncio.create_task(self._follow_design(handle)))
 

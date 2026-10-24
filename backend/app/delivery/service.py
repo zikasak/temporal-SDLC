@@ -12,7 +12,8 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from app.delivery.models import (
-    MENTION_HANDLED, OUTCOME_OWED, RETRY_STAGES, DeliveryProgress, DeliveryState, RetryStage, delivery_id, interrupted,
+    MENTION_HANDLED, OUTCOME_OWED, RETRY_STAGES, DeliveryProgress, DeliveryState, RetryStage, delivery_id,
+    delivery_labels, interrupted,
 )
 from app.delivery import mentions as mention_history
 from app.github.errors import GitHubError
@@ -146,6 +147,7 @@ async def _restart(finished: _Finished, session_id: str) -> None:
             task_queue=description.task_queue,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
             id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
+            **delivery_labels(finished.state.spec),
         )
     except WorkflowAlreadyStartedError as exc:
         raise SessionBusy(busy) from exc

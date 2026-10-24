@@ -128,7 +128,7 @@ The browser uses `/api` in front of these backend routes. Vite removes that pref
 | `POST /{requirements,api-design}/sessions/{session_id}/answers` | Answer the questions the model asked with `ask_user`. |
 | `POST /{requirements,api-design}/sessions/{session_id}/delivery/answers` | Answer a paused coding agent of the session's delivery. |
 | `GET /{requirements,api-design}/sessions/{session_id}/document` | Download the finalized document. |
-| `GET /workflows` | List workflow executions with optional type filter and pagination. |
+| `GET /workflows` | List workflow executions with their repository, branch and onboarding ID, with optional type, repository, branch and onboarding_id filters and pagination. The values are recorded as the `SdlcRepository`, `SdlcBranch` and `SdlcOnboardingId` search attributes and a `repository` memo; the main worker registers the attributes and once deletes executions started before them. |
 | `POST /start` | Run the greeting workflow and return its result. |
 
 Brace notation groups routes for readability; it is not literal URL syntax.

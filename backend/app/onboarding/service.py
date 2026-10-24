@@ -14,6 +14,7 @@ from app.github.models import RepositorySelection
 from app.onboarding import storage
 from app.onboarding.models import FINISHED_STATUSES, OnboardingState, onboarding_problems
 from app.temporal.client import connect_temporal
+from app.temporal.labels import labels
 from app.temporal.registry import register
 from app.temporal.sessions import SessionBusy, fork_messages, start_update, state_at_message
 
@@ -48,7 +49,8 @@ async def _unfinished(session_id: str) -> bool:
 
 async def _start(session_id: str, state: OnboardingState) -> None:
     client = await connect_temporal()
-    await client.start_workflow(WORKFLOW_TYPE, state, id=session_id, task_queue=TASK_QUEUE)
+    await client.start_workflow(WORKFLOW_TYPE, state, id=session_id, task_queue=TASK_QUEUE,
+                                **labels(state.repository, session_id))
     await register(session_id)
 
 

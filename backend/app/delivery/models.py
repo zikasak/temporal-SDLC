@@ -12,6 +12,7 @@ from app.github.models import (
 from app.llm.questions import Question
 from app.requirements.models import Requirement, TaskKind
 from app.review.models import FindingsAcceptance, ReviewRound
+from app.temporal.labels import labels
 from app.verification.models import VerificationResult, VerificationStatus
 
 # `review` runs a failed code review again on the verified delivery, or goes on from a
@@ -84,6 +85,12 @@ class TaskSpec:
     # tests and a root Dockerfile are written and verified against that code, which
     # changes only where the user confirmed a bug in it.
     onboarding: bool = False
+
+
+def delivery_labels(spec: TaskSpec) -> dict[str, Any]:
+    """The search attributes and memo of a delivery's executions and of the code
+    generation it starts: its session's repository and, for an onboarding, the onboarding."""
+    return labels(spec.repository, spec.session_id if spec.onboarding else None)
 
 
 @dataclass

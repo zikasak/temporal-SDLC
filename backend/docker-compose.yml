@@ -64,6 +64,10 @@ services:
       - |
         temporal operator namespace describe --address temporal:7233 --namespace default >/dev/null 2>&1 ||
         temporal operator namespace create --address temporal:7233 --namespace default --retention 1d
+        for name in SdlcRepository SdlcBranch SdlcOnboardingId; do
+          temporal operator search-attribute list --address temporal:7233 --namespace default | grep -qw "$$name" ||
+          temporal operator search-attribute create --address temporal:7233 --namespace default --name "$$name" --type Keyword
+        done
     restart: on-failure:5
 
   temporal-ui:

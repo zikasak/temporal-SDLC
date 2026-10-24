@@ -12,6 +12,7 @@ from app.github.models import RepositorySelection
 from app.requirements.models import DIRECT_KINDS, RequirementsState, TaskKind
 from app.requirements.prompt import intake_messages, opening_message
 from app.temporal.client import connect_temporal
+from app.temporal.labels import labels
 from app.temporal.registry import register
 from app.temporal.sessions import SessionBusy, fork_messages, start_update, state_at_message
 
@@ -38,6 +39,7 @@ async def start_session(
         state,
         id=session_id,
         task_queue=TASK_QUEUE,
+        **labels(state.repository),
     )
     await register(handle.id)
     logger.info("Started requirements session %s", session_id)

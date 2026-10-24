@@ -15,7 +15,7 @@ with workflow.unsafe.imports_passed_through():
     from app.delivery.contract import with_requirements
     from app.delivery.models import (
         MENTION_HANDLED, OUTCOME_OWED, STOPPED, TASK_IDLE_TIMEOUT, AgentQuestions, DeliveryProgress,
-        DeliveryState, is_mention, judge_baseline, judge_kept, kept_tests, mention_key,
+        DeliveryState, delivery_labels, is_mention, judge_baseline, judge_kept, kept_tests, mention_key,
         open_review_findings, unproven_green,
     )
     from app.diagnosis.models import repair_request
@@ -600,6 +600,7 @@ class DeliveryWorkflow:
                 args=[self.spec.session_id, self.spec.document_id, self.spec.language],
                 id=self._child_id('codegen'),
                 task_queue=CODEGEN_TASK_QUEUE,
+                **delivery_labels(self.spec),
                 result_type=dict,
             )
         except ChildWorkflowError as exc:
