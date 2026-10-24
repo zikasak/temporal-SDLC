@@ -72,6 +72,11 @@ class Language:
     post_process: Callable[[Path], None] = lambda project: None
 
 
+# Dependencies and build output of the other projects a repository may hold beside the
+# service, such as a web frontend: never sources, whatever the service's language.
+OTHER_PARTS_BUILD_DIRS = ("node_modules", "dist", "__pycache__", ".venv", "venv")
+
+
 class UnsupportedLanguage(ValueError):
     pass
 

@@ -67,6 +67,23 @@ Every file you change is pushed to a new branch of the repository once the servi
 verification. Only finish once the change and a successful build are complete.
 """
 
+PARTS_PROMPT = """
+The repository holds more than the service: the `repository_parts` entry of the input lists
+its projects by directory and toolchain, and the task covers all of them. Besides the service
+they may be a web frontend, an app, a command-line tool or other code that uses its API,
+often in another language. Read the requirements{brief} for what each part has to do: the
+pages, forms, screens and user actions a requirement describes belong to the part that shows
+them, and a part that calls an endpoint the task adds or changes must be changed to use it.
+Make those changes in that part, in its own language and following its own structure and
+conventions, as thoroughly as the service's; the task is not complete while a part the
+requirements concern is left unchanged. Leave parts the task does not concern as they are.
+The Dockerfile and the contract tests cover the service alone, so nothing else checks the
+other parts: install the dependencies of each part you change and build it with its own
+toolchain (for a package.json project, npm ci and its build script), without running its
+tests, and fix failures before you finish.
+"""
+PARTS_BRIEF = ' and the brief'
+
 REPAIR_PROMPT = """
 This is a repair run. /workspace/service already holds your previous implementation. It
 compiled, but independently written HTTP contract tests failed against the running service
@@ -149,8 +166,16 @@ def base_prompt(inputs: dict, instructions: str) -> str:
         return ONBOARDING_PROMPT.format(instructions=instructions)
     # A change to an existing service is told about its checkout by its own prompt.
     if inputs.get('brief'):
-        return CHANGE_PROMPT.format(instructions=instructions)
-    return PROMPT.format(instructions=instructions) + repository_prompt(inputs)
+        return CHANGE_PROMPT.format(instructions=instructions) + parts_prompt(inputs)
+    return (PROMPT.format(instructions=instructions) + repository_prompt(inputs)
+            + parts_prompt(inputs))
+
+
+def parts_prompt(inputs: dict) -> str:
+    """What the author is told about the repository's projects besides the service."""
+    if not inputs.get('repository_parts'):
+        return ''
+    return PARTS_PROMPT.format(brief=PARTS_BRIEF if inputs.get('brief') else '')
 
 
 def repository_prompt(inputs: dict) -> str:

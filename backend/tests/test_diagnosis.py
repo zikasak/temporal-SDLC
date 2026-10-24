@@ -9,6 +9,7 @@ from temporalio.testing import ActivityEnvironment
 from app import docker_agents
 from app.api_design.models import empty_api
 from app.diagnosis import activities
+from app.languages import OTHER_PARTS_BUILD_DIRS
 
 RUN = 'f' * 32
 BROKEN = {'class_name': 'OrdersTest', 'name': 'creates'}
@@ -80,7 +81,7 @@ async def test_diagnosis_reviews_both_sides_and_publishes_a_bounded_verdict(sess
     payload = json.loads(sent.pop('input.json'))
     sent.pop('llm-settings.json')  # Shared model input is covered by the adapter lifecycle tests.
     assert json.loads(sent.pop('language.json')) == {
-        'name': 'java', 'build_dirs': ['target'], 'label': 'Java (Spring Boot)', 'report_pattern': 'TEST-*.xml'}
+        'name': 'java', 'build_dirs': ['target', *OTHER_PARTS_BUILD_DIRS], 'label': 'Java (Spring Boot)', 'report_pattern': 'TEST-*.xml'}
     # The reviewer gets both source trees and this run's evidence, and nothing else.
     assert sent == {'review/service/src/main/java/Orders.java': 'IMPLEMENTATION SOURCE',
                     'review/tests/src/test/java/OrdersTest.java': 'TEST SOURCE',

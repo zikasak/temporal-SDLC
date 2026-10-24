@@ -4,7 +4,9 @@ and Maven/JUnit 5 contract tests."""
 import re
 from pathlib import Path
 
-from app.languages import Implementation, Language, TestReports, TestSuite, register
+from app.languages import (
+    OTHER_PARTS_BUILD_DIRS, Implementation, Language, TestReports, TestSuite, register,
+)
 from app.config import CODEGEN_BASE_PACKAGE
 
 SPRING_SERVER_PROPERTIES = {
@@ -168,7 +170,7 @@ def _write_api_test_stubs(project: Path) -> None:
 JAVA = register(Language(
     name="java", label="Java (Spring Boot)",
     generator_args=_generator_args, post_process=_write_api_test_stubs,
-    build_dirs=("target",),
+    build_dirs=("target", *OTHER_PARTS_BUILD_DIRS),
     implementation=Implementation(
         instructions=IMPLEMENTATION_INSTRUCTIONS,
         contract_paths=("src",), test_dirs=("test", "tests"),
