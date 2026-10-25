@@ -1959,3 +1959,24 @@ h2 {
   .settings-fields label:nth-child(2) { grid-column: 1 / -1; grid-row: 2; }
   .settings-actions { align-items: flex-start; flex-direction: column; }
 }
+
+/* Repository and branch cells of the Workflows list filter the list by their value. */
+.workflow-filter-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline dotted;
+  cursor: pointer;
+}
+
+.workflow-filter-link:hover,
+.workflow-filter-link:focus-visible {
+  text-decoration: underline;
+}
+
+/* The choice about the contract, contract tests or Dockerfile a branch already has. */
+.contract-decision {
+  gap: 12px;
+}

@@ -1,6 +1,7 @@
 import ReactDOM from "react-dom/client";
 import ApiDesign from "./ApiDesign";
 import App from "./App";
+import Onboarding from "./Onboarding";
 import Requirements from "./Requirements";
 import Workflows from "./Workflows";
 import GitHubSettings from "./GitHubSettings";
@@ -12,12 +13,13 @@ import { APP_RETURN_PATH } from "./github";
 import "./styles.css";
 import React, { useEffect, useState } from "react";
 
-type Mode = "chat" | "requirements" | "api-design" | "workflows" | "github" | "users" | "settings";
+type Mode = "chat" | "requirements" | "api-design" | "onboarding" | "workflows" | "github" | "users" | "settings";
 
 const modes: [Mode, string][] = [
   ["chat", "Chat"],
   ["requirements", "Requirements"],
   ["api-design", "API design"],
+  ["onboarding", "Onboarding"],
   ["workflows", "Workflows"],
   ["github", "GitHub"],
   ["settings", "Settings"],
@@ -104,6 +106,7 @@ function Shell() {
       {shown === "chat" && <App />}
       {shown === "requirements" && <Requirements />}
       {shown === "api-design" && <ApiDesign />}
+      {shown === "onboarding" && <Onboarding />}
       {shown === "workflows" && <Workflows />}
       {shown === "github" && <GitHubSettings />}
       {shown === "users" && <Users />}

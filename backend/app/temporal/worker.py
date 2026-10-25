@@ -7,6 +7,7 @@ from temporalio.worker import Worker
 
 from app.config import TASK_QUEUE, TEMPORAL_ADDRESS
 from app.logging_setup import configure_logging
+from app.temporal.executions import prepare_namespace
 from app.temporal.lifecycle import run_worker
 
 with workflow.unsafe.imports_passed_through():
@@ -55,6 +56,7 @@ async def main():
     await ensure_settings_schema()
     await ensure_mention_schema()
     client = await Client.connect(TEMPORAL_ADDRESS)
+    await prepare_namespace(client)
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,

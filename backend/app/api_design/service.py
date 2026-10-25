@@ -18,6 +18,7 @@ from app.requirements import service as requirements_service
 from app.requirements.document import render_requirements_markdown
 from app.requirements.models import DIRECT_KINDS
 from app.temporal.client import TemporalUnavailable, connect_temporal
+from app.temporal.execution_fields import execution_fields
 from app.temporal.registry import is_registered, register
 from app.temporal.sessions import (
     SessionBusy, SessionNotFound, fork_messages, is_running, start_update, state_at_message,
@@ -89,6 +90,7 @@ async def _start(state: ApiDesignState) -> str:
             state,
             id=session_id,
             task_queue=TASK_QUEUE,
+            **execution_fields(state.repository),
         )
     await register(session_id)
     logger.info("Started API design session %s from %s", session_id, state.source_session_id)

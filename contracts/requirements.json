@@ -557,5 +557,77 @@
     "priority": "must",
     "rationale": "User chose: listed and reopened like sessions.",
     "title": "List and reopen onboardings"
+  },
+  {
+    "category": "functional",
+    "description": "The web client has its own Onboarding tab in the top navigation, where a signed-in user picks a repository and branch and starts an onboarding.",
+    "id": "FR-67",
+    "priority": "must",
+    "rationale": "User chose both a dedicated tab and an entry point from the repository picker.",
+    "title": "Onboarding tab in the web client"
+  },
+  {
+    "category": "functional",
+    "description": "The repository picker in the Requirements tab offers an action that starts an onboarding of the selected repository and branch and opens it in the Onboarding tab.",
+    "id": "FR-68",
+    "priority": "must",
+    "rationale": "User chose both a dedicated tab and an entry point from the repository picker.",
+    "title": "Start onboarding from the repository picker"
+  },
+  {
+    "category": "functional",
+    "description": "The Workflows page offers an Onboarding filter for OnboardingWorkflow executions, and each onboarding execution in the list links to its page in the Onboarding tab, where its state and progress are shown.",
+    "id": "FR-69",
+    "priority": "must",
+    "rationale": "User chose to reuse the Workflows list filtered to onboarding workflows to satisfy FR-66.",
+    "title": "Reopen onboardings from the Workflows list"
+  },
+  {
+    "category": "functional",
+    "description": "The Onboarding page lets the user do everything the /onboarding/sessions endpoints offer: send messages and answer the interviewer's questions, decide whether to replace an existing contract, update the checkout, finalize, fork after a message, retry a failed turn, follow the delivery progress, answer agent questions (including the confirmation of a bug in the existing code), accept open review findings or give instructions about them, and retry a failed stage.",
+    "id": "FR-70",
+    "priority": "must",
+    "rationale": "User chose: everything the backend offers.",
+    "title": "Onboarding UI covers every backend action"
+  },
+  {
+    "category": "functional",
+    "description": "Each OnboardingWorkflow, RequirementsWorkflow, ApiDesignWorkflow and DeliveryWorkflow execution returned by GET /workflows includes the repository and branch it works in, and the Workflows page shows them.",
+    "id": "FR-71",
+    "priority": "must",
+    "rationale": "User chose to return repository and branch for onboarding, requirements, API design and delivery workflows.",
+    "title": "Repository and branch in GET /workflows"
+  },
+  {
+    "category": "functional",
+    "description": "In the Workflows list, every DeliveryWorkflow and CodegenWorkflow execution started for an onboarding links to that onboarding's page in the Onboarding tab.",
+    "id": "FR-72",
+    "priority": "must",
+    "rationale": "User chose to link an onboarding's delivery and code generation workflows to the onboarding's page.",
+    "title": "Onboarding's child workflows link to its page"
+  },
+  {
+    "category": "functional",
+    "description": "Every execution returned by GET /workflows that was started for an onboarding (the OnboardingWorkflow itself and its DeliveryWorkflow and CodegenWorkflow executions) includes the ID of that onboarding, which the Workflows page uses to link to the onboarding's page.",
+    "id": "FR-73",
+    "priority": "must",
+    "rationale": "User chose to have the API return an onboarding ID rather than have the page follow parent_workflow_id.",
+    "title": "Onboarding ID in GET /workflows"
+  },
+  {
+    "category": "functional",
+    "description": "Every execution returned by GET /workflows includes the new repository, branch and onboarding ID fields, and each one is null when it does not apply to that execution (for example, repository and branch of a chat or sample workflow, or the onboarding ID of a run not started for an onboarding).",
+    "id": "FR-74",
+    "priority": "must",
+    "rationale": "User chose to always return the fields, with null when they do not apply.",
+    "title": "Inapplicable new fields are null"
+  },
+  {
+    "category": "non_functional",
+    "description": "GET /workflows keeps its existing fields (workflow_id, run_id, workflow_type, status, task_queue, parent_workflow_id, start_time, close_time, next_page_token) with their current names and meaning; the change only adds fields.",
+    "id": "NFR-7",
+    "priority": "must",
+    "rationale": "User: only add fields.",
+    "title": "GET /workflows only gains fields"
   }
 ]

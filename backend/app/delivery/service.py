@@ -19,6 +19,7 @@ from app.github.errors import GitHubError
 from app.github.models import PullRequestMention
 from app.requirements.models import CHANGE_KINDS
 from app.temporal.client import connect_temporal
+from app.temporal.execution_fields import task_fields
 from app.temporal.sessions import SessionBusy, SessionEnded, is_running, start_update
 
 logger = logging.getLogger(__name__)
@@ -146,6 +147,7 @@ async def _restart(finished: _Finished, session_id: str) -> None:
             task_queue=description.task_queue,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
             id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
+            **task_fields(finished.state.spec),
         )
     except WorkflowAlreadyStartedError as exc:
         raise SessionBusy(busy) from exc

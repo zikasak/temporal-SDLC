@@ -1724,7 +1724,7 @@
       "tag": "workflows"
     },
     {
-      "description": "Newest first, 50 per page. type OnboardingWorkflow lists onboardings, whose workflow_id is the onboarding's session_id, as RequirementsWorkflow lists requirements sessions.",
+      "description": "Newest first, 50 per page. type OnboardingWorkflow lists onboardings, whose workflow_id is the onboarding's session_id, as RequirementsWorkflow lists requirements sessions. Every execution also carries repository, branch and onboarding_id, each null when it does not apply; the existing fields keep their names and meaning. The optional repository, branch and onboarding_id filters combine with type and with each other (all must match); executions whose field is null never match a filter on it. The repository filter is compared case-insensitively, as on GitHub; the branch and onboarding_id filters must match exactly. A malformed filter value (a repository that is not owner/name, an empty branch, or an onboarding_id not of the form onboarding-session- followed by 32 hex digits) answers 422 with a detail, like an invalid type or page_token. Pass the same filters with page_token when continuing. Executions started before this change, which have no recorded repository, branch or onboarding ID, are deleted from the namespace when the change is deployed (the instance has no users yet), so they are not listed.",
       "error_statuses": [
         401,
         422,
@@ -1745,13 +1745,40 @@
           "name": "page_token",
           "required": false,
           "type": "string"
+        },
+        {
+          "description": "Only executions working in this repository, as owner/name (its full_name), compared case-insensitively; 422 when not of the form owner/name.",
+          "location": "query",
+          "name": "repository",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "description": "Only executions working on this source branch, compared exactly; 422 when empty.",
+          "location": "query",
+          "name": "branch",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "description": "Only executions started for this onboarding (onboarding-session- followed by 32 hex digits), compared exactly; 422 otherwise.",
+          "location": "query",
+          "name": "onboarding_id",
+          "required": false,
+          "type": "string"
         }
       ],
       "path": "/workflows",
       "request_schema": null,
       "requirement_ids": [
         "FR-17",
-        "FR-66"
+        "FR-66",
+        "FR-69",
+        "FR-71",
+        "FR-72",
+        "FR-73",
+        "FR-74",
+        "NFR-7"
       ],
       "response_array": false,
       "response_schema": "WorkflowPage",
@@ -2980,6 +3007,27 @@
           "array": false,
           "format": "date-time",
           "name": "close_time",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "Always present. The repository the execution works in, as in the session's repository (provider, repository_id, full_name, html_url, private and the source branch), for OnboardingWorkflow, RequirementsWorkflow, ApiDesignWorkflow and DeliveryWorkflow executions, and for CodegenWorkflow executions the repository of the delivery that started them; null for any other execution.",
+          "name": "repository",
+          "required": false,
+          "type": "RepositorySelection"
+        },
+        {
+          "array": false,
+          "description": "Always present. The branch the execution works in (the source branch the session checked out, not a branch the delivery pushes; the same as repository.branch), for OnboardingWorkflow, RequirementsWorkflow, ApiDesignWorkflow and DeliveryWorkflow executions, and for CodegenWorkflow executions the branch of the delivery that started them; null for any other execution.",
+          "name": "branch",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "Always present. The session_id of the onboarding the execution was started for: the OnboardingWorkflow's own workflow_id, or the onboarding that started a DeliveryWorkflow or CodegenWorkflow execution; null for an execution not started for an onboarding.",
+          "name": "onboarding_id",
           "required": false,
           "type": "string"
         }
