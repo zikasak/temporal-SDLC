@@ -82,6 +82,8 @@ export type DeliveryProgress = {
   pull_request_text_error: string | null;
   // Authorised mentions of the app on the pull request and what they led to.
   mentions: PullRequestMention[];
+  // Whether an onboarding changed the existing code after the user confirmed a bug in it.
+  existing_code_changed: boolean;
 };
 
 export type PullRequestMention = {
@@ -257,6 +259,7 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     pull_request_status: publicationStatuses.includes(value.pull_request_status as PublicationStatus)
       ? value.pull_request_status as PublicationStatus : "not_applicable",
     mentions: pullRequestMentions(value.mentions),
+    existing_code_changed: value.existing_code_changed === true,
   };
 }
 
@@ -595,10 +598,13 @@ function DocumentationResults({ progress, retrying, disabled, onRetry }: {
   );
 }
 
-export function DeliveryResults({ progress, documentation = false, retrying, disabled, onRetry, answering, onAnswer, onFindings }: {
+export function DeliveryResults({ progress, documentation = false, onboarding = false, retrying, disabled, onRetry, answering, onAnswer, onFindings }: {
   progress: DeliveryProgress;
   // Whether the session's task changes documentation only.
   documentation?: boolean;
+  // Whether this is an onboarding: the existing code is built with a new Dockerfile, no
+  // server code is generated.
+  onboarding?: boolean;
   retrying: GenerationStage | null;
   disabled: boolean;
   onRetry: (stage: GenerationStage) => void;
@@ -634,6 +640,7 @@ export function DeliveryResults({ progress, documentation = false, retrying, dis
       {pending && (
         <div role="status">
           <p>{stage === "running" ? "Running contract tests against the service…" :
+            onboarding ? `Building the existing code with the new Dockerfile: ${service} · Tests: ${progress.tests ? "compiled" : progress.tests_error ? "generation or build failed" : "generating and compiling"}…` :
             change ? (progress.baseline_status === "reproduced" ? `Changing the service: ${service}…` : "Waiting for the baseline…") :
             !progress.code ? "Waiting for server code…" : "Waiting for service and test builds…"}</p>
           {progress.code && <p className="verification-builds">
@@ -649,6 +656,10 @@ export function DeliveryResults({ progress, documentation = false, retrying, dis
         Repair round {repairing.attempt}: correcting the {repairing.target}…
       </p>}
       {stage === "not_applicable" && <p>Verification is not available for this session.</p>}
+      {onboarding && progress.existing_code_changed && <p role="status">
+        The existing code was changed after you confirmed a bug in it; the commit message and
+        the pull request description say so.
+      </p>}
       {stage === "skipped" && <p>Verification skipped because a prerequisite did not complete.</p>}
       {progress.implementation_error && <div className="generation-failure">
         <p role="alert">{progress.implementation_error}</p>

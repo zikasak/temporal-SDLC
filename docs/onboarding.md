@@ -31,3 +31,21 @@ When the diagnosis blames the existing code, the delivery asks the user in
 
 When the existing code changes, `existing_code_changed` is set, and the commit message and
 the pull request description say so.
+
+## In the web client and the workflow list
+
+The **Onboarding** tab starts an onboarding from a repository and branch and offers every
+action of `/onboarding/sessions`: messages and answers, the contract decision, checkout
+updates, finalizing, forking, retries, agent questions (including the confirmation of a bug
+in the existing code), open review findings and stage retries. The repository picker of the
+**Requirements** tab can start an onboarding of the selected branch and open it there.
+
+`GET /workflows` returns `repository`, `branch` and `onboarding_id` for every execution
+(null when they do not apply) and filters on them with the same query parameters. They are
+recorded when an execution starts (`app/temporal/execution_fields.py`): the repository
+selection in the memo and the custom keyword search attributes `Repository` (lower-cased
+`owner/name`), `Branch` and `OnboardingId`. The `temporal-namespace` compose job and the main
+worker register the attributes; the main worker also deletes, once per instance, the
+executions started before they recorded these fields. The **Workflows** page has an
+Onboarding filter, shows each execution's repository and branch, and links an onboarding and
+the delivery and code generation it started to the onboarding's page.

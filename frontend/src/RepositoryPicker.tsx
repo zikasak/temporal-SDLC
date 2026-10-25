@@ -23,12 +23,16 @@ export function RepositorySummary({ repository, checkout = null, onUpdate }: {
   </p>;
 }
 
-export default function RepositoryPicker({ value, onChange, disabled = false, required = false }: {
+export default function RepositoryPicker({ value, onChange, disabled = false, required = false, onOnboard, onboarding = false }: {
   value: RepositorySelection | null;
   onChange: (value: RepositorySelection | null) => void;
   disabled?: boolean;
   // Chat may run without a repository; every other session works inside one.
   required?: boolean;
+  // Offers to onboard the selected repository and branch instead, when given.
+  onOnboard?: (value: RepositorySelection) => void;
+  // Whether that onboarding is being started.
+  onboarding?: boolean;
 }) {
   const id = useId();
   const [repositories, setRepositories] = useState<Repository[]>([]);
@@ -153,6 +157,13 @@ export default function RepositoryPicker({ value, onChange, disabled = false, re
       {branchError && <p className="connector-error" role="alert">{branchError} Use Refresh to try again{!required && ", or choose No repository"}.</p>}
       {nextBranchPage && <button type="button" className="workflows-refresh" disabled={loadingBranches}
         onClick={() => void loadBranches(value.full_name, nextBranchPage, true)}>Load more branches</button>}
+      {onOnboard && <div className="repository-actions">
+        <button type="button" className="workflows-refresh" disabled={!value.branch || onboarding}
+          title="Draft a contract, contract tests and a Dockerfile for the existing code of this branch"
+          onClick={() => onOnboard(value)}>
+          {onboarding ? "Starting onboarding…" : "Onboard this branch"}
+        </button>
+      </div>}
     </>}
   </fieldset>;
 }

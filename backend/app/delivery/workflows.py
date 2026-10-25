@@ -21,6 +21,7 @@ with workflow.unsafe.imports_passed_through():
     from app.diagnosis.models import repair_request
     from app.github.checkout import SNAPSHOT_DIR
     from app.github.models import PullRequestMention
+    from app.temporal.execution_fields import task_fields
     from app.requirements.models import CHANGE_KINDS
     from app.review.models import (
         MAX_REVIEW_ROUNDS, ReviewFinding, ReviewRound, earlier_findings, for_worker,
@@ -600,6 +601,7 @@ class DeliveryWorkflow:
                 args=[self.spec.session_id, self.spec.document_id, self.spec.language],
                 id=self._child_id('codegen'),
                 task_queue=CODEGEN_TASK_QUEUE,
+                **task_fields(self.spec),
                 result_type=dict,
             )
         except ChildWorkflowError as exc:

@@ -116,6 +116,18 @@ Contract ambiguities and how the suite reads them:
   Temporal are accepted. Contract decisions, forks, the one-unfinished-onboarding rule
   (409), existing artifacts, checkout updates and the pushed branch name
   `onboarding/<source branch>-<short id>` need a real repository and are not tested.
+- `GET /workflows` filters `repository`, `branch` and `onboarding_id`
+  (FR-71 to FR-74, `tests/test_workflow_filters.py`): without Temporal the suite can only
+  check that malformed values answer 422 with a `detail` (repository not `owner/name`,
+  empty branch, onboarding ID not `onboarding-session-` plus 32 hex digits), assuming
+  this validation happens before Temporal is contacted, as the contract says "like an
+  invalid type or page_token". Well formed filters must give 200 or 503. When Temporal
+  is available and the list is not empty, the new fields (always present, null when
+  not applicable) and the filter matching are checked on whatever executions come back;
+  with no executions or no Temporal this part verifies nothing more. Matching of
+  filters against real executions, the case-insensitive repository filter, and the
+  onboarding IDs of DeliveryWorkflow/CodegenWorkflow executions need Temporal, a
+  repository and an LLM, so they are not tested.
 - Unknown IDs are well formed (prefix and 32 hex digits) so that they are treated as
   unknown rather than malformed.
 

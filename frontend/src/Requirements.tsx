@@ -6,6 +6,7 @@ import {
   type DeliveryProgress, type GenerationStage,
 } from "./Delivery";
 import ForkButton from "./ForkButton";
+import { onboardingLink, startOnboarding } from "./Onboarding";
 import IntakeForm, { type Intake } from "./Intake";
 import { AskedQuestions, QuestionForm, questionList, type Question } from "./Questions";
 import RepositoryPicker, { RepositorySummary } from "./RepositoryPicker";
@@ -185,6 +186,7 @@ export default function Requirements() {
   const [retryingGeneration, setRetryingGeneration] = useState<GenerationStage | null>(null);
   const [error, setError] = useState("");
   const [repositoryChoice, setRepositoryChoice] = useState<RepositorySelection | null>(null);
+  const [onboarding, setOnboarding] = useState(false);
   const conversation = useRef<HTMLDivElement>(null);
   const chatEnd = useRef<HTMLDivElement>(null);
 
@@ -261,6 +263,19 @@ export default function Requirements() {
       setError(failure(caught, "Could not start a session."));
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  /** Starts onboarding the chosen branch instead and opens it in the Onboarding tab. */
+  async function onboard(repository: RepositorySelection) {
+    if (!repository.branch) return;
+    setOnboarding(true);
+    setError("");
+    try {
+      window.location.assign(onboardingLink(await startOnboarding(repository)));
+    } catch (caught) {
+      setError(failure(caught, "Could not start the onboarding."));
+      setOnboarding(false);
     }
   }
 
@@ -536,7 +551,9 @@ export default function Requirements() {
           ) : (
             !sessionId && (
               <IntakeForm
-                repository={<RepositoryPicker value={repositoryChoice} onChange={setRepositoryChoice} disabled={submitting} required />}
+                repository={<RepositoryPicker value={repositoryChoice} onChange={setRepositoryChoice}
+                  disabled={submitting || onboarding} required
+                  onOnboard={(repository) => void onboard(repository)} onboarding={onboarding} />}
                 repositoryReady={Boolean(repositoryChoice?.branch)}
                 disabled={submitting}
                 submitting={submitting}

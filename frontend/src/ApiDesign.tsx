@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import Markdown from "react-markdown";
 import { errorMessage, failure, readBody } from "./api";
+import { ApiModelSection, type ApiModel } from "./ApiModel";
 import ForkButton from "./ForkButton";
 import { AskedQuestions, QuestionForm, questionList, type Question } from "./Questions";
 import { RepositorySummary } from "./RepositoryPicker";
@@ -19,39 +20,6 @@ type Requirement = {
   id: string;
   category: string;
   title: string;
-};
-
-type Property = {
-  name: string;
-  type: string;
-  required: boolean;
-  array: boolean;
-  format?: string;
-  enum?: string[];
-  description?: string;
-};
-
-type Schema = { name: string; description: string; properties: Property[] };
-
-type Parameter = { name: string; location: string; type: string; required: boolean };
-
-type Endpoint = {
-  method: string;
-  path: string;
-  summary: string;
-  parameters: Parameter[];
-  request_schema: string | null;
-  response_status: number;
-  response_schema: string | null;
-  response_array: boolean;
-  error_statuses: number[];
-  requirement_ids: string[];
-};
-
-type ApiModel = {
-  info: { title: string; version: string; description: string; auth: string };
-  schemas: Schema[];
-  endpoints: Endpoint[];
 };
 
 type OpenApiDocument = {
@@ -96,13 +64,6 @@ const statusLabels: Record<SessionStatus, string> = {
   completed: "Complete",
   failed: "Failed",
 };
-const authLabels: Record<string, string> = {
-  none: "No authentication",
-  bearer: "Bearer token",
-  api_key: "API key",
-  basic: "Basic auth",
-};
-
 function urlParam(name: string) {
   return new URLSearchParams(window.location.search).get(name) ?? "";
 }
@@ -182,11 +143,6 @@ function codePending(session: Session) {
 
 function pipelinePending(session: Session) {
   return codePending(session) || deliveryPending(session);
-}
-
-function typeLabel(type: string | null, array: boolean) {
-  if (!type) return "—";
-  return array ? `${type}[]` : type;
 }
 
 export default function ApiDesign() {
@@ -456,11 +412,6 @@ export default function ApiDesign() {
   const documentUrl = session
     ? `/api/api-design/sessions/${encodeURIComponent(session.session_id)}/document`
     : "";
-  const linked = new Set(session?.api.endpoints.flatMap((item) => item.requirement_ids));
-  const uncovered =
-    session?.requirements.filter(
-      (item) => item.category === "functional" && !linked.has(item.id),
-    ) ?? [];
 
   return (
     <main className="page-shell">
@@ -711,113 +662,7 @@ export default function ApiDesign() {
             )}
 
             {session && (
-              <section className="requirements-list api-model" aria-label="API model">
-                <h3>
-                  {session.api.info.title} <small>v{session.api.info.version}</small>
-                </h3>
-                <p className="api-auth">
-                  {authLabels[session.api.info.auth] ?? session.api.info.auth}
-                </p>
-
-                {session.problems.length > 0 && (
-                  <div className="requirement-group api-problems">
-                    <h4>Open problems</h4>
-                    <ul>
-                      {session.problems.map((item) => (
-                        <li key={item}>
-                          <p>{item}</p>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                <div className="requirement-group">
-                  <h4>Endpoints ({session.api.endpoints.length})</h4>
-                  {session.api.endpoints.length === 0 ? (
-                    <p className="requirement-empty">None yet.</p>
-                  ) : (
-                    <ul>
-                      {session.api.endpoints.map((item) => (
-                        <li key={`${item.method} ${item.path}`}>
-                          <div className="requirement-heading">
-                            <span className={`method method-${item.method.toLowerCase()}`}>
-                              {item.method}
-                            </span>
-                            <code className="endpoint-path">{item.path}</code>
-                            <strong>{item.summary}</strong>
-                          </div>
-                          <p className="endpoint-io">
-                            {item.request_schema && <>body {item.request_schema} → </>}
-                            {item.response_status}{" "}
-                            {typeLabel(item.response_schema, item.response_array)}
-                            {item.error_statuses.length > 0 &&
-                              ` · errors ${item.error_statuses.join(", ")}`}
-                            {item.parameters
-                              .filter((parameter) => parameter.location !== "path")
-                              .map((parameter) => ` · ${parameter.location} ${parameter.name}`)
-                              .join("")}
-                          </p>
-                          {item.requirement_ids.length > 0 && (
-                            <small>{item.requirement_ids.join(", ")}</small>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-
-                <div className="requirement-group">
-                  <h4>Schemas ({session.api.schemas.length})</h4>
-                  {session.api.schemas.length === 0 ? (
-                    <p className="requirement-empty">None yet.</p>
-                  ) : (
-                    <ul>
-                      {session.api.schemas.map((schema) => (
-                        <li key={schema.name}>
-                          <div className="requirement-heading">
-                            <strong>{schema.name}</strong>
-                          </div>
-                          {schema.description && <small>{schema.description}</small>}
-                          <table className="schema-properties">
-                            <tbody>
-                              {schema.properties.map((item) => (
-                                <tr key={item.name}>
-                                  <td>
-                                    <code>{item.name}</code>
-                                    {item.required && <span title="Required">*</span>}
-                                  </td>
-                                  <td>
-                                    {typeLabel(item.type, item.array)}
-                                    {item.format && ` (${item.format})`}
-                                    {item.enum && ` ${item.enum.join(" | ")}`}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-
-                {uncovered.length > 0 && (
-                  <div className="requirement-group">
-                    <h4>Functional requirements without endpoints</h4>
-                    <ul>
-                      {uncovered.map((item) => (
-                        <li key={item.id}>
-                          <div className="requirement-heading">
-                            <code>{item.id}</code>
-                            <span>{item.title}</span>
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </section>
+              <ApiModelSection api={session.api} problems={session.problems} requirements={session.requirements} />
             )}
 
             {!session && !error && (
