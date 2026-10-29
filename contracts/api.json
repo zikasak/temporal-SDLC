@@ -1363,7 +1363,8 @@
         "FR-39",
         "FR-52",
         "FR-54",
-        "FR-55"
+        "FR-55",
+        "FR-77"
       ],
       "response_array": false,
       "response_schema": "RequirementsSession",
@@ -1550,7 +1551,7 @@
       "tag": "requirements"
     },
     {
-      "description": "Writes the requirements document; the session is completed once it is ready.",
+      "description": "Writes the requirements document; the session is completed once it is ready. A new service or an API change on a repository then starts its API design by itself (api_design_session_id).",
       "error_statuses": [
         401,
         503,
@@ -1570,7 +1571,8 @@
       "path": "/requirements/sessions/{session_id}/finalize",
       "request_schema": null,
       "requirement_ids": [
-        "FR-12"
+        "FR-12",
+        "FR-77"
       ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
@@ -2618,6 +2620,13 @@
         {
           "array": false,
           "name": "contract_commit",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "The API design the session started by itself once the user generated the document of a new service or an API change; the design starts drafting the API at once, as a child of the session. Null until then, for any other kind of task, for a session without a repository, and for one whose document was written because it expired.",
+          "name": "api_design_session_id",
           "required": false,
           "type": "string"
         },

@@ -9,9 +9,9 @@ from temporalio.client import WorkflowUpdateStage
 
 from app.api_design.models import ApiDesignState
 from app.api_design.openapi import design_problems
+from app.api_design.source import design_state
 from app.config import TASK_QUEUE
 from app.delivery import service as delivery_service
-from app.delivery.contract import with_requirements
 from app.delivery.models import DeliveryProgress, RetryStage
 from app.documents import DocumentNotFound, get_generated_document
 from app.requirements import service as requirements_service
@@ -54,24 +54,7 @@ async def start_session(requirements_session_id: str) -> str:
                     requirements_session_id)
         requirements_document = render_requirements_markdown(source.requirements,
                                                              retired=source.retired)
-    state = ApiDesignState(
-        source_session_id=requirements_session_id,
-        requirements=source.requirements,
-        requirements_document=requirements_document,
-        kind=source.kind,
-        repository=source.repository,
-    )
-    if source.contract:
-        # A change to the service the repository holds: the design goes on from that
-        # service's contract, which the change's requirements join.
-        contract = with_requirements(source.contract, source.requirements, source.retired)
-        state.requirements = contract["requirements"]
-        state.requirements_document = contract["requirements_document"]
-        state.change_document = requirements_document
-        state.contract = source.contract
-        state.contract_commit = source.contract_commit
-        state.api = contract["api"]
-        state.language = contract["language"]
+    state = design_state(requirements_session_id, source, requirements_document)
     return await _start(state)
 
 

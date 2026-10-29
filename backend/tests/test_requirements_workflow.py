@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any
 
@@ -10,9 +11,11 @@ from temporalio.client import WorkflowUpdateFailedError, WorkflowUpdateStage
 from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
+from app.api_design.models import ApiDesignState
 from app.requirements import service
 from app.requirements.models import RequirementsState
 from app.temporal import sessions
+from app.temporal.executions import ensure_search_attributes
 from app.temporal.sessions import InvalidForkPoint
 from app.temporal.workflows import RequirementsWorkflow
 
@@ -30,6 +33,7 @@ class FakeActivities:
         # The kind the model records on its next turn, when any.
         self.kind: str | None = "new_service"
         self.checkouts: list[str] = []
+        self.registered: list[str] = []
 
     @activity.defn(name="checkout_repository")
     async def checkout_repository(self, session_id: str, repository: dict[str, Any]) -> dict[str, Any]:
@@ -65,6 +69,25 @@ class FakeActivities:
         self.documents.append(session_id)
         return DOCUMENT
 
+    @activity.defn(name="read_requirements_document")
+    async def read_requirements_document(self, session_id: str, document_id: str) -> str:
+        return "# Requirements"
+
+    @activity.defn(name="register_session")
+    async def register_session(self, session_id: str) -> None:
+        self.registered.append(session_id)
+
+
+# The API designs the sessions started, by ID, with what they were started from.
+designs: dict[str, ApiDesignState] = {}
+
+
+@workflow.defn(name="ApiDesignWorkflow", sandboxed=False)
+class FakeApiDesign:
+    @workflow.run
+    async def run(self, state: ApiDesignState) -> None:
+        designs[workflow.info().workflow_id] = state
+
 
 @pytest.fixture(scope="session")
 async def env():
@@ -72,14 +95,36 @@ async def env():
         yield env
 
 
-@pytest.fixture
-async def worker(env):
+@pytest.fixture(scope="module")
+async def server():
+    """The dev server, for children started with the repository's search attributes,
+    which the time-skipping one does not know."""
+    async with await WorkflowEnvironment.start_local() as server:
+        await ensure_search_attributes(server.client)
+        yield server
+
+
+@asynccontextmanager
+async def workers(env):
     activities = FakeActivities()
     async with Worker(
-        env.client, task_queue=TASK_QUEUE, workflows=[RequirementsWorkflow],
+        env.client, task_queue=TASK_QUEUE, workflows=[RequirementsWorkflow, FakeApiDesign],
         activities=[activities.requirements_turn, activities.write_requirements_document,
-                    activities.checkout_repository],
+                    activities.checkout_repository, activities.read_requirements_document,
+                    activities.register_session],
     ):
+        yield activities
+
+
+@pytest.fixture
+async def worker(env):
+    async with workers(env) as activities:
+        yield activities
+
+
+@pytest.fixture
+async def live(server):
+    async with workers(server) as activities:
         yield activities
 
 
@@ -190,6 +235,42 @@ async def test_idle_session_auto_finalizes(env, worker):
     await handle.execute_update(RequirementsWorkflow.answer_questions, ["Book rooms"])
     await env.sleep(timedelta(hours=25))
     assert await handle.result() == DOCUMENT
+
+
+async def test_finalized_session_starts_its_api_design(server, live, repository_selection):
+    handle = await start(server, RequirementsState(messages=[
+        {"role": "assistant", "content": "Hello"}], repository=repository_selection))
+    await wait_for_status(handle, "interviewing")
+    await handle.execute_update(RequirementsWorkflow.send_message, "Book rooms")
+    await handle.execute_update(RequirementsWorkflow.finalize)
+
+    for _ in range(100):
+        state = await handle.query(RequirementsWorkflow.get_state)
+        if state.api_design_session_id in designs:
+            break
+        await asyncio.sleep(0.05)
+    design_id = state.api_design_session_id
+    assert design_id and design_id.startswith("api-design-session-")
+    design = designs[design_id]
+    assert design.source_session_id == handle.id
+    assert design.requirements_document == "# Requirements"
+    assert design.requirements == state.requirements and design.kind == "new_service"
+    assert design.repository == repository_selection
+    assert live.registered == [design_id]
+    description = await server.client.get_workflow_handle(design_id).describe()
+    assert description.parent_id == handle.id
+    await handle.terminate()
+
+
+async def test_expired_session_starts_no_api_design(env, worker, repository_selection):
+    handle = await start(env, RequirementsState(messages=[
+        {"role": "assistant", "content": "Hello"}], repository=repository_selection))
+    await wait_for_status(handle, "interviewing")
+    await handle.execute_update(RequirementsWorkflow.send_message, "Book rooms")
+    await env.sleep(timedelta(hours=25))
+    state = await wait_for_status(handle, "completed")
+    assert state.api_design_session_id is None and worker.registered == []
+    await handle.terminate()
 
 
 async def test_kind_must_be_recorded_before_the_document_is_generated(env, worker):

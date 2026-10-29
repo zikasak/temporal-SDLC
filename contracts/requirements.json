@@ -639,6 +639,14 @@
     "title": "List top-level flows and a flow's children"
   },
   {
+    "category": "functional",
+    "description": "When the user generates the requirements document of a new service or an API change on a repository, the requirements session starts that task's API design itself, which drafts the API at once; GET /requirements/sessions/{session_id} returns its ID as api_design_session_id and the web client opens the design from there. A session whose document was written because it was idle for a day starts none. POST /api-design/sessions can still start further designs of the same requirements.",
+    "id": "FR-77",
+    "priority": "must",
+    "rationale": "User asked that the API design flow start automatically when the requirements are finished.",
+    "title": "API design starts when the requirements are finished"
+  },
+  {
     "category": "non_functional",
     "description": "GET /workflows keeps its existing fields (workflow_id, run_id, workflow_type, status, task_queue, parent_workflow_id, start_time, close_time, next_page_token) with their current names and meaning; the change only adds fields.",
     "id": "NFR-7",

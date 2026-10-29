@@ -47,6 +47,7 @@ from app.onboarding.models import onboarding_branch
 from app.llm.graph import get_message_graph, interview, native_session
 from app.llm.model import get_model
 from app.llm.prompt import INLINE_DOCUMENT_CHARS, MAX_REMEMBERED_CHARS, model_messages
+from app.temporal.registry import register
 from app.temporal.tracing import trace_activity
 from app.tracing import langchain_config
 from app.requirements.document import DOCUMENT_FILENAME, render_requirements_markdown
@@ -527,6 +528,12 @@ async def read_requirements_document(session_id: str, document_id: str) -> str:
         return (await get_generated_document(document_id, session_id))["parsed_text"]
     except DocumentNotFound as exc:
         raise ApplicationError(str(exc), non_retryable=True) from exc
+
+
+@activity.defn
+async def register_session(session_id: str) -> None:
+    """Record a session a workflow started, as the API records the ones it starts."""
+    await register(session_id)
 
 
 @activity.defn

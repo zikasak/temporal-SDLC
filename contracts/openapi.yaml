@@ -2574,6 +2574,7 @@ paths:
       - FR-52
       - FR-54
       - FR-55
+      - FR-77
   /requirements/sessions/{session_id}/answers:
     post:
       operationId: postRequirementsSessionsBySessionIdAnswers
@@ -2904,7 +2905,8 @@ paths:
       operationId: postRequirementsSessionsBySessionIdFinalize
       summary: Finalize the requirements session
       description: Writes the requirements document; the session is completed once
-        it is ready.
+        it is ready. A new service or an API change on a repository then starts its
+        API design by itself (api_design_session_id).
       tags:
       - requirements
       parameters:
@@ -2947,6 +2949,7 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-12
+      - FR-77
   /requirements/sessions/{session_id}/fork:
     post:
       operationId: postRequirementsSessionsBySessionIdFork
@@ -3846,6 +3849,14 @@ components:
           type: object
         contract_commit:
           type: string
+        api_design_session_id:
+          type: string
+          description: The API design the session started by itself once the
+            user generated the document of a new service or an API change; the
+            design starts drafting the API at once, as a child of the session.
+            Null until then, for any other kind of task, for a session without a
+            repository, and for one whose document was written because it
+            expired.
         delivery:
           type: object
           description: Progress of the delivery of a bugfix or documentation task.
