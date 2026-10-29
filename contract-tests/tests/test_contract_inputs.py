@@ -49,9 +49,7 @@ def test_session_endpoints_require_sign_in(anonymous):
             ("POST", "/requirements/sessions", {
                 "repository": {"full_name": "owner/repo", "branch": "main"},
                 "kind": "docs", "answers": [], "task": "Document it."}),
-            ("POST", "/api-design/sessions", {"requirements_session_id": "x"}),
             ("GET", "/workflows", None),
-            ("POST", "/start", None),
             ("POST", "/llm/requests", {"message": "hello"}),
             ("GET", "/connectors/github/repositories", None)):
         response = anonymous.request(method, path, json=body)
@@ -166,9 +164,3 @@ def test_github_configuration_needs_a_private_key(admin):
 
 def test_manifest_connection_needs_a_code(admin):
     assert admin.post("/connectors/github/connection/manifest", json={}).status_code == 422
-
-
-def test_sample_workflow_reports_unavailable_temporal(admin):
-    response = admin.post("/start")
-    assert response.status_code == 503
-    assert isinstance(response.json()["detail"], str) and response.json()["detail"]

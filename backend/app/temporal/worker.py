@@ -25,7 +25,6 @@ with workflow.unsafe.imports_passed_through():
     from app.temporal.activities import (
         api_design_turn,
         checkout_repository,
-        greet,
         open_pull_request,
         parse_document,
         publish_documentation,
@@ -44,7 +43,6 @@ with workflow.unsafe.imports_passed_through():
         ApiDesignWorkflow,
         LLMRequestWorkflow,
         RequirementsWorkflow,
-        SayHelloWorkflow,
     )
 
 
@@ -62,11 +60,11 @@ async def main():
         client,
         task_queue=TASK_QUEUE,
         workflows=[
-            SayHelloWorkflow, LLMRequestWorkflow, RequirementsWorkflow, ApiDesignWorkflow,
+            LLMRequestWorkflow, RequirementsWorkflow, ApiDesignWorkflow,
             DeliveryWorkflow, OnboardingWorkflow,
         ],
         activities=[
-            greet, parse_document, send_llm_message,
+            parse_document, send_llm_message,
             requirements_turn, write_requirements_document,
             api_design_turn, write_openapi_document,
             checkout_repository, update_repository_checkout, publish_repository,

@@ -13,11 +13,18 @@ from app.temporal import executions
 TASK_QUEUE = "listing-test"
 
 
-@workflow.defn(name="SayHelloWorkflow")
-class FakeHello:
+@workflow.defn(name="LLMRequestWorkflow")
+class FakeChat:
     @workflow.run
-    async def run(self, name: str) -> str:
-        return f"Hello, {name}!"
+    async def run(self, message: str) -> str:
+        return f"Reply to {message}"
+
+
+@workflow.defn(name="CodegenWorkflow")
+class FakeCodegen:
+    @workflow.run
+    async def run(self) -> None:
+        pass
 
 
 @workflow.defn(name="RequirementsWorkflow")
@@ -39,7 +46,7 @@ class FakeSession:
     @workflow.run
     async def run(self) -> None:
         session_id = workflow.info().workflow_id
-        await workflow.execute_child_workflow("SayHelloWorkflow", "child", id=f"{session_id}-hello")
+        await workflow.execute_child_workflow("CodegenWorkflow", id=f"{session_id}-codegen")
         await workflow.execute_child_workflow("DeliveryWorkflow", id=f"delivery-{session_id}")
 
 
@@ -75,22 +82,22 @@ async def _listed(workflow_type: str | None, expected: int, **filters) -> list[d
 
 
 async def test_lists_workflows_filtered_by_type(client):
-    async with Worker(client, task_queue=TASK_QUEUE, workflows=[FakeHello, FakeRequirements],
+    async with Worker(client, task_queue=TASK_QUEUE, workflows=[FakeChat, FakeRequirements],
                       workflow_runner=UnsandboxedWorkflowRunner()):
         for name in ("a", "b", "c"):
             await client.execute_workflow(
-                "SayHelloWorkflow", name, id=f"hello-{uuid.uuid4()}", task_queue=TASK_QUEUE
+                "LLMRequestWorkflow", name, id=f"llm-request-{uuid.uuid4()}", task_queue=TASK_QUEUE
             )
         running = await client.start_workflow(
             "RequirementsWorkflow", id=f"requirements-session-{uuid.uuid4().hex}",
             task_queue=TASK_QUEUE,
         )
 
-        hello = await _listed("SayHelloWorkflow", 3)
-        assert len(hello) == 3
-        assert {item["workflow_type"] for item in hello} == {"SayHelloWorkflow"}
-        assert {item["status"] for item in hello} == {"completed"}
-        assert all(item["close_time"] for item in hello)
+        chats = await _listed("LLMRequestWorkflow", 3)
+        assert len(chats) == 3
+        assert {item["workflow_type"] for item in chats} == {"LLMRequestWorkflow"}
+        assert {item["status"] for item in chats} == {"completed"}
+        assert all(item["close_time"] for item in chats)
 
         requirements = await _listed("RequirementsWorkflow", 1)
         assert [item["workflow_id"] for item in requirements] == [running.id]
@@ -104,7 +111,7 @@ async def test_lists_workflows_filtered_by_type(client):
 
 async def test_lists_top_level_workflows_and_the_children_of_one(client):
     async with Worker(client, task_queue=TASK_QUEUE,
-                      workflows=[FakeHello, FakeSession, FakeDelivery],
+                      workflows=[FakeCodegen, FakeSession, FakeDelivery],
                       workflow_runner=UnsandboxedWorkflowRunner()):
         session_id = f"api-design-session-{uuid.uuid4().hex}"
         await client.execute_workflow("ApiDesignWorkflow", id=session_id, task_queue=TASK_QUEUE)
@@ -114,7 +121,7 @@ async def test_lists_top_level_workflows_and_the_children_of_one(client):
 
         children = await _listed(None, 3, parent=session_id)
         assert sorted(item["workflow_type"] for item in children) == [
-            "DeliveryWorkflow", "DeliveryWorkflow", "SayHelloWorkflow"]
+            "CodegenWorkflow", "DeliveryWorkflow", "DeliveryWorkflow"]
 
         top = await _listed(None, 1, top_level=True)
         assert session_id in {item["workflow_id"] for item in top}

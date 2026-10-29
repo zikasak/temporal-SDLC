@@ -8,8 +8,7 @@ type FlowType =
   | "LLMRequestWorkflow"
   | "RequirementsWorkflow"
   | "ApiDesignWorkflow"
-  | "OnboardingWorkflow"
-  | "SayHelloWorkflow";
+  | "OnboardingWorkflow";
 
 type Flow = {
   workflow_id: string;
@@ -54,7 +53,6 @@ const flowTypes: [FlowType, string][] = [
   ["RequirementsWorkflow", "Requirements"],
   ["ApiDesignWorkflow", "API design"],
   ["OnboardingWorkflow", "Onboarding"],
-  ["SayHelloWorkflow", "Hello"],
 ];
 
 const typeLabels: Record<string, string> = {

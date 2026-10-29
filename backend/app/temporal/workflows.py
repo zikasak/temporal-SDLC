@@ -25,7 +25,6 @@ with workflow.unsafe.imports_passed_through():
     from app.temporal.activities import (
         api_design_turn,
         checkout_repository,
-        greet,
         parse_document,
         read_repository_contract,
         read_requirements_document,
@@ -168,17 +167,6 @@ class _Delivering:
         # The caller found the delivery closed; this session may not have seen it yet.
         if not self._delivering or self._redelivery is not None:
             raise ValueError("This session's delivery cannot be started again.")
-
-
-@workflow.defn
-class SayHelloWorkflow:
-    @workflow.run
-    async def run(self, name: str) -> str:
-        return await workflow.execute_activity(
-            greet,
-            name,
-            schedule_to_close_timeout=timedelta(seconds=10),
-        )
 
 
 @workflow.defn

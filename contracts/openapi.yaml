@@ -3140,34 +3140,6 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-10
-  /start:
-    post:
-      operationId: postStart
-      summary: Start the sample workflow
-      description: Runs the sample greeting workflow and returns its result.
-      tags:
-      - workflows
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/WorkflowResult'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-18
   /workflows:
     get:
       operationId: getWorkflows
@@ -4115,14 +4087,6 @@ components:
           type: string
       required:
       - workflows
-    WorkflowResult:
-      type: object
-      description: The result of the sample workflow.
-      properties:
-        result:
-          type: string
-      required:
-      - result
     ReviewFinding:
       type: object
       description: A problem the code review found in the delivery's own changes.

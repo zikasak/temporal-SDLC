@@ -357,11 +357,6 @@ async def read_repository_contract(session_id: str) -> RepositoryContract:
 
 
 @activity.defn
-async def greet(name: str) -> str:
-    return f"Hello {name}"
-
-
-@activity.defn
 @trace_activity('parse-document', feature='documents', input_parameter='document_id')
 async def parse_document(document_id: str) -> None:
     try:

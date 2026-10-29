@@ -37,7 +37,6 @@ WORKFLOW_TYPES = (
     "OnboardingWorkflow",
     "DeliveryWorkflow",
     "CodegenWorkflow",
-    "SayHelloWorkflow",
 )
 PAGE_SIZE = 50
 ONBOARDING_ID_PATTERN = re.compile(r"onboarding-session-[0-9a-f]{32}")

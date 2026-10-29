@@ -107,13 +107,6 @@
   },
   {
     "category": "functional",
-    "description": "POST /start runs the sample greeting workflow and returns its result.",
-    "id": "FR-18",
-    "priority": "could",
-    "title": "Start the sample workflow"
-  },
-  {
-    "category": "functional",
     "description": "While a requirements session waits for the user, its branch can be checked out again at its latest commit, which the interview reads and the task is finalized against from then on, such as a commit that added the contract the task needs. The session shows the commit it is checked out at. A failed update keeps the earlier checkout and says so.",
     "id": "FR-19",
     "priority": "must",
@@ -616,7 +609,7 @@
   },
   {
     "category": "functional",
-    "description": "Every execution returned by GET /workflows includes the new repository, branch and onboarding ID fields, and each one is null when it does not apply to that execution (for example, repository and branch of a chat or sample workflow, or the onboarding ID of a run not started for an onboarding).",
+    "description": "Every execution returned by GET /workflows includes the new repository, branch and onboarding ID fields, and each one is null when it does not apply to that execution (for example, repository and branch of a chat, or the onboarding ID of a run not started for an onboarding).",
     "id": "FR-74",
     "priority": "must",
     "rationale": "User chose to always return the fields, with null when they do not apply.",

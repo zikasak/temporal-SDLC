@@ -1685,25 +1685,6 @@
       "tag": "requirements"
     },
     {
-      "description": "Runs the sample greeting workflow and returns its result.",
-      "error_statuses": [
-        401,
-        503
-      ],
-      "method": "POST",
-      "parameters": [],
-      "path": "/start",
-      "request_schema": null,
-      "requirement_ids": [
-        "FR-18"
-      ],
-      "response_array": false,
-      "response_schema": "WorkflowResult",
-      "response_status": 200,
-      "summary": "Start the sample workflow",
-      "tag": "workflows"
-    },
-    {
       "description": "Newest first, 50 per page. type OnboardingWorkflow lists onboardings, whose workflow_id is the onboarding's session_id, as RequirementsWorkflow lists requirements sessions. Every execution also carries repository, branch and onboarding_id, each null when it does not apply; the existing fields keep their names and meaning. The optional repository, branch and onboarding_id filters combine with type and with each other (all must match); executions whose field is null never match a filter on it. The repository filter is compared case-insensitively, as on GitHub; the branch and onboarding_id filters must match exactly. A malformed filter value (a repository that is not owner/name, an empty branch, or an onboarding_id not of the form onboarding-session- followed by 32 hex digits) answers 422 with a detail, like an invalid type or page_token. Pass the same filters with page_token when continuing. Executions started before this change, which have no recorded repository, branch or onboarding ID, are deleted from the namespace when the change is deployed (the instance has no users yet), so they are not listed. top_level=true lists only the flows without a parent, and parent=<workflow_id> only the children of one (and its session's delivery runs); they cannot be combined.",
       "error_statuses": [
         401,
@@ -3037,18 +3018,6 @@
           "array": false,
           "name": "next_page_token",
           "required": false,
-          "type": "string"
-        }
-      ]
-    },
-    {
-      "description": "The result of the sample workflow.",
-      "name": "WorkflowResult",
-      "properties": [
-        {
-          "array": false,
-          "name": "result",
-          "required": true,
           "type": "string"
         }
       ]

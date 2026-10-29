@@ -19,7 +19,7 @@ flowchart LR
         docs["Document layer<br/>Storage, parsing, search, revisions, cleanup"]
 
         subgraph mainworker["Main Temporal worker · my-task-queue"]
-            workflows["Workflows<br/>SayHello · LLMRequest<br/>Requirements · ApiDesign"]
+            workflows["Workflows<br/>LLMRequest · Requirements<br/>ApiDesign"]
             activities["Activities<br/>Parse attachments, answer turns<br/>Write requirements and OpenAPI"]
             agent["LangGraph agent<br/>Model ↔ tool-call loop"]
             tools["Tools<br/>Read/search/write documents<br/>Update requirements and API model"]
@@ -122,14 +122,12 @@ The browser uses `/api` in front of these backend routes. Vite removes that pref
 | `GET /llm/requests/{request_id}/documents/{document_id}` | Download an attachment or generated document. |
 | `GET /requirements/intake` | The questions every requirements interview starts with: the task kinds, each kind's questions, and the task question. |
 | `POST /requirements/sessions` | Start a requirements interview from the repository, the chosen kind, the answers to its questions, and the task. |
-| `POST /api-design/sessions` | Start API design from a completed requirements session. |
 | `GET /{requirements,api-design}/sessions/{session_id}` | Retrieve session state. |
 | `POST /{requirements,api-design}/sessions/{session_id}/{messages,retry,finalize,fork}` | Update, retry, finalize, or branch a session. |
 | `POST /{requirements,api-design}/sessions/{session_id}/answers` | Answer the questions the model asked with `ask_user`. |
 | `POST /{requirements,api-design}/sessions/{session_id}/delivery/answers` | Answer a paused coding agent of the session's delivery. |
 | `GET /{requirements,api-design}/sessions/{session_id}/document` | Download the finalized document. |
 | `GET /workflows` | List workflow executions with optional type filter and pagination. |
-| `POST /start` | Run the greeting workflow and return its result. |
 
 Brace notation groups routes for readability; it is not literal URL syntax.
 
