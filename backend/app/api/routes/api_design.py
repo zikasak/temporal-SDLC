@@ -1,6 +1,5 @@
 import re
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
 
 from app.api.downloads import session_document_download
 from app.api.errors import http_error
@@ -20,29 +19,15 @@ from app.api_design.service import (
     retry_generation,
     retry_message,
     send_message,
-    start_session,
 )
 
 router = APIRouter(prefix="/api-design/sessions")
 SESSION_ID_PATTERN = re.compile(r"api-design-session-[0-9a-f]{32}")
 
 
-class StartBody(BaseModel):
-    requirements_session_id: str = Field(pattern=r"^requirements-session-[0-9a-f]{32}$")
-
-
 def _check_session_id(session_id: str) -> None:
     if not SESSION_ID_PATTERN.fullmatch(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
-
-
-@router.post("", status_code=201)
-async def create_session(body: StartBody):
-    try:
-        session_id = await start_session(body.requirements_session_id)
-    except Exception as exc:
-        raise http_error(exc) from exc
-    return {"session_id": session_id}
 
 
 @router.get("/{session_id}")

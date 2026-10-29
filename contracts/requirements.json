@@ -72,7 +72,7 @@
   },
   {
     "category": "functional",
-    "description": "A new service or an API change continues in an API design session started from its completed requirements session. Its conversation records the endpoints, schemas and implementation language, and finalizing it renders the OpenAPI document.",
+    "description": "A new service or an API change continues in an API design session that its completed requirements session starts (FR-77). Its conversation records the endpoints, schemas and implementation language, and finalizing it renders the OpenAPI document.",
     "id": "FR-13",
     "priority": "must",
     "title": "Design the API"
@@ -640,10 +640,10 @@
   },
   {
     "category": "functional",
-    "description": "When the user generates the requirements document of a new service or an API change on a repository, the requirements session starts that task's API design itself, which drafts the API at once; GET /requirements/sessions/{session_id} returns its ID as api_design_session_id and the web client opens the design from there. A session whose document was written because it was idle for a day starts none. POST /api-design/sessions can still start further designs of the same requirements.",
+    "description": "When the user generates the requirements document of a new service or an API change on a repository, the requirements session starts that task's API design itself, which drafts the API at once; GET /requirements/sessions/{session_id} returns its ID as api_design_session_id and the web client opens the design from there. A session whose document was written because it was idle for a day starts none. An API design is never started by hand: there is no POST /api-design/sessions, and the only other design of the same requirements is a fork of one.",
     "id": "FR-77",
     "priority": "must",
-    "rationale": "User asked that the API design flow start automatically when the requirements are finished.",
+    "rationale": "User asked that the API design flow start automatically when the requirements are finished, and then that it no longer be started by hand.",
     "title": "API design starts when the requirements are finished"
   },
   {

@@ -575,9 +575,8 @@ async def test_bugfix_is_delivered_red_to_green_from_the_requirements_session(en
     assert response["delivery"]["baseline_status"] == "reproduced"
     assert response["delivery"]["publication"]["branch"] == "generated/abc"
     assert "contract" not in response
-    # Such a task has no API design to start.
-    with pytest.raises(sessions.SessionBusy, match="no API design"):
-        await api_design_service.start_session(handle.id)
+    # Such a task has no API design.
+    assert response["api_design_session_id"] is None
 
 
 @pytest.mark.parametrize('baseline, status, error', [
@@ -750,8 +749,7 @@ async def test_documentation_is_written_alone_and_pushed_as_unverified(env, work
 
     response = await requirements_service.get_session(handle.id)
     assert response["delivery"]["publication"]["verified"] is False
-    with pytest.raises(sessions.SessionBusy, match="no API design"):
-        await api_design_service.start_session(handle.id)
+    assert response["api_design_session_id"] is None
 
 
 @pytest.mark.parametrize("kind", ["bugfix", "api_change", "docs"])

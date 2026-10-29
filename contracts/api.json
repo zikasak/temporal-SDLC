@@ -1,28 +1,6 @@
 {
   "endpoints": [
     {
-      "description": "Continues a completed requirements session of a new service or an API change.",
-      "error_statuses": [
-        401,
-        503,
-        404,
-        409,
-        422
-      ],
-      "method": "POST",
-      "parameters": [],
-      "path": "/api-design/sessions",
-      "request_schema": "StartApiDesignSession",
-      "requirement_ids": [
-        "FR-13"
-      ],
-      "response_array": false,
-      "response_schema": "SessionCreated",
-      "response_status": 201,
-      "summary": "Start an API design session",
-      "tag": "api-design"
-    },
-    {
       "description": "The session's conversation, state and delivery progress.",
       "error_statuses": [
         401,
@@ -2636,18 +2614,6 @@
           "name": "delivery",
           "required": false,
           "type": "object"
-        }
-      ]
-    },
-    {
-      "description": "The requirements session an API design continues.",
-      "name": "StartApiDesignSession",
-      "properties": [
-        {
-          "array": false,
-          "name": "requirements_session_id",
-          "required": true,
-          "type": "string"
         }
       ]
     },

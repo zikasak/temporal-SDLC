@@ -708,19 +708,11 @@ export default function Requirements() {
                     <span>revision {session.document.revision}</span>
                   </li>
                 </ul>
-                {session.status === "completed" && session.kind && !directKinds.includes(session.kind) && (
-                  session.api_design_session_id ? (
-                    <a className="next-step"
-                      href={`?mode=api-design&session_id=${encodeURIComponent(session.api_design_session_id)}`}>
-                      Continue with the API design →
-                    </a>
-                  ) : (
-                    // Sessions finalized before designs started by themselves.
-                    <a className="next-step"
-                      href={`?mode=api-design&requirements_session_id=${encodeURIComponent(session.session_id)}`}>
-                      Design the API from these requirements →
-                    </a>
-                  )
+                {session.api_design_session_id && (
+                  <a className="next-step"
+                    href={`?mode=api-design&session_id=${encodeURIComponent(session.api_design_session_id)}`}>
+                    Continue with the API design →
+                  </a>
                 )}
                 {session.delivery && (
                   <DeliveryResults progress={session.delivery} retrying={retryingGeneration}

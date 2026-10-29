@@ -5,59 +5,6 @@ info:
   description: Turns tasks described in conversation into requirements, API designs
     and verified code published to GitHub.
 paths:
-  /api-design/sessions:
-    post:
-      operationId: postApiDesignSessions
-      summary: Start an API design session
-      description: Continues a completed requirements session of a new service or
-        an API change.
-      tags:
-      - api-design
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/StartApiDesignSession'
-      responses:
-        '201':
-          description: Created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionCreated'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Entity
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-13
   /api-design/sessions/{session_id}:
     get:
       operationId: getApiDesignSessionsBySessionId
@@ -3875,14 +3822,6 @@ components:
       - messages
       - requirements
       - retired
-    StartApiDesignSession:
-      type: object
-      description: The requirements session an API design continues.
-      properties:
-        requirements_session_id:
-          type: string
-      required:
-      - requirements_session_id
     ApiDesignSession:
       type: object
       description: An API design session and its delivery.

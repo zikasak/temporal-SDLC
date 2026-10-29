@@ -9,53 +9,17 @@ from temporalio.client import WorkflowUpdateStage
 
 from app.api_design.models import ApiDesignState
 from app.api_design.openapi import design_problems
-from app.api_design.source import design_state
 from app.config import TASK_QUEUE
 from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, RetryStage
-from app.documents import DocumentNotFound, get_generated_document
-from app.requirements import service as requirements_service
-from app.requirements.document import render_requirements_markdown
-from app.requirements.models import DIRECT_KINDS
-from app.temporal.client import TemporalUnavailable, connect_temporal
+from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import execution_fields
-from app.temporal.registry import is_registered, register
+from app.temporal.registry import register
 from app.temporal.sessions import (
     SessionBusy, SessionNotFound, fork_messages, is_running, start_update, state_at_message,
 )
 
 logger = logging.getLogger(__name__)
-
-
-async def start_session(requirements_session_id: str) -> str:
-    try:
-        source = await requirements_service.get_state(requirements_session_id)
-    except TemporalUnavailable:
-        # An unknown source session is reported as such even without Temporal.
-        if not await is_registered(requirements_session_id):
-            raise SessionNotFound("Requirements session not found") from None
-        raise
-    if source.status != "completed" or not source.document:
-        raise SessionBusy("Generate the requirements document before designing the API.")
-    if source.kind in DIRECT_KINDS:
-        raise SessionBusy("This task leaves the API as it is, so it has no API design: "
-                          "its requirements session delivers it.")
-    if not source.repository:
-        raise SessionBusy("This requirements session has no repository. Start a new "
-                          "requirements session and choose one.")
-    try:
-        document = await get_generated_document(
-            source.document["document_id"], requirements_session_id
-        )
-        requirements_document = document["parsed_text"]
-    except DocumentNotFound:
-        # The stored document expired; the requirements tables still carry the content.
-        logger.info("Requirements document for %s expired; rendering from tables",
-                    requirements_session_id)
-        requirements_document = render_requirements_markdown(source.requirements,
-                                                             retired=source.retired)
-    state = design_state(requirements_session_id, source, requirements_document)
-    return await _start(state)
 
 
 async def _start(state: ApiDesignState) -> str:

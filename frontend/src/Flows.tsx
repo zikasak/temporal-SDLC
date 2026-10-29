@@ -47,7 +47,8 @@ type Attention = {
   link: string;
 };
 
-// The flows a user starts, as the type filter offers them.
+// The flows the type filter offers: those a user starts, and the API designs that
+// finished requirements start.
 const flowTypes: [FlowType, string][] = [
   ["LLMRequestWorkflow", "Chat"],
   ["RequirementsWorkflow", "Requirements"],
@@ -562,7 +563,6 @@ export default function Flows({ search, refreshKey, onNavigate }: {
             <span>Start</span>
             <button type="button" onClick={() => onNavigate("?mode=chat")}>Chat</button>
             <button type="button" onClick={() => onNavigate("?mode=requirements")}>Requirements</button>
-            <button type="button" onClick={() => onNavigate("?mode=api-design")}>API design</button>
             <button type="button" onClick={() => onNavigate("?mode=onboarding")}>Onboarding</button>
             <button className="workflows-refresh" type="button" disabled={loading}
               onClick={() => setReload((value) => value + 1)}>
