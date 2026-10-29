@@ -3236,7 +3236,9 @@ paths:
         Pass the same filters with page_token when continuing. Executions started
         before this change, which have no recorded repository, branch or onboarding
         ID, are deleted from the namespace when the change is deployed (the instance
-        has no users yet), so they are not listed.
+        has no users yet), so they are not listed. top_level=true lists only the
+        flows without a parent, and parent=<workflow_id> only the children of one (and
+        its session's delivery runs); they cannot be combined.
       tags:
       - workflows
       parameters:
@@ -3273,6 +3275,21 @@ paths:
           type: string
         description: Only executions started for this onboarding (onboarding-session-
           followed by 32 hex digits), compared exactly; 422 otherwise.
+      - name: parent
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Only the children of this workflow execution, together with the
+          runs of its delivery (delivery- followed by the ID); 422 when empty or malformed,
+          or combined with top_level.
+      - name: top_level
+        in: query
+        required: false
+        schema:
+          type: boolean
+        description: true lists only executions without a parent workflow; a DeliveryWorkflow
+          is never listed, as it is listed under its session.
       responses:
         '200':
           description: OK
@@ -3306,6 +3323,7 @@ paths:
       - FR-72
       - FR-73
       - FR-74
+      - FR-76
       - NFR-7
 security:
 - bearer: []

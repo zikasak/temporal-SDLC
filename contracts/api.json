@@ -1724,7 +1724,7 @@
       "tag": "workflows"
     },
     {
-      "description": "Newest first, 50 per page. type OnboardingWorkflow lists onboardings, whose workflow_id is the onboarding's session_id, as RequirementsWorkflow lists requirements sessions. Every execution also carries repository, branch and onboarding_id, each null when it does not apply; the existing fields keep their names and meaning. The optional repository, branch and onboarding_id filters combine with type and with each other (all must match); executions whose field is null never match a filter on it. The repository filter is compared case-insensitively, as on GitHub; the branch and onboarding_id filters must match exactly. A malformed filter value (a repository that is not owner/name, an empty branch, or an onboarding_id not of the form onboarding-session- followed by 32 hex digits) answers 422 with a detail, like an invalid type or page_token. Pass the same filters with page_token when continuing. Executions started before this change, which have no recorded repository, branch or onboarding ID, are deleted from the namespace when the change is deployed (the instance has no users yet), so they are not listed.",
+      "description": "Newest first, 50 per page. type OnboardingWorkflow lists onboardings, whose workflow_id is the onboarding's session_id, as RequirementsWorkflow lists requirements sessions. Every execution also carries repository, branch and onboarding_id, each null when it does not apply; the existing fields keep their names and meaning. The optional repository, branch and onboarding_id filters combine with type and with each other (all must match); executions whose field is null never match a filter on it. The repository filter is compared case-insensitively, as on GitHub; the branch and onboarding_id filters must match exactly. A malformed filter value (a repository that is not owner/name, an empty branch, or an onboarding_id not of the form onboarding-session- followed by 32 hex digits) answers 422 with a detail, like an invalid type or page_token. Pass the same filters with page_token when continuing. Executions started before this change, which have no recorded repository, branch or onboarding ID, are deleted from the namespace when the change is deployed (the instance has no users yet), so they are not listed. top_level=true lists only the flows without a parent, and parent=<workflow_id> only the children of one (and its session's delivery runs); they cannot be combined.",
       "error_statuses": [
         401,
         422,
@@ -1766,6 +1766,20 @@
           "name": "onboarding_id",
           "required": false,
           "type": "string"
+        },
+        {
+          "description": "Only the children of this workflow execution, together with the runs of its delivery (delivery- followed by the ID); 422 when empty or malformed, or combined with top_level.",
+          "location": "query",
+          "name": "parent",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "description": "true lists only executions without a parent workflow; a DeliveryWorkflow is never listed, as it is listed under its session.",
+          "location": "query",
+          "name": "top_level",
+          "required": false,
+          "type": "boolean"
         }
       ],
       "path": "/workflows",
@@ -1778,7 +1792,8 @@
         "FR-72",
         "FR-73",
         "FR-74",
-        "NFR-7"
+        "NFR-7",
+        "FR-76"
       ],
       "response_array": false,
       "response_schema": "WorkflowPage",

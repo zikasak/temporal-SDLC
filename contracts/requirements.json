@@ -623,6 +623,22 @@
     "title": "Inapplicable new fields are null"
   },
   {
+    "category": "functional",
+    "description": "The web client shows every flow on one Flows page instead of separate Chat, Requirements, API design, Onboarding and Workflows tabs. The page lists the top-level flows; opening one lists its child flows and steps with their statuses, highlights each one waiting for the user (unanswered questions, a coding agent's questions, open review findings or a contract decision) with a button that opens its questions, and opens a flow's conversation, session or onboarding in a panel on the same page. New chats, requirements interviews and onboardings are started from that page.",
+    "id": "FR-75",
+    "priority": "must",
+    "rationale": "User asked to see each flow on the same page rather than on a page per kind of flow.",
+    "title": "One page for every flow"
+  },
+  {
+    "category": "functional",
+    "description": "GET /workflows takes top_level=true to list only executions without a parent (a session's delivery, even one started again on its own, is never top-level), and parent=<workflow_id> to list only the children of that execution together with the session's delivery runs. They combine with the other filters; parent with top_level, or an empty or malformed parent, answers 422.",
+    "id": "FR-76",
+    "priority": "must",
+    "rationale": "The Flows page lists top-level flows and expands one into its children.",
+    "title": "List top-level flows and a flow's children"
+  },
+  {
     "category": "non_functional",
     "description": "GET /workflows keeps its existing fields (workflow_id, run_id, workflow_type, status, task_queue, parent_workflow_id, start_time, close_time, next_page_token) with their current names and meaning; the change only adds fields.",
     "id": "NFR-7",

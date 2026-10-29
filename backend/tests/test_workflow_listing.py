@@ -27,6 +27,22 @@ class FakeRequirements:
         await workflow.wait_condition(lambda: False)
 
 
+@workflow.defn(name="DeliveryWorkflow")
+class FakeDelivery:
+    @workflow.run
+    async def run(self) -> None:
+        pass
+
+
+@workflow.defn(name="ApiDesignWorkflow")
+class FakeSession:
+    @workflow.run
+    async def run(self) -> None:
+        session_id = workflow.info().workflow_id
+        await workflow.execute_child_workflow("SayHelloWorkflow", "child", id=f"{session_id}-hello")
+        await workflow.execute_child_workflow("DeliveryWorkflow", id=f"delivery-{session_id}")
+
+
 @pytest.fixture(scope="module")
 async def env():
     async with await WorkflowEnvironment.start_local() as env:
@@ -43,13 +59,14 @@ async def client(env, monkeypatch):
     return env.client
 
 
-async def _listed(workflow_type: str | None, expected: int) -> list[dict]:
+async def _listed(workflow_type: str | None, expected: int, **filters) -> list[dict]:
     # Visibility is eventually consistent; wait for the new executions to show up.
     for _ in range(50):
-        page = await executions.list_executions(workflow_type)
+        page = await executions.list_executions(workflow_type, **filters)
         items = page["workflows"]
         while page["next_page_token"]:
-            page = await executions.list_executions(workflow_type, page["next_page_token"])
+            page = await executions.list_executions(workflow_type, page["next_page_token"],
+                                                    **filters)
             items += page["workflows"]
         if len(items) >= expected:
             return items
@@ -85,6 +102,26 @@ async def test_lists_workflows_filtered_by_type(client):
         await running.terminate()
 
 
+async def test_lists_top_level_workflows_and_the_children_of_one(client):
+    async with Worker(client, task_queue=TASK_QUEUE,
+                      workflows=[FakeHello, FakeSession, FakeDelivery],
+                      workflow_runner=UnsandboxedWorkflowRunner()):
+        session_id = f"api-design-session-{uuid.uuid4().hex}"
+        await client.execute_workflow("ApiDesignWorkflow", id=session_id, task_queue=TASK_QUEUE)
+        # A delivery started again on its own after its session closed.
+        await client.execute_workflow("DeliveryWorkflow", id=f"delivery-{session_id}",
+                                      task_queue=TASK_QUEUE)
+
+        children = await _listed(None, 3, parent=session_id)
+        assert sorted(item["workflow_type"] for item in children) == [
+            "DeliveryWorkflow", "DeliveryWorkflow", "SayHelloWorkflow"]
+
+        top = await _listed(None, 1, top_level=True)
+        assert session_id in {item["workflow_id"] for item in top}
+        assert not {item["workflow_id"] for item in children} & {
+            item["workflow_id"] for item in top}
+
+
 def test_rejects_unknown_type_and_bad_token():
     from fastapi import FastAPI
 
@@ -93,3 +130,7 @@ def test_rejects_unknown_type_and_bad_token():
     http = TestClient(app)
     assert http.get("/workflows", params={"type": "Nope' OR 1=1"}).status_code == 422
     assert http.get("/workflows", params={"page_token": "***"}).status_code == 422
+    assert http.get("/workflows", params={"parent": " "}).status_code == 422
+    assert http.get("/workflows", params={"parent": "a\nb"}).status_code == 422
+    assert http.get("/workflows",
+                    params={"parent": "x", "top_level": "true"}).status_code == 422
