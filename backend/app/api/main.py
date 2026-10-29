@@ -8,7 +8,7 @@ from fastapi import Depends, FastAPI, Request
 
 from app.api.errors import TemporalUnavailableError, temporal_unavailable_response
 from app.api.routes import (
-    api_design, auth, github, hello, llm_requests, onboarding, requirements, settings,
+    api_design, auth, github, llm_requests, onboarding, requirements, settings,
     workflows,
 )
 from app.auth.storage import ensure_schema as ensure_auth_schema
@@ -66,7 +66,7 @@ app.include_router(auth.router)
 # Called by GitHub, authenticated by its signature instead of a user token.
 app.include_router(github.events_router)
 # Everything else requires a signed-in user.
-for route_module in (hello, llm_requests, requirements, api_design, onboarding, workflows, github,
+for route_module in (llm_requests, requirements, api_design, onboarding, workflows, github,
                      settings):
     app.include_router(route_module.router, dependencies=[Depends(auth.require_user)])
 

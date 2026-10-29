@@ -3,7 +3,7 @@ import ApiDesign from "./ApiDesign";
 import App from "./App";
 import Onboarding from "./Onboarding";
 import Requirements from "./Requirements";
-import Workflows from "./Workflows";
+import Flows from "./Flows";
 import GitHubSettings from "./GitHubSettings";
 import Login, { userRecord, type User } from "./Login";
 import Users from "./Users";
@@ -13,28 +13,48 @@ import { APP_RETURN_PATH } from "./github";
 import "./styles.css";
 import React, { useEffect, useState } from "react";
 
-type Mode = "chat" | "requirements" | "api-design" | "onboarding" | "workflows" | "github" | "users" | "settings";
+type Page = "flows" | "github" | "users" | "settings";
+// The views of a flow, opened in a panel over the Flows page.
+type Panel = "chat" | "requirements" | "api-design" | "onboarding";
 
-const modes: [Mode, string][] = [
-  ["chat", "Chat"],
-  ["requirements", "Requirements"],
-  ["api-design", "API design"],
-  ["onboarding", "Onboarding"],
-  ["workflows", "Workflows"],
+const pages: [Page, string][] = [
+  ["flows", "Flows"],
   ["github", "GitHub"],
   ["settings", "Settings"],
   // Shown to the first user only.
   ["users", "Users"],
 ];
+const panels: [Panel, string][] = [
+  ["chat", "Chat"],
+  ["requirements", "Requirements interview"],
+  ["api-design", "API design"],
+  ["onboarding", "Onboarding"],
+];
 
-function modeFromUrl(): Mode {
-  if (window.location.pathname === APP_RETURN_PATH) return "github";
-  const mode = new URLSearchParams(window.location.search).get("mode");
-  return modes.find(([item]) => item === mode)?.[0] ?? "chat";
+/** The page and the flow view a URL shows; any other mode, such as the former Workflows
+ * tab, shows the list of flows. */
+function locate(search: string): { page: Page; panel: Panel | null } {
+  if (window.location.pathname === APP_RETURN_PATH) return { page: "github", panel: null };
+  const params = new URLSearchParams(search);
+  const mode = params.get("mode");
+  const page = pages.find(([item]) => item === mode)?.[0];
+  if (page) return { page, panel: null };
+  const panel = panels.find(([item]) => item === mode)?.[0] ?? (params.has("request_id") ? "chat" : null);
+  return { page: "flows", panel };
+}
+
+function listSearchOf(search: string) {
+  const { page, panel } = locate(search);
+  return page === "flows" && !panel ? search || "?" : "?";
 }
 
 function Shell() {
-  const [mode, setMode] = useState<Mode>(modeFromUrl);
+  const [search, setSearch] = useState(window.location.search);
+  // The list's filters, kept while a flow is open over it.
+  const [listSearch, setListSearch] = useState(() => listSearchOf(window.location.search));
+  // Changes whenever a flow view is opened, so that it reads its URL afresh.
+  const [panelKey, setPanelKey] = useState(0);
+  const [listRefresh, setListRefresh] = useState(0);
   // undefined while the saved session is being checked, null when signed out.
   const [user, setUser] = useState<User | null>();
   const [error, setError] = useState("");
@@ -72,18 +92,65 @@ function Shell() {
     }
   }
 
-  function switchMode(next: Mode) {
-    const url = new URL(window.location.href);
-    url.search = next === "chat" ? "" : `?mode=${next}`;
-    window.history.replaceState(null, "", url);
-    setMode(next);
+  function show(next: string) {
+    setSearch(next);
+    const { page, panel } = locate(next);
+    if (page === "flows" && !panel) setListSearch(next || "?");
+    setPanelKey((value) => value + 1);
   }
+
+  function navigate(next: string) {
+    const url = new URL(next, window.location.href);
+    url.pathname = "/";
+    window.history.pushState(null, "", url);
+    show(url.search);
+  }
+
+  function closePanel() {
+    navigate(listSearch);
+    setListRefresh((value) => value + 1);
+  }
+
+  useEffect(() => {
+    const onPopState = () => show(window.location.search);
+    // The flow views link to each other with ?… links: they open in place, without a reload.
+    const onClick = (event: MouseEvent) => {
+      const anchor = event.target instanceof Element ? event.target.closest("a") : null;
+      const href = anchor?.getAttribute("href");
+      if (!anchor || !href?.startsWith("?") || event.defaultPrevented || event.button !== 0 ||
+          event.metaKey || event.ctrlKey || event.shiftKey || event.altKey ||
+          anchor.target || anchor.hasAttribute("download")) return;
+      event.preventDefault();
+      navigate(href);
+    };
+    window.addEventListener("popstate", onPopState);
+    document.addEventListener("click", onClick);
+    return () => {
+      window.removeEventListener("popstate", onPopState);
+      document.removeEventListener("click", onClick);
+    };
+  }, []);
+
+  const { page, panel } = locate(search);
+
+  useEffect(() => {
+    if (!panel) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closePanel();
+    };
+    document.addEventListener("keydown", onKey);
+    document.body.classList.add("flow-panel-open");
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.classList.remove("flow-panel-open");
+    };
+  }, [panel, listSearch]);
 
   if (error) return <main className="page-shell"><p className="connector-error" role="alert">{error}</p></main>;
   if (user === undefined) return null;
   if (user === null) return <Login onSignedIn={setUser} />;
-  const available = modes.filter(([item]) => item !== "users" || user.admin);
-  const shown = available.some(([item]) => item === mode) ? mode : "chat";
+  const available = pages.filter(([item]) => item !== "users" || user.admin);
+  const shown = available.some(([item]) => item === page) ? page : "flows";
 
   return (
     <>
@@ -93,7 +160,7 @@ function Shell() {
             key={item}
             type="button"
             aria-current={shown === item ? "page" : undefined}
-            onClick={() => switchMode(item)}
+            onClick={() => navigate(item === "flows" ? listSearch : `?mode=${item}`)}
           >
             {label}
           </button>
@@ -103,11 +170,25 @@ function Shell() {
           <button type="button" onClick={() => void signOut()}>Sign out</button>
         </span>
       </nav>
-      {shown === "chat" && <App />}
-      {shown === "requirements" && <Requirements />}
-      {shown === "api-design" && <ApiDesign />}
-      {shown === "onboarding" && <Onboarding />}
-      {shown === "workflows" && <Workflows />}
+      {shown === "flows" && <Flows search={listSearch} refreshKey={listRefresh} onNavigate={navigate} />}
+      {shown === "flows" && panel && (
+        <div className="flow-panel-backdrop" onClick={(event) => {
+          if (event.target === event.currentTarget) closePanel();
+        }}>
+          <section className="flow-panel" role="dialog" aria-modal="true"
+            aria-label={panels.find(([item]) => item === panel)?.[1]}>
+            <div className="flow-panel-bar">
+              <button type="button" onClick={closePanel}>← All flows</button>
+            </div>
+            <div key={panelKey}>
+              {panel === "chat" && <App />}
+              {panel === "requirements" && <Requirements />}
+              {panel === "api-design" && <ApiDesign />}
+              {panel === "onboarding" && <Onboarding />}
+            </div>
+          </section>
+        </div>
+      )}
       {shown === "github" && <GitHubSettings />}
       {shown === "users" && <Users />}
       {shown === "settings" && <Settings />}

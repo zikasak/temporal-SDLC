@@ -71,7 +71,6 @@ function urlParam(name: string) {
 function rememberSessionId(sessionId: string) {
   const url = new URL(window.location.href);
   url.searchParams.set("mode", "api-design");
-  url.searchParams.delete("requirements_session_id");
   if (sessionId) url.searchParams.set("session_id", sessionId);
   else url.searchParams.delete("session_id");
   window.history.replaceState(null, "", url);
@@ -148,9 +147,6 @@ function pipelinePending(session: Session) {
 export default function ApiDesign() {
   const [sessionId, setSessionId] = useState(() => urlParam("session_id"));
   const [lookupId, setLookupId] = useState(() => urlParam("session_id"));
-  const [requirementsId, setRequirementsId] = useState(() =>
-    urlParam("requirements_session_id"),
-  );
   const [refreshKey, setRefreshKey] = useState(0);
   const [session, setSession] = useState<Session | null>(null);
   const [message, setMessage] = useState("");
@@ -211,26 +207,6 @@ export default function ApiDesign() {
     const parsed = await readBody(response);
     if (!response.ok) throw new Error(errorMessage(parsed, response.status));
     return parsed;
-  }
-
-  async function startSession(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const source = requirementsId.trim();
-    if (!source) return;
-    setSubmitting(true);
-    setError("");
-    setSession(null);
-    try {
-      const body = await post("", { requirements_session_id: source });
-      if (!isObject(body) || typeof body.session_id !== "string") {
-        throw new Error("The backend did not return a session ID.");
-      }
-      openSession(body.session_id);
-    } catch (caught) {
-      setError(failure(caught, "Could not start a session."));
-    } finally {
-      setSubmitting(false);
-    }
   }
 
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
@@ -418,7 +394,7 @@ export default function ApiDesign() {
       <header className="page-heading">
         <h1>API design</h1>
         <p className="page-intro">
-          Start from a finished requirements session. The LLM drafts the API, discusses
+          Each finished requirements session starts its own. The LLM drafts the API, discusses
           resources, endpoints and data models with you, and writes them up as an OpenAPI
           schema.
         </p>
@@ -427,7 +403,7 @@ export default function ApiDesign() {
       <div className="workspace">
         <section className="request-panel" aria-labelledby="design-title">
           <div className="section-heading">
-            <h2 id="design-title">{session ? "Your answer" : "New session"}</h2>
+            <h2 id="design-title">{session ? "Your answer" : "Open a session"}</h2>
           </div>
 
           {session && asked.length > 0 ? (
@@ -482,43 +458,10 @@ export default function ApiDesign() {
               </button>
             </form>
           ) : (
-            <form className="message-form" onSubmit={startSession}>
-              <label htmlFor="requirements-session-id">Requirements session ID</label>
-              <input
-                id="requirements-session-id"
-                className="text-input"
-                value={requirementsId}
-                onChange={(event) => setRequirementsId(event.target.value)}
-                placeholder="requirements-session-..."
-                disabled={submitting}
-              />
-              <button
-                className="run-button"
-                type="submit"
-                disabled={submitting || !requirementsId.trim()}
-              >
-                <span>{submitting ? "Starting" : "Start API design"}</span>
-                {submitting && <span className="spinner" aria-hidden="true" />}
-              </button>
-            </form>
-          )}
-
-          {session && (
-            <button
-              className="new-conversation"
-              type="button"
-              onClick={() => {
-                setSession(null);
-                setSessionId("");
-                setLookupId("");
-                setRequirementsId(session.source_session_id);
-                setMessage("");
-                setError("");
-                rememberSessionId("");
-              }}
-            >
-              Start a new session
-            </button>
+            <p className="request-note">
+              API designs start by themselves when the requirements of a new service or an API
+              change are generated. Open one from the Flows page or by its session ID.
+            </p>
           )}
 
           <form className="lookup-form" onSubmit={retrieveSession}>

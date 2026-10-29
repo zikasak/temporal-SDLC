@@ -1444,52 +1444,6 @@ h2 {
   margin-bottom: 12px;
 }
 
-.workflows-table-wrap {
-  margin-top: 22px;
-  overflow-x: auto;
-  border: 1px solid #e2e6e0;
-}
-
-.workflows-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.84rem;
-}
-
-.workflows-table th,
-.workflows-table td {
-  padding: 11px 14px;
-  border-bottom: 1px solid #e2e6e0;
-  text-align: left;
-  white-space: nowrap;
-}
-
-.workflows-table th {
-  color: var(--muted);
-  background: #f6f7f3;
-  font-size: 0.74rem;
-  font-weight: 650;
-  letter-spacing: 0.02em;
-}
-
-.workflows-table tbody tr:last-child td {
-  border-bottom: 0;
-}
-
-.workflows-table tbody tr:hover {
-  background: #f6f7f3;
-}
-
-.workflow-id a,
-.workflow-id code {
-  font-family: var(--mono);
-  font-size: 0.77rem;
-}
-
-.workflow-id a {
-  color: var(--green-dark);
-}
-
 .status-continued_as_new .status-dot {
   background: #6f8fb3;
 }
@@ -1960,7 +1914,7 @@ h2 {
   .settings-actions { align-items: flex-start; flex-direction: column; }
 }
 
-/* Repository and branch cells of the Workflows list filter the list by their value. */
+/* A flow's repository and branch filter the Flows list by their value. */
 .workflow-filter-link {
   padding: 0;
   border: 0;
@@ -1979,4 +1933,270 @@ h2 {
 /* The choice about the contract, contract tests or Dockerfile a branch already has. */
 .contract-decision {
   gap: 12px;
+}
+
+/* The Flows page: top-level flows, each opening into its child flows and steps. */
+.flow-start {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.flow-start > span {
+  margin-right: 2px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.flow-start button:not(.workflows-refresh) {
+  padding: 7px 13px;
+  border: 1px solid var(--green);
+  border-radius: 3px;
+  color: var(--green-dark);
+  background: #fff;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.flow-start button:not(.workflows-refresh):hover {
+  color: #fff;
+  background: var(--green);
+}
+
+.flow-start .workflows-refresh {
+  margin-left: 8px;
+}
+
+.flow-list,
+.flow-children {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.flow-list {
+  margin-top: 22px;
+  border: 1px solid #e2e6e0;
+}
+
+.flow-list > .flow-item + .flow-item {
+  border-top: 1px solid #e2e6e0;
+}
+
+.flow-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  min-height: 46px;
+  padding: 8px 14px;
+  font-size: 0.84rem;
+}
+
+.flow-top > .flow-row:hover {
+  background: #f6f7f3;
+}
+
+.flow-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 140px;
+  padding: 0;
+  border: 0;
+  color: var(--ink);
+  background: none;
+  font: inherit;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+}
+
+.flow-leaf {
+  padding-left: 18px;
+  font-weight: 600;
+  cursor: default;
+}
+
+.flow-chevron {
+  width: 10px;
+  height: 10px;
+  border-right: 2px solid var(--quiet);
+  border-bottom: 2px solid var(--quiet);
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+}
+
+.flow-toggle[aria-expanded="true"] .flow-chevron {
+  transform: rotate(45deg);
+}
+
+.flow-id {
+  min-width: 0;
+  max-width: 28ch;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-meta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.flow-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.flow-open-button,
+.flow-questions-button {
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--ink);
+  background: #fff;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.flow-open-button:hover {
+  border-color: var(--green);
+  color: var(--green-dark);
+}
+
+.flow-questions-button {
+  border-color: #b8742a;
+  color: #fff;
+  background: #b8742a;
+}
+
+.flow-questions-button:hover {
+  background: #965c1d;
+}
+
+/* A flow or step waiting for the user. */
+.flow-needs-input > .flow-row {
+  box-shadow: inset 4px 0 0 #b8742a;
+  background: #fdf6ec;
+}
+
+.flow-body {
+  padding: 4px 14px 14px 32px;
+  border-top: 1px dashed #e2e6e0;
+}
+
+.flow-children .flow-item {
+  border-left: 1px solid #e2e6e0;
+}
+
+.flow-children .flow-row {
+  min-height: 38px;
+  padding: 6px 10px;
+}
+
+.flow-children .flow-body {
+  padding: 2px 0 6px 22px;
+  border-top: 0;
+}
+
+.flow-children-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.flow-attention-list {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.flow-attention-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid #ecd2ad;
+  border-radius: 3px;
+  color: #6b3f0e;
+  background: #fdf6ec;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+/* A flow's conversation, session or onboarding, opened over the list. */
+body.flow-panel-open {
+  overflow: hidden;
+}
+
+.flow-panel-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(32, 42, 37, 0.35);
+}
+
+.flow-panel {
+  width: min(1240px, 100%);
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  background: #f2f3ee;
+  box-shadow: 0 18px 50px rgba(32, 42, 37, 0.25);
+}
+
+.flow-panel-bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--paper);
+}
+
+.flow-panel-bar button {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--ink);
+  background: #fff;
+  font-size: 0.84rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.flow-panel .page-shell {
+  width: calc(100% - 48px);
+  padding-top: 28px;
+}
+
+.flow-panel .page-heading {
+  margin-bottom: 24px;
+}
+
+@media (max-width: 640px) {
+  .flow-panel-backdrop {
+    padding: 0;
+  }
+
+  .flow-body {
+    padding-left: 14px;
+  }
 }

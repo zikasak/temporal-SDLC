@@ -5,59 +5,6 @@ info:
   description: Turns tasks described in conversation into requirements, API designs
     and verified code published to GitHub.
 paths:
-  /api-design/sessions:
-    post:
-      operationId: postApiDesignSessions
-      summary: Start an API design session
-      description: Continues a completed requirements session of a new service or
-        an API change.
-      tags:
-      - api-design
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/StartApiDesignSession'
-      responses:
-        '201':
-          description: Created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionCreated'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Not Found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '422':
-          description: Unprocessable Entity
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-13
   /api-design/sessions/{session_id}:
     get:
       operationId: getApiDesignSessionsBySessionId
@@ -2574,6 +2521,7 @@ paths:
       - FR-52
       - FR-54
       - FR-55
+      - FR-77
   /requirements/sessions/{session_id}/answers:
     post:
       operationId: postRequirementsSessionsBySessionIdAnswers
@@ -2904,7 +2852,8 @@ paths:
       operationId: postRequirementsSessionsBySessionIdFinalize
       summary: Finalize the requirements session
       description: Writes the requirements document; the session is completed once
-        it is ready.
+        it is ready. A new service or an API change on a repository then starts its
+        API design by itself (api_design_session_id).
       tags:
       - requirements
       parameters:
@@ -2947,6 +2896,7 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-12
+      - FR-77
   /requirements/sessions/{session_id}/fork:
     post:
       operationId: postRequirementsSessionsBySessionIdFork
@@ -3190,34 +3140,6 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-10
-  /start:
-    post:
-      operationId: postStart
-      summary: Start the sample workflow
-      description: Runs the sample greeting workflow and returns its result.
-      tags:
-      - workflows
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/WorkflowResult'
-        '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-18
   /workflows:
     get:
       operationId: getWorkflows
@@ -3236,7 +3158,9 @@ paths:
         Pass the same filters with page_token when continuing. Executions started
         before this change, which have no recorded repository, branch or onboarding
         ID, are deleted from the namespace when the change is deployed (the instance
-        has no users yet), so they are not listed.
+        has no users yet), so they are not listed. top_level=true lists only the
+        flows without a parent, and parent=<workflow_id> only the children of one (and
+        its session's delivery runs); they cannot be combined.
       tags:
       - workflows
       parameters:
@@ -3273,6 +3197,21 @@ paths:
           type: string
         description: Only executions started for this onboarding (onboarding-session-
           followed by 32 hex digits), compared exactly; 422 otherwise.
+      - name: parent
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Only the children of this workflow execution, together with the
+          runs of its delivery (delivery- followed by the ID); 422 when empty or malformed,
+          or combined with top_level.
+      - name: top_level
+        in: query
+        required: false
+        schema:
+          type: boolean
+        description: true lists only executions without a parent workflow; a DeliveryWorkflow
+          is never listed, as it is listed under its session.
       responses:
         '200':
           description: OK
@@ -3306,6 +3245,7 @@ paths:
       - FR-72
       - FR-73
       - FR-74
+      - FR-76
       - NFR-7
 security:
 - bearer: []
@@ -3828,6 +3768,14 @@ components:
           type: object
         contract_commit:
           type: string
+        api_design_session_id:
+          type: string
+          description: The API design the session started by itself once the
+            user generated the document of a new service or an API change; the
+            design starts drafting the API at once, as a child of the session.
+            Null until then, for any other kind of task, for a session without a
+            repository, and for one whose document was written because it
+            expired.
         delivery:
           type: object
           description: Progress of the delivery of a bugfix or documentation task.
@@ -3846,14 +3794,6 @@ components:
       - messages
       - requirements
       - retired
-    StartApiDesignSession:
-      type: object
-      description: The requirements session an API design continues.
-      properties:
-        requirements_session_id:
-          type: string
-      required:
-      - requirements_session_id
     ApiDesignSession:
       type: object
       description: An API design session and its delivery.
@@ -4147,14 +4087,6 @@ components:
           type: string
       required:
       - workflows
-    WorkflowResult:
-      type: object
-      description: The result of the sample workflow.
-      properties:
-        result:
-          type: string
-      required:
-      - result
     ReviewFinding:
       type: object
       description: A problem the code review found in the delivery's own changes.

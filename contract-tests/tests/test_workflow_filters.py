@@ -88,3 +88,35 @@ def test_executions_carry_the_new_fields_and_keep_the_old_ones(admin):
             assert item["onboarding_id"] == item["workflow_id"], item
         if item["onboarding_id"] is not None:
             assert item["onboarding_id"].startswith("onboarding-session-"), item
+
+
+# FR-76: top-level flows and the children of one.
+@pytest.mark.parametrize("params", (
+    {"parent": ""},
+    {"parent": " "},
+    {"parent": "a\nb"},
+    {"parent": "requirements-session-x", "top_level": "true"},
+), ids=("empty", "blank", "control-character", "with-top-level"))
+def test_malformed_parent_filter_is_rejected(admin, params):
+    assert_unprocessable(admin.get("/workflows", params=params))
+
+
+def test_top_level_lists_no_child_and_no_delivery(admin):
+    response = admin.get("/workflows", params={"top_level": "true"})
+    assert response.status_code in (200, 503), response.text
+    if response.status_code == 503:
+        return
+    for item in response.json()["workflows"]:
+        assert item["parent_workflow_id"] is None, item
+        assert item["workflow_type"] != "DeliveryWorkflow", item
+
+
+def test_parent_lists_only_its_children_and_delivery(admin):
+    parent = f"requirements-session-{uuid.uuid4().hex}"
+    response = admin.get("/workflows", params={"parent": parent})
+    assert response.status_code in (200, 503), response.text
+    if response.status_code == 503:
+        return
+    for item in response.json()["workflows"]:
+        assert (item["parent_workflow_id"] == parent
+                or item["workflow_id"] == f"delivery-{parent}"), item

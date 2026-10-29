@@ -88,7 +88,7 @@ const categories: [Category, string][] = [
 ];
 const NOT_DRAFTED = "The contract has not been drafted yet.";
 
-/** The Onboarding tab's link to an onboarding's page. */
+/** The link that opens an onboarding's view over the Flows page. */
 export function onboardingLink(sessionId: string) {
   return `?mode=onboarding&session_id=${encodeURIComponent(sessionId)}`;
 }
@@ -516,7 +516,7 @@ export default function Onboarding() {
             </div>
           </form>
           <p className="field-hint">
-            <a href="?mode=workflows&type=OnboardingWorkflow">All onboardings</a>
+            <a href="?type=OnboardingWorkflow">All onboardings</a>
           </p>
         </section>
 

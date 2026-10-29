@@ -17,6 +17,7 @@ from temporalio.api.workflowservice.v1 import DeleteWorkflowExecutionRequest
 from temporalio.client import Client, WorkflowExecution
 
 from app.db import connect
+from app.delivery.models import delivery_id
 from app.github.client import NAME_PATTERN as REPOSITORY_PATTERN
 from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import (
@@ -36,11 +37,11 @@ WORKFLOW_TYPES = (
     "OnboardingWorkflow",
     "DeliveryWorkflow",
     "CodegenWorkflow",
-    "SayHelloWorkflow",
 )
 PAGE_SIZE = 50
 ONBOARDING_ID_PATTERN = re.compile(r"onboarding-session-[0-9a-f]{32}")
 MAX_BRANCH_LENGTH = 255
+MAX_WORKFLOW_ID_LENGTH = 1000
 # The one-time removal of executions started before they recorded these fields.
 UNTRACKED_MIGRATION = "delete-executions-without-repository-fields"
 _MIGRATION_LOCK = 0x5EA2C4A7
@@ -64,8 +65,15 @@ def _quote(value: str) -> str:
 
 
 def check_filters(repository: str | None, branch: str | None,
-                  onboarding_id: str | None) -> None:
+                  onboarding_id: str | None, parent: str | None = None,
+                  top_level: bool = False) -> None:
     """Raise InvalidFilter for a malformed filter value; None means no filter."""
+    if parent is not None:
+        if top_level:
+            raise InvalidFilter("parent and top_level cannot be combined.")
+        if (not parent.strip() or len(parent) > MAX_WORKFLOW_ID_LENGTH
+                or any(ord(c) < 32 or ord(c) == 127 for c in parent)):
+            raise InvalidFilter("parent is not a valid workflow ID.")
     if repository is not None and not REPOSITORY_PATTERN.fullmatch(repository):
         raise InvalidFilter("repository must be of the form owner/name.")
     if branch is not None:
@@ -79,8 +87,16 @@ def check_filters(repository: str | None, branch: str | None,
 
 
 def _query(workflow_type: str | None, repository: str | None, branch: str | None,
-           onboarding_id: str | None) -> str | None:
+           onboarding_id: str | None, parent: str | None = None,
+           top_level: bool = False) -> str | None:
     clauses = []
+    # A session's delivery is its child, except for a run started again on its own after
+    # the session closed: it is listed under the session by its ID, never at the top.
+    if top_level:
+        clauses.append("ParentWorkflowId IS NULL AND WorkflowType != 'DeliveryWorkflow'")
+    if parent is not None:
+        clauses.append(f"(ParentWorkflowId = {_quote(parent)} "
+                       f"OR WorkflowId = {_quote(delivery_id(parent))})")
     # workflow_type is checked against WORKFLOW_TYPES, so it is safe to inline.
     if workflow_type:
         clauses.append(f"WorkflowType = '{workflow_type}'")
@@ -133,14 +149,14 @@ async def _execution(item: WorkflowExecution) -> dict[str, Any]:
 async def list_executions(
     workflow_type: str | None = None, page_token: str | None = None, *,
     repository: str | None = None, branch: str | None = None,
-    onboarding_id: str | None = None,
+    onboarding_id: str | None = None, parent: str | None = None, top_level: bool = False,
 ) -> dict[str, Any]:
-    check_filters(repository, branch, onboarding_id)
+    check_filters(repository, branch, onboarding_id, parent, top_level)
     try:
         token = base64.b64decode(page_token, altchars=b"-_", validate=True) if page_token else None
     except (binascii.Error, ValueError) as exc:
         raise InvalidPageToken("Invalid page token.") from exc
-    query = _query(workflow_type, repository, branch, onboarding_id)
+    query = _query(workflow_type, repository, branch, onboarding_id, parent, top_level)
     client = await connect_temporal()
     executions = client.list_workflows(query, page_size=PAGE_SIZE, next_page_token=token)
     await executions.fetch_next_page()

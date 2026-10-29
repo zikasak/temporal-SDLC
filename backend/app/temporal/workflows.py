@@ -11,6 +11,7 @@ with workflow.unsafe.imports_passed_through():
     from app.api_design.models import ApiDesignState
     from app.api_design.openapi import api_problems, design_problems
     from app.api_design.prompt import opening_fallback
+    from app.api_design.source import design_state
     from app.delivery.models import TASK_IDLE_TIMEOUT, DeliveryState, TaskSpec, delivery_id
     from app.github.models import RepositorySelection
     from app.temporal.execution_fields import execution_fields, task_fields
@@ -24,10 +25,10 @@ with workflow.unsafe.imports_passed_through():
     from app.temporal.activities import (
         api_design_turn,
         checkout_repository,
-        greet,
         parse_document,
         read_repository_contract,
         read_requirements_document,
+        register_session,
         requirements_turn,
         send_llm_message,
         update_repository_checkout,
@@ -46,6 +47,8 @@ DISCUSSION_TOO_LONG = "This discussion is too long to continue. Generate the Ope
 # Requirements → API design → delivery is one Temporal workflow tree whose root stays open
 # as long as any part of the task does; histories from before that replay without it.
 TASK_TREE = "task-tree"
+# A requirements session the user finalizes starts its API design itself.
+AUTO_API_DESIGN = "auto-api-design"
 
 
 def pending_questions(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -167,17 +170,6 @@ class _Delivering:
 
 
 @workflow.defn
-class SayHelloWorkflow:
-    @workflow.run
-    async def run(self, name: str) -> str:
-        return await workflow.execute_activity(
-            greet,
-            name,
-            schedule_to_close_timeout=timedelta(seconds=10),
-        )
-
-
-@workflow.defn
 class LLMRequestWorkflow:
     @workflow.run
     async def run(
@@ -239,6 +231,8 @@ class RequirementsWorkflow(_Delivering):
         # The API design sessions started from this one, each followed to its end.
         self._designs: list[asyncio.Task[None]] = []
         self._owns_designs = False
+        # Set when the user generated the document, rather than an idle session expiring.
+        self._finalized = False
 
     @workflow.run
     async def run(self, state: RequirementsState | None = None) -> dict[str, Any] | None:
@@ -267,6 +261,8 @@ class RequirementsWorkflow(_Delivering):
         if self.state.status == "completed" and self.state.kind in DIRECT_KINDS:
             await self._deliver()
         elif self.state.status == "completed" and workflow.patched(TASK_TREE):
+            if self._finalized and self.state.repository and workflow.patched(AUTO_API_DESIGN):
+                await self._start_first_design()
             await self._own_designs()
         return self.state.document
 
@@ -290,14 +286,36 @@ class RequirementsWorkflow(_Delivering):
                     return
                 self._owns_designs = True
 
-    @workflow.update
-    async def start_api_design(self, session_id: str, state: ApiDesignState) -> None:
-        """Start an API design of this task, or a fork of one, as this session's child;
-        done once it has started."""
+    async def _start_first_design(self) -> None:
+        """Hand the finished requirements to their API design, which the user then
+        discusses without having to start it."""
+        session_id = f"api-design-session-{workflow.uuid4().hex}"
+        state = design_state(workflow.info().workflow_id, self.state,
+                             await self._requirements_text())
+        await self._start_design(session_id, state)
+        self.state.api_design_session_id = session_id
+        try:
+            await workflow.execute_activity(
+                register_session, session_id,
+                start_to_close_timeout=timedelta(minutes=1),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except ActivityError as exc:
+            # Unrecorded, the design is still listed and served while Temporal is up.
+            workflow.logger.warning("API design %s not recorded: %s", session_id,
+                                    exc.cause or exc)
+
+    async def _start_design(self, session_id: str, state: ApiDesignState) -> None:
         handle = await workflow.start_child_workflow(
             "ApiDesignWorkflow", state, id=session_id, **execution_fields(state.repository))
         workflow.logger.info("API design %s started", session_id)
         self._designs.append(asyncio.create_task(self._follow_design(handle)))
+
+    @workflow.update
+    async def start_api_design(self, session_id: str, state: ApiDesignState) -> None:
+        """Start an API design of this task, or a fork of one, as this session's child;
+        done once it has started."""
+        await self._start_design(session_id, state)
 
     @start_api_design.validator
     def validate_start_api_design(self, session_id: str, state: ApiDesignState) -> None:
@@ -382,7 +400,7 @@ class RequirementsWorkflow(_Delivering):
             if self.state.status != "interviewing":
                 raise ApplicationError("This session is no longer accepting changes.")
             workflow.logger.info("Finalize requested")
-            await self._write_document()
+            self._finalized = await self._write_document()
 
     @finalize.validator
     def validate_finalize(self) -> None:
@@ -515,14 +533,12 @@ class RequirementsWorkflow(_Delivering):
         self.state.status = "completed"
         return True
 
-    async def _deliver(self) -> None:
-        """Hand the brief and the repository's contract to a delivery and stay open
-        until that ends."""
-        session_id = workflow.info().workflow_id
+    async def _requirements_text(self) -> str:
+        """The text of the session's requirements document."""
         try:
-            document = await workflow.execute_activity(
+            return await workflow.execute_activity(
                 read_requirements_document,
-                args=[session_id, self.state.document["document_id"]],
+                args=[workflow.info().workflow_id, self.state.document["document_id"]],
                 start_to_close_timeout=timedelta(minutes=1),
                 schedule_to_close_timeout=timedelta(minutes=3),
                 retry_policy=RetryPolicy(maximum_attempts=3),
@@ -530,8 +546,14 @@ class RequirementsWorkflow(_Delivering):
         except ActivityError as exc:
             # The stored document expired; the requirement tables still carry the content.
             workflow.logger.warning("Requirements document unavailable: %s", exc.cause or exc)
-            document = render_requirements_markdown(self.state.requirements,
-                                                    retired=self.state.retired)
+            return render_requirements_markdown(self.state.requirements,
+                                                retired=self.state.retired)
+
+    async def _deliver(self) -> None:
+        """Hand the brief and the repository's contract to a delivery and stay open
+        until that ends."""
+        session_id = workflow.info().workflow_id
+        document = await self._requirements_text()
         contract = self.state.contract
         await self._run_delivery(DeliveryState(spec=TaskSpec(
             session_id=session_id,

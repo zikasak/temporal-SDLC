@@ -79,8 +79,8 @@ Settings are shared application-wide in PostgreSQL's `app.workflow_settings` tab
 Startup seeds missing rows with the local Qwen model, OpenAI adapter, and model-default
 thinking. Saved rows are preserved across restarts. The supported types are chat,
 requirements (including its document overview), API design, implementation, test
-generation, diagnosis, documentation, and review. Delivery, code generation, verification,
-and greetings have no model calls of their own.
+generation, diagnosis, documentation, and review. Delivery, code generation and verification
+have no model calls of their own.
 
 Every host turn reloads its workflow's settings. Coding containers receive a validated
 snapshot in `/workspace/llm-settings.json` at launch, including on a resumed run.

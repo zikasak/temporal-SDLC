@@ -26,6 +26,7 @@ from app.requirements import service as requirements_service
 from app.requirements.document import render_requirements_markdown
 from app.requirements.models import RequirementsState
 from app.temporal import sessions
+from app.temporal.executions import ensure_search_attributes
 from app.temporal.workflows import ApiDesignWorkflow, RequirementsWorkflow
 from tests.pipeline import (
     ADDED_TESTS, BASELINE_IMAGE, BROKEN_TEST, CODE, FakeCodegenWorkflow, FakeStages,
@@ -86,6 +87,10 @@ class FakeActivities(FakeStages):
     async def read_requirements_document(self, session_id: str, document_id: str) -> str:
         return "# Brief"
 
+    @activity.defn(name="register_session")
+    async def register_session(self, session_id: str) -> None:
+        pass
+
     @activity.defn(name="update_repository_checkout")
     async def update_repository_checkout(self, session_id: str,
                                          repository: dict[str, Any]) -> dict[str, Any]:
@@ -128,6 +133,8 @@ async def server():
     """The dev server, for what the time-skipping one does not do: tell a parent that its
     child was terminated, and terminate children with their parent."""
     async with await WorkflowEnvironment.start_local() as server:
+        # Children are started with the repository's search attributes.
+        await ensure_search_attributes(server.client)
         yield server
 
 
@@ -151,6 +158,7 @@ async def workers(env, monkeypatch):
         workflows=[RequirementsWorkflow, ApiDesignWorkflow, DeliveryWorkflow],
         activities=[activities.requirements_turn, activities.write_requirements_document,
                     activities.read_requirements_document, activities.read_repository_contract,
+                    activities.register_session,
                     activities.checkout_repository, activities.update_repository_checkout,
                     activities.publish_repository, activities.publish_documentation,
                     activities.open_pull_request, activities.api_design_turn, activities.write_openapi_document],
@@ -567,9 +575,8 @@ async def test_bugfix_is_delivered_red_to_green_from_the_requirements_session(en
     assert response["delivery"]["baseline_status"] == "reproduced"
     assert response["delivery"]["publication"]["branch"] == "generated/abc"
     assert "contract" not in response
-    # Such a task has no API design to start.
-    with pytest.raises(sessions.SessionBusy, match="no API design"):
-        await api_design_service.start_session(handle.id)
+    # Such a task has no API design.
+    assert response["api_design_session_id"] is None
 
 
 @pytest.mark.parametrize('baseline, status, error', [
@@ -742,8 +749,7 @@ async def test_documentation_is_written_alone_and_pushed_as_unverified(env, work
 
     response = await requirements_service.get_session(handle.id)
     assert response["delivery"]["publication"]["verified"] is False
-    with pytest.raises(sessions.SessionBusy, match="no API design"):
-        await api_design_service.start_session(handle.id)
+    assert response["api_design_session_id"] is None
 
 
 @pytest.mark.parametrize("kind", ["bugfix", "api_change", "docs"])
@@ -852,38 +858,34 @@ async def test_agent_questions_wait_for_the_users_answers(env, worker):
         await delivery_service.answer(session_id, asked["workflow_id"], ["MySQL"])
 
 
-async def test_a_task_is_one_workflow_tree_open_until_its_delivery_closes(env, worker, monkeypatch, repository_selection):
+async def test_a_task_is_one_workflow_tree_open_until_its_delivery_closes(server, live, repository_selection):
     """Requirements → API design → delivery, retries included, stay under one root, so no
     part of a task falls to the namespace's retention while another goes on."""
-    async def document(*args):
-        return {"parsed_text": "# Requirements"}
-
-    monkeypatch.setattr(api_design_service, "get_generated_document", document)
-    monkeypatch.setattr(api_design_service, "TASK_QUEUE", TASK_QUEUE)
-    worker.kind = "new_service"
-    worker.fail_tests = True
-    requirements = await specify_bugfix(env, repository_selection)
+    live.kind = "new_service"
+    live.fail_tests = True
+    requirements = await specify_bugfix(server, repository_selection)
     await requirements.execute_update(RequirementsWorkflow.finalize)
-    design = env.client.get_workflow_handle(
-        await api_design_service.start_session(requirements.id))
+    # The session starts the design itself once the document is written.
+    state = await wait_until(requirements, lambda state: state.api_design_session_id)
+    design = server.client.get_workflow_handle(state.api_design_session_id)
     assert (await design.describe()).parent_id == requirements.id
     for _ in range(100):
         if (await design.query(ApiDesignWorkflow.get_state)).status == "interviewing":
             break
         await asyncio.sleep(0.05)
     await design.execute_update(ApiDesignWorkflow.finalize)
-    progress = await delivered(env, design.id)
+    progress = await delivered(server, design.id)
     assert progress.tests_error and progress.verification_status == "skipped"
 
     # The retry continues the delivery as new, still the design's child.
-    first_run = (await delivery(env, design.id).describe()).run_id
-    worker.fail_tests = False
+    first_run = (await delivery(server, design.id).describe()).run_id
+    live.fail_tests = False
     await delivery_service.retry(design.id, "tests")
-    progress = await delivered(env, design.id)
+    progress = await delivered(server, design.id)
     assert progress.tests_error is None and progress.verification["status"] == "passed"
-    retried = await delivery(env, design.id).describe()
+    retried = await delivery(server, design.id).describe()
     assert retried.run_id != first_run and retried.parent_id == design.id
-    for handle in (requirements, design, delivery(env, design.id)):
+    for handle in (requirements, design, delivery(server, design.id)):
         assert (await handle.describe()).status == WorkflowExecutionStatus.RUNNING
     await requirements.terminate()
 

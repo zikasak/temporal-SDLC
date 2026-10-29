@@ -67,7 +67,6 @@ Contract ambiguities and how the suite reads them:
   the session is looked up, the way FastAPI validates requests. So invalid bodies are
   sent to unknown session IDs.
 - Text over 10000 characters may answer 413 or 422 (NFR-5); both are accepted.
-- `/start` answers 503 with a `detail`, because the service image has no Temporal (NFR-4).
 - `POST /connectors/github/events` (FR-44, FR-49) is covered only for rejected deliveries:
   the suite never connects a GitHub App, so the connection has no webhook secret and every
   delivery, unsigned, wrongly signed or signed with a guessed key, must answer 401. A

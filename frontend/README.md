@@ -1,6 +1,6 @@
 # Async LLM requests
 
-This page starts a Temporal workflow for each message, returns its workflow ID immediately, and retrieves the answer by that ID. Replies include the conversation in the LLM call. A message can include one PDF, DOCX, or TXT file. The original is kept on disk, extracted text is kept in PostgreSQL, and the workflow carries only its document ID. The LLM receives a `document://` link and can read or search the parsed text with tools. It can also create, edit, and delete its own `.txt` and `.md` documents in the conversation. The latest request ID restores the conversation, attachments, and generated document links while Temporal retains it. The existing greeting workflow and `POST /start` endpoint are still available.
+This page starts a Temporal workflow for each message, returns its workflow ID immediately, and retrieves the answer by that ID. Replies include the conversation in the LLM call. A message can include one PDF, DOCX, or TXT file. The original is kept on disk, extracted text is kept in PostgreSQL, and the workflow carries only its document ID. The LLM receives a `document://` link and can read or search the parsed text with tools. It can also create, edit, and delete its own `.txt` and `.md` documents in the conversation. The latest request ID restores the conversation, attachments, and generated document links while Temporal retains it.
 
 ## GitHub connection and session repositories
 

@@ -25,7 +25,6 @@ with workflow.unsafe.imports_passed_through():
     from app.temporal.activities import (
         api_design_turn,
         checkout_repository,
-        greet,
         open_pull_request,
         parse_document,
         publish_documentation,
@@ -33,6 +32,7 @@ with workflow.unsafe.imports_passed_through():
         publish_repository,
         read_repository_contract,
         read_requirements_document,
+        register_session,
         requirements_turn,
         send_llm_message,
         update_repository_checkout,
@@ -43,7 +43,6 @@ with workflow.unsafe.imports_passed_through():
         ApiDesignWorkflow,
         LLMRequestWorkflow,
         RequirementsWorkflow,
-        SayHelloWorkflow,
     )
 
 
@@ -61,16 +60,16 @@ async def main():
         client,
         task_queue=TASK_QUEUE,
         workflows=[
-            SayHelloWorkflow, LLMRequestWorkflow, RequirementsWorkflow, ApiDesignWorkflow,
+            LLMRequestWorkflow, RequirementsWorkflow, ApiDesignWorkflow,
             DeliveryWorkflow, OnboardingWorkflow,
         ],
         activities=[
-            greet, parse_document, send_llm_message,
+            parse_document, send_llm_message,
             requirements_turn, write_requirements_document,
             api_design_turn, write_openapi_document,
             checkout_repository, update_repository_checkout, publish_repository,
             publish_documentation, publish_onboarding, open_pull_request, write_pull_request_text,
-            read_repository_contract, read_requirements_document,
+            read_repository_contract, read_requirements_document, register_session,
             find_onboarding_artifacts, onboarding_turn,
             classify_mention, answer_mention, reply_to_mention,
             record_new_mention, save_mention, mention_body,

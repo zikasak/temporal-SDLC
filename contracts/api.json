@@ -1,28 +1,6 @@
 {
   "endpoints": [
     {
-      "description": "Continues a completed requirements session of a new service or an API change.",
-      "error_statuses": [
-        401,
-        503,
-        404,
-        409,
-        422
-      ],
-      "method": "POST",
-      "parameters": [],
-      "path": "/api-design/sessions",
-      "request_schema": "StartApiDesignSession",
-      "requirement_ids": [
-        "FR-13"
-      ],
-      "response_array": false,
-      "response_schema": "SessionCreated",
-      "response_status": 201,
-      "summary": "Start an API design session",
-      "tag": "api-design"
-    },
-    {
       "description": "The session's conversation, state and delivery progress.",
       "error_statuses": [
         401,
@@ -1363,7 +1341,8 @@
         "FR-39",
         "FR-52",
         "FR-54",
-        "FR-55"
+        "FR-55",
+        "FR-77"
       ],
       "response_array": false,
       "response_schema": "RequirementsSession",
@@ -1550,7 +1529,7 @@
       "tag": "requirements"
     },
     {
-      "description": "Writes the requirements document; the session is completed once it is ready.",
+      "description": "Writes the requirements document; the session is completed once it is ready. A new service or an API change on a repository then starts its API design by itself (api_design_session_id).",
       "error_statuses": [
         401,
         503,
@@ -1570,7 +1549,8 @@
       "path": "/requirements/sessions/{session_id}/finalize",
       "request_schema": null,
       "requirement_ids": [
-        "FR-12"
+        "FR-12",
+        "FR-77"
       ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
@@ -1705,26 +1685,7 @@
       "tag": "requirements"
     },
     {
-      "description": "Runs the sample greeting workflow and returns its result.",
-      "error_statuses": [
-        401,
-        503
-      ],
-      "method": "POST",
-      "parameters": [],
-      "path": "/start",
-      "request_schema": null,
-      "requirement_ids": [
-        "FR-18"
-      ],
-      "response_array": false,
-      "response_schema": "WorkflowResult",
-      "response_status": 200,
-      "summary": "Start the sample workflow",
-      "tag": "workflows"
-    },
-    {
-      "description": "Newest first, 50 per page. type OnboardingWorkflow lists onboardings, whose workflow_id is the onboarding's session_id, as RequirementsWorkflow lists requirements sessions. Every execution also carries repository, branch and onboarding_id, each null when it does not apply; the existing fields keep their names and meaning. The optional repository, branch and onboarding_id filters combine with type and with each other (all must match); executions whose field is null never match a filter on it. The repository filter is compared case-insensitively, as on GitHub; the branch and onboarding_id filters must match exactly. A malformed filter value (a repository that is not owner/name, an empty branch, or an onboarding_id not of the form onboarding-session- followed by 32 hex digits) answers 422 with a detail, like an invalid type or page_token. Pass the same filters with page_token when continuing. Executions started before this change, which have no recorded repository, branch or onboarding ID, are deleted from the namespace when the change is deployed (the instance has no users yet), so they are not listed.",
+      "description": "Newest first, 50 per page. type OnboardingWorkflow lists onboardings, whose workflow_id is the onboarding's session_id, as RequirementsWorkflow lists requirements sessions. Every execution also carries repository, branch and onboarding_id, each null when it does not apply; the existing fields keep their names and meaning. The optional repository, branch and onboarding_id filters combine with type and with each other (all must match); executions whose field is null never match a filter on it. The repository filter is compared case-insensitively, as on GitHub; the branch and onboarding_id filters must match exactly. A malformed filter value (a repository that is not owner/name, an empty branch, or an onboarding_id not of the form onboarding-session- followed by 32 hex digits) answers 422 with a detail, like an invalid type or page_token. Pass the same filters with page_token when continuing. Executions started before this change, which have no recorded repository, branch or onboarding ID, are deleted from the namespace when the change is deployed (the instance has no users yet), so they are not listed. top_level=true lists only the flows without a parent, and parent=<workflow_id> only the children of one (and its session's delivery runs); they cannot be combined.",
       "error_statuses": [
         401,
         422,
@@ -1766,6 +1727,20 @@
           "name": "onboarding_id",
           "required": false,
           "type": "string"
+        },
+        {
+          "description": "Only the children of this workflow execution, together with the runs of its delivery (delivery- followed by the ID); 422 when empty or malformed, or combined with top_level.",
+          "location": "query",
+          "name": "parent",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "description": "true lists only executions without a parent workflow; a DeliveryWorkflow is never listed, as it is listed under its session.",
+          "location": "query",
+          "name": "top_level",
+          "required": false,
+          "type": "boolean"
         }
       ],
       "path": "/workflows",
@@ -1778,7 +1753,8 @@
         "FR-72",
         "FR-73",
         "FR-74",
-        "NFR-7"
+        "NFR-7",
+        "FR-76"
       ],
       "response_array": false,
       "response_schema": "WorkflowPage",
@@ -2608,22 +2584,17 @@
         },
         {
           "array": false,
+          "description": "The API design the session started by itself once the user generated the document of a new service or an API change; the design starts drafting the API at once, as a child of the session. Null until then, for any other kind of task, for a session without a repository, and for one whose document was written because it expired.",
+          "name": "api_design_session_id",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "array": false,
           "description": "Progress of the delivery of a bugfix or documentation task. A bugfix's progress also holds reviews (ReviewRound list), review_error, the open_findings flag, findings_acceptance (FindingsAcceptance), the reviewing and findings_open verification_status values and the publication (RepositoryPublication) with its verified flag, the first 20 open findings its commit message lists and findings_count, as in ApiDesignSession. Every delivery's progress also holds pull_request_status and, once a pushed delivery's pull request is open, pull_request (PullRequest), pull_request_error, pull_request_text_error, and mentions (PullRequestMention list) of the app on that pull request, as in ApiDesignSession.",
           "name": "delivery",
           "required": false,
           "type": "object"
-        }
-      ]
-    },
-    {
-      "description": "The requirements session an API design continues.",
-      "name": "StartApiDesignSession",
-      "properties": [
-        {
-          "array": false,
-          "name": "requirements_session_id",
-          "required": true,
-          "type": "string"
         }
       ]
     },
@@ -3047,18 +3018,6 @@
           "array": false,
           "name": "next_page_token",
           "required": false,
-          "type": "string"
-        }
-      ]
-    },
-    {
-      "description": "The result of the sample workflow.",
-      "name": "WorkflowResult",
-      "properties": [
-        {
-          "array": false,
-          "name": "result",
-          "required": true,
           "type": "string"
         }
       ]

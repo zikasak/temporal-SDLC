@@ -15,11 +15,13 @@ from temporalio.worker import Replayer, Worker
 from app.api.routes.api_design import router
 from app.api_design import service
 from app.api_design.models import ApiDesignState, empty_api
+from app.api_design.source import design_state
 from app.api_design.prompt import OPENING_FALLBACK, OPENING_QUESTIONS
 from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, delivery_id
 from app.delivery.workflows import DeliveryWorkflow
 from app.requirements.document import render_requirements_markdown
+from app.requirements.models import RequirementsState
 from app.temporal import sessions
 from app.temporal.workflows import ApiDesignWorkflow
 from tests.pipeline import CODE, FakeCodegenWorkflow, FakeStages, finished, stage_workers
@@ -110,38 +112,23 @@ async def start(env, repository=None, language: str | None = "java"):
     )
 
 
-@pytest.mark.parametrize("linked", [False, True])
-async def test_new_api_design_inherits_the_requirements_repository(env, worker, monkeypatch, repository_selection, linked):
-    from app.requirements.models import RequirementsState
+async def start_from(env, source: RequirementsState, document: str):
+    """The API design that finished requirements session `source`, whose document reads
+    `document`, hands its task to."""
+    return await env.client.start_workflow(
+        ApiDesignWorkflow.run, design_state("requirements-session-" + "0" * 32, source, document),
+        id=f"api-design-session-{uuid.uuid4().hex}", task_queue=TASK_QUEUE,
+    )
 
-    selected = repository_selection if linked else None
-    source = RequirementsState(status="completed", document={"document_id": "0" * 32}, repository=selected,
-                               kind="new_service")
 
-    async def requirements_state(session_id):
-        return source
-
-    async def document(*args):
-        return {"parsed_text": "# Requirements"}
-
-    async def connect():
-        return env.client
-
-    monkeypatch.setattr(service.requirements_service, "get_state", requirements_state)
-    monkeypatch.setattr(service, "get_generated_document", document)
-    monkeypatch.setattr(service, "connect_temporal", connect)
-    monkeypatch.setattr(sessions, "connect_temporal", connect)
-    monkeypatch.setattr(service, "TASK_QUEUE", TASK_QUEUE)
-    if not linked:
-        # Only chat may run without a repository.
-        with pytest.raises(sessions.SessionBusy, match="no repository"):
-            await service.start_session("requirements-session-" + "0" * 32)
-        return
-    handle = env.client.get_workflow_handle(await service.start_session("requirements-session-" + "0" * 32))
+async def test_new_api_design_inherits_the_requirements_repository(env, worker, connected, repository_selection):
+    source = RequirementsState(status="completed", document={"document_id": "0" * 32},
+                               repository=repository_selection, kind="new_service")
+    handle = await start_from(env, source, "# Requirements")
     try:
         state = await wait_for_status(handle, "interviewing")
-        assert state.repository == selected and state.kind == "new_service"
-        assert (await service.get_session(handle.id))["repository"] == selected
+        assert state.repository == repository_selection and state.kind == "new_service"
+        assert (await service.get_session(handle.id))["repository"] == repository_selection
     finally:
         await handle.terminate()
 
@@ -152,11 +139,9 @@ def requirement(number: int, title: str) -> dict[str, Any]:
 
 
 @pytest.fixture
-def change(monkeypatch, connected, repository_selection):
+def change(connected, repository_selection):
     """A finished requirements session that changes the API of a published service: it
     adds FR-3 and ends FR-2, which one of the service's endpoints is linked to."""
-    from app.requirements.models import RequirementsState
-
     published = [requirement(1, "Book rooms"), requirement(2, "List rooms by floor")]
     contract = {"language": "java", "requirements": published,
                 "requirements_document": render_requirements_markdown(published, "A hotel."),
@@ -168,21 +153,12 @@ def change(monkeypatch, connected, repository_selection):
         retired=published[1:], contract=contract,
         # The commit the fake checkout of every session reports.
         contract_commit="1" * 40)
-
-    async def requirements_state(session_id):
-        return source
-
-    async def document(*args):
-        return {"parsed_text": "# Change"}
-
-    monkeypatch.setattr(service.requirements_service, "get_state", requirements_state)
-    monkeypatch.setattr(service, "get_generated_document", document)
     return source
 
 
 async def test_api_change_is_designed_from_the_repository_contract(env, worker, change):
     worker.draft_endpoints = [endpoint("/bookings")]
-    handle = env.client.get_workflow_handle(await service.start_session("requirements-session-" + "0" * 32))
+    handle = await start_from(env, change, "# Change")
     state = await wait_for_status(handle, "interviewing")
     # The designer starts from the API and the language the service has, not from nothing.
     assert [item["path"] for item in state.api["endpoints"]] == ["/rooms", "/bookings"]
@@ -214,7 +190,7 @@ async def test_api_change_goes_on_from_a_moved_repository_only_with_the_same_con
     change.contract_commit = "0" * 40
     worker.repository_contract = (
         change.contract if same_contract else {**change.contract, "requirements": []})
-    handle = env.client.get_workflow_handle(await service.start_session("requirements-session-" + "0" * 32))
+    handle = await start_from(env, change, "# Change")
     if same_contract:
         state = await wait_for_status(handle, "interviewing")
         assert state.contract_commit == "1" * 40 and worker.turns == 1
