@@ -611,7 +611,11 @@ class ApiDesignWorkflow(_Delivering):
                  and await self._confirm_contract())
         if ready and not self.state.messages:
             async with self._turn_lock:
-                if not await self._turn():
+                # A change has no questions to fall back on, so its opening stays
+                # failed until it is retried; older histories replay the fallback.
+                if not await self._turn() and not (
+                        self.state.change_document
+                        and workflow.patched("retryable-change-opening")):
                     self.state.messages.append(
                         opening_fallback(bool(self.state.change_document)))
                     self.state.error = None
@@ -698,6 +702,7 @@ class ApiDesignWorkflow(_Delivering):
 
     @send_message.validator
     def validate_send_message(self, message: str) -> None:
+        self._check_opened()
         if self.state.status != "interviewing" or self.state.messages[-1]["role"] == "user":
             raise ValueError("Retry the unanswered message before sending another.")
         if pending_questions(self.state.messages):
@@ -719,6 +724,7 @@ class ApiDesignWorkflow(_Delivering):
 
     @answer_questions.validator
     def validate_answer_questions(self, answers: list[str]) -> None:
+        self._check_opened()
         if self.state.status != "interviewing" or self.state.messages[-1]["role"] == "user":
             raise ValueError("Retry the unanswered message before sending another.")
         check_answers(self.state.messages, answers, DISCUSSION_TOO_LONG)
@@ -727,13 +733,13 @@ class ApiDesignWorkflow(_Delivering):
     async def retry_message(self) -> None:
         self._updates += 1
         async with self._turn_lock:
-            if self.state.status != "interviewing" or not self.state.messages or self.state.messages[-1]["role"] != "user":
+            if self.state.status != "interviewing" or (self.state.messages and self.state.messages[-1]["role"] != "user"):
                 raise ApplicationError("There is no unanswered message to retry.")
             await self._turn()
 
     @retry_message.validator
     def validate_retry_message(self) -> None:
-        if self.state.status != "interviewing" or not self.state.messages or self.state.messages[-1]["role"] != "user":
+        if self.state.status != "interviewing" or (self.state.messages and self.state.messages[-1]["role"] != "user"):
             raise ValueError("There is no unanswered message to retry.")
 
     @workflow.update
@@ -747,11 +753,16 @@ class ApiDesignWorkflow(_Delivering):
 
     @finalize.validator
     def validate_finalize(self) -> None:
+        self._check_opened()
         if self.state.status != "interviewing" or (self.state.messages and self.state.messages[-1]["role"] == "user"):
             raise ValueError("Retry the unanswered message before generating the OpenAPI.")
         problems = design_problems(self.state.api, self.state.language)
         if problems:
             raise ValueError("Fix these problems first: " + " ".join(problems))
+
+    def _check_opened(self) -> None:
+        if self.state.status == "interviewing" and not self.state.messages:
+            raise ValueError("The session's opening failed. Retry it first.")
 
     async def _turn(self) -> bool:
         self.state.status = "turn_running"
@@ -813,7 +824,8 @@ class ApiDesignWorkflow(_Delivering):
     async def _expire(self) -> None:
         """After a day without messages, keep the API if it is complete."""
         workflow.logger.info("API design session idle, expiring")
-        if not api_problems(self.state.api) and await self._write_document():
+        # A failed opening has changed nothing, so there is no design to keep.
+        if self.state.messages and not api_problems(self.state.api) and await self._write_document():
             return
         self.state.status = "failed"
         self.state.error = "The session expired before the API was complete."

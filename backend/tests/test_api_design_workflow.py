@@ -16,7 +16,7 @@ from app.api.routes.api_design import router
 from app.api_design import service
 from app.api_design.models import ApiDesignState, empty_api
 from app.api_design.source import design_state
-from app.api_design.prompt import OPENING_FALLBACK, OPENING_QUESTIONS
+from app.api_design.prompt import CHANGE_OPENING_FALLBACK, OPENING_FALLBACK, OPENING_QUESTIONS
 from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, delivery_id
 from app.delivery.workflows import DeliveryWorkflow
@@ -397,6 +397,66 @@ async def test_failed_draft_falls_back_to_opening_question(env, worker):
         "role": "user", "content": "Who will call the API?\n→ Mobile apps\n\n"
                                    "How should callers authenticate?\n→ /rooms"}
     await handle.terminate()
+
+
+async def failed_change_opening(env, worker, change) -> Any:
+    worker.fail_draft = True
+    handle = await start_from(env, change, "# Change")
+    state = await wait_for_status(handle, "interviewing")
+    assert state.messages == [] and state.error
+    return handle
+
+
+async def test_failed_change_opening_is_retried_not_disguised_as_a_question(env, worker, change):
+    worker.draft_endpoints = [endpoint("/bookings")]
+    handle = await failed_change_opening(env, worker, change)
+    # Nothing can go on from an opening that failed, least of all the unchanged API.
+    for update, *args in ((ApiDesignWorkflow.send_message, "/rooms"),
+                          (ApiDesignWorkflow.answer_questions, ["/rooms"]),
+                          (ApiDesignWorkflow.finalize,)):
+        with pytest.raises(WorkflowUpdateFailedError) as refused:
+            await handle.execute_update(update, *args)
+        assert "Retry it first" in str(refused.value.cause)
+    assert worker.documents == []
+
+    # A retry that fails again can be retried again.
+    await handle.execute_update(ApiDesignWorkflow.retry_message)
+    state = await handle.query(ApiDesignWorkflow.get_state)
+    assert state.status == "interviewing" and state.messages == [] and state.error
+
+    worker.fail_draft = False
+    await handle.execute_update(ApiDesignWorkflow.retry_message)
+    state = await handle.query(ApiDesignWorkflow.get_state)
+    assert state.messages == [{"role": "assistant", "content": "Draft ready. Who calls the API?"}]
+    assert state.error is None
+    assert [item["path"] for item in state.api["endpoints"]] == ["/rooms", "/bookings"]
+
+    # The opening is answered now, so there is nothing left to retry.
+    with pytest.raises(WorkflowUpdateFailedError):
+        await handle.execute_update(ApiDesignWorkflow.retry_message)
+    await handle.terminate()
+
+
+async def test_failed_change_opening_replays_with_its_fallback_from_older_histories(env, worker, change, monkeypatch):
+    patched = workflow.patched
+    with monkeypatch.context() as legacy:
+        legacy.setattr(workflow, 'patched', lambda name: False if name == 'retryable-change-opening' else patched(name))
+        worker.fail_draft = True
+        handle = await start_from(env, change, "# Change")
+        state = await wait_for_status(handle, "interviewing")
+        assert state.messages == [{"role": "assistant", "content": CHANGE_OPENING_FALLBACK}]
+        assert state.error is None
+        await handle.terminate()
+        history = await handle.fetch_history()
+    await Replayer(workflows=[ApiDesignWorkflow]).replay_workflow(history)
+
+
+async def test_session_with_a_failed_opening_expires_without_a_document(env, worker, change):
+    handle = await failed_change_opening(env, worker, change)
+    await env.sleep(timedelta(hours=25))
+    state = await wait_for_status(handle, "failed")
+    assert state.error == "The session expired before the API was complete."
+    assert state.document is None and worker.documents == []
 
 
 async def test_rejects_message_while_turn_running(env, worker):

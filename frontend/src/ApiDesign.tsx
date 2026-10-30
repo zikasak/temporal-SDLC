@@ -378,7 +378,9 @@ export default function ApiDesign() {
   }, [session?.messages.length, session?.status]);
 
   const unanswered = session?.messages.at(-1)?.role === "user" && session.status === "interviewing";
-  const canCompose = session?.status === "interviewing" && !unanswered && !submitting;
+  // A change session whose opening failed has nothing to answer until it is retried.
+  const openingFailed = session?.status === "interviewing" && session.messages.length === 0 && Boolean(session.error);
+  const canCompose = session?.status === "interviewing" && session.messages.length > 0 && !unanswered && !submitting;
   // Questions of the last message are answered with the form, not with a message.
   const last = session?.messages.at(-1);
   const asked = last?.role === "assistant" ? last.questions : [];
@@ -623,8 +625,10 @@ export default function ApiDesign() {
               <div className="error-state" role="alert">
                 <p>{error ? "Something went wrong." : "The last step did not complete."}</p>
                 <span>{error || session?.error}</span>
-                {unanswered && !submitting && (
-                  <button type="button" onClick={retryMessage}>Retry this message</button>
+                {(unanswered || openingFailed) && !submitting && (
+                  <button type="button" onClick={retryMessage}>
+                    {openingFailed ? "Retry" : "Retry this message"}
+                  </button>
                 )}
                 {error && sessionId && (
                   <button type="button" onClick={() => setRefreshKey((value) => value + 1)}>

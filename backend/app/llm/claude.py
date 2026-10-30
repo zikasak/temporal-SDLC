@@ -116,10 +116,18 @@ class ChatClaude(Runnable):
             thinking = ({} if self.thinking_level == 'default' else
                         {'thinking': {'type': 'disabled'}} if self.thinking_level == 'off' else
                         {'thinking': {'type': 'adaptive'}, 'effort': self.thinking_level})
+            # A prompt can embed a whole API model, which Linux refuses as one process
+            # argument. A coding stage's cwd is the user's project, so it stays out of there.
+            system_dir = Path(await self._stack.enter_async_context(
+                async_context(tempfile.TemporaryDirectory, prefix='claude-system-')))
+            system_file = system_dir / 'system-prompt.md'
+            await run_sync(system_file.write_text,
+                           '\n\n'.join(message.text for message in messages
+                                       if isinstance(message, SystemMessage)),
+                           encoding='utf-8')
             options = ClaudeAgentOptions(
                 model=self.model, cli_path=self.cli_path, cwd=str(cwd),
-                system_prompt='\n\n'.join(message.text for message in messages
-                                          if isinstance(message, SystemMessage)),
+                system_prompt={'type': 'file', 'path': str(system_file)},
                 **thinking, max_turns=max_turns, tools=[], skills=[], setting_sources=[],
                 strict_mcp_config=True, verbatim_prompts=True,
                 mcp_servers=({TOOL_SERVER: flow_server(tools, until=until)} if tools else {}),

@@ -83,11 +83,22 @@ class ChatPi(BaseChatModel):
             command += ['--model', self.model]
         if self.thinking_level != 'default':
             command += ['--thinking', self.thinking_level]
-        if system:
-            command += ['--system-prompt', system]
         command += ['--session-id', _session_id(system, messages)]
         env = {**os.environ, AGENT_DIR_ENV: self.agent_dir} if self.agent_dir else os.environ
         payload = {'tools': list(tools), 'messages': _pi_messages(messages)}
+        if not system:
+            return await self._attempts(command, env, payload)
+        # A prompt can embed a whole API model, which Linux refuses as one process argument.
+        # Pi reads the value as a file while that file exists, and as literal text otherwise.
+        async with async_context(tempfile.NamedTemporaryFile, 'w', encoding='utf-8',
+                                 suffix='.md') as prompt:
+            await run_sync(prompt.write, system)
+            await run_sync(prompt.flush)
+            return await self._attempts([*command, '--system-prompt', prompt.name], env, payload)
+
+    async def _attempts(self, command: list[str], env: Any,
+                        payload: dict[str, Any]) -> ChatResult:
+        """Requests until one is not cut off at the output limit."""
         for _ in range(TRUNCATED_ATTEMPTS):
             reply = await self._request(command, env, payload)
             # A response cut off at the output limit has no usable answer or tool call; a

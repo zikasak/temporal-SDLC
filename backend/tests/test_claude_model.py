@@ -1,4 +1,10 @@
 """Claude native request behavior and isolated-agent credential boundaries."""
+import os
+import shlex
+import shutil
+from pathlib import Path
+
+import claude_agent_sdk
 import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -33,6 +39,35 @@ async def test_native_reply_and_thinking_options(claude_http, thinking_level, mo
         assert request['output_config']['effort'] == 'high'
     elif thinking_level == 'off':
         assert request['thinking']['type'] == 'disabled'
+
+
+async def test_system_prompt_over_the_argument_limit_reaches_claude(claude_http, tmp_path):
+    # Linux refuses to spawn a process with one argument over 128 KiB. macOS has no such
+    # per-argument limit, so the recorded command line is checked as well as the spawn.
+    bundled = Path(claude_agent_sdk.__file__).parent / '_bundled' / 'claude'
+    real_cli = str(bundled) if bundled.exists() else shutil.which('claude')
+    recorded = tmp_path / 'argv'
+    cli = tmp_path / 'claude-recording'
+    cli.write_text(f'#!/bin/sh\nprintf \'%s\\0\' "$@" >> {shlex.quote(str(recorded))}\n'
+                   f'exec {shlex.quote(real_cli)} "$@"\n')
+    cli.chmod(0o755)
+    project = tmp_path / 'project'
+    project.mkdir()
+    replies, requests = claude_http
+    replies.append([{'type': 'text', 'text': 'Done.'}])
+    first, second = 'Проверка ✓ ' * 10_000 + 'конец', 'Be brief.'
+    assert len(first.encode()) > 200_000
+
+    async with ChatClaude(cli_path=str(cli), cwd=project, timeout=30).async_session() as session:
+        await session.ainvoke([SystemMessage(first), SystemMessage(second), HumanMessage('Hi')])
+
+    [request] = requests
+    assert f'{first}\n\n{second}' in [block['text'] for block in request['system']]
+    argv = recorded.read_bytes().split(b'\0')
+    assert max(map(len, argv)) < 128 * 1024
+    prompt_file = Path(os.fsdecode(argv[argv.index(b'--system-prompt-file') + 1]))
+    assert not prompt_file.exists()
+    assert not prompt_file.is_relative_to(project)
 
 
 async def test_claude_harness_forwards_credentials_by_name(created_container, monkeypatch, saved_model_settings):

@@ -19,7 +19,10 @@ FAKE_PI = '''#!{python}
 import json, os, pathlib, sys
 log = pathlib.Path({log!r})
 calls = json.loads(log.read_text()) if log.exists() else []
-calls.append({{'argv': sys.argv[1:], 'stdin': sys.stdin.read(),
+argv = sys.argv[1:]
+system = (pathlib.Path(argv[argv.index('--system-prompt') + 1]).read_text(encoding='utf-8')
+          if '--system-prompt' in argv else None)
+calls.append({{'argv': argv, 'stdin': sys.stdin.read(), 'system': system,
               'agent_dir': os.environ.get('PI_CODING_AGENT_DIR'),
               'input': json.load(open(os.environ['PI_LANGCHAIN_INPUT']))}})
 log.write_text(json.dumps(calls))
@@ -79,7 +82,7 @@ def test_returns_final_text_and_usage(fake_pi):
     assert reply.response_metadata['model_name'] == 'gpt-test'
     [call] = calls()
     argv = call['argv']
-    assert argv[argv.index('--system-prompt') + 1] == 'Be brief.'
+    assert call['system'] == 'Be brief.'
     assert argv[argv.index('--model') + 1] == 'openai/gpt-test'
     assert {'--mode', 'json', '--no-tools', '--no-session'} <= set(argv)
     assert os.path.isfile(argv[argv.index('--extension') + 1])
@@ -242,6 +245,31 @@ def test_a_response_cut_off_every_time_fails_saying_so(fake_pi):
     with pytest.raises(RuntimeError, match='cut off at the output limit 3 times'):
         model.invoke('hi')
     assert len(calls()) == 3
+
+
+def test_system_prompt_too_long_for_an_argument_reaches_every_attempt(fake_pi):
+    install, calls = fake_pi
+    system = 'Требование ✓ 𝛑\n' * 7_000
+    assert len(system.encode()) > 200_000
+    model = ChatPi(command=install(CUT_OFF, [assistant('Done.')]))
+
+    assert model.invoke([SystemMessage(system), HumanMessage('hi')]).content == 'Done.'
+
+    first, second = calls()
+    assert first['system'] == second['system'] == system
+    for call in (first, second):
+        assert max(len(arg.encode()) for arg in call['argv']) < 128 * 1024
+        assert not os.path.exists(call['argv'][call['argv'].index('--system-prompt') + 1])
+
+
+def test_system_prompt_file_is_removed_when_pi_fails(fake_pi):
+    install, calls = fake_pi
+    model = ChatPi(command=install([], code=3, stderr='No API key\n'))
+    with pytest.raises(RuntimeError, match='code 3'):
+        model.invoke([SystemMessage('Be brief.'), HumanMessage('hi')])
+    [call] = calls()
+    assert call['system'] == 'Be brief.'
+    assert not os.path.exists(call['argv'][call['argv'].index('--system-prompt') + 1])
 
 
 def test_process_failure_reports_stderr(fake_pi):

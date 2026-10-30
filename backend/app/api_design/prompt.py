@@ -104,7 +104,8 @@ CHANGE_GUIDANCE = (
 
 
 def opening_fallback(change: bool) -> ConversationMessage:
-    """The first message of a session whose first turn failed."""
+    """The first message of a session whose first turn failed. Change sessions only
+    get theirs when replaying histories from before their opening could be retried."""
     if change:
         return {"role": "assistant", "content": CHANGE_OPENING_FALLBACK}
     return {"role": "assistant", "content": OPENING_FALLBACK,
