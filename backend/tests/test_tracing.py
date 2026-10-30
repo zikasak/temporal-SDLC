@@ -400,6 +400,54 @@ shutdown_tracing()
     assert len(generations) == 2
 
 
+def test_claude_agent_over_its_turn_budget_still_exports_its_session(
+        claude_http, tracing_server, tmp_path):
+    replies, requests = claude_http
+    environment, spans = tracing_server
+    environment.update(TEST_MODEL_SETTINGS=json.dumps({'adapter': 'claude', 'model': 'claude-test'}),
+                       TEST_WORKSPACE=str(tmp_path / 'stage'), TEST_AGENT_MAX_TURNS='1',
+                       APP_TRACE_SESSION_ID='limited-pipeline', APP_TRACE_AGENT_ROLE='implementation')
+    replies.append([{'type': 'tool_use', 'id': 'first', 'name': 'mcp__flow__write_file',
+                     'input': {'path': 'first.txt', 'content': 'first'}}])
+    run_script('''
+import asyncio, json, os, shutil
+from pathlib import Path
+from app.agent_workflows import runtime
+from app.llm import claude
+from app.settings.models import SETTINGS_FILENAME
+from app.tracing import shutdown_tracing
+directory = Path(os.environ['TEST_WORKSPACE'])
+root = directory / 'service'
+root.mkdir(parents=True)
+(directory / SETTINGS_FILENAME).write_text(os.environ['TEST_MODEL_SETTINGS'])
+# The closing CLI cancels a SessionEnd export against a real Langfuse; drop it here.
+plugin = directory / 'plugin'
+shutil.copytree(claude.PLUGIN, plugin)
+hooks = plugin / 'hooks' / 'hooks.json'
+config = json.loads(hooks.read_text())
+del config['hooks']['SessionEnd']
+hooks.write_text(json.dumps(config))
+claude.PLUGIN = plugin
+try:
+    asyncio.run(runtime.run_agent(runtime.AgentProfile(root=root, prompt='Write files',
+        initial_messages=['Create a service'], max_turns_env='TEST_AGENT_MAX_TURNS',
+        validate_completion=lambda root: None, completion_message='Done',
+        exhaustion_message='Too many turns')))
+except RuntimeError as exc:
+    assert 'Too many turns' in str(exc)
+else:
+    raise AssertionError('The agent finished within its turn budget')
+shutdown_tracing()
+''', environment)
+    assert len(requests) == 1
+    agent, = [span for span in spans if span.name == 'author-implementation']
+    native_turn, = [span for span in spans if span.name == 'Conversational Turn']
+    assert native_turn.parent_span_id == agent.span_id
+    generation, = [span for span in spans
+                   if attributes(span).get('langfuse.observation.type') == 'generation']
+    assert generation.parent_span_id == native_turn.span_id
+
+
 def test_claude_pause_resume_exports_each_native_call_once_under_its_current_stage(
         claude_http, tracing_server, tmp_path):
     replies, requests = claude_http

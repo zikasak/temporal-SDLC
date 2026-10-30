@@ -176,7 +176,8 @@ class ChatClaude(Runnable):
                         model_name = event.model
                     elif isinstance(event, ResultMessage):
                         result = event
-                        self._native_session, self._unfinished = event.session_id, False
+                        # The plugin's Stop hook skips error results, so those stay unfinished.
+                        self._native_session, self._unfinished = event.session_id, event.is_error
         except TimeoutError as exc:
             await self._client.interrupt()
             raise TimeoutError(f'Claude sent nothing for {self.timeout:g} seconds') from exc
@@ -203,9 +204,10 @@ class ChatClaude(Runnable):
         return reply
 
     async def _export_unfinished(self, env: dict[str, str], config_dir: Path) -> None:
-        """Export a request that ended without a result. The plugin exports from the
-        Stop and SessionEnd hooks, which an interrupted or failed session never reaches
-        or the closing CLI cuts short. Turns it already exported are not repeated."""
+        """Export a request that ended without a result or with an error result, such as
+        error_max_turns. The plugin exports from the Stop and SessionEnd hooks; Stop does
+        not fire for an interrupted or failed request, and the closing CLI cuts SessionEnd
+        short. Turns it already exported are not repeated."""
         session = self._native_session
         if not self._unfinished or not session:
             return
