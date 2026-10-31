@@ -410,24 +410,15 @@ def test_claude_agent_over_its_turn_budget_still_exports_its_session(
     replies.append([{'type': 'tool_use', 'id': 'first', 'name': 'mcp__flow__write_file',
                      'input': {'path': 'first.txt', 'content': 'first'}}])
     run_script('''
-import asyncio, json, os, shutil
+import asyncio, os
 from pathlib import Path
 from app.agent_workflows import runtime
-from app.llm import claude
 from app.settings.models import SETTINGS_FILENAME
 from app.tracing import shutdown_tracing
 directory = Path(os.environ['TEST_WORKSPACE'])
 root = directory / 'service'
 root.mkdir(parents=True)
 (directory / SETTINGS_FILENAME).write_text(os.environ['TEST_MODEL_SETTINGS'])
-# The closing CLI cancels a SessionEnd export against a real Langfuse; drop it here.
-plugin = directory / 'plugin'
-shutil.copytree(claude.PLUGIN, plugin)
-hooks = plugin / 'hooks' / 'hooks.json'
-config = json.loads(hooks.read_text())
-del config['hooks']['SessionEnd']
-hooks.write_text(json.dumps(config))
-claude.PLUGIN = plugin
 try:
     asyncio.run(runtime.run_agent(runtime.AgentProfile(root=root, prompt='Write files',
         initial_messages=['Create a service'], max_turns_env='TEST_AGENT_MAX_TURNS',

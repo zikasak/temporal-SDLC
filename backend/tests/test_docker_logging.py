@@ -125,3 +125,39 @@ async def test_unavailable_container_logs_never_fail_the_observed_run(tmp_path, 
     monkeypatch.setenv('PATH', str(tmp_path))  # no docker executable at all
     async with docker_agents.forward_logs('agent-1', 'agent'):
         pass
+
+
+async def test_stage_turn_budgets_reach_the_agent_container(tmp_path, monkeypatch):
+    """A worker's *_MAX_TURNS setting is forwarded by name into `docker create`."""
+    calls = []
+
+    async def fake_docker(*args, **kwargs):
+        calls.append(args)
+        if args[0] == 'create':
+            raise RuntimeError('stop after create')
+        return ''
+
+    async def fake_settings(role):
+        return docker_agents.ModelSettings()
+
+    monkeypatch.setattr(docker_agents, 'docker', fake_docker)
+    monkeypatch.setattr(docker_agents, 'get_workflow_settings', fake_settings)
+    monkeypatch.setattr(docker_agents, 'pi_container_args', lambda settings: [])
+    monkeypatch.setattr(docker_agents, 'claude_container_args', lambda settings: [])
+    monkeypatch.setattr(docker_agents, 'container_trace_environment', lambda *a: {})
+    monkeypatch.setenv('IMPLEMENTATION_MAX_TURNS', '400')
+    monkeypatch.delenv('REVIEW_MAX_TURNS', raising=False)
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+
+    with pytest.raises(RuntimeError, match='stop after create'):
+        await docker_agents.run_agent(
+            'implementation', 's1', workspace, tmp_path / 'out', 'out', tmp_path / 'agent.log',
+            image_build=docker_agents.AgentImageBuild(context=tmp_path, dockerfile=tmp_path / 'Dockerfile'),
+            paused=tmp_path / 'paused')
+
+    create = next(args for args in calls if args[0] == 'create')
+    pairs = list(zip(create, create[1:]))
+    assert ('-e', 'IMPLEMENTATION_MAX_TURNS') in pairs
+    assert ('-e', 'REVIEW_MAX_TURNS') not in pairs
+    assert not any('400' in arg for arg in create)

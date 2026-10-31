@@ -8,6 +8,9 @@ from langfuse import propagate_attributes
 
 from app.tracing import tracing_client
 
+# The final export waits for a Stop hook still exporting, instead of the plugin's 2 s.
+FINAL_EXPORT_LOCK_SECONDS = 60.0
+
 
 def main() -> int:
     if os.getenv('APP_CLAUDE_TRACING_ENABLED') != 'true':
@@ -21,6 +24,8 @@ def main() -> int:
     sys.modules[spec.name] = plugin
     spec.loader.exec_module(plugin)
     plugin.create_langfuse_client = lambda config: client
+    if os.getenv('APP_CLAUDE_FINAL_EXPORT') == '1':
+        plugin.FileLock.__init__.__defaults__ = (FINAL_EXPORT_LOCK_SECONDS,)
     # Attached-mode observations must keep the app's session and feature instead
     # of assigning the native CLI's session ID as the Langfuse session.
     feature = os.getenv('APP_CLAUDE_TRACE_FEATURE')

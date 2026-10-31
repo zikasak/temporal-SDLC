@@ -33,7 +33,10 @@ logger = logging.getLogger(__name__)
 # Output of sandboxed containers, re-logged line by line at each line's own level.
 container_logger = logging.getLogger('app.containers')
 # Forwarded by name; LOG_LEVEL sets the agent's own logging, which forward_logs re-logs.
-AGENT_SETTINGS = ('AGENT_CONTEXT_TOKENS', 'LOG_LEVEL')
+# The *_MAX_TURNS budgets are read inside the container by each stage's AgentProfile.
+AGENT_SETTINGS = ('AGENT_CONTEXT_TOKENS', 'LOG_LEVEL', 'IMPLEMENTATION_MAX_TURNS',
+                  'TEST_GENERATION_MAX_TURNS', 'REVIEW_MAX_TURNS', 'DIAGNOSIS_MAX_TURNS',
+                  'DOCUMENTATION_MAX_TURNS')
 CONTAINER_LINE_CHARS = 4000
 # How long a container's remaining output may take to arrive once it was waited for.
 LOG_DRAIN_SECONDS = 2

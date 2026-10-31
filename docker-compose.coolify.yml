@@ -38,6 +38,13 @@ x-app: &app
     PI_CREDENTIALS_SHARED: "true"
     AGENT_CONTEXT_TOKENS: ${AGENT_CONTEXT_TOKENS:-64000}
     CONTRACT_EMBED_CHARS: ${CONTRACT_EMBED_CHARS:-32000}
+    # Per-stage agent tool-turn budgets, forwarded into agent containers; blank keeps
+    # each stage's built-in default (implementation 200, others 80).
+    IMPLEMENTATION_MAX_TURNS: ${IMPLEMENTATION_MAX_TURNS:-}
+    TEST_GENERATION_MAX_TURNS: ${TEST_GENERATION_MAX_TURNS:-}
+    REVIEW_MAX_TURNS: ${REVIEW_MAX_TURNS:-}
+    DIAGNOSIS_MAX_TURNS: ${DIAGNOSIS_MAX_TURNS:-}
+    DOCUMENTATION_MAX_TURNS: ${DOCUMENTATION_MAX_TURNS:-}
     GITHUB_TOKEN_ENCRYPTION_KEY: ${GITHUB_TOKEN_ENCRYPTION_KEY:-}
     GITHUB_ALLOWED_ORIGINS: ${GITHUB_ALLOWED_ORIGINS:-}
     # Optional, such as https://app.example.com/api/connectors/github/events; derived

@@ -58,6 +58,19 @@ class AgentProfile:
     wrap_up_prompt: str | None = None
 
 
+def _max_turns(profile: AgentProfile) -> int:
+    """The stage's tool-turn budget from its env var; unset, blank or invalid values
+    fall back to the profile default."""
+    value = os.getenv(profile.max_turns_env, '').strip()
+    try:
+        return int(value) if value else profile.default_max_turns
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            'Ignoring invalid %s=%r; using %d', profile.max_turns_env, value,
+            profile.default_max_turns)
+        return profile.default_max_turns
+
+
 READ_LINES = 500
 READ_CHARS = 30000
 SHELL_CHARS = 8000
@@ -484,8 +497,7 @@ async def _run_claude(profile: AgentProfile, provider) -> bool:
     )
     if state is not None and state.get('adapter') != 'claude':
         raise ValueError('A paused run must resume with the same adapter')
-    turns = state['turns'] if state else int(os.getenv(
-        profile.max_turns_env, str(profile.default_max_turns)))
+    turns = state['turns'] if state else _max_turns(profile)
     if turns <= 0:
         raise RuntimeError(profile.exhaustion_message)
     pending = {}
@@ -565,7 +577,7 @@ async def _run_with_provider(profile: AgentProfile, provider) -> bool:
     history: list[BaseMessage] = []
     notes = ''
     changed: dict[str, None] = {}
-    turns = int(os.getenv(profile.max_turns_env, str(profile.default_max_turns)))
+    turns = _max_turns(profile)
     nudges = 0
     resumed = await run_sync(_resume, profile.root.parent)
     if resumed:

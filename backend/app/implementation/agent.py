@@ -198,7 +198,8 @@ async def main() -> None:
     await run_agent(AgentProfile(
         root=ROOT, prompt=base_prompt(inputs, language['instructions']) + repair_prompt(inputs),
         initial_messages=[context],
-        max_turns_env='IMPLEMENTATION_MAX_TURNS', validate_completion=validate_completion,
+        max_turns_env='IMPLEMENTATION_MAX_TURNS', default_max_turns=200,
+        validate_completion=validate_completion,
         completion_message='Implementation completed',
         exhaustion_message='Implementation exceeded the tool-turn limit',
         contracts=CONTRACTS if await run_sync(CONTRACTS.is_dir) else None,
