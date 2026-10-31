@@ -1441,6 +1441,10 @@ class DeliveryWorkflow:
             self.progress.implementation_error = "The service could not be implemented or built."
 
     async def _generate_tests(self, repair: dict[str, Any] | None = None) -> None:
+        # Tests put back as the repository holds them were seen passing so: they stay so.
+        restore = (repair or {}).get('review', {}).get('restore') or []
+        if restore:
+            self.state.kept_tests = sorted({*self.state.kept_tests, *restore})
         context = self._stage_context(repair)
         if self.state.kept_tests and self.spec.checkout:
             # The repository's tests the changed service was seen to pass as they are.

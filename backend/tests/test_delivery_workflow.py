@@ -724,7 +724,7 @@ async def test_api_change_has_the_repository_tests_its_service_still_passes_put_
     assert state.verification_status == "completed" and state.publication_status == "completed"
 
 
-async def test_a_suite_still_keeping_tests_after_the_restore_rounds_is_retried_with_the_restore(env, worker, repository_selection):
+async def test_a_suite_still_keeping_tests_after_the_restore_rounds_is_retried_with_the_restore(env, worker, repository_selection, monkeypatch):
     worker.rewritten_tests, worker.still_passing = [LISTS, BOOKS], [LISTS]
     worker.__class__ = IgnoresRestore
     session_id = await deliver(env, repository_selection, kind="api_change")
@@ -735,6 +735,15 @@ async def test_a_suite_still_keeping_tests_after_the_restore_rounds_is_retried_w
     assert state.publication_status == "skipped" and not worker.published and not state.reviews
 
     worker.__class__ = FakeActivities
+    finished = delivery_service._finished
+
+    async def recorded_nothing_kept(*args):
+        # As a delivery from before the kept tests were recorded.
+        result = await finished(*args)
+        result.state.kept_tests = []
+        return result
+
+    monkeypatch.setattr(delivery_service, "_finished", recorded_nothing_kept)
     await delivery_service.retry(session_id, "tests")
     state = await delivered(env, session_id)
     # The retried author is not started blind: it gets the reason and what to put back.
