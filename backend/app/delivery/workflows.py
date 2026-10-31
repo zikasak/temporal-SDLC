@@ -1106,6 +1106,10 @@ class DeliveryWorkflow:
                 "The repository's tests could not be run against the changed service.")
         else:
             self.progress.verification_error = judge_kept(self.progress.existing_tests, touched)
+            # Once seen passing as the repository holds them, they stay so for every
+            # later author: a repair that rewrote one again would only be rejected again.
+            self.state.kept_tests = sorted({
+                *self.state.kept_tests, *kept_tests(self.progress.existing_tests, touched)})
         self.progress.verification_status = 'completed'
 
     async def _repair(self, attempt: int) -> bool:
@@ -1437,10 +1441,14 @@ class DeliveryWorkflow:
             self.progress.implementation_error = "The service could not be implemented or built."
 
     async def _generate_tests(self, repair: dict[str, Any] | None = None) -> None:
+        context = self._stage_context(repair)
+        if self.state.kept_tests and self.spec.checkout:
+            # The repository's tests the changed service was seen to pass as they are.
+            context['keep'] = list(self.state.kept_tests)
         try:
             self.progress.tests = await workflow.execute_child_workflow(
                 "TestGenerationWorkflow",
-                args=[self.spec.session_id, self._stage_context(repair)],
+                args=[self.spec.session_id, context],
                 id=self._child_id(self._stage_name('test-generation', repair),
                                   repair['attempt'] if repair else 0),
                 task_queue=TEST_GENERATION_TASK_QUEUE,

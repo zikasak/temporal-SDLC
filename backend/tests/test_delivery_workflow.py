@@ -714,6 +714,9 @@ async def test_api_change_has_the_repository_tests_its_service_still_passes_put_
     assert [stage for stage, _ in worker.repairs] == ["tests"]
     review = worker.repairs[0][1]["review"]
     assert review["restore"] == [LISTS] and LISTS in review["findings"][0]["summary"]
+    # The author of the first suite had nothing to keep; every later one keeps it.
+    assert "keep" not in worker.test_contexts[0]
+    assert worker.test_contexts[-1]["keep"] == [LISTS]
     assert worker.existing_runs == [("repository-tests", [LISTS, BOOKS]),
                                     ("repository-tests", [BOOKS])]
     # The restored suite goes on to the code review and is published.
@@ -737,6 +740,7 @@ async def test_a_suite_still_keeping_tests_after_the_restore_rounds_is_retried_w
     # The retried author is not started blind: it gets the reason and what to put back.
     retried = worker.test_contexts[-1]["repair"]["review"]
     assert retried["restore"] == [LISTS] and LISTS in retried["findings"][0]["summary"]
+    assert worker.test_contexts[-1]["keep"] == [LISTS]
     assert worker.existing_runs[-1] == ("repository-tests", [BOOKS])
     assert state.verification_error is None and state.publication_status == "completed"
 

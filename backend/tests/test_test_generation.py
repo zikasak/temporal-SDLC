@@ -2,6 +2,7 @@ import asyncio
 import json
 import tarfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 from temporalio.exceptions import ApplicationError
@@ -359,3 +360,81 @@ async def test_a_review_correction_puts_back_the_repository_tests_it_is_given(tm
     # The author is given the test as the repository holds it.
     assert set(sent['repair']['review']['restore']) == {case}
     assert 'get();' in sent['repair']['review']['restore'][case]
+
+
+async def run_api_change_author(tmp_path, monkeypatch, published: dict[str, str],
+                                written: dict[str, str], repair: dict) -> tuple[dict, Any]:
+    """Run the test author of an API change whose repository holds `lists` and `books`,
+    after the change published `published`; it writes `written`. Returns its input and
+    the run, still to be awaited."""
+    monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
+    source = 'src/test/java/com/example/OrdersTest.java'
+    existing = tmp_path / 'session/repository/contract-tests' / source
+    existing.parent.mkdir(parents=True)
+    existing.write_text(java_tests(lists='get();', books='book();'))
+    await record_repository_tests(tmp_path, monkeypatch)
+    suite = tmp_path / 'session/tests/suite' / source
+    suite.parent.mkdir(parents=True)
+    suite.write_text(java_tests(**published))
+    (tmp_path / 'session/tests/suite/pom.xml').write_text('pom')
+    context = {'requirements': [], 'api_design': empty_api(), 'language': 'java',
+               'repository': {'full_name': 'octocat/project', 'branch': 'main'},
+               'repair': repair, 'keep': ['com.example.OrdersTest#lists']}
+    sent = {}
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': 0})
+        if args[0] == 'cp' and args[1] == '-a':
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.update(json.loads(archive.extractfile('input.json').read()))
+        if args[0] == 'cp' and args[1].endswith(':/workspace/tests/.'):
+            (Path(args[2]) / source).parent.mkdir(parents=True)
+            (Path(args[2]) / source).write_text(java_tests(**written))
+            (Path(args[2]) / 'pom.xml').write_text('pom')
+        if args[0] == 'build' and '--iidfile' in args:
+            Path(args[args.index('--iidfile') + 1]).write_text('sha256:' + 'd' * 64)
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    return sent, ActivityEnvironment().run(activities.generate_service_tests, 'session', context)
+
+
+@pytest.mark.parametrize('written, refused', [
+    # The kept test stays; what made it fail in the suite is corrected around it.
+    ({'lists': 'get();', 'books': 'book();', 'added': 'post();'}, None),
+    ({'lists': 'rewritten();', 'books': 'book();', 'added': 'post();'},
+     'may not touch: com.example.OrdersTest#lists'),
+    ({'books': 'book();', 'added': 'post();'}, 'may not touch: com.example.OrdersTest#lists'),
+])
+async def test_a_repair_leaves_the_tests_the_changed_service_was_seen_to_pass(tmp_path, monkeypatch, written, refused):
+    # The diagnosis found the kept test broken in the suite of the API change.
+    sent, run = await run_api_change_author(
+        tmp_path, monkeypatch, {'lists': 'get();', 'books': 'book();', 'added': 'post();'},
+        written, {'attempt': 1, 'broken_tests': [
+            {'class_name': 'com.example.OrdersTest', 'name': 'lists'}]})
+    if refused:
+        with pytest.raises(RuntimeError, match=refused):
+            await run
+    else:
+        assert (await run)['changed_tests'] == []
+    # The author is told which tests those are, as the repository holds them.
+    assert set(sent['keep']) == {'com.example.OrdersTest#lists'}
+    assert 'get();' in sent['keep']['com.example.OrdersTest#lists']
+
+
+@pytest.mark.parametrize('written, refused', [
+    ({'lists': 'get();', 'books': 'book();'}, None),
+    # Putting one test back is no occasion to rewrite another the suite had left alone.
+    ({'lists': 'get();', 'books': 'rewritten();'}, 'may not touch: com.example.OrdersTest#books'),
+])
+async def test_putting_tests_back_leaves_the_other_repository_tests_alone(tmp_path, monkeypatch, written, refused):
+    sent, run = await run_api_change_author(
+        tmp_path, monkeypatch, {'lists': 'changed();', 'books': 'book();'}, written,
+        {'attempt': 1, 'review': {'findings': [{'summary': 'Put it back.', 'reason': 'Kept.'}],
+                                  'restore': ['com.example.OrdersTest#lists']}})
+    if refused:
+        with pytest.raises(RuntimeError, match=refused):
+            await run
+    else:
+        assert (await run)['changed_tests'] == []

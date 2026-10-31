@@ -55,6 +55,9 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
         if not previous.is_dir():
             raise ApplicationError('Generated tests are unavailable', non_retryable=True)
         contracts['repair'] = repair
+    if context.get('keep'):
+        # The repository's tests the changed service still passes, with their sources.
+        contracts['keep'] = context['keep']
 
     # The author of a session with a repository continues that repository's contract
     # tests, as the delivery recorded them before any author ran; the rest of the
@@ -138,16 +141,16 @@ async def generate_service_tests(session_id: str, context: dict[str, Any]) -> di
     )
     frozen = None
     if repair and repair.get('review'):
-        # Code review findings concern the delivery's own tests: the repository's tests
-        # it left as they were stay so for a change.
-        if change:
-            published = await run_sync(suite.test_cases, session_dir / 'tests/suite')
-            frozen = {case: source for case, source in repository.items()
-                      if published.get(case) == source}
         # Repository tests the suite has to put back: the author gets each one's source,
         # and a suite in which one of them still differs from it is rejected.
         restore = {case: repository[case] for case in repair['review'].get('restore', [])
                    if case in repository}
+        # Code review findings concern the delivery's own tests: the repository's tests
+        # it left as they were stay so for a change, and while others are put back.
+        if change or restore:
+            published = await run_sync(suite.test_cases, session_dir / 'tests/suite')
+            frozen = {case: source for case, source in repository.items()
+                      if published.get(case) == source}
         if restore:
             frozen = {**(frozen or {}), **restore}
             context = {**context, 'repair': {
@@ -165,6 +168,13 @@ async def generate_service_tests(session_id: str, context: dict[str, Any]) -> di
         }
     elif change:
         frozen = repository
+    # Repository tests the changed service was seen to pass as they are stay so in every
+    # authoring run, a repair that found one of them failing included.
+    keep = {case: repository[case] for case in context.get('keep', []) if case in repository}
+    if keep:
+        frozen = {**(frozen or {}), **keep}
+    context = {**context, 'keep': keep} if keep else {
+        key: value for key, value in context.items() if key != 'keep'}
     result = await run_stage(stage(language, frozen, must_add=change and not repair),
                              session_id, context, GENERATED_CODE_DIR)
     if not continued or 'questions' in result:

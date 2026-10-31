@@ -138,11 +138,27 @@ worker rejects a suite in which one of them still differs.
 """
 
 
+KEEP_PROMPT = """
+The `keep` entry of the input maps tests of the repository, by identity (`module.Class#test`
+or `package.Class#method`), to their source as the repository holds them, with layout and
+comments normalized (a method's source may follow the headers of the classes it runs in).
+Each one was run, as the repository holds
+it, against the new service and passed there: the contract still supports it. Keep each
+exactly as given, in the file and class it belongs to, whatever else asks to change it,
+including `broken_tests`: the outer worker rejects a suite in which one of them differs or
+is missing. When one of them fails in your suite, it is not wrong: something your suite
+changed around it is, such as a fixture, helper, configuration or another test it shares
+state with. Correct that instead, so that it passes in your suite as it does in the
+repository's.
+"""
+
+
 def repair_prompt(inputs: dict) -> str:
+    keep = KEEP_PROMPT if inputs.get('keep') else ''
     repair = inputs.get('repair')
     if not repair:
-        return ''
-    return REVIEW_PROMPT if repair.get('review') else REPAIR_PROMPT
+        return keep
+    return (REVIEW_PROMPT if repair.get('review') else REPAIR_PROMPT) + keep
 
 
 def validate_completion(test_glob: str, root: Path) -> None:

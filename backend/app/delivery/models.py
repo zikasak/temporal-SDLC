@@ -300,6 +300,10 @@ class DeliveryState:
     # author put back as the repository holds them, told why: those its rejected suite
     # changed or removed that the changed service still passed. Set by the retry.
     restore_tests: list[str] = field(default_factory=list)
+    # The repository's tests an API change was seen to keep supporting: each ran, as the
+    # repository holds it, against the changed service and passed. Every later author of
+    # the delivery, a repair included, has to leave them as the repository holds them.
+    kept_tests: list[str] = field(default_factory=list)
     # Raised once the run has done its work and waits for the user's next decision; a
     # restart continues the delivery as a new run of the same workflow.
     waiting: bool = False
