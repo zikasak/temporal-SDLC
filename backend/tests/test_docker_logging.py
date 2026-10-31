@@ -161,3 +161,10 @@ async def test_stage_turn_budgets_reach_the_agent_container(tmp_path, monkeypatc
     assert ('-e', 'IMPLEMENTATION_MAX_TURNS') in pairs
     assert ('-e', 'REVIEW_MAX_TURNS') not in pairs
     assert not any('400' in arg for arg in create)
+
+
+def test_claude_agent_containers_use_the_five_minute_prompt_cache(monkeypatch):
+    monkeypatch.setenv('ANTHROPIC_API_KEY', 'sk-test-key')
+    args = docker_agents.claude_container_args(
+        docker_agents.ModelSettings(adapter='claude', model='claude-sonnet-4-5'))
+    assert ('-e', 'FORCE_PROMPT_CACHING_5M=1') in list(zip(args, args[1:]))

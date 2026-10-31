@@ -351,6 +351,11 @@ def claude_container_args(settings: ModelSettings) -> list[str]:
                            'CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`.')
     # Secrets are forwarded by name, so their values stay out of the docker arguments.
     args = [argument for key in credentials for argument in ('-e', key)]
+    # Agent containers serve only the stages after the API design, whose turns follow
+    # each other closely: Claude Code's 5-minute prompt cache suffices there, and it
+    # overrides the 1-hour TTL a subscription login would otherwise get. Pi already
+    # caches for 5 minutes unless PI_CACHE_RETENTION=long, which is not forwarded.
+    args += ['-e', 'FORCE_PROMPT_CACHING_5M=1']
     if os.getenv('ANTHROPIC_BASE_URL'):
         args += ['-e', f'ANTHROPIC_BASE_URL={_container_url(os.environ["ANTHROPIC_BASE_URL"])}']
     return args
