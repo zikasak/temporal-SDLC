@@ -666,8 +666,6 @@ async def test_bugfix_ends_the_requirements_its_interview_retired(env, worker, r
 
 @pytest.mark.parametrize("still_passing, not_run, refused", [
     ([], [], None),
-    (["com.example.RoomsTest#lists"], [],
-     "still passes were changed or removed: com.example.RoomsTest#lists (1)"),
     # A rewritten test that was not seen to fail as it was is not shown to be unsupported.
     ([], ["com.example.RoomsTest#books"], "did not run, as they were, against the changed "
                                           "service: com.example.RoomsTest#books (1)"),
@@ -690,6 +688,57 @@ async def test_api_change_keeps_the_repository_tests_its_service_still_passes(en
     worker.still_passing = worker.not_run = []
     await delivery_service.retry(session_id, "tests")
     assert (await delivered(env, session_id)).publication_status == "completed"
+
+
+class IgnoresRestore(FakeActivities):
+    """A test author that keeps the repository's tests it rewrote, whatever it is told."""
+
+    @property
+    def rewritten_tests(self) -> list[str]:
+        return self.__dict__['rewritten_tests']
+
+    @rewritten_tests.setter
+    def rewritten_tests(self, value: list[str]) -> None:
+        pass
+
+
+LISTS, BOOKS = "com.example.RoomsTest#lists", "com.example.RoomsTest#books"
+KEPT = "still passes were changed or removed: com.example.RoomsTest#lists (1)"
+
+
+async def test_api_change_has_the_repository_tests_its_service_still_passes_put_back(env, worker, repository_selection):
+    worker.rewritten_tests, worker.still_passing = [LISTS, BOOKS], [LISTS]
+    state = await delivered(env, await deliver(env, repository_selection, kind="api_change"))
+    # The test author is told which test the changed service still passes and puts it
+    # back as the repository holds it; only the other rewritten test is run again.
+    assert [stage for stage, _ in worker.repairs] == ["tests"]
+    review = worker.repairs[0][1]["review"]
+    assert review["restore"] == [LISTS] and LISTS in review["findings"][0]["summary"]
+    assert worker.existing_runs == [("repository-tests", [LISTS, BOOKS]),
+                                    ("repository-tests", [BOOKS])]
+    # The restored suite goes on to the code review and is published.
+    assert len(state.reviews) == 1 and state.verification_error is None
+    assert state.verification_status == "completed" and state.publication_status == "completed"
+
+
+async def test_a_suite_still_keeping_tests_after_the_restore_rounds_is_retried_with_the_restore(env, worker, repository_selection):
+    worker.rewritten_tests, worker.still_passing = [LISTS, BOOKS], [LISTS]
+    worker.__class__ = IgnoresRestore
+    session_id = await deliver(env, repository_selection, kind="api_change")
+    state = await delivered(env, session_id)
+    # Two restore rounds, each verified again, and the suite still rewrites the test.
+    assert [stage for stage, _ in worker.repairs] == ["tests", "tests"]
+    assert len(worker.existing_runs) == 3 and KEPT in state.verification_error
+    assert state.publication_status == "skipped" and not worker.published and not state.reviews
+
+    worker.__class__ = FakeActivities
+    await delivery_service.retry(session_id, "tests")
+    state = await delivered(env, session_id)
+    # The retried author is not started blind: it gets the reason and what to put back.
+    retried = worker.test_contexts[-1]["repair"]["review"]
+    assert retried["restore"] == [LISTS] and LISTS in retried["findings"][0]["summary"]
+    assert worker.existing_runs[-1] == ("repository-tests", [BOOKS])
+    assert state.verification_error is None and state.publication_status == "completed"
 
 
 async def test_api_change_is_not_published_with_a_test_that_did_not_run(env, worker, repository_selection):

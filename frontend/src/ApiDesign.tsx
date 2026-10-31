@@ -6,8 +6,8 @@ import ForkButton from "./ForkButton";
 import { AskedQuestions, QuestionForm, questionList, type Question } from "./Questions";
 import { RepositorySummary } from "./RepositoryPicker";
 import {
-  DeliveryResults, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress,
-  type DeliveryProgress, type GenerationStage,
+  DeliveryResults, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress, taskKind,
+  type DeliveryProgress, type GenerationStage, type TaskKind,
 } from "./Delivery";
 import {
   repositoryCheckout, repositorySelection, type RepositoryCheckout, type RepositorySelection,
@@ -37,6 +37,8 @@ type Session = DeliveryProgress & {
   // An assistant message's questions are answered by the next user message.
   messages: { role: "user" | "assistant"; content: string; questions: Question[] }[];
   requirements: Requirement[];
+  // The kind of task the requirements session recorded: a new service or an API change.
+  kind: TaskKind | null;
   api: ApiModel;
   language: string | null;
   problems: string[];
@@ -118,6 +120,7 @@ function sessionRecord(value: unknown): Session {
       role: item.role, content: item.content, questions: questionList(item.questions),
     })),
     requirements: value.requirements as Requirement[],
+    kind: taskKind(value.kind),
     api: value.api as ApiModel,
     language: typeof value.language === "string" ? value.language : null,
     problems: value.problems.filter((item): item is string => typeof item === "string"),
@@ -598,7 +601,7 @@ export default function ApiDesign() {
                     {retryingGeneration === "server" ? "Restarting server generation…" : "Retry server generation"}
                   </button>
                 </div>}
-                <DeliveryResults progress={session} retrying={retryingGeneration}
+                <DeliveryResults progress={session} kind={session.kind} retrying={retryingGeneration}
                   disabled={submitting || pipelinePending(session)}
                   onRetry={(stage) => void retryGeneration(stage)}
                   answering={submitting} onAnswer={answerAgent}

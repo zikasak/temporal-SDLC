@@ -16,7 +16,7 @@ with workflow.unsafe.imports_passed_through():
     from app.delivery.models import (
         MENTION_HANDLED, OUTCOME_OWED, STOPPED, TASK_IDLE_TIMEOUT, AgentQuestions, DeliveryProgress,
         DeliveryState, is_mention, judge_baseline, judge_kept, kept_tests, mention_key,
-        open_review_findings, unproven_green,
+        open_review_findings, restorable_tests, unproven_green,
     )
     from app.diagnosis.models import repair_request
     from app.github.checkout import SNAPSHOT_DIR
@@ -33,6 +33,11 @@ with workflow.unsafe.imports_passed_through():
 
 # Each round is a diagnosis, a repair of one side and a new verification.
 MAX_REPAIR_ROUNDS = 5
+# Rounds in which the test author of an API change puts back the repository's tests the
+# changed service still passes, each verified again.
+MAX_RESTORE_ROUNDS = 2
+# Marks the workflow code that sends a suite rejected for such tests back to its author.
+RESTORE_KEPT_PATCH = 'restore-kept-tests'
 # Runs of one verification whose result is an infrastructure error, not a verdict.
 VERIFICATION_ATTEMPTS = 2
 # An API change may add more tests than one run reports on singly; the run still
@@ -64,6 +69,18 @@ def _same_mention(first: tuple[str | None, int | None],
     a state recorded before types were, matches by comment ID alone."""
     return first[1] == second[1] and (
         first[0] is None or second[0] is None or first[0] == second[0])
+
+
+def restore_finding(kept: list[str],
+                    reason: str = 'Verification rejected the tests.') -> ReviewFinding:
+    """The finding that sends the test author back to the repository's `kept` tests it
+    changed or removed although the changed service still passes them."""
+    return {'summary': (
+        'These tests of the repository were changed or removed, but the changed service '
+        f'still passes them as the repository holds them: {", ".join(kept)}. A test the '
+        'contract still supports has to stay exactly as the repository holds it: put '
+        'each one back as the `restore` entry gives it.'),
+        'target': 'tests', 'reason': reason}
 
 
 @workflow.defn
@@ -773,6 +790,12 @@ class DeliveryWorkflow:
             return
         if self.state.retry_stage == 'server':
             await self._implement_service()
+        elif self.state.restore_tests and workflow.patched(RESTORE_KEPT_PATCH):
+            # The suite was rejected for tests the changed service still passed: its
+            # author is told so and puts them back, rather than writing the same again.
+            restore, self.state.restore_tests = self.state.restore_tests, []
+            await self._generate_tests(
+                review_request([restore_finding(restore)], 'tests', 1, restore=restore))
         else:
             await self._generate_tests()
         await self._verify_built()
@@ -784,6 +807,8 @@ class DeliveryWorkflow:
             await self._verify_and_repair()
             if self.spec.kind == 'api_change':
                 await self._prove_kept()
+                if workflow.patched(RESTORE_KEPT_PATCH):
+                    await self._restore_kept()
             if self._passed():
                 await self._review_rounds()
         else:
@@ -933,12 +958,30 @@ class DeliveryWorkflow:
         kept = kept_tests(existing, touched)
         if not kept:
             return None
-        return {'summary': (
-            'These tests of the repository were changed or removed, but the changed service '
-            f'still passes them as the repository holds them: {", ".join(kept)}. A test the '
-            'contract still supports has to stay exactly as the repository holds it: put '
-            'each one back as the `restore` entry gives it.'),
-            'target': 'tests', 'reason': reason}, kept
+        return restore_finding(kept, reason), kept
+
+    async def _restore_kept(self) -> None:
+        """While verification of an API change passed but rejected its suite for tests of
+        the repository it changed or removed that the changed service still passes, have
+        the test author put them back as the repository holds them and verify again, at
+        most MAX_RESTORE_ROUNDS times. A rejection left stays the verification's error."""
+        for attempt in range(1, MAX_RESTORE_ROUNDS + 1):
+            restore = restorable_tests(self.progress)
+            if not restore or not self.progress.verification_error:
+                return
+            workflow.logger.info('Restore round %d: %d repository tests', attempt, len(restore))
+            self.progress.verification_status = 'repairing'
+            await self._generate_tests(
+                review_request([restore_finding(restore)], 'tests', attempt, restore=restore))
+            if self.progress.tests_error:
+                # The rejected suite's image stays; the author's failure is the way on.
+                self.progress.verification_status = 'completed'
+                return
+            self.progress.verification = None
+            self.progress.verification_error = None
+            self.progress.existing_tests = None
+            await self._verify_and_repair()
+            await self._prove_kept()
 
     async def _verify_correction(self, workers: list[str], number: int) -> bool:
         """Verify the delivery as the workers corrected it; true when it passed again."""

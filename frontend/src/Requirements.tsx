@@ -715,7 +715,7 @@ export default function Requirements() {
                   </a>
                 )}
                 {session.delivery && (
-                  <DeliveryResults progress={session.delivery} retrying={retryingGeneration}
+                  <DeliveryResults progress={session.delivery} kind={session.kind} retrying={retryingGeneration}
                     documentation={session.kind === "docs"}
                     disabled={submitting || deliveryPending(session.delivery)}
                     onRetry={(stage) => void retryGeneration(stage)}

@@ -38,6 +38,14 @@ type VerificationResult = {
 
 // `review` runs a failed code review again, or goes on from a failed correction of its findings.
 export type GenerationStage = "server" | "tests" | "documentation" | "repository" | "review";
+// The kind of task a session delivers, as the requirements session recorded it.
+export type TaskKind = "new_service" | "api_change" | "bugfix" | "docs";
+const taskKinds: TaskKind[] = ["new_service", "api_change", "bugfix", "docs"];
+
+/** The task kind a session record carries, or null when it has none. */
+export function taskKind(value: unknown): TaskKind | null {
+  return taskKinds.includes(value as TaskKind) ? value as TaskKind : null;
+}
 // `repeats`: the finding was reported again after a correction did not settle it.
 type ReviewFinding = { summary: string; path?: string; target: "implementation" | "tests" | "both"; reason: string; repeats?: number };
 type ReviewRound = { round: number; findings: ReviewFinding[]; instructions?: string };
@@ -337,6 +345,7 @@ export function retriedProgress(progress: DeliveryProgress, stage: GenerationSta
       ? { baseline: null, baseline_error: null, baseline_status: "waiting" as const } : {}),
     // A repeated push keeps the verification it publishes.
     ...(stage === "repository" ? {} : {
+      review_error: null,
       verification: null,
       verification_error: null,
       verification_status: "waiting" as const,
@@ -598,8 +607,10 @@ function DocumentationResults({ progress, retrying, disabled, onRetry }: {
   );
 }
 
-export function DeliveryResults({ progress, documentation = false, onboarding = false, retrying, disabled, onRetry, answering, onAnswer, onFindings }: {
+export function DeliveryResults({ progress, kind = null, documentation = false, onboarding = false, retrying, disabled, onRetry, answering, onAnswer, onFindings }: {
   progress: DeliveryProgress;
+  // The kind of task the session delivers, when it records one.
+  kind?: TaskKind | null;
   // Whether the session's task changes documentation only.
   documentation?: boolean;
   // Whether this is an onboarding: the existing code is built with a new Dockerfile, no
@@ -625,11 +636,14 @@ export function DeliveryResults({ progress, documentation = false, onboarding = 
   const stage = progress.verification_status;
   const pending = stage === "waiting" || stage === "running";
   const repairing = progress.repairs[progress.repairs.length - 1];
-  // A change to an existing service generates no code and has a baseline instead.
-  const change = progress.baseline_status !== "not_applicable";
-  // A change whose verification proved nothing goes on by retrying its tests, unless
-  // a failed stage above already offers that.
-  const unverified = change && !progress.tests_error && !progress.baseline_error &&
+  // A bugfix generates no code and has a baseline instead.
+  const change = kind === "bugfix" || progress.baseline_status !== "not_applicable";
+  // A change, a bugfix or an API change, is published only with a verification that
+  // proved all of it. When it proved nothing, the change goes on by retrying its tests,
+  // unless a failed stage above already offers that; an API change needs its code first.
+  const proved = change || kind === "api_change";
+  const unverified = proved && !progress.tests_error && !progress.baseline_error &&
+    (change || Boolean(progress.code)) &&
     (Boolean(progress.verification_error) || result?.status === "error");
   const service = progress.implementation ? "built" : progress.implementation_error ? "build failed" : "building";
   return <>
@@ -679,7 +693,9 @@ export function DeliveryResults({ progress, documentation = false, onboarding = 
       {unverified && <div className="generation-failure">
         <button type="button" className="generate-button" disabled={disabled}
           onClick={() => onRetry("tests")}>
-          {retrying === "tests" ? "Writing the regression tests again…" : "Write the regression tests again"}
+          {change
+            ? retrying === "tests" ? "Writing the regression tests again…" : "Write the regression tests again"
+            : retrying === "tests" ? "Writing the tests again…" : "Write the tests again"}
         </button>
       </div>}
       {result && <>

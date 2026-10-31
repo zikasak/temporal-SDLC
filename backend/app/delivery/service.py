@@ -13,6 +13,7 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from app.delivery.models import (
     MENTION_HANDLED, OUTCOME_OWED, RETRY_STAGES, DeliveryProgress, DeliveryState, RetryStage, delivery_id, interrupted,
+    restorable_tests,
 )
 from app.delivery import mentions as mention_history
 from app.github.errors import GitHubError
@@ -270,6 +271,10 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
         raise SessionBusy('No implementation language was chosen for this session. '
                           'Fork it from a message and choose a language there.')
     state.retry_stage = stage
+    # A suite rejected for changing tests the changed service still passes would be
+    # rejected again: the retry has its author put them back, before the run is cleared.
+    state.restore_tests = (restorable_tests(progress)
+                           if stage == 'tests' and state.spec.kind == 'api_change' else [])
     # A finished run waits for no agent.
     progress.agent_questions = []
     if state.spec.checkout:

@@ -225,6 +225,23 @@ def kept_tests(result: VerificationResult, touched: list[str]) -> list[str]:
             if tracked.get(case, {}).get('tests') and not tracked[case]['failed']]
 
 
+def restorable_tests(progress: 'DeliveryProgress') -> list[str]:
+    """The repository's tests an API change changed or removed that its passed suite has to
+    put back as the repository holds them: all of them ran, as they were, against the
+    changed service, and these still passed there. Empty when verification did not pass,
+    or when some did not run or could not be run, which no restore settles."""
+    result, tests, verification = (progress.existing_tests, progress.tests,
+                                   progress.verification)
+    if not result or not tests or not verification or verification['status'] != 'passed':
+        return []
+    touched = [*tests.get('changed_tests', []), *tests.get('removed_tests', [])]
+    tracked = result['tracked']
+    if result['status'] == 'error' or tracked is None or any(
+            not tracked.get(case, {}).get('tests') for case in touched):
+        return []
+    return kept_tests(result, touched)
+
+
 def judge_kept(result: VerificationResult, touched: list[str]) -> str | None:
     """Why an API change may not publish its suite: `touched` are the repository's tests
     it changed or removed, and `result` their run, as they were, against the changed
@@ -279,6 +296,10 @@ class DeliveryState:
     # mention, the comment it refers to. Retrying the server or tests stage after it
     # failed carries out that fix again on the delivered sources, not the original task.
     code_fix: dict[str, Any] | None = None
+    # The repository's tests that retrying the tests stage of an API change has its test
+    # author put back as the repository holds them, told why: those its rejected suite
+    # changed or removed that the changed service still passed. Set by the retry.
+    restore_tests: list[str] = field(default_factory=list)
     # Raised once the run has done its work and waits for the user's next decision; a
     # restart continues the delivery as a new run of the same workflow.
     waiting: bool = False
