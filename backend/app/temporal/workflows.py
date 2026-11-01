@@ -12,6 +12,8 @@ with workflow.unsafe.imports_passed_through():
     from app.api_design.openapi import api_problems, design_problems
     from app.api_design.prompt import opening_fallback
     from app.api_design.source import design_state
+    from app.architecture.models import ARCHITECTURE_KINDS, ArchitectureResult, ArchitectureState
+    from app.architecture.source import architecture_state
     from app.delivery.models import TASK_IDLE_TIMEOUT, DeliveryState, TaskSpec, delivery_id
     from app.github.models import RepositorySelection
     from app.temporal.execution_fields import execution_fields, task_fields
@@ -49,6 +51,8 @@ DISCUSSION_TOO_LONG = "This discussion is too long to continue. Generate the Ope
 TASK_TREE = "task-tree"
 # A requirements session the user finalizes starts its API design itself.
 AUTO_API_DESIGN = "auto-api-design"
+# ...through the architecture session it starts first, which hands the design back.
+ARCHITECTURE_STAGE = "architecture-stage"
 
 
 def pending_questions(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -262,7 +266,11 @@ class RequirementsWorkflow(_Delivering):
             await self._deliver()
         elif self.state.status == "completed" and workflow.patched(TASK_TREE):
             if self._finalized and self.state.repository and workflow.patched(AUTO_API_DESIGN):
-                await self._start_first_design()
+                if (self.state.kind in ARCHITECTURE_KINDS
+                        and workflow.patched(ARCHITECTURE_STAGE)):
+                    await self._start_first_architecture()
+                else:
+                    await self._start_first_design()
             await self._own_designs()
         return self.state.document
 
@@ -310,6 +318,64 @@ class RequirementsWorkflow(_Delivering):
             "ApiDesignWorkflow", state, id=session_id, **execution_fields(state.repository))
         workflow.logger.info("API design %s started", session_id)
         self._designs.append(asyncio.create_task(self._follow_design(handle)))
+
+    async def _register(self, session_id: str) -> None:
+        try:
+            await workflow.execute_activity(
+                register_session, session_id,
+                start_to_close_timeout=timedelta(minutes=1),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except ActivityError as exc:
+            # Unrecorded, the session is still listed and served while Temporal is up.
+            workflow.logger.warning("Session %s not recorded: %s", session_id,
+                                    exc.cause or exc)
+
+    async def _start_first_architecture(self) -> None:
+        """Hand the finished requirements to their architecture session, which drafts the
+        architecture at once and later hands the task on to its API design."""
+        session_id = f"architecture-session-{workflow.uuid4().hex}"
+        state = architecture_state(workflow.info().workflow_id, self.state,
+                                   await self._requirements_text())
+        await self._start_architecture(session_id, state)
+        self.state.architecture_session_id = session_id
+        await self._register(session_id)
+
+    async def _start_architecture(self, session_id: str, state: ArchitectureState) -> None:
+        handle = await workflow.start_child_workflow(
+            "ArchitectureWorkflow", state, id=session_id, result_type=ArchitectureResult,
+            **execution_fields(state.repository))
+        workflow.logger.info("Architecture session %s started", session_id)
+        self._designs.append(asyncio.create_task(self._follow_architecture(handle)))
+
+    async def _follow_architecture(self, handle: workflow.ChildWorkflowHandle) -> None:
+        """Wait for the architecture session to be finalized or skipped, then start the API
+        design it hands on as this session's child, next to it."""
+        try:
+            result = await handle
+        except ChildWorkflowError as exc:
+            workflow.logger.warning("Architecture session %s did not finish: %s", handle.id,
+                                    exc.cause or exc)
+            return
+        if not result:
+            return
+        if isinstance(result, dict):
+            result = ArchitectureResult(
+                api_design_session_id=result["api_design_session_id"],
+                design=ApiDesignState(**result["design"]))
+        await self._start_design(result.api_design_session_id, result.design)
+        await self._register(result.api_design_session_id)
+
+    @workflow.update
+    async def start_architecture(self, session_id: str, state: ArchitectureState) -> None:
+        """Start an architecture session of this task, such as a fork of one, as this
+        session's child; done once it has started."""
+        await self._start_architecture(session_id, state)
+
+    @start_architecture.validator
+    def validate_start_architecture(self, session_id: str, state: ArchitectureState) -> None:
+        if not self._owns_designs:
+            raise ValueError("Generate the requirements document before the architecture.")
 
     @workflow.update
     async def start_api_design(self, session_id: str, state: ApiDesignState) -> None:
@@ -567,6 +633,9 @@ class RequirementsWorkflow(_Delivering):
             language=contract["language"],
             repository=self.state.repository,
             checkout=self.state.checkout,
+            # Given to the coding agents read-only; the repository's files stay as they are.
+            architecture=contract.get("architecture"),
+            architecture_structure=contract.get("architecture_structure"),
         )))
 
     async def _expire(self) -> None:
@@ -808,6 +877,8 @@ class ApiDesignWorkflow(_Delivering):
             language=self.state.language,
             repository=self.state.repository,
             checkout=self.state.checkout,
+            architecture=self.state.architecture,
+            architecture_structure=self.state.architecture_structure,
         )))
 
     async def _expire(self) -> None:

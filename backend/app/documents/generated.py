@@ -14,7 +14,8 @@ from app.documents.storage import new_expiry
 logger = logging.getLogger(__name__)
 
 MAX_GENERATED_BYTES = 256 * 1024
-CONTENT_TYPES = {"md": "text/markdown", "yaml": "application/yaml", "yml": "application/yaml"}
+CONTENT_TYPES = {"md": "text/markdown", "yaml": "application/yaml", "yml": "application/yaml",
+                 "json": "application/json"}
 
 
 def _generated_metadata(row: dict[str, Any]) -> dict[str, Any]:
@@ -37,9 +38,9 @@ def _generated_filename(filename: str) -> str:
         or "/" in filename
         or "\\" in filename
         or "\x00" in filename
-        or not re.fullmatch(r"[^/\\]+\.(?:txt|md|py|ya?ml)", filename, re.IGNORECASE)
+        or not re.fullmatch(r"[^/\\]+\.(?:txt|md|py|ya?ml|json)", filename, re.IGNORECASE)
     ):
-        raise DocumentValidationError("Use a single .txt, .md, .py, or .yaml filename.")
+        raise DocumentValidationError("Use a single .txt, .md, .py, .yaml or .json filename.")
     return filename
 
 

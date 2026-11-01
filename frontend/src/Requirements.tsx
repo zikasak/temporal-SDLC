@@ -49,8 +49,9 @@ type Session = {
   checkout: RepositoryCheckout | null;
   // The delivery of a task this session hands over itself, once it has finished.
   delivery: DeliveryProgress | null;
-  // The API design the session started itself once the document was generated.
-  api_design_session_id: string | null;
+  // The architecture session the session started itself once the document of a new
+  // service or an API change was generated; it later starts the API design.
+  architecture_session_id: string | null;
 };
 
 const sessionStatuses: SessionStatus[] = [
@@ -162,8 +163,8 @@ function sessionRecord(value: unknown): Session {
     forked_from: forkOrigin(value),
     repository,
     checkout: repositoryCheckout("checkout" in value ? value.checkout : null),
-    api_design_session_id: "api_design_session_id" in value &&
-      typeof value.api_design_session_id === "string" ? value.api_design_session_id : null,
+    architecture_session_id: "architecture_session_id" in value &&
+      typeof value.architecture_session_id === "string" ? value.architecture_session_id : null,
   };
 }
 
@@ -213,10 +214,10 @@ export default function Requirements() {
         const record = sessionRecord(body);
         setSession(record);
         setError("");
-        // A finished task that designs its API starts the design right after the document;
-        // sessions finalized before that existed never do, so the wait is bounded.
+        // A finished task that designs its API starts its architecture right after the
+        // document; sessions finalized before that existed never do, so the wait is bounded.
         const designStarting = record.status === "completed" && record.kind !== null &&
-          !directKinds.includes(record.kind) && !record.api_design_session_id && designPolls-- > 0;
+          !directKinds.includes(record.kind) && !record.architecture_session_id && designPolls-- > 0;
         if (pendingStatuses.includes(record.status) || (record.delivery && deliveryPending(record.delivery)) ||
             designStarting) {
           timer = window.setTimeout(poll, 2000);
@@ -708,10 +709,10 @@ export default function Requirements() {
                     <span>revision {session.document.revision}</span>
                   </li>
                 </ul>
-                {session.api_design_session_id && (
+                {session.architecture_session_id && (
                   <a className="next-step"
-                    href={`?mode=api-design&session_id=${encodeURIComponent(session.api_design_session_id)}`}>
-                    Continue with the API design →
+                    href={`?mode=architecture&session_id=${encodeURIComponent(session.architecture_session_id)}`}>
+                    Continue with the architecture →
                   </a>
                 )}
                 {session.delivery && (

@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 WORKFLOW_TYPES = (
     "LLMRequestWorkflow",
     "RequirementsWorkflow",
+    "ArchitectureWorkflow",
     "ApiDesignWorkflow",
     "OnboardingWorkflow",
     "DeliveryWorkflow",

@@ -105,3 +105,9 @@ class ApiDesignState:
     repository: RepositorySelection | None = None
     # Set once the repository is on the worker's disk; forks check out their own.
     checkout: RepositoryCheckout | None = None
+    # The architecture session whose finalizing or skip started this design, and the
+    # architecture it hands on, as Markdown and in machine-readable form: the finalized
+    # one, or the repository's existing one when an API change skipped the stage.
+    architecture_session_id: str | None = None
+    architecture: str | None = None
+    architecture_structure: dict[str, Any] | None = None

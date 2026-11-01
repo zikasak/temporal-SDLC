@@ -137,7 +137,8 @@ async def get_session(session_id: str) -> dict[str, Any]:
     state = await get_state(session_id)
     session = dataclasses.asdict(state)
     # Polled every few seconds; the page shows the task, not the repository's contract.
-    del session["contract"]
+    # The API design is found through the architecture session.
+    del session["contract"], session["api_design_session_id"]
     delivery = None
     if _delivers(state):
         delivery = dataclasses.asdict(

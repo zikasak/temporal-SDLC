@@ -84,6 +84,14 @@ class TaskSpec:
     # tests and a root Dockerfile are written and verified against that code, which
     # changes only where the user confirmed a bug in it.
     onboarding: bool = False
+    # The task's architecture, as Markdown and in machine-readable form: given to the
+    # coding agents and committed with the contract as contracts/architecture.md and
+    # contracts/architecture.json. None for a task specified before architectures were.
+    architecture: str | None = None
+    architecture_structure: dict[str, Any] | None = None
+    # An onboarding that adds only the architecture to the repository's contract: nothing
+    # is written, verified or reviewed, the two files are pushed with a pull request.
+    architecture_only: bool = False
 
 
 @dataclass

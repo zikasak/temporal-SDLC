@@ -103,6 +103,13 @@ CHANGE_GUIDANCE = (
 )
 
 
+ARCHITECTURE_GUIDANCE = (
+    "The task's top-level architecture below was settled before this discussion. Design "
+    "the API so that it fits it: its components, the data flow between them and the "
+    "technology choices it records."
+)
+
+
 def opening_fallback(change: bool) -> ConversationMessage:
     """The first message of a session whose first turn failed."""
     if change:
@@ -127,6 +134,8 @@ def api_turn_messages(state: ApiDesignState, extra_guidance: str = "") -> list[B
         f"\n</requirements_document>\n\n"
         + (f"<change_document>\n{state.change_document}\n</change_document>\n\n"
            if change else "")
+        + (f"{ARCHITECTURE_GUIDANCE}\n<architecture>\n{state.architecture}\n"
+           "</architecture>\n\n" if state.architecture else "")
         + f"Current API model: "
         f"{json.dumps(state.api, ensure_ascii=False)}\nOpen problems: "
         f"{json.dumps(problems, ensure_ascii=False)}"

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import Markdown from "react-markdown";
 import { errorMessage, failure, readBody } from "./api";
 import { ApiModelSection, isApiModel, type ApiModel } from "./ApiModel";
+import { ArchitectureSection, architectureStructure, type ArchitectureStructure } from "./Architecture";
 import {
   DeliveryResults, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress,
   type DeliveryProgress, type GenerationStage,
@@ -26,6 +27,8 @@ type OnboardingStatus =
   | "failed"
   | "superseded";
 type Artifact = "contract" | "contract_tests" | "dockerfile";
+// The user's choice about what the branch already has.
+type Decision = "replace" | "decline" | "architecture_only";
 type Category = "functional" | "non_functional" | "technical";
 
 type Requirement = {
@@ -46,6 +49,11 @@ type Session = {
   existing_contract: boolean;
   existing_artifacts: Artifact[];
   replaced_contract: boolean;
+  // Whether the branch's contract lacks its architecture, which offers adding only it, and
+  // whether the user chose to.
+  architecture_missing: boolean;
+  architecture_only: boolean;
+  architecture_structure: ArchitectureStructure | null;
   // An assistant message's questions are answered by the next user message.
   messages: { role: "user" | "assistant"; content: string; questions: Question[] }[];
   requirements: Requirement[];
@@ -167,6 +175,9 @@ function sessionRecord(value: unknown): Session {
     existing_artifacts: value.existing_artifacts.filter(
       (item): item is Artifact => typeof item === "string" && item in artifactLabels),
     replaced_contract: value.replaced_contract === true,
+    architecture_missing: value.architecture_missing === true,
+    architecture_only: value.architecture_only === true,
+    architecture_structure: architectureStructure(value.architecture_structure),
     messages: value.messages.map((item) => ({
       role: item.role, content: item.content, questions: questionList(item.questions),
     })),
@@ -303,10 +314,14 @@ export default function Onboarding() {
     }), "Could not send the answers.");
   }
 
-  function decideContract(replace: boolean) {
-    return act((id) => post(`/${id}/contract-decision`, { replace_contract: replace }), (current) => ({
-      ...current, error: null, replaced_contract: replace,
-      status: !replace ? "declined" : drafted(current) ? "interviewing" : "drafting",
+  function decideContract(decision: Decision) {
+    const architectureOnly = decision === "architecture_only";
+    return act((id) => post(`/${id}/contract-decision`, { decision }), (current) => ({
+      ...current, error: null,
+      replaced_contract: decision === "replace",
+      architecture_only: architectureOnly,
+      status: decision === "decline" ? "declined"
+        : drafted(current) && current.architecture_only === architectureOnly ? "interviewing" : "drafting",
     }), "Could not record the decision.");
   }
 
@@ -422,8 +437,8 @@ export default function Onboarding() {
       <header className="page-heading">
         <h1>Onboarding</h1>
         <p className="page-intro">
-          Bring an existing repository under contract. The LLM drafts the requirements, the API
-          and the language from the code; you review and correct the drafts. Finalizing writes the
+          Bring an existing repository under contract. The LLM drafts the requirements, the
+          architecture, the API and the language from the code; you review and correct the drafts. Finalizing writes the
           contract, contract tests and a root Dockerfile, verifies the tests against the existing
           code, and opens a pull request from a new branch.
         </p>
@@ -441,15 +456,27 @@ export default function Onboarding() {
                 The branch already has {artifactList(session.existing_artifacts)}. Onboarding replaces
                 {session.existing_artifacts.length > 1 ? " them" : " it"}. Declining ends the
                 onboarding and leaves the existing files unchanged.
+                {session.architecture_missing && (
+                  <> Its contract has no contracts/architecture.md: you can also add only the
+                    architecture, drafted from the code, and leave every other file as it is.</>
+                )}
               </p>
-              <button className="run-button" type="button" disabled={submitting}
-                onClick={() => void decideContract(true)}>
-                <span>Replace and continue</span>
-              </button>
-              <button className="generate-button" type="button" disabled={submitting}
-                onClick={() => void decideContract(false)}>
-                Keep the existing files (decline)
-              </button>
+              <div className="onboarding-decisions">
+                <button className="run-button" type="button" disabled={submitting}
+                  onClick={() => void decideContract("replace")}>
+                  <span>Replace and continue</span>
+                </button>
+                {session.architecture_missing && (
+                  <button className="run-button" type="button" disabled={submitting}
+                    onClick={() => void decideContract("architecture_only")}>
+                    <span>Add only the architecture</span>
+                  </button>
+                )}
+                <button className="generate-button" type="button" disabled={submitting}
+                  onClick={() => void decideContract("decline")}>
+                  Keep the existing files (decline)
+                </button>
+              </div>
             </div>
           ) : session && asked.length > 0 ? (
             <div className="message-form">
@@ -546,7 +573,8 @@ export default function Onboarding() {
           {session && session.existing_contract && session.status !== "awaiting_confirmation" && (
             <p className="request-id">
               The branch had {artifactList(session.existing_artifacts)}
-              {session.replaced_contract ? "; the onboarding replaces it." : "."}
+              {session.replaced_contract ? "; the onboarding replaces it."
+                : session.architecture_only ? "; the onboarding adds only its architecture." : "."}
             </p>
           )}
 
@@ -605,7 +633,9 @@ export default function Onboarding() {
                   {session.status === "preparing"
                     ? "Checking out the repository…"
                     : session.status === "drafting"
-                      ? "Reading the code and drafting the requirements, the API and the language…"
+                      ? session.architecture_only
+                        ? "Reading the code and drafting the architecture…"
+                        : "Reading the code and drafting the requirements, the architecture, the API and the language…"
                       : session.status === "finalizing"
                         ? "Fixing the drafts as the contract…"
                         : "Waiting for the analyst…"}
@@ -617,7 +647,9 @@ export default function Onboarding() {
 
             {session?.status === "completed" && (
               <section className="generated-documents" aria-label="Onboarding delivery">
-                <h3>Contract, contract tests and Dockerfile</h3>
+                <h3>{session.architecture_only
+                  ? "contracts/architecture.md and contracts/architecture.json"
+                  : "Contract, contract tests and Dockerfile"}</h3>
                 {session.delivery ? (
                   <DeliveryResults progress={session.delivery} onboarding retrying={retryingGeneration}
                     disabled={submitting || deliveryPending(session.delivery)}
@@ -628,7 +660,12 @@ export default function Onboarding() {
               </section>
             )}
 
-            {session && isDrafted && (
+            {session && isDrafted && session.architecture_only && (
+              <ArchitectureSection structure={session.architecture_structure}
+                problems={finishedStatuses.includes(session.status) ? [] : session.problems} />
+            )}
+
+            {session && isDrafted && !session.architecture_only && (
               <section className="requirements-list" aria-label="Drafted requirements">
                 <h3>Drafted requirements ({session.requirements.length})</h3>
                 {categories.map(([category, label]) => {
@@ -659,11 +696,15 @@ export default function Onboarding() {
               </section>
             )}
 
-            {session && isDrafted && (
+            {session && isDrafted && !session.architecture_only && (
               <ApiModelSection api={session.api} problems={session.problems}
                 requirements={session.requirements}>
                 <p className="api-auth">Language: {session.language ?? "not detected yet"}</p>
               </ApiModelSection>
+            )}
+
+            {session && isDrafted && !session.architecture_only && (
+              <ArchitectureSection structure={session.architecture_structure} problems={[]} />
             )}
 
             {!session && !error && (

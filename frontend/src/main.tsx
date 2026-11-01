@@ -1,6 +1,7 @@
 import ReactDOM from "react-dom/client";
 import ApiDesign from "./ApiDesign";
 import App from "./App";
+import Architecture from "./Architecture";
 import Onboarding from "./Onboarding";
 import Requirements from "./Requirements";
 import Flows from "./Flows";
@@ -15,7 +16,7 @@ import React, { useEffect, useState } from "react";
 
 type Page = "flows" | "github" | "users" | "settings";
 // The views of a flow, opened in a panel over the Flows page.
-type Panel = "chat" | "requirements" | "api-design" | "onboarding";
+type Panel = "chat" | "requirements" | "architecture" | "api-design" | "onboarding";
 
 const pages: [Page, string][] = [
   ["flows", "Flows"],
@@ -27,6 +28,7 @@ const pages: [Page, string][] = [
 const panels: [Panel, string][] = [
   ["chat", "Chat"],
   ["requirements", "Requirements interview"],
+  ["architecture", "Architecture"],
   ["api-design", "API design"],
   ["onboarding", "Onboarding"],
 ];
@@ -183,6 +185,7 @@ function Shell() {
             <div key={panelKey}>
               {panel === "chat" && <App />}
               {panel === "requirements" && <Requirements />}
+              {panel === "architecture" && <Architecture />}
               {panel === "api-design" && <ApiDesign />}
               {panel === "onboarding" && <Onboarding />}
             </div>

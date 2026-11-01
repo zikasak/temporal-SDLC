@@ -12,8 +12,12 @@ from app.config import CONTRACT_EMBED_CHARS
 CONTRACTS_DIR = 'contracts'
 REQUIREMENTS_FILENAME = 'requirements.json'
 NARRATIVE_FILENAME = 'requirements.md'
-CONTRACT_KEYS = {'requirements', 'requirements_document', 'requirements_narrative', 'api_design'}
+ARCHITECTURE_FILENAME = 'architecture.md'
+CONTRACT_KEYS = {'requirements', 'requirements_document', 'requirements_narrative', 'api_design',
+                 'architecture'}
 FILE_PURPOSES = {
+    ARCHITECTURE_FILENAME: ('The top-level architecture: components, data flow and technology '
+                            'choices'),
     REQUIREMENTS_FILENAME: 'Every requirement with its description and rationale',
     OPENAPI_FILENAME: 'The complete API contract',
     NARRATIVE_FILENAME: 'Business context and assumptions beyond the requirement list',
@@ -42,6 +46,8 @@ def on_demand_contracts(context: dict[str, Any], embedded_chars: int,
     narrative = context.get('requirements_narrative') or context.get('requirements_document')
     if narrative:
         files[NARRATIVE_FILENAME] = narrative
+    if context.get('architecture'):
+        files[ARCHITECTURE_FILENAME] = context['architecture']
     index = {
         **{key: value for key, value in context.items() if key not in CONTRACT_KEYS},
         'contracts': GUIDE,

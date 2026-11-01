@@ -17,7 +17,10 @@ from app.api_design.openapi import DOCUMENT_FILENAME as OPENAPI_FILENAME
 from app.api_design.openapi import api_problems, render_openapi
 from app.api_design.prompt import api_turn_messages
 from app.config import GENERATED_CODE_DIR
-from app.delivery.contract import ContractError, RepositoryContract, read_contract, write_contract
+from app.delivery.contract import (
+    ContractError, RepositoryContract, read_contract, read_service_contract, write_architecture,
+    write_contract,
+)
 from app.documentation.activities import is_documentation_file
 from app.documents import (
     DocumentConflict,
@@ -67,6 +70,7 @@ COMMIT_SUBJECTS = {"api_change": "Change the service's API, contract tests and c
                    "bugfix": "Fix the service and add regression tests"}
 DOCUMENTATION_SUBJECT = "Change the documentation"
 ONBOARDING_SUBJECT = "Onboard the service: contract, contract tests and Dockerfile"
+ARCHITECTURE_SUBJECT = "Add the service's architecture to the contract"
 # Added to the commit of an onboarding that changed the repository's existing code.
 CODE_CHANGED_NOTE = ("The existing code was changed: the user confirmed that failing "
                      "contract tests revealed bugs in it.")
@@ -121,7 +125,7 @@ def _published_requirements() -> tuple[Requirement, ...]:
     if not activity.in_activity():
         return ()
     try:
-        contract = read_contract(repository_checkout.checkout_path(
+        contract = read_service_contract(repository_checkout.checkout_path(
             GENERATED_CODE_DIR, activity.info().workflow_id))
     except ContractError:
         return ()
@@ -276,6 +280,28 @@ async def publish_onboarding(
 
 
 @activity.defn
+@trace_activity('publish-onboarding-architecture', feature='repository',
+                input_parameter='repository')
+async def publish_onboarding_architecture(
+    session_id: str, repository: RepositorySelection, architecture: str,
+    structure: dict[str, Any] | None,
+) -> RepositoryPublication:
+    """Commit the architecture an onboarding drafted to its own new branch and push it:
+    contracts/architecture.md and contracts/architecture.json, and nothing else."""
+    target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
+    if not await run_sync(target.is_dir):
+        raise ApplicationError("The repository checkout is unavailable.", non_retryable=True)
+    if not architecture:
+        raise ApplicationError("The onboarding has no architecture to push.",
+                               non_retryable=True)
+    result = await _publish(
+        session_id, repository, ARCHITECTURE_SUBJECT,
+        lambda: write_architecture(target, architecture, structure),
+        branch=onboarding_branch(repository['branch'], session_id))
+    return {**result, 'findings': [], 'findings_count': 0}
+
+
+@activity.defn
 @trace_activity('publish-documentation', feature='repository', input_parameter='repository')
 async def publish_documentation(
     session_id: str, repository: RepositorySelection, language: str, verified: bool,
@@ -310,6 +336,7 @@ async def open_pull_request(
     kind = change.get('kind')
     subject = (DOCUMENTATION_SUBJECT if kind == 'docs'
                else ONBOARDING_SUBJECT if kind == 'onboarding'
+               else ARCHITECTURE_SUBJECT if kind == 'onboarding_architecture'
                else COMMIT_SUBJECTS.get(kind, COMMIT_SUBJECT))
     title, body = pull_request_description(subject, change, publication, text)
     verified = bool(publication['verified'])

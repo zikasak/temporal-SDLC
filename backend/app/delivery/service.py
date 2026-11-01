@@ -29,6 +29,13 @@ async def get_progress(session_id: str) -> DeliveryProgress | None:
     """None in the moment between the session finishing and its delivery starting. A
     delivery stopped from outside reports the stage it stopped in as failed, which is
     how a retry finds it."""
+    state = await get_state(session_id)
+    return state.progress if state else None
+
+
+async def get_state(session_id: str) -> DeliveryState | None:
+    """The delivery's state with its progress as get_progress reports it, such as for the
+    task as fix rounds changed it; None before the delivery started."""
     client = await connect_temporal()
     handle = client.get_workflow_handle(delivery_id(session_id))
     try:
@@ -43,7 +50,8 @@ async def get_progress(session_id: str) -> DeliveryProgress | None:
     if description.status not in (WorkflowExecutionStatus.RUNNING,
                                   WorkflowExecutionStatus.COMPLETED):
         state = interrupted(state)
-    return await with_mention_history(session_id, state.progress)
+    state.progress = await with_mention_history(session_id, state.progress)
+    return state
 
 
 async def with_mention_history(session_id: str,
@@ -265,7 +273,10 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
     # An onboarding generates no code: its tests are written for the existing code.
     if stage == 'tests' and not progress.code and not change and not state.spec.onboarding:
         raise SessionBusy('Retry server generation first.')
-    if not state.spec.language:
+    if state.spec.architecture_only and stage != 'repository':
+        raise SessionBusy('An onboarding that adds only the architecture has only its push '
+                          'to retry.')
+    if not state.spec.language and not state.spec.architecture_only:
         # A completed session takes no messages, so only a fork can choose one.
         raise SessionBusy('No implementation language was chosen for this session. '
                           'Fork it from a message and choose a language there.')

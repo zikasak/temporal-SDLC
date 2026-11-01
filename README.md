@@ -50,6 +50,7 @@ Deploy `docker-compose.coolify.yml`, configure the provider keys (`OPENAI_API_KE
 
 ## Documentation
 
+- [docs/architecture-stage.md](docs/architecture-stage.md): the architecture stage between requirements and API design.
 - [docs/asyncio.md](docs/asyncio.md): async execution.
 - [docs/github-connector.md](docs/github-connector.md): the GitHub connector.
 - [docs/interaction-schema.md](docs/interaction-schema.md): project interaction schema.

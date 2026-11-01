@@ -2200,3 +2200,27 @@ body.flow-panel-open {
     padding-left: 14px;
   }
 }
+
+/* The architect's proposal to skip the architecture stage, waiting for the user. */
+.skip-proposal {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid #d6b656;
+  border-radius: 8px;
+  background: #fff8e1;
+}
+
+.skip-proposal p {
+  margin: 0 0 8px;
+}
+
+.architecture-responsibilities {
+  margin: 4px 0 0 18px;
+  list-style: disc;
+}
+
+.onboarding-decisions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

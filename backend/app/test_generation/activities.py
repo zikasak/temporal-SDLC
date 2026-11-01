@@ -48,6 +48,7 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
         'requirements_document': context.get('requirements_document', ''),
         # A change to an existing service adds tests for its brief to the existing suite.
         **({'brief': context['brief']} if context.get('brief') else {}),
+        **({'architecture': context['architecture']} if context.get('architecture') else {}),
     })
     repair = context.get('repair')
     previous = session_dir / 'tests/suite'

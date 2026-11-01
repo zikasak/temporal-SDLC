@@ -1,7 +1,9 @@
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, StrictBool
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict
 
 from app.api.errors import http_error
 from app.api.routes.auth import require_user
@@ -23,8 +25,9 @@ class CreateBody(BaseModel):
 
 class ContractDecisionBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    # true replaces everything existing_artifacts lists; false declines the onboarding.
-    replace_contract: StrictBool
+    # replace replaces everything existing_artifacts lists, decline ends the onboarding,
+    # architecture_only adds only contracts/architecture.md and architecture.json.
+    decision: Literal["replace", "decline", "architecture_only"]
 
 
 def _check_session_id(session_id: str) -> None:
@@ -101,7 +104,7 @@ async def refresh_checkout(session_id: str):
 async def decide_contract(session_id: str, body: ContractDecisionBody):
     _check_session_id(session_id)
     try:
-        status = await service.decide_contract(session_id, body.replace_contract)
+        status = await service.decide_contract(session_id, body.decision)
     except Exception as exc:
         raise http_error(exc) from exc
     return {"session_id": session_id, "status": status}
