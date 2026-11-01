@@ -20,7 +20,6 @@
       "path": "/api-design/sessions/{session_id}",
       "request_schema": null,
       "requirement_ids": [
-        "FR-13",
         "FR-34",
         "FR-35",
         "FR-36",
@@ -29,7 +28,9 @@
         "FR-39",
         "FR-52",
         "FR-54",
-        "FR-55"
+        "FR-55",
+        "FR-83",
+        "FR-85"
       ],
       "response_array": false,
       "response_schema": "ApiDesignSession",
@@ -58,9 +59,7 @@
       ],
       "path": "/api-design/sessions/{session_id}/answers",
       "request_schema": "AnswersInput",
-      "requirement_ids": [
-        "FR-13"
-      ],
+      "requirement_ids": [],
       "response_array": false,
       "response_schema": "SessionStatusChange",
       "response_status": 202,
@@ -177,9 +176,7 @@
       ],
       "path": "/api-design/sessions/{session_id}/document",
       "request_schema": null,
-      "requirement_ids": [
-        "FR-13"
-      ],
+      "requirement_ids": [],
       "response_array": false,
       "response_schema": null,
       "response_status": 200,
@@ -206,9 +203,7 @@
       ],
       "path": "/api-design/sessions/{session_id}/finalize",
       "request_schema": null,
-      "requirement_ids": [
-        "FR-13"
-      ],
+      "requirement_ids": [],
       "response_array": false,
       "response_schema": "SessionStatusChange",
       "response_status": 202,
@@ -236,9 +231,7 @@
       ],
       "path": "/api-design/sessions/{session_id}/fork",
       "request_schema": "ForkInput",
-      "requirement_ids": [
-        "FR-13"
-      ],
+      "requirement_ids": [],
       "response_array": false,
       "response_schema": "SessionCreated",
       "response_status": 201,
@@ -303,9 +296,7 @@
       ],
       "path": "/api-design/sessions/{session_id}/messages",
       "request_schema": "MessageInput",
-      "requirement_ids": [
-        "FR-13"
-      ],
+      "requirement_ids": [],
       "response_array": false,
       "response_schema": "SessionStatusChange",
       "response_status": 202,
@@ -332,14 +323,271 @@
       ],
       "path": "/api-design/sessions/{session_id}/retry",
       "request_schema": null,
-      "requirement_ids": [
-        "FR-13"
-      ],
+      "requirement_ids": [],
       "response_array": false,
       "response_schema": "SessionStatusChange",
       "response_status": 202,
       "summary": "Retry the last turn",
       "tag": "api-design"
+    },
+    {
+      "description": "The session's draft, conversation, skip proposal and state. Architecture sessions are started only by their requirements session (there is no POST /architecture/sessions) and have no idle timeout: they wait for the user indefinitely.",
+      "error_statuses": [
+        401,
+        404,
+        503
+      ],
+      "method": "GET",
+      "parameters": [
+        {
+          "description": "architecture-session- followed by 32 hex digits.",
+          "location": "path",
+          "name": "session_id",
+          "required": true,
+          "type": "string"
+        }
+      ],
+      "path": "/architecture/sessions/{session_id}",
+      "request_schema": null,
+      "requirement_ids": [
+        "FR-78",
+        "FR-79",
+        "FR-80",
+        "FR-81",
+        "FR-84",
+        "FR-86"
+      ],
+      "response_array": false,
+      "response_schema": "ArchitectureSession",
+      "response_status": 200,
+      "summary": "Get an architecture session",
+      "tag": "architecture"
+    },
+    {
+      "description": "Answers the questions of the last assistant message and starts a turn.",
+      "error_statuses": [
+        401,
+        404,
+        409,
+        422,
+        503
+      ],
+      "method": "POST",
+      "parameters": [
+        {
+          "description": "architecture-session- followed by 32 hex digits.",
+          "location": "path",
+          "name": "session_id",
+          "required": true,
+          "type": "string"
+        }
+      ],
+      "path": "/architecture/sessions/{session_id}/answers",
+      "request_schema": "AnswersInput",
+      "requirement_ids": [
+        "FR-79",
+        "FR-86"
+      ],
+      "response_array": false,
+      "response_schema": "SessionStatusChange",
+      "response_status": 202,
+      "summary": "Answer the interviewer's questions",
+      "tag": "architecture"
+    },
+    {
+      "description": "The architecture document as a file attachment: format md (the default) returns architecture.md with its fixed headings, format json returns its machine-readable form, architecture.json, as written to contracts/architecture.json. 404 until it is ready or when the stage was skipped; 422 for any other format.",
+      "error_statuses": [
+        401,
+        404,
+        422,
+        503
+      ],
+      "method": "GET",
+      "parameters": [
+        {
+          "description": "architecture-session- followed by 32 hex digits.",
+          "location": "path",
+          "name": "session_id",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "description": "md (default) for architecture.md or json for architecture.json; 422 otherwise.",
+          "location": "query",
+          "name": "format",
+          "required": false,
+          "type": "string"
+        }
+      ],
+      "path": "/architecture/sessions/{session_id}/document",
+      "request_schema": null,
+      "requirement_ids": [
+        "FR-84",
+        "FR-86"
+      ],
+      "response_array": false,
+      "response_schema": null,
+      "response_status": 200,
+      "summary": "Download the architecture document",
+      "tag": "architecture"
+    },
+    {
+      "description": "Writes the architecture document; once it is ready the session is completed and starts the task's API design (api_design_session_id), which drafts the API at once using the finalized architecture. 409 while problems remain, a turn is running or the session is finalized or skipped.",
+      "error_statuses": [
+        401,
+        404,
+        409,
+        503
+      ],
+      "method": "POST",
+      "parameters": [
+        {
+          "description": "architecture-session- followed by 32 hex digits.",
+          "location": "path",
+          "name": "session_id",
+          "required": true,
+          "type": "string"
+        }
+      ],
+      "path": "/architecture/sessions/{session_id}/finalize",
+      "request_schema": null,
+      "requirement_ids": [
+        "FR-82",
+        "FR-83",
+        "FR-84",
+        "FR-85",
+        "FR-86"
+      ],
+      "response_array": false,
+      "response_schema": "SessionStatusChange",
+      "response_status": 202,
+      "summary": "Finalize the architecture session",
+      "tag": "architecture"
+    },
+    {
+      "description": "Starts a new architecture session of the same requirements session with the conversation up to the given message. The original stays open: each fork, when finalized or its skip confirmed, starts its own API design, a child of the requirements session like the others. 409 once the session's API design has started.",
+      "error_statuses": [
+        401,
+        404,
+        409,
+        422,
+        503
+      ],
+      "method": "POST",
+      "parameters": [
+        {
+          "description": "architecture-session- followed by 32 hex digits.",
+          "location": "path",
+          "name": "session_id",
+          "required": true,
+          "type": "string"
+        }
+      ],
+      "path": "/architecture/sessions/{session_id}/fork",
+      "request_schema": "ForkInput",
+      "requirement_ids": [
+        "FR-86",
+        "FR-88"
+      ],
+      "response_array": false,
+      "response_schema": "SessionCreated",
+      "response_status": 201,
+      "summary": "Fork the session",
+      "tag": "architecture"
+    },
+    {
+      "description": "Starts the interviewer's turn on the message. Sending a message while a skip proposal is open declines it: the proposal is dismissed, skip_declined becomes true, the message explains what the architecture should cover and the LLM drafts the architecture from it without proposing a skip again.",
+      "error_statuses": [
+        401,
+        404,
+        409,
+        413,
+        422,
+        503
+      ],
+      "method": "POST",
+      "parameters": [
+        {
+          "description": "architecture-session- followed by 32 hex digits.",
+          "location": "path",
+          "name": "session_id",
+          "required": true,
+          "type": "string"
+        }
+      ],
+      "path": "/architecture/sessions/{session_id}/messages",
+      "request_schema": "MessageInput",
+      "requirement_ids": [
+        "FR-79",
+        "FR-86",
+        "FR-97"
+      ],
+      "response_array": false,
+      "response_schema": "SessionStatusChange",
+      "response_status": 202,
+      "summary": "Send a message",
+      "tag": "architecture"
+    },
+    {
+      "description": "Runs the failed drafting or interviewer turn again.",
+      "error_statuses": [
+        401,
+        404,
+        409,
+        503
+      ],
+      "method": "POST",
+      "parameters": [
+        {
+          "description": "architecture-session- followed by 32 hex digits.",
+          "location": "path",
+          "name": "session_id",
+          "required": true,
+          "type": "string"
+        }
+      ],
+      "path": "/architecture/sessions/{session_id}/retry",
+      "request_schema": null,
+      "requirement_ids": [
+        "FR-86"
+      ],
+      "response_array": false,
+      "response_schema": "SessionStatusChange",
+      "response_status": 202,
+      "summary": "Retry the last turn",
+      "tag": "architecture"
+    },
+    {
+      "description": "Skips the stage of an API change, confirming the open skip proposal or, without one, at the user's own request (also after a declined proposal or once a draft exists, which is then discarded). The session ends as skipped, the repository's existing contracts/architecture.md (and contracts/architecture.json) are kept unchanged and are the architecture given to the API design and coding agents, and the task's API design starts (api_design_session_id). 409 for a new service, while drafting or a turn is running, or once the session is finalized, skipped or failed.",
+      "error_statuses": [
+        401,
+        404,
+        409,
+        503
+      ],
+      "method": "POST",
+      "parameters": [
+        {
+          "description": "architecture-session- followed by 32 hex digits.",
+          "location": "path",
+          "name": "session_id",
+          "required": true,
+          "type": "string"
+        }
+      ],
+      "path": "/architecture/sessions/{session_id}/skip",
+      "request_schema": null,
+      "requirement_ids": [
+        "FR-80",
+        "FR-82",
+        "FR-85",
+        "FR-86"
+      ],
+      "response_array": false,
+      "response_schema": "SessionStatusChange",
+      "response_status": 202,
+      "summary": "Skip the architecture stage",
+      "tag": "architecture"
     },
     {
       "description": "No sign-in required. Returns a session and sets the access_token cookie.",
@@ -874,7 +1122,7 @@
       "tag": "chat"
     },
     {
-      "description": "Starts onboarding on the repository and branch, outside requirements sessions and the intake. Any signed-in user can start one, and every signed-in user can list (GET /workflows?type=OnboardingWorkflow) and reopen all onboardings. When the branch already has a contract in contracts/, contract tests in contract-tests/ or a root Dockerfile, the onboarding waits as awaiting_confirmation, with existing_artifacts saying which were found, until the user decides through POST /onboarding/sessions/{session_id}/contract-decision; otherwise the LLM drafts the requirements, the API and the language from the existing code. 409 while another onboarding of the same repository and branch is unfinished.",
+      "description": "Starts onboarding on the repository and branch, outside requirements sessions and the intake. Any signed-in user can start one, and every signed-in user can list (GET /workflows?type=OnboardingWorkflow) and reopen all onboardings. When the branch already has a contract in contracts/, contract tests in contract-tests/ or a root Dockerfile, the onboarding waits as awaiting_confirmation, with existing_artifacts saying which were found and architecture_missing whether the contract lacks contracts/architecture.md or contracts/architecture.json, until the user decides through POST /onboarding/sessions/{session_id}/contract-decision; otherwise the LLM drafts the requirements, the architecture, the API and the language from the existing code, all reviewed in the same interview. 409 while another onboarding of the same repository and branch is unfinished.",
       "error_statuses": [
         401,
         404,
@@ -888,9 +1136,11 @@
       "request_schema": "CreateOnboardingSession",
       "requirement_ids": [
         "FR-56",
-        "FR-58",
         "FR-61",
-        "FR-66"
+        "FR-66",
+        "FR-93",
+        "FR-95",
+        "FR-96"
       ],
       "response_array": false,
       "response_schema": "SessionCreated",
@@ -918,9 +1168,6 @@
       "path": "/onboarding/sessions/{session_id}",
       "request_schema": null,
       "requirement_ids": [
-        "FR-57",
-        "FR-58",
-        "FR-60",
         "FR-65",
         "FR-66"
       ],
@@ -951,9 +1198,7 @@
       ],
       "path": "/onboarding/sessions/{session_id}/answers",
       "request_schema": "AnswersInput",
-      "requirement_ids": [
-        "FR-58"
-      ],
+      "requirement_ids": [],
       "response_array": false,
       "response_schema": "SessionStatusChange",
       "response_status": 202,
@@ -982,7 +1227,6 @@
       "request_schema": null,
       "requirement_ids": [
         "FR-56",
-        "FR-58",
         "FR-61"
       ],
       "response_array": false,
@@ -992,7 +1236,7 @@
       "tag": "onboarding"
     },
     {
-      "description": "Replacing starts drafting at the start, or returns to the interview with the drafts kept after a checkout update, and the onboarding then replaces every artifact listed in existing_artifacts (contract, contract tests, root Dockerfile). Declining always ends the onboarding as declined, also after a checkout update, which ends its interview and drafts too, and leaves the existing files unchanged. 409 unless the onboarding is awaiting_confirmation.",
+      "description": "replace starts drafting the full contract at the start, or returns to the interview with the drafts kept after a checkout update, and the onboarding then replaces every artifact listed in existing_artifacts (contract, contract tests, root Dockerfile). decline always ends the onboarding as declined, also after a checkout update, which ends its interview and drafts too, and leaves the existing files unchanged. architecture_only drafts only contracts/architecture.md and contracts/architecture.json from the existing code for review in the interview (replacing whichever of the two exists) and leaves every other existing file unchanged; the rest of the existing contract (requirements.json, requirements.md, api.json, openapi.yaml, language.json) must be readable, otherwise 409 with a detail naming the unreadable file, and while the onboarding runs, anything in the drafted architecture that disagrees with api.json or requirements.json is listed in problems, which must be settled in the interview before finalizing. 409 when architecture_missing is false. 409 unless the onboarding is awaiting_confirmation.",
       "error_statuses": [
         401,
         404,
@@ -1013,7 +1257,9 @@
       "path": "/onboarding/sessions/{session_id}/contract-decision",
       "request_schema": "ContractDecisionInput",
       "requirement_ids": [
-        "FR-61"
+        "FR-61",
+        "FR-96",
+        "FR-98"
       ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
@@ -1073,10 +1319,7 @@
       ],
       "path": "/onboarding/sessions/{session_id}/delivery/findings/accept",
       "request_schema": null,
-      "requirement_ids": [
-        "FR-60",
-        "FR-62"
-      ],
+      "requirement_ids": [],
       "response_array": false,
       "response_schema": "SessionStatusChange",
       "response_status": 200,
@@ -1105,10 +1348,7 @@
       ],
       "path": "/onboarding/sessions/{session_id}/delivery/findings/instructions",
       "request_schema": "FindingsInstructionsInput",
-      "requirement_ids": [
-        "FR-60",
-        "FR-62"
-      ],
+      "requirement_ids": [],
       "response_array": false,
       "response_schema": "SessionStatusChange",
       "response_status": 202,
@@ -1116,7 +1356,7 @@
       "tag": "onboarding"
     },
     {
-      "description": "Fixes the reviewed drafts as the contract and starts the delivery: contract tests and a root Dockerfile are written and verified against the existing code, then code review, push to a new branch named onboarding/<source branch>-<short id> (the short id taken from the onboarding's session ID) and a pull request to the default branch, as for a delivery. 409 while problems remain or a turn is running.",
+      "description": "Fixes the reviewed drafts as the contract, including contracts/architecture.md, and starts the delivery: contract tests and a root Dockerfile are written and verified against the existing code, then code review, push to a new branch named onboarding/<source branch>-<short id> (the short id taken from the onboarding's session ID) and a pull request to the default branch, as for a delivery. For an architecture-only onboarding, only contracts/architecture.md (and contracts/architecture.json) is pushed to that branch with a pull request to the default branch, without contract tests, verification or code review; the rest of the existing contract is left unchanged, and disagreements between the drafted architecture and the existing api.json or requirements.json are among the problems that block finalizing. 409 while problems remain or a turn is running.",
       "error_statuses": [
         401,
         404,
@@ -1136,11 +1376,11 @@
       "path": "/onboarding/sessions/{session_id}/finalize",
       "request_schema": null,
       "requirement_ids": [
-        "FR-57",
-        "FR-58",
-        "FR-60",
-        "FR-62",
-        "FR-65"
+        "FR-65",
+        "FR-93",
+        "FR-98",
+        "FR-99",
+        "FR-100"
       ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
@@ -1170,7 +1410,6 @@
       "path": "/onboarding/sessions/{session_id}/fork",
       "request_schema": "ForkInput",
       "requirement_ids": [
-        "FR-58",
         "FR-66"
       ],
       "response_array": false,
@@ -1201,7 +1440,6 @@
       "path": "/onboarding/sessions/{session_id}/generation/retry",
       "request_schema": "RetryStageInput",
       "requirement_ids": [
-        "FR-60",
         "FR-65"
       ],
       "response_array": false,
@@ -1232,9 +1470,7 @@
       ],
       "path": "/onboarding/sessions/{session_id}/messages",
       "request_schema": "MessageInput",
-      "requirement_ids": [
-        "FR-58"
-      ],
+      "requirement_ids": [],
       "response_array": false,
       "response_schema": "SessionStatusChange",
       "response_status": 202,
@@ -1261,9 +1497,7 @@
       ],
       "path": "/onboarding/sessions/{session_id}/retry",
       "request_schema": null,
-      "requirement_ids": [
-        "FR-58"
-      ],
+      "requirement_ids": [],
       "response_array": false,
       "response_schema": "SessionStatusChange",
       "response_status": 202,
@@ -1342,7 +1576,7 @@
         "FR-52",
         "FR-54",
         "FR-55",
-        "FR-77"
+        "FR-81"
       ],
       "response_array": false,
       "response_schema": "RequirementsSession",
@@ -1519,9 +1753,7 @@
       ],
       "path": "/requirements/sessions/{session_id}/document",
       "request_schema": null,
-      "requirement_ids": [
-        "FR-12"
-      ],
+      "requirement_ids": [],
       "response_array": false,
       "response_schema": null,
       "response_status": 200,
@@ -1529,12 +1761,12 @@
       "tag": "requirements"
     },
     {
-      "description": "Writes the requirements document; the session is completed once it is ready. A new service or an API change on a repository then starts its API design by itself (api_design_session_id).",
+      "description": "Writes the requirements document; the session is completed once it is ready. A new service or an API change on a repository then starts its architecture session by itself (architecture_session_id), no longer the API design. An API change, bugfix or documentation task is specified against the repository's contract in contracts/, which must include contracts/architecture.md and contracts/architecture.json; 409 when the contract is missing or unreadable, including when either architecture file is missing. The coding agents of a bugfix or documentation delivery receive the repository's existing contracts/architecture.md and contracts/architecture.json read-only, as context, and never change them.",
       "error_statuses": [
         401,
-        503,
         404,
-        409
+        409,
+        503
       ],
       "method": "POST",
       "parameters": [
@@ -1549,8 +1781,10 @@
       "path": "/requirements/sessions/{session_id}/finalize",
       "request_schema": null,
       "requirement_ids": [
-        "FR-12",
-        "FR-77"
+        "FR-78",
+        "FR-81",
+        "FR-85",
+        "FR-92"
       ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
@@ -1685,7 +1919,7 @@
       "tag": "requirements"
     },
     {
-      "description": "Newest first, 50 per page. type OnboardingWorkflow lists onboardings, whose workflow_id is the onboarding's session_id, as RequirementsWorkflow lists requirements sessions. Every execution also carries repository, branch and onboarding_id, each null when it does not apply; the existing fields keep their names and meaning. The optional repository, branch and onboarding_id filters combine with type and with each other (all must match); executions whose field is null never match a filter on it. The repository filter is compared case-insensitively, as on GitHub; the branch and onboarding_id filters must match exactly. A malformed filter value (a repository that is not owner/name, an empty branch, or an onboarding_id not of the form onboarding-session- followed by 32 hex digits) answers 422 with a detail, like an invalid type or page_token. Pass the same filters with page_token when continuing. Executions started before this change, which have no recorded repository, branch or onboarding ID, are deleted from the namespace when the change is deployed (the instance has no users yet), so they are not listed. top_level=true lists only the flows without a parent, and parent=<workflow_id> only the children of one (and its session's delivery runs); they cannot be combined.",
+      "description": "Newest first, 50 per page. type OnboardingWorkflow lists onboardings, whose workflow_id is the onboarding's session_id, as RequirementsWorkflow lists requirements sessions and ArchitectureWorkflow lists architecture sessions. Every execution also carries repository, branch and onboarding_id, each null when it does not apply; the existing fields keep their names and meaning. The optional repository, branch and onboarding_id filters combine with type and with each other (all must match); executions whose field is null never match a filter on it. The repository filter is compared case-insensitively, as on GitHub; the branch and onboarding_id filters must match exactly. A malformed filter value (a repository that is not owner/name, an empty branch, or an onboarding_id not of the form onboarding-session- followed by 32 hex digits) answers 422 with a detail, like an invalid type or page_token. Pass the same filters with page_token when continuing. Executions started before this change, which have no recorded repository, branch or onboarding ID, are deleted from the namespace when the change is deployed (the instance has no users yet), so they are not listed. top_level=true lists only the flows without a parent, and parent=<workflow_id> only the children of one (and its session's delivery runs); they cannot be combined. An ArchitectureWorkflow is a child of its requirements session, and the ApiDesignWorkflow an architecture session starts is also a child of that requirements session, so parent=<requirements workflow_id> lists both.",
       "error_statuses": [
         401,
         422,
@@ -1749,12 +1983,15 @@
         "FR-17",
         "FR-66",
         "FR-69",
-        "FR-71",
         "FR-72",
         "FR-73",
         "FR-74",
         "NFR-7",
-        "FR-76"
+        "FR-76",
+        "FR-87",
+        "FR-89",
+        "FR-90",
+        "FR-91"
       ],
       "response_array": false,
       "response_schema": "WorkflowPage",
@@ -2412,7 +2649,7 @@
         },
         {
           "array": false,
-          "description": "awaiting_confirmation, declined, drafting and superseded occur only for onboardings.",
+          "description": "awaiting_confirmation, declined and superseded occur only for onboardings; drafting for onboardings and architecture sessions; skipped only for architecture sessions.",
           "enum": [
             "preparing",
             "awaiting_confirmation",
@@ -2422,6 +2659,7 @@
             "turn_running",
             "finalizing",
             "completed",
+            "skipped",
             "failed",
             "superseded"
           ],
@@ -2584,8 +2822,8 @@
         },
         {
           "array": false,
-          "description": "The API design the session started by itself once the user generated the document of a new service or an API change; the design starts drafting the API at once, as a child of the session. Null until then, for any other kind of task, for a session without a repository, and for one whose document was written because it expired.",
-          "name": "api_design_session_id",
+          "description": "The architecture session the session started by itself once the user generated the document of a new service or an API change; it drafts the architecture at once, as a child of the session, and later starts the API design. Null until then, for any other kind of task, for a session without a repository, and for one whose document was written because it expired. Replaces api_design_session_id, which is no longer returned: the API design is found through the architecture session.",
+          "name": "architecture_session_id",
           "required": false,
           "type": "string"
         },
@@ -2627,6 +2865,27 @@
           "name": "source_session_id",
           "required": true,
           "type": "string"
+        },
+        {
+          "array": false,
+          "description": "The architecture session that started this design when it was finalized or skipped; the design remains a child of the requirements session (source_session_id).",
+          "name": "architecture_session_id",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "The architecture the design and the delivery's coding agents are given, as Markdown: the finalized architecture, or the repository's existing contracts/architecture.md when an API change skipped the stage. It is committed as contracts/architecture.md when the delivery is pushed (unchanged when skipped).",
+          "name": "architecture",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "The same architecture in machine-readable form, committed as contracts/architecture.json when the delivery is pushed (unchanged when skipped).",
+          "name": "architecture_structure",
+          "required": false,
+          "type": "ArchitectureStructure"
         },
         {
           "array": false,
@@ -2983,14 +3242,14 @@
         },
         {
           "array": false,
-          "description": "Always present. The repository the execution works in, as in the session's repository (provider, repository_id, full_name, html_url, private and the source branch), for OnboardingWorkflow, RequirementsWorkflow, ApiDesignWorkflow and DeliveryWorkflow executions, and for CodegenWorkflow executions the repository of the delivery that started them; null for any other execution.",
+          "description": "Always present. The repository the execution works in, as in the session's repository (provider, repository_id, full_name, html_url, private and the source branch), for OnboardingWorkflow, RequirementsWorkflow, ArchitectureWorkflow, ApiDesignWorkflow and DeliveryWorkflow executions, and for CodegenWorkflow executions the repository of the delivery that started them; null for any other execution.",
           "name": "repository",
           "required": false,
           "type": "RepositorySelection"
         },
         {
           "array": false,
-          "description": "Always present. The branch the execution works in (the source branch the session checked out, not a branch the delivery pushes; the same as repository.branch), for OnboardingWorkflow, RequirementsWorkflow, ApiDesignWorkflow and DeliveryWorkflow executions, and for CodegenWorkflow executions the branch of the delivery that started them; null for any other execution.",
+          "description": "Always present. The branch the execution works in (the source branch the session checked out, not a branch the delivery pushes; the same as repository.branch), for OnboardingWorkflow, RequirementsWorkflow, ArchitectureWorkflow, ApiDesignWorkflow and DeliveryWorkflow executions, and for CodegenWorkflow executions the branch of the delivery that started them; null for any other execution.",
           "name": "branch",
           "required": false,
           "type": "string"
@@ -3390,7 +3649,7 @@
       ]
     },
     {
-      "description": "An onboarding of an existing repository: the drafted contract, the review interview and the delivery of the contract, contract tests and Dockerfile. Every signed-in user can reopen any onboarding.",
+      "description": "An onboarding of an existing repository: the drafted contract, the review interview and the delivery of the contract, contract tests and Dockerfile, or of contracts/architecture.md alone. Every signed-in user can reopen any onboarding.",
       "name": "OnboardingSession",
       "properties": [
         {
@@ -3401,7 +3660,7 @@
         },
         {
           "array": false,
-          "description": "awaiting_confirmation while the branch has a contract in contracts/, contract tests or a root Dockerfile and the user has not yet chosen whether to replace them, at the start or again after a checkout update found ones not there before; declined once the user chose to keep them, which ends the onboarding without changing anything; drafting while the LLM drafts the requirements, the API and the language from the existing code; preparing also while the checkout is updated; superseded once the onboarding was forked, which ends it so that only the fork stays unfinished.",
+          "description": "awaiting_confirmation while the branch has a contract in contracts/, contract tests or a root Dockerfile and the user has not yet decided, at the start or again after a checkout update found ones not there before; declined once the user chose decline, which ends the onboarding without changing anything; drafting while the LLM drafts the requirements, the architecture, the API and the language from the existing code (only the architecture for an architecture-only onboarding); preparing also while the checkout is updated; superseded once the onboarding was forked, which ends it so that only the fork stays unfinished.",
           "enum": [
             "preparing",
             "awaiting_confirmation",
@@ -3459,8 +3718,22 @@
         },
         {
           "array": false,
-          "description": "Whether the user chose to replace what existing_artifacts lists.",
+          "description": "True when the branch has a contract in contracts/ but lacks contracts/architecture.md or contracts/architecture.json (both are required), at the start or the last checkout update; only then is the architecture_only decision offered.",
+          "name": "architecture_missing",
+          "required": true,
+          "type": "boolean"
+        },
+        {
+          "array": false,
+          "description": "Whether the user chose to replace what existing_artifacts lists (decision replace).",
           "name": "replaced_contract",
+          "required": true,
+          "type": "boolean"
+        },
+        {
+          "array": false,
+          "description": "Whether the user chose to add only contracts/architecture.md (decision architecture_only): only the architecture is drafted and reviewed, requirements, api and language stay empty, and the result is pushed with a pull request without contract tests, verification or code review.",
+          "name": "architecture_only",
           "required": true,
           "type": "boolean"
         },
@@ -3472,21 +3745,35 @@
         },
         {
           "array": true,
-          "description": "The drafted requirements, as corrected in the interview.",
+          "description": "The drafted requirements, as corrected in the interview; empty for an architecture-only onboarding.",
           "name": "requirements",
           "required": true,
           "type": "Requirement"
         },
         {
           "array": false,
-          "description": "The drafted endpoints and schemas, as corrected in the interview.",
+          "description": "The architecture drafted by the LLM from the existing code, as Markdown with the fixed headings (Components with their responsibilities, Data flow, Technology choices), rendered from architecture_structure as corrected in the interview; written to contracts/architecture.md. Null until drafted.",
+          "name": "architecture",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "The same architecture in machine-readable form; written to contracts/architecture.json. Null until drafted.",
+          "name": "architecture_structure",
+          "required": false,
+          "type": "ArchitectureStructure"
+        },
+        {
+          "array": false,
+          "description": "The drafted endpoints and schemas, as corrected in the interview; empty for an architecture-only onboarding.",
           "name": "api",
           "required": true,
           "type": "object"
         },
         {
           "array": false,
-          "description": "The implementation language of the existing code, as the LLM detected it from the code and the user may correct it in the interview; written to contracts/language.json.",
+          "description": "The implementation language of the existing code, as the LLM detected it from the code and the user may correct it in the interview; written to contracts/language.json. Null for an architecture-only onboarding.",
           "name": "language",
           "required": false,
           "type": "string"
@@ -3506,7 +3793,7 @@
         },
         {
           "array": false,
-          "description": "Progress of verifying and publishing the contract, contract tests and Dockerfile, with the same fields as an ApiDesignSession's delivery progress: verification_status, publication_status, verification, publication (its branch named onboarding/<source branch>-<short id>), agent_questions (including a coding agent's question whether a failing test reveals a bug in the existing code, which waits for an answer without a timeout), reviews, review_error, open_findings, findings_acceptance, pull_request_status, pull_request, pull_request_error, pull_request_text_error and mentions. When the existing code was changed after the user confirmed a bug, the result is still verified as usual once the tests pass, and the pushed commit's message and the pull request's description say that the existing code was changed.",
+          "description": "Progress of verifying and publishing the contract, contract tests and Dockerfile, with the same fields as an ApiDesignSession's delivery progress: verification_status, publication_status, verification, publication (its branch named onboarding/<source branch>-<short id>), agent_questions (including a coding agent's question whether a failing test reveals a bug in the existing code, which waits for an answer without a timeout), reviews, review_error, open_findings, findings_acceptance, pull_request_status, pull_request, pull_request_error, pull_request_text_error and mentions. When the existing code was changed after the user confirmed a bug, the result is still verified as usual once the tests pass, and the pushed commit's message and the pull request's description say that the existing code was changed. For an architecture-only onboarding, verification_status is not_applicable, reviews stay empty and open_findings is never raised; only the publication of contracts/architecture.md and contracts/architecture.json and its pull request are reported.",
           "name": "delivery",
           "required": false,
           "type": "object"
@@ -3519,10 +3806,262 @@
       "properties": [
         {
           "array": false,
-          "description": "true replaces everything listed in existing_artifacts and the onboarding proceeds to drafting; false declines: the onboarding ends as declined and the existing files are left unchanged.",
-          "name": "replace_contract",
+          "description": "replace replaces everything listed in existing_artifacts and the onboarding proceeds to drafting the full contract; decline ends the onboarding as declined and leaves the existing files unchanged; architecture_only, allowed only while architecture_missing is true, drafts only contracts/architecture.md from the existing code and leaves every other file of the existing contract, the contract tests and the Dockerfile unchanged. Replaces the former replace_contract boolean.",
+          "enum": [
+            "replace",
+            "decline",
+            "architecture_only"
+          ],
+          "name": "decision",
+          "required": true,
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "description": "The LLM's proposal, made instead of the initial draft, to skip the architecture stage of an API change, waiting for the user.",
+      "name": "SkipProposal",
+      "properties": [
+        {
+          "array": false,
+          "description": "Why the LLM judges that the task needs no new architecture.",
+          "name": "reason",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "The assistant message that made the proposal.",
+          "name": "message_index",
+          "required": true,
+          "type": "integer"
+        }
+      ]
+    },
+    {
+      "description": "An architecture session: the LLM's draft of the task's top-level architecture and the review conversation.",
+      "name": "ArchitectureSession",
+      "properties": [
+        {
+          "array": false,
+          "description": "architecture-session- followed by 32 hex digits.",
+          "name": "session_id",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "drafting while the LLM drafts the architecture from the requirements (for an API change starting from the repository's contracts/architecture.md), or decides instead to propose skipping the stage; skipped once the user skipped the stage.",
+          "enum": [
+            "preparing",
+            "drafting",
+            "interviewing",
+            "turn_running",
+            "finalizing",
+            "completed",
+            "skipped",
+            "failed"
+          ],
+          "name": "status",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "The requirements session that started this architecture session.",
+          "name": "source_session_id",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "enum": [
+            "new_service",
+            "api_change"
+          ],
+          "name": "kind",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": true,
+          "name": "messages",
+          "required": true,
+          "type": "Message"
+        },
+        {
+          "array": true,
+          "name": "requirements",
+          "required": true,
+          "type": "Requirement"
+        },
+        {
+          "array": false,
+          "description": "The current draft as Markdown, rendered from structure with fixed headings: Components (with their responsibilities), Data flow and Technology choices. Null until drafted, including while a skip proposal made instead of the initial draft is open.",
+          "name": "architecture",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "The current draft in machine-readable form, written to contracts/architecture.json when the delivery is pushed. Null until drafted.",
+          "name": "structure",
+          "required": false,
+          "type": "ArchitectureStructure"
+        },
+        {
+          "array": false,
+          "description": "The LLM's open proposal to skip the stage. Only for an API change and only made instead of the initial draft; null when none is open. Once declined (by sending a message) it is dismissed, the architecture is drafted and no skip is proposed again in the session.",
+          "name": "skip_proposal",
+          "required": false,
+          "type": "SkipProposal"
+        },
+        {
+          "array": false,
+          "description": "True once the user declined the skip proposal; the LLM proposes no further skip in this session.",
+          "name": "skip_declined",
           "required": true,
           "type": "boolean"
+        },
+        {
+          "array": false,
+          "description": "The architecture document (contracts/architecture.md and contracts/architecture.json), once finalized.",
+          "name": "document",
+          "required": false,
+          "type": "object"
+        },
+        {
+          "array": false,
+          "name": "error",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "name": "forked_from",
+          "required": false,
+          "type": "object"
+        },
+        {
+          "array": false,
+          "name": "repository",
+          "required": false,
+          "type": "RepositorySelection"
+        },
+        {
+          "array": false,
+          "name": "checkout",
+          "required": false,
+          "type": "object"
+        },
+        {
+          "array": true,
+          "description": "What must be settled before the architecture can be finalized.",
+          "name": "problems",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "The API design this session started when it was finalized or skipped, as a child of the requirements session; null until then.",
+          "name": "api_design_session_id",
+          "required": false,
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "description": "A component or module of the architecture.",
+      "name": "ArchitectureComponent",
+      "properties": [
+        {
+          "array": false,
+          "name": "name",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": true,
+          "description": "What the component is responsible for.",
+          "name": "responsibilities",
+          "required": true,
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "description": "Data passed from one component to another.",
+      "name": "ArchitectureDataFlow",
+      "properties": [
+        {
+          "array": false,
+          "description": "Name of the component the data comes from.",
+          "name": "source",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "Name of the component the data goes to.",
+          "name": "target",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "What data flows and how.",
+          "name": "description",
+          "required": true,
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "description": "A key technology choice.",
+      "name": "ArchitectureTechnologyChoice",
+      "properties": [
+        {
+          "array": false,
+          "description": "What the choice is about, such as storage or messaging.",
+          "name": "topic",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "name": "choice",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "name": "rationale",
+          "required": false,
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "description": "The machine-readable architecture, written to contracts/architecture.json; contracts/architecture.md is rendered from it with fixed headings (Components, Data flow, Technology choices).",
+      "name": "ArchitectureStructure",
+      "properties": [
+        {
+          "array": true,
+          "name": "components",
+          "required": true,
+          "type": "ArchitectureComponent"
+        },
+        {
+          "array": true,
+          "name": "data_flows",
+          "required": true,
+          "type": "ArchitectureDataFlow"
+        },
+        {
+          "array": true,
+          "name": "technology_choices",
+          "required": true,
+          "type": "ArchitectureTechnologyChoice"
         }
       ]
     }

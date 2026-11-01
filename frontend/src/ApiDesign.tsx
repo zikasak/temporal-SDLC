@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import Markdown from "react-markdown";
 import { errorMessage, failure, readBody } from "./api";
 import { ApiModelSection, type ApiModel } from "./ApiModel";
+import { ArchitectureSection, architectureStructure, type ArchitectureStructure } from "./Architecture";
 import ForkButton from "./ForkButton";
 import { AskedQuestions, QuestionForm, questionList, type Question } from "./Questions";
 import { RepositorySummary } from "./RepositoryPicker";
@@ -47,6 +48,9 @@ type Session = DeliveryProgress & {
   forked_from: { session_id: string; message_index: number } | null;
   repository: RepositorySelection | null;
   checkout: RepositoryCheckout | null;
+  // The architecture session that started this design, and the architecture it hands on.
+  architecture_session_id: string | null;
+  architecture_structure: ArchitectureStructure | null;
 };
 
 const sessionStatuses: SessionStatus[] = [
@@ -115,6 +119,9 @@ function sessionRecord(value: unknown): Session {
     checkout: repositoryCheckout(value.checkout),
     source_session_id:
       typeof value.source_session_id === "string" ? value.source_session_id : "",
+    architecture_session_id:
+      typeof value.architecture_session_id === "string" ? value.architecture_session_id : null,
+    architecture_structure: architectureStructure(value.architecture_structure),
     status: value.status as SessionStatus,
     messages: value.messages.map((item) => ({
       role: item.role, content: item.content, questions: questionList(item.questions),
@@ -523,6 +530,15 @@ export default function ApiDesign() {
             </p>
           )}
 
+          {session?.architecture_session_id && (
+            <p className="fork-note">
+              Designed against the architecture of its architecture session.
+              <a href={`?mode=architecture&session_id=${encodeURIComponent(session.architecture_session_id)}`}>
+                Open the architecture
+              </a>
+            </p>
+          )}
+
           <div
             ref={conversation}
             className="response-content"
@@ -611,6 +627,10 @@ export default function ApiDesign() {
 
             {session && (
               <ApiModelSection api={session.api} problems={session.problems} requirements={session.requirements} />
+            )}
+
+            {session?.architecture_structure && (
+              <ArchitectureSection structure={session.architecture_structure} problems={[]} />
             )}
 
             {!session && !error && (

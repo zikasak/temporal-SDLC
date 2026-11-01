@@ -28,7 +28,8 @@ with workflow.unsafe.imports_passed_through():
         review_request,
     )
     from app.temporal.activities import (
-        open_pull_request, publish_documentation, publish_onboarding, publish_repository,
+        open_pull_request, publish_documentation, publish_onboarding,
+        publish_onboarding_architecture, publish_repository,
     )
 
 # Each round is a diagnosis, a repair of one side and a new verification.
@@ -61,6 +62,10 @@ TESTS_AT_FAULT = 'No: the code is right, repair the tests and the contract'
 BUG_SUMMARY_CHARS = 600
 DOCS_FIX_STARTED = ('Started a fix round of the documentation from your comment: the '
                     'changes, then their check. I will reply here again with the outcome.')
+ARCHITECTURE_FIX_STARTED = ('Started a fix round of the architecture from your comment: '
+                            'contracts/architecture.md and contracts/architecture.json are '
+                            'changed as it asks and pushed to this pull request, without '
+                            'tests or code review. I will reply here again with the outcome.')
 
 
 def _same_mention(first: tuple[str | None, int | None],
@@ -118,6 +123,10 @@ class DeliveryWorkflow:
         # code, and the user's answer to it.
         self._bug_question = False
         self._bug_answer: str | None = None
+        # Why this run's fix round of an architecture-only onboarding changed nothing,
+        # and the model's summary of the change it made.
+        self._fix_error: str | None = None
+        self._fix_summary: str | None = None
 
     @workflow.run
     async def run(self, state: DeliveryState) -> DeliveryProgress:
@@ -181,6 +190,20 @@ class DeliveryWorkflow:
             raise ValueError('Wait for the current generation to finish.')
 
     async def _deliver(self) -> None:
+        if self.spec.architecture_only:
+            # Only contracts/architecture.md and contracts/architecture.json are pushed,
+            # without tests, verification or code review.
+            self.progress.verification_status = 'not_applicable'
+            if self.state.mention is not None and self.state.instructions:
+                # A fix requested on the pull request changes the architecture first; a
+                # change that could not be made leaves the earlier push as it is.
+                if not await self._revise_architecture(self.state.instructions):
+                    return
+            if self.spec.checkout:
+                self.progress.publication_status = 'waiting'
+                self.progress.pull_request_status = 'waiting'
+            await self._publish_architecture()
+            return
         if not await self._snapshot():
             self.progress.verification_status = 'skipped'
         elif self.state.instructions or self.state.mention is not None:
@@ -326,6 +349,15 @@ class DeliveryWorkflow:
 
     def _fix_unavailable(self) -> str | None:
         """Why the delivery cannot take a fix round, if it cannot."""
+        if self.spec.architecture_only and not workflow.patched('architecture-fixes'):
+            # Histories from before architecture fixes turned them down.
+            return ('This pull request only adds the architecture to the contract, which '
+                    'was reviewed in the onboarding; start a new onboarding to change it.')
+        if self.spec.architecture_only:
+            # The architecture takes fixes without tests, verification or code review.
+            if not self.progress.publication or not self.spec.checkout:
+                return 'The architecture has not been pushed yet.'
+            return None
         # A documentation delivery takes fixes of its documentation, without code review.
         if self.spec.kind != 'docs' and not self.spec.language:
             return 'No implementation language was chosen for this delivery.'
@@ -498,8 +530,9 @@ class DeliveryWorkflow:
         self._mention_ref = {'comment_type': entry['comment_type'],
                              'comment_id': entry['comment_id']}
         entry['status'] = 'running'
-        if not await self._reply(
-                entry, DOCS_FIX_STARTED if self.spec.kind == 'docs' else FIX_STARTED):
+        started = (ARCHITECTURE_FIX_STARTED if self.spec.architecture_only
+                   else DOCS_FIX_STARTED if self.spec.kind == 'docs' else FIX_STARTED)
+        if not await self._reply(entry, started):
             self._ack_error = entry.get('error') or 'The reply could not be posted.'
             # The round goes on and shows what failed meanwhile.
             entry['status'] = 'running'
@@ -531,8 +564,14 @@ class DeliveryWorkflow:
         # branch keeps after a failed round does not count.
         pushed = bool(self._pushed and self.progress.publication_status == 'completed'
                       and publication)
+        fix_error, self._fix_error = self._fix_error, None
+        fix_summary, self._fix_summary = self._fix_summary, None
         if pushed:
-            if self.spec.kind == 'docs':
+            if self.spec.architecture_only:
+                verified = ('Only the architecture changed, so no tests, verification or '
+                            'code review ran.'
+                            + (f'\n\n{fix_summary}' if fix_summary else ''))
+            elif self.spec.kind == 'docs':
                 verified = ('It passed its check.' if publication['verified']
                             else 'No check exists for documentation yet, so it is marked '
                                  'as unverified.')
@@ -561,7 +600,7 @@ class DeliveryWorkflow:
                 entry.pop('error', None)
             await self._settle(entry)
             return
-        error = (self.progress.documentation_error
+        error = (fix_error or self.progress.documentation_error
                  or self.progress.implementation_error or self.progress.tests_error
                  or self.progress.baseline_error or self.progress.verification_error
                  or self.progress.review_error or self.progress.publication_error
@@ -1242,6 +1281,10 @@ class DeliveryWorkflow:
         if self.spec.onboarding:
             # The contract was drafted from the repository's existing code.
             context['onboarding'] = True
+        if self.spec.architecture:
+            # The task's top-level architecture, which the code follows; the agents never
+            # change it.
+            context['architecture'] = self.spec.architecture
         return context
 
     def _stage_context(self, repair: dict[str, Any] | None) -> dict[str, Any]:
@@ -1310,6 +1353,10 @@ class DeliveryWorkflow:
                 'requirements': self.spec.requirements,
                 'requirements_document': self.spec.requirements_document,
                 'api': self.spec.api,
+                # Committed as contracts/architecture.md and contracts/architecture.json;
+                # without one the repository's files are kept.
+                'architecture': self.spec.architecture,
+                'architecture_structure': self.spec.architecture_structure,
             }
             if self.spec.brief:
                 # The repository's contract grows by what the change required of the service.
@@ -1357,6 +1404,56 @@ class DeliveryWorkflow:
                 # the step ends here instead of waiting for good.
                 self.progress.pull_request_status = 'not_applicable'
 
+    async def _revise_architecture(self, instructions: str) -> bool:
+        """Change the architecture of an architecture-only onboarding as a comment on its
+        pull request asks; true when it changed and is to be pushed again."""
+        try:
+            revised = await workflow.execute_activity(
+                'revise_onboarding_architecture',
+                args=[self.spec.session_id, self.spec.architecture_structure, instructions],
+                result_type=dict, start_to_close_timeout=timedelta(minutes=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except ActivityError as exc:
+            workflow.logger.warning('Architecture fix failed: %s', exc.cause or exc)
+            reason = (str(getattr(exc.cause, 'message', '') or '')[:2500]
+                      if isinstance(exc.cause, ApplicationError) else '')
+            self._fix_error = reason or 'The architecture could not be changed.'
+            return False
+        self.spec.architecture = revised['architecture']
+        self.spec.architecture_structure = revised['architecture_structure']
+        self._fix_summary = revised.get('summary') or None
+        return True
+
+    async def _publish_architecture(self) -> None:
+        """Push the architecture an onboarding added to the repository's contract, then
+        open its pull request."""
+        if not self.spec.checkout:
+            return
+        self.progress.publication_status = 'running'
+        self.progress.publication_error = None
+        try:
+            self.progress.publication = await workflow.execute_activity(
+                publish_onboarding_architecture,
+                args=[self.spec.session_id, self.spec.repository, self.spec.architecture,
+                      self.spec.architecture_structure],
+                start_to_close_timeout=timedelta(minutes=10),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except ActivityError as exc:
+            workflow.logger.warning('Architecture push failed: %s', exc.cause or exc)
+            reason = str(getattr(exc.cause, 'message', '') or '')[-500:]
+            self.progress.publication_error = (
+                'The architecture could not be pushed to the repository.'
+                + (f' {reason}' if reason else ''))
+            self.progress.publication_status = 'error'
+            self.progress.pull_request_status = 'skipped'
+            return
+        workflow.logger.info('Architecture pushed to %s', self.progress.publication['branch'])
+        self.progress.publication_status = 'completed'
+        self._pushed = True
+        await self._pull_request()
+
     async def _pull_request(self) -> None:
         """Open the pull request of the pushed branch, or update the open one. Its failure
         never fails the push or the delivery: it is reported, and retrying the repository
@@ -1365,7 +1462,8 @@ class DeliveryWorkflow:
         self.progress.pull_request_error = None
         brief = self.spec.brief
         change = {
-            'kind': 'onboarding' if self.spec.onboarding else self.spec.kind,
+            'kind': ('onboarding_architecture' if self.spec.architecture_only
+                     else 'onboarding' if self.spec.onboarding else self.spec.kind),
             'requirements': brief['requirements'] if brief else self.spec.requirements,
             'retired': brief['retired'] if brief else [],
         }

@@ -65,20 +65,6 @@
   },
   {
     "category": "functional",
-    "description": "Finalizing a session writes its requirements document, available for download once ready. A task on an existing service (API change, bugfix or documentation) is specified against the contract the repository holds in contracts/; a repository without a readable contract cannot be finalized for one.",
-    "id": "FR-12",
-    "priority": "must",
-    "title": "Finalize requirements"
-  },
-  {
-    "category": "functional",
-    "description": "A new service or an API change continues in an API design session that its completed requirements session starts (FR-77). Its conversation records the endpoints, schemas and implementation language, and finalizing it renders the OpenAPI document.",
-    "id": "FR-13",
-    "priority": "must",
-    "title": "Design the API"
-  },
-  {
-    "category": "functional",
     "description": "A finalized task is delivered: code is generated or changed, the service and its contract tests are written by separate coding agents, and verification runs the tests against the built service, repairing the failing side a bounded number of times. A bugfix's new tests must first fail against the service as the repository holds it. The session shows the delivery's progress, its agents' questions can be answered, and a failed stage can be retried.",
     "id": "FR-14",
     "priority": "must",
@@ -473,22 +459,6 @@
   },
   {
     "category": "functional",
-    "description": "Onboarding produces for the repository the full contract in contracts/ (requirements.json, requirements.md, api.json, openapi.yaml, language.json), contract tests and a root Dockerfile, and the contract tests are verified to pass against the existing code built with that Dockerfile.",
-    "id": "FR-57",
-    "priority": "must",
-    "rationale": "User chose the full contract plus contract tests and Dockerfile, all verified against the existing code.",
-    "title": "Onboarding produces the full contract, tests and Dockerfile"
-  },
-  {
-    "category": "functional",
-    "description": "An LLM drafts the requirements and the API from the repository's existing code, and the user reviews and corrects the drafts in an interview before the onboarding is finalized.",
-    "id": "FR-58",
-    "priority": "must",
-    "rationale": "User chose LLM drafting followed by user review in an interview.",
-    "title": "LLM drafts the contract, user reviews it"
-  },
-  {
-    "category": "functional",
     "description": "When a contract test fails against the existing code during onboarding, the repair changes the tests (and the drafted contract); the existing code is changed only after the user confirms that the failure reveals a bug in it.",
     "id": "FR-59",
     "priority": "must",
@@ -497,27 +467,11 @@
   },
   {
     "category": "functional",
-    "description": "The onboarding result goes through the code review step and is pushed to a new branch with a pull request to the repository's default branch, in the same way as a delivery.",
-    "id": "FR-60",
-    "priority": "must",
-    "rationale": "User chose: new branch and pull request like a delivery, including code review.",
-    "title": "Publish onboarding like a delivery"
-  },
-  {
-    "category": "functional",
     "description": "When the chosen branch already has a contract in contracts/, the user is warned before onboarding proceeds and chooses whether to replace it; if the user declines, the onboarding does not proceed and the existing contract is left unchanged.",
     "id": "FR-61",
     "priority": "must",
     "rationale": "User chose: warn and let the user choose whether to replace it.",
     "title": "Warn before replacing an existing contract"
-  },
-  {
-    "category": "functional",
-    "description": "The code review step runs for new service, API change and bugfix deliveries and for onboarding, and does not run for documentation-only deliveries.",
-    "id": "FR-62",
-    "priority": "must",
-    "rationale": "Replaces FR-26: user confirmed onboarding is included in code review.",
-    "title": "Review applies to code-producing deliveries and onboarding"
   },
   {
     "category": "functional",
@@ -585,14 +539,6 @@
   },
   {
     "category": "functional",
-    "description": "Each OnboardingWorkflow, RequirementsWorkflow, ApiDesignWorkflow and DeliveryWorkflow execution returned by GET /workflows includes the repository and branch it works in, and the Workflows page shows them.",
-    "id": "FR-71",
-    "priority": "must",
-    "rationale": "User chose to return repository and branch for onboarding, requirements, API design and delivery workflows.",
-    "title": "Repository and branch in GET /workflows"
-  },
-  {
-    "category": "functional",
     "description": "In the Workflows list, every DeliveryWorkflow and CodegenWorkflow execution started for an onboarding links to that onboarding's page in the Onboarding tab.",
     "id": "FR-72",
     "priority": "must",
@@ -632,19 +578,195 @@
     "title": "List top-level flows and a flow's children"
   },
   {
-    "category": "functional",
-    "description": "When the user generates the requirements document of a new service or an API change on a repository, the requirements session starts that task's API design itself, which drafts the API at once; GET /requirements/sessions/{session_id} returns its ID as api_design_session_id and the web client opens the design from there. A session whose document was written because it was idle for a day starts none. An API design is never started by hand: there is no POST /api-design/sessions, and the only other design of the same requirements is a fork of one.",
-    "id": "FR-77",
-    "priority": "must",
-    "rationale": "User asked that the API design flow start automatically when the requirements are finished, and then that it no longer be started by hand.",
-    "title": "API design starts when the requirements are finished"
-  },
-  {
     "category": "non_functional",
     "description": "GET /workflows keeps its existing fields (workflow_id, run_id, workflow_type, status, task_queue, parent_workflow_id, start_time, close_time, next_page_token) with their current names and meaning; the change only adds fields.",
     "id": "NFR-7",
     "priority": "must",
     "rationale": "User: only add fields.",
     "title": "GET /workflows only gains fields"
+  },
+  {
+    "category": "functional",
+    "description": "For a new service or an API change, an architecture stage runs after the requirements are finished and before the API design, and prepares the task's top-level architecture.",
+    "id": "FR-78",
+    "priority": "must",
+    "rationale": "User: add an architecture stage after requirements, for new service and API change only, before API design.",
+    "title": "Architecture stage between requirements and API design"
+  },
+  {
+    "category": "functional",
+    "description": "In the architecture stage an LLM drafts the architecture from the requirements, and the user then reviews and corrects it in a conversation, in the same way as an API design session.",
+    "id": "FR-79",
+    "priority": "must",
+    "rationale": "User chose LLM drafting followed by a review conversation, like API design.",
+    "title": "LLM drafts the architecture, user reviews it"
+  },
+  {
+    "category": "functional",
+    "description": "For an API change, when the LLM judges that the task needs no new architecture, it proposes skipping the stage, and the stage is skipped only after the user confirms; a new service always goes through the architecture stage and its skip cannot be proposed or confirmed (confirming a skip for it answers 409).",
+    "id": "FR-80",
+    "priority": "must",
+    "rationale": "User chose: the LLM proposes skipping and the user confirms; skipping is allowed only for an API change.",
+    "title": "LLM proposes skipping, user confirms (API change only)"
+  },
+  {
+    "category": "functional",
+    "description": "When the user generates the requirements document of a new service or an API change on a repository, the requirements session starts that task's architecture session, which drafts the architecture at once; GET /requirements/sessions/{session_id} returns its ID as architecture_session_id and the web client opens it from there. A session whose document was written because it was idle for a day starts none. The requirements session no longer starts the API design itself.",
+    "id": "FR-81",
+    "priority": "must",
+    "rationale": "Replaces FR-77: user chose that the requirements session starts the architecture session.",
+    "title": "Requirements start the architecture session"
+  },
+  {
+    "category": "functional",
+    "description": "Finalizing the architecture session, or confirming that its stage is skipped, starts the task's API design session, which drafts the API at once; the architecture session returns its ID as api_design_session_id. An API design is never started by hand: there is no POST /api-design/sessions, and the only other design of the same task is a fork of one.",
+    "id": "FR-82",
+    "priority": "must",
+    "rationale": "Replaces FR-77's hand-off: user chose that finalizing or skipping the architecture starts the API design.",
+    "title": "Architecture finalized or skipped starts the API design"
+  },
+  {
+    "category": "functional",
+    "description": "A new service or an API change continues in an API design session started by its architecture session; the design's conversation records the endpoints, schemas and implementation language, uses the finalized architecture when there is one, and finalizing it renders the OpenAPI document.",
+    "id": "FR-83",
+    "priority": "must",
+    "rationale": "Replaces FR-13: the API design now follows the architecture stage and uses its result.",
+    "title": "Design the API"
+  },
+  {
+    "category": "functional",
+    "description": "The finalized architecture document describes the task's components or modules, their responsibilities, the data flow between them and the key technology choices.",
+    "id": "FR-84",
+    "priority": "must",
+    "rationale": "User chose components, responsibilities, data flow and key technology choices.",
+    "title": "Content of the architecture document"
+  },
+  {
+    "category": "functional",
+    "description": "The finalized architecture is given to the API design and to the delivery's coding agents, and is committed with the contract as contracts/architecture.md when the delivery is pushed. When an API change skips the stage, the repository's existing contracts/architecture.md is kept unchanged and is the architecture given to the API design and coding agents.",
+    "id": "FR-85",
+    "priority": "must",
+    "rationale": "User chose: fed to API design and coding agents, committed to contracts/; a skipped API change keeps the existing architecture.md.",
+    "title": "Architecture used downstream and committed"
+  },
+  {
+    "category": "functional",
+    "description": "Architecture sessions are served under /architecture/sessions with the same actions as API design sessions (get the session, send a message, answer the interviewer's questions, retry a failed turn, finalize, fork after a message and download the document) plus an action that confirms the proposed skip of the stage.",
+    "id": "FR-86",
+    "priority": "must",
+    "rationale": "User chose endpoints like API design plus a skip confirmation.",
+    "title": "Architecture session endpoints"
+  },
+  {
+    "category": "functional",
+    "description": "On the Flows page the architecture session appears as a child flow of its requirements session, opens in the panel, and is highlighted as waiting for the user while it has unanswered questions or a skip proposal to confirm.",
+    "id": "FR-87",
+    "priority": "must",
+    "rationale": "User chose a child flow of the requirements session, highlighted while waiting, including a skip proposal.",
+    "title": "Architecture stage on the Flows page"
+  },
+  {
+    "category": "functional",
+    "description": "Forking an architecture session whose API design has already started answers 409.",
+    "id": "FR-88",
+    "priority": "must",
+    "rationale": "User chose: forking is not allowed once the API design has started.",
+    "title": "No fork once the API design has started"
+  },
+  {
+    "category": "functional",
+    "description": "Each OnboardingWorkflow, RequirementsWorkflow, ArchitectureWorkflow, ApiDesignWorkflow and DeliveryWorkflow execution returned by GET /workflows includes the repository and branch it works in, and the Flows page shows them.",
+    "id": "FR-89",
+    "priority": "must",
+    "rationale": "Replaces FR-71: user chose to treat the architecture workflow like API design.",
+    "title": "Repository and branch in GET /workflows"
+  },
+  {
+    "category": "functional",
+    "description": "The Flows page offers an Architecture filter that lists only ArchitectureWorkflow executions.",
+    "id": "FR-90",
+    "priority": "must",
+    "rationale": "User chose to offer the architecture workflow as a filter.",
+    "title": "Architecture filter on the Flows page"
+  },
+  {
+    "category": "functional",
+    "description": "On the Flows page, the API design session started by an architecture session appears as a child flow of the requirements session, next to the architecture session, and GET /workflows?parent=<requirements workflow_id> includes it.",
+    "id": "FR-91",
+    "priority": "must",
+    "rationale": "User chose to keep the API design next to the architecture session under the requirements session.",
+    "title": "API design stays a child of the requirements session"
+  },
+  {
+    "category": "functional",
+    "description": "Finalizing a session writes its requirements document, available for download once ready. A task on an existing service (API change, bugfix or documentation) is specified against the contract the repository holds in contracts/, which includes contracts/architecture.md; a repository without a readable contract, including one without contracts/architecture.md, cannot be finalized for one.",
+    "id": "FR-92",
+    "priority": "must",
+    "rationale": "Replaces FR-12: user chose that contracts/architecture.md is a required part of the contract.",
+    "title": "Finalize requirements"
+  },
+  {
+    "category": "functional",
+    "description": "Onboarding produces for the repository the full contract in contracts/ (requirements.json, requirements.md, api.json, openapi.yaml, language.json and architecture.md, the architecture drafted by an LLM from the existing code), contract tests and a root Dockerfile, and the contract tests are verified to pass against the existing code built with that Dockerfile.",
+    "id": "FR-93",
+    "priority": "must",
+    "rationale": "Replaces FR-57: user chose that onboarding drafts contracts/architecture.md, which is now required.",
+    "title": "Onboarding produces the full contract, tests and Dockerfile"
+  },
+  {
+    "category": "functional",
+    "description": "For an API change, the architecture session drafts its architecture starting from the repository's existing contracts/architecture.md, and the finalized architecture replaces that file when the delivery is pushed.",
+    "id": "FR-94",
+    "priority": "must",
+    "rationale": "User chose: start from the existing one and replace it with the finalized result.",
+    "title": "API change starts from the existing architecture"
+  },
+  {
+    "category": "functional",
+    "description": "An LLM drafts the requirements, the architecture and the API from the repository's existing code, and the user reviews and corrects all three drafts in the same interview before the onboarding is finalized.",
+    "id": "FR-95",
+    "priority": "must",
+    "rationale": "Replaces FR-58: user chose that the drafted architecture is reviewed in the same onboarding interview.",
+    "title": "LLM drafts the contract, user reviews it"
+  },
+  {
+    "category": "functional",
+    "description": "When the chosen branch already has a contract in contracts/ but no contracts/architecture.md, onboarding offers, in addition to replacing the whole contract or not proceeding, to add only architecture.md; choosing it drafts and adds contracts/architecture.md and leaves every other file of the existing contract unchanged.",
+    "id": "FR-96",
+    "priority": "must",
+    "rationale": "User chose: onboarding offers to add only architecture.md for repositories whose contract predates this change.",
+    "title": "Onboarding adds only a missing architecture"
+  },
+  {
+    "category": "functional",
+    "description": "When the user declines the LLM's proposal to skip the architecture stage, the proposal is dismissed, the stage is not skipped, and the conversation continues with the user explaining what the architecture should cover.",
+    "id": "FR-97",
+    "priority": "must",
+    "rationale": "User chose: the proposal is dismissed and the user explains what the architecture should cover.",
+    "title": "Declining a skip proposal"
+  },
+  {
+    "category": "functional",
+    "description": "When onboarding adds only contracts/architecture.md, an LLM drafts it from the existing code, the user reviews and corrects it in the onboarding interview, and it is then pushed to a new branch with a pull request to the repository's default branch, without contract tests, verification or code review.",
+    "id": "FR-98",
+    "priority": "must",
+    "rationale": "User chose: draft, review in the interview, push with a pull request; no tests, verification or code review.",
+    "title": "Architecture-only onboarding is reviewed and published without tests"
+  },
+  {
+    "category": "functional",
+    "description": "The result of an onboarding that produces the full contract goes through the code review step and is pushed to a new branch with a pull request to the repository's default branch, in the same way as a delivery; an onboarding that adds only contracts/architecture.md is pushed and gets a pull request without code review.",
+    "id": "FR-99",
+    "priority": "must",
+    "rationale": "Replaces FR-60: the user chose no code review for architecture-only onboarding.",
+    "title": "Publish onboarding like a delivery"
+  },
+  {
+    "category": "functional",
+    "description": "The code review step runs for new service, API change and bugfix deliveries and for onboardings that produce the full contract, and does not run for documentation-only deliveries or for onboardings that add only contracts/architecture.md.",
+    "id": "FR-100",
+    "priority": "must",
+    "rationale": "Replaces FR-62: the user chose no code review for architecture-only onboarding.",
+    "title": "Review applies to code-producing deliveries and full onboarding"
   }
 ]

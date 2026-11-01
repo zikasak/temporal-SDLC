@@ -70,6 +70,10 @@ async def fork_session(session_id: str, message_index: int) -> str:
         language=source.language,
         repository=source.repository,
         forked_from={"session_id": session_id, "message_index": message_index},
+        # A fork designs against the same architecture.
+        architecture_session_id=source.architecture_session_id,
+        architecture=source.architecture,
+        architecture_structure=source.architecture_structure,
     ))
     logger.info("Forked API design session %s after message %d as %s",
                 session_id, message_index, fork_id)

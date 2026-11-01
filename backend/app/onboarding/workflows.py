@@ -7,10 +7,17 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError
 
 with workflow.unsafe.imports_passed_through():
+    from app.api_design.models import empty_api
+    from app.architecture.models import normalize_structure, render_architecture_markdown
     from app.delivery.models import DeliveryState, TaskSpec
     from app.llm.questions import answers_text
-    from app.onboarding.activities import find_onboarding_artifacts, onboarding_turn
-    from app.onboarding.models import FINISHED_STATUSES, OnboardingState, onboarding_problems
+    from app.onboarding.activities import (
+        find_onboarding_artifacts, inspect_onboarding_contract, onboarding_turn,
+    )
+    from app.onboarding.models import (
+        ARCHITECTURE_PRESENT, DECISIONS, FINISHED_STATUSES, OnboardingState,
+        draft_kind_changed, onboarding_problems,
+    )
     from app.requirements.document import render_requirements_markdown
     from app.temporal.activities import checkout_repository, update_repository_checkout
     from app.temporal.workflows import (
@@ -29,6 +36,14 @@ ARTIFACTS_UPDATE_FAILED = ("The checkout was updated, but its existing contract,
                            "again before finalizing.")
 DRAFT_FAILED = "The LLM could not draft the contract. Retry."
 TURN_FAILED = "The LLM could not answer. Retry this message."
+CONTRACT_UNKNOWN = ("The existing contract could not be read, so only replacing it or "
+                    "declining is offered. Update the checkout to read it again.")
+# Onboardings that also draft the architecture and may add only it.
+ARCHITECTURE_STAGE = "onboarding-architecture"
+# Onboardings that record which kind of draft exists apart from the current decision.
+DRAFT_KIND = "onboarding-draft-kind"
+# Onboardings whose first checkout checks that adding only the architecture still applies.
+FORK_ARCHITECTURE_CHECK = "onboarding-fork-architecture-check"
 
 
 @workflow.defn
@@ -114,19 +129,57 @@ class OnboardingWorkflow(_Delivering):
             self.state.error = ARTIFACTS_FAILED
             return
         self.state.existing_artifacts = found
-        accepted = known if self.state.replaced_contract else []
-        if any(item not in accepted for item in found):
+        await self._inspect(found)
+        accepted = known if self._decided() else []
+        # A fork carries architecture_only over: adding only the architecture still needs
+        # a contract without one that is readable apart from it, as in update_checkout.
+        invalid = self._architecture_only_invalid() and workflow.patched(
+            FORK_ARCHITECTURE_CHECK)
+        if invalid or any(item not in accepted for item in found):
             self.state.replaced_contract = False
+            self.state.architecture_only = False
             self.state.status = "awaiting_confirmation"
             workflow.logger.info("The branch already has %s; awaiting the user", found)
             return
         await self._proceed()
+
+    def _architecture_only_invalid(self) -> bool:
+        """Whether adding only the architecture was chosen but no longer applies: the
+        branch has an architecture now, or the rest of its contract is unreadable."""
+        return self.state.architecture_only and (
+            not self.state.architecture_missing or bool(self.state.contract_problem))
+
+    def _decided(self) -> bool:
+        """Whether the user chose to go on with what the branch has."""
+        return self.state.replaced_contract or self.state.architecture_only
+
+    async def _inspect(self, found: list[str]) -> None:
+        """Find whether the branch's contract lacks its architecture, which offers adding
+        only that, and whether the rest of it is readable."""
+        self.state.architecture_missing = False
+        self.state.contract_problem = None
+        if "contract" not in found or not workflow.patched(ARCHITECTURE_STAGE):
+            return
+        try:
+            inspected = await workflow.execute_activity(
+                inspect_onboarding_contract, workflow.info().workflow_id,
+                start_to_close_timeout=timedelta(minutes=1),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except ActivityError as exc:
+            workflow.logger.warning("Existing contract unknown: %s", exc.cause or exc)
+            self.state.architecture_missing = True
+            self.state.contract_problem = CONTRACT_UNKNOWN
+            return
+        self.state.architecture_missing = bool(inspected["architecture_missing"])
+        self.state.contract_problem = inspected.get("contract_problem")
 
     async def _proceed(self) -> None:
         """Draft the contract, or go on with the interview of the drafts."""
         async with self._turn_lock:
             if self._ended():
                 return
+            self._discard_drafts_of_other_kind(self.state.architecture_only)
             if not self.state.drafted:
                 await self._draft()
             elif self.state.messages and self.state.messages[-1]["role"] == "user":
@@ -150,9 +203,11 @@ class OnboardingWorkflow(_Delivering):
             return False
         self._apply(result)
         self.state.drafted = True
+        self.state.drafted_architecture_only = self.state.architecture_only
         self.state.status = "interviewing"
-        workflow.logger.info("Contract drafted: %d requirements, %d endpoints",
-                             len(self.state.requirements), len(self.state.api["endpoints"]))
+        workflow.logger.info("Contract drafted: %d requirements, %d endpoints, architecture %s",
+                             len(self.state.requirements), len(self.state.api["endpoints"]),
+                             "drafted" if self.state.architecture_structure else "missing")
         return True
 
     async def _turn(self) -> bool:
@@ -192,6 +247,8 @@ class OnboardingWorkflow(_Delivering):
         self.state.requirements = result["requirements"]
         self.state.api = result["api"]
         self.state.language = result["language"]
+        self.state.architecture_structure = result.get("architecture_structure")
+        self.state.conflicts = list(result.get("conflicts") or [])
 
     @workflow.query
     def get_state(self) -> OnboardingState:
@@ -257,26 +314,75 @@ class OnboardingWorkflow(_Delivering):
         if not self._retryable():
             raise ValueError("There is no failed drafting or turn to retry.")
 
+    @staticmethod
+    def _decision(decision: Any) -> str:
+        # Histories from before the architecture_only choice sent a boolean.
+        if isinstance(decision, bool):
+            return "replace" if decision else "decline"
+        return str(decision)
+
+    def _discard_drafts_of_other_kind(self, architecture_only: bool) -> None:
+        """Drafts of the other kind than `architecture_only` asks for do not carry over:
+        the onboarding drafts anew. The kind is the one recorded when drafting, not the
+        current decision, which a return to awaiting_confirmation resets."""
+        if not self.state.drafted:
+            return
+        changed = draft_kind_changed(self.state, architecture_only)
+        # Histories from before the draft kind was recorded compared the current decision.
+        previous = architecture_only != self.state.architecture_only
+        if changed != previous and not workflow.patched(DRAFT_KIND):
+            changed = previous
+        if not changed:
+            return
+        workflow.logger.info("Discarding the %s drafts to draft anew",
+                             "architecture-only" if not architecture_only else "full")
+        self.state.drafted = False
+        self.state.drafted_architecture_only = None
+        self.state.requirements = []
+        self.state.api = empty_api()
+        self.state.language = None
+        self.state.architecture_structure = None
+        self.state.conflicts = []
+
     @workflow.update
-    async def contract_decision(self, replace: bool) -> None:
-        """The user's choice about what the branch already has."""
+    async def contract_decision(self, decision: Any) -> None:
+        """The user's choice about what the branch already has: replace it, decline the
+        onboarding, or add only the architecture to the existing contract."""
         self._updates += 1
+        choice = self._decision(decision)
         if self.state.status != "awaiting_confirmation":
             raise ApplicationError("The onboarding is not awaiting a decision.")
-        if not replace:
+        if choice == "decline":
             workflow.logger.info("The user kept the existing contract; onboarding declined")
             self.state.status = "declined"
             self.state.error = None
             return
-        workflow.logger.info("The user chose to replace %s", self.state.existing_artifacts)
-        self.state.replaced_contract = True
+        architecture_only = choice == "architecture_only"
+        self._discard_drafts_of_other_kind(architecture_only)
+        if architecture_only:
+            workflow.logger.info("The user chose to add only the architecture")
+            self.state.requirements = []
+            self.state.api = empty_api()
+            self.state.language = None
+        else:
+            workflow.logger.info("The user chose to replace %s", self.state.existing_artifacts)
+        self.state.architecture_only = architecture_only
+        self.state.replaced_contract = not architecture_only
         await self._proceed()
 
     @contract_decision.validator
-    def validate_contract_decision(self, replace: bool) -> None:
+    def validate_contract_decision(self, decision: Any) -> None:
         if self.state.status != "awaiting_confirmation":
             raise ValueError("The onboarding is not awaiting a decision about the existing "
                              "contract.")
+        choice = self._decision(decision)
+        if choice not in DECISIONS:
+            raise ValueError("The decision must be replace, decline or architecture_only.")
+        if choice == "architecture_only":
+            if not self.state.architecture_missing:
+                raise ValueError(ARCHITECTURE_PRESENT)
+            if self.state.contract_problem:
+                raise ValueError(self.state.contract_problem)
 
     @workflow.update
     async def update_checkout(self) -> None:
@@ -317,13 +423,21 @@ class OnboardingWorkflow(_Delivering):
                 return
             self.state.artifacts_unknown = False
             self.state.existing_artifacts = found
-            accepted = known if self.state.replaced_contract else []
+            await self._inspect(found)
+            if self._ended():
+                return
+            accepted = known if self._decided() else []
             newly = [item for item in found if item not in accepted]
-            if newly or (status == "awaiting_confirmation" and found):
+            # Adding only the architecture needs a contract without one, readable apart.
+            invalid = self._architecture_only_invalid()
+            if newly or invalid or (status == "awaiting_confirmation" and found):
                 workflow.logger.info("The branch now has %s; awaiting the user", newly)
                 self.state.replaced_contract = False
+                self.state.architecture_only = False
                 self.state.status = "awaiting_confirmation"
                 return
+            # Drafts of another kind than the decision asks for are drafted anew.
+            self._discard_drafts_of_other_kind(self.state.architecture_only)
             self.state.status = "interviewing"
         if not self.state.drafted and status == "awaiting_confirmation":
             # Nothing is left to decide about, so drafting starts.
@@ -388,8 +502,30 @@ class OnboardingWorkflow(_Delivering):
     def validate_restart_delivery(self, state: DeliveryState) -> None:
         self._validate_restart_delivery()
 
+    def _architecture(self) -> tuple[str | None, dict[str, Any] | None]:
+        if not self.state.architecture_structure:
+            return None, None
+        structure = normalize_structure(self.state.architecture_structure)
+        return render_architecture_markdown(structure), dict(structure)
+
     async def _deliver(self) -> None:
         """Hand the contract to the delivery and stay open until that ends."""
+        architecture, structure = self._architecture()
+        if self.state.architecture_only:
+            # Only contracts/architecture.md and contracts/architecture.json are pushed.
+            await self._run_delivery(DeliveryState(spec=TaskSpec(
+                session_id=workflow.info().workflow_id,
+                requirements=[],
+                requirements_document="",
+                api=empty_api(),
+                repository=self.state.repository,
+                checkout=self.state.checkout,
+                onboarding=True,
+                architecture=architecture,
+                architecture_structure=structure,
+                architecture_only=True,
+            )))
+            return
         await self._run_delivery(DeliveryState(spec=TaskSpec(
             session_id=workflow.info().workflow_id,
             requirements=self.state.requirements,
@@ -399,4 +535,6 @@ class OnboardingWorkflow(_Delivering):
             repository=self.state.repository,
             checkout=self.state.checkout,
             onboarding=True,
+            architecture=architecture,
+            architecture_structure=structure,
         )))

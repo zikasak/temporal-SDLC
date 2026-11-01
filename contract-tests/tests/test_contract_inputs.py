@@ -57,18 +57,6 @@ def test_session_endpoints_require_sign_in(anonymous):
         assert response.headers["www-authenticate"] == "Bearer", path
 
 
-def test_api_design_needs_an_existing_requirements_session(admin):
-    response = admin.post("/api-design/sessions", json={
-        "requirements_session_id": f"requirements-session-{uuid.uuid4().hex}"})
-    assert response.status_code == 404
-    assert isinstance(response.json()["detail"], str)
-
-
-def test_api_design_start_needs_a_requirements_session_id(admin):
-    response = admin.post("/api-design/sessions", json={})
-    assert response.status_code == 422
-
-
 @pytest.mark.parametrize("session", (requirements_session, api_design_session),
                          ids=("requirements", "api-design"))
 def test_messages_to_unknown_sessions_are_not_found(admin, session):
@@ -83,6 +71,19 @@ def test_messages_to_unknown_sessions_are_not_found(admin, session):
 
 def test_checkout_of_an_unknown_session_is_not_found(admin):
     assert admin.post(f"{requirements_session()}/checkout").status_code == 404
+
+
+def test_api_design_needs_an_existing_requirements_session(admin):
+    response = admin.post('/api-design/sessions', json={'requirements_session_id': f'requirements-session-{uuid.uuid4().hex}'})
+    assert response.status_code == 404
+    assert isinstance(response.json()['detail'], str)
+
+
+def test_api_design_sessions_cannot_be_started_directly(admin):
+    # FR-82: an API design is never started by hand; there is no POST /api-design/sessions.
+    response = admin.post("/api-design/sessions", json={
+        "requirements_session_id": f"requirements-session-{uuid.uuid4().hex}"})
+    assert response.status_code in (404, 405), response.text
 
 
 @pytest.mark.parametrize("session", (requirements_session, api_design_session),

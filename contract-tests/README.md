@@ -106,8 +106,8 @@ Contract ambiguities and how the suite reads them:
   Connection check accepts 409 or 503. A JSON array as the body of check/disconnect is expected to be
   rejected with 422 (FR-50, NFR-6: "the body is an empty JSON object").
 - Onboarding (FR-56 to FR-66, `tests/test_onboarding.py`) needs GitHub, Temporal and an
-  LLM to get past the first step, so the suite covers sign-in, input validation (boolean
-  `replace_contract`, `message_index`, answers, instructions, stage enum, messages of 1 to
+  LLM to get past the first step, so the suite covers sign-in, input validation (`decision` enum
+  replace/decline/architecture_only, the former `replace_contract` body rejected, `message_index`, answers, instructions, stage enum, messages of 1 to
   10000 characters) and unknown onboardings (404) on every onboarding endpoint. Starting an
   onboarding on a repository the service cannot reach must be refused; the contract lists
   404, 409 and 503, and any of them is accepted. `GET /workflows?type=OnboardingWorkflow`
@@ -127,6 +127,20 @@ Contract ambiguities and how the suite reads them:
   filters against real executions, the case-insensitive repository filter, and the
   onboarding IDs of DeliveryWorkflow/CodegenWorkflow executions need Temporal, a
   repository and an LLM, so they are not tested.
+- Architecture sessions (FR-78 to FR-88, `tests/test_architecture.py`) are started only by a
+  finalized requirements session, which needs GitHub, Temporal and an LLM. The suite covers
+  sign-in, input validation (messages of 1 to 10000 characters, answers, `message_index`),
+  unknown sessions (404) on every architecture endpoint, and that
+  `GET /workflows?type=ArchitectureWorkflow` is a documented type (200 or 503). The contract
+  does not say whether an invalid `format` of the document download (422) is checked before
+  the session lookup (404), so both are accepted. Drafting, skip proposals, declining,
+  finalizing, skipping and the 409 rules need a real session and are not tested.
+  There is no `POST /architecture/sessions` or `POST /api-design/sessions`: both stages are
+  started by the previous stage (FR-82); `test_api_design_sessions_cannot_be_started_directly`
+  and `test_architecture_sessions_cannot_be_started_directly` check that the routes do not
+  exist (404 or 405). The legacy `test_api_design_needs_an_existing_requirements_session` is a
+  protected test that must stay unchanged; it only observes that this route answers 404 and
+  does not claim any documented behaviour of the removed endpoint.
 - Unknown IDs are well formed (prefix and 32 hex digits) so that they are treated as
   unknown rather than malformed.
 

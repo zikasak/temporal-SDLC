@@ -11,6 +11,8 @@ from app.temporal.executions import prepare_namespace
 from app.temporal.lifecycle import run_worker
 
 with workflow.unsafe.imports_passed_through():
+    from app.architecture.activities import architecture_turn, write_architecture_document
+    from app.architecture.workflows import ArchitectureWorkflow
     from app.delivery.mention_activities import (
         answer_mention, classify_mention, mention_body, record_new_mention, reply_to_mention,
         save_mention,
@@ -19,7 +21,10 @@ with workflow.unsafe.imports_passed_through():
     from app.delivery.pull_request_activities import write_pull_request_text
     from app.delivery.workflows import DeliveryWorkflow
     from app.documents import ensure_document_schema
-    from app.onboarding.activities import find_onboarding_artifacts, onboarding_turn
+    from app.onboarding.activities import (
+        find_onboarding_artifacts, inspect_onboarding_contract, onboarding_turn,
+        revise_onboarding_architecture,
+    )
     from app.onboarding.workflows import OnboardingWorkflow
     from app.settings.storage import ensure_schema as ensure_settings_schema
     from app.temporal.activities import (
@@ -29,6 +34,7 @@ with workflow.unsafe.imports_passed_through():
         parse_document,
         publish_documentation,
         publish_onboarding,
+        publish_onboarding_architecture,
         publish_repository,
         read_repository_contract,
         read_requirements_document,
@@ -60,17 +66,20 @@ async def main():
         client,
         task_queue=TASK_QUEUE,
         workflows=[
-            LLMRequestWorkflow, RequirementsWorkflow, ApiDesignWorkflow,
+            LLMRequestWorkflow, RequirementsWorkflow, ArchitectureWorkflow, ApiDesignWorkflow,
             DeliveryWorkflow, OnboardingWorkflow,
         ],
         activities=[
             parse_document, send_llm_message,
             requirements_turn, write_requirements_document,
+            architecture_turn, write_architecture_document,
             api_design_turn, write_openapi_document,
             checkout_repository, update_repository_checkout, publish_repository,
-            publish_documentation, publish_onboarding, open_pull_request, write_pull_request_text,
+            publish_documentation, publish_onboarding, publish_onboarding_architecture,
+            open_pull_request, write_pull_request_text,
             read_repository_contract, read_requirements_document, register_session,
-            find_onboarding_artifacts, onboarding_turn,
+            find_onboarding_artifacts, inspect_onboarding_contract, onboarding_turn,
+            revise_onboarding_architecture,
             classify_mention, answer_mention, reply_to_mention,
             record_new_mention, save_mention, mention_body,
         ],

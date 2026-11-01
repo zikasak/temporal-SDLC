@@ -17,7 +17,7 @@ def assert_detail(response) -> None:
 VALID_BODIES = {
     "answers": {"answers": ["Yes"]},
     "checkout": None,
-    "contract-decision": {"replace_contract": True},
+    "contract-decision": {"decision": "replace"},
     "delivery/answers": {"workflow_id": "stage-x", "answers": ["yes"]},
     "delivery/findings/accept": None,
     "delivery/findings/instructions": {"instructions": "Fix the findings."},
@@ -123,18 +123,27 @@ def test_onboarding_fork_needs_a_message_index(admin, body):
 
 # Contract decision (FR-61)
 
-@pytest.mark.parametrize("body", ({}, {"replace_contract": None}, {"replace_contract": "maybe"},
-                                  {"replace_contract": [True]}),
-                         ids=("missing", "null", "not-a-boolean", "list"))
+@pytest.mark.parametrize('body', ({}, {'replace_contract': None}, {'replace_contract': 'maybe'}, {'replace_contract': [True]}), ids=('missing', 'null', 'not-a-boolean', 'list'))
 def test_contract_decision_needs_a_boolean(admin, body):
+    response = admin.post(f'{onboarding()}/contract-decision', json=body)
+    assert response.status_code == 422
+    assert response.json()['detail']
+
+
+@pytest.mark.parametrize("body", ({}, {"decision": None}, {"decision": "maybe"}, {"decision": True},
+                                  {"decision": ["replace"]}, {"decision": "REPLACE"},
+                                  {"replace_contract": True}, {"replace_contract": False}),
+                         ids=("missing", "null", "not-in-enum", "boolean", "list", "wrong-case",
+                              "former-replace-contract-true", "former-replace-contract-false"))
+def test_contract_decision_needs_a_decision_from_the_enum(admin, body):
     response = admin.post(f"{onboarding()}/contract-decision", json=body)
     assert response.status_code == 422
     assert response.json()["detail"]
 
 
-@pytest.mark.parametrize("replace", (True, False))
-def test_contract_decision_of_an_unknown_onboarding_is_not_found(admin, replace):
-    response = admin.post(f"{onboarding()}/contract-decision", json={"replace_contract": replace})
+@pytest.mark.parametrize("decision", ("replace", "decline", "architecture_only"))
+def test_contract_decision_of_an_unknown_onboarding_is_not_found(admin, decision):
+    response = admin.post(f"{onboarding()}/contract-decision", json={"decision": decision})
     assert response.status_code == 404
     assert isinstance(response.json()["detail"], str)
 

@@ -8,10 +8,15 @@ lock).
 1. **preparing**: the branch is checked out.
 2. **awaiting_confirmation**: the branch already has a contract in `contracts/`, contract
    tests in `contract-tests/` or a root `Dockerfile` (`existing_artifacts`). The user calls
-   `POST …/contract-decision`. Replacing goes on; declining ends the onboarding as
-   **declined** and changes nothing.
-3. **drafting**: the LLM reads the code and drafts the requirements, the API and the
-   language (`onboarding_turn` activity).
+   `POST …/contract-decision` with `decision` `replace`, `decline` or
+   `architecture_only`. Replacing goes on; declining ends the onboarding as **declined** and
+   changes nothing. `architecture_only` is offered only while `architecture_missing` is true
+   (the contract lacks `contracts/architecture.md` or `contracts/architecture.json`) and the
+   rest of that contract is readable (`inspect_onboarding_contract` activity).
+3. **drafting**: the LLM reads the code and drafts the requirements, the architecture, the
+   API and the language (`onboarding_turn` activity). An architecture-only onboarding
+   drafts only the architecture and records with `record_conflict` where it disagrees with
+   the existing `api.json` or `requirements.json`; open conflicts are listed in `problems`.
 4. **interviewing / turn_running**: the user reviews and corrects the drafts. Failed turns
    and failed drafting can be retried, and `POST …/checkout` checks the branch out again.
    Forking ends the original as **superseded**.
@@ -20,7 +25,11 @@ lock).
    root `Dockerfile` and `.dockerignore`, and the host keeps the existing code as it was.
    The test agent writes a new contract-test suite. Verification, repair rounds (at most
    5), code review rounds (at most 5), the push to `onboarding/<branch>-<short id>` and the
-   pull request work as for any delivery, and so do mentions on the pull request.
+   pull request work as for any delivery, and so do mentions on the pull request. The
+   contract includes `contracts/architecture.md` and `contracts/architecture.json`.
+   An architecture-only onboarding starts a delivery with `TaskSpec.architecture_only`,
+   which only pushes those two files (`publish_onboarding_architecture`) and opens the pull
+   request: no tests, verification or code review.
 
 When the diagnosis blames the existing code, the delivery asks the user in
 `agent_questions` (stage `diagnosis`) whether it is a bug, and waits without a timeout:

@@ -12,7 +12,11 @@ from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, RetryStage
 from app.github.models import RepositorySelection
 from app.onboarding import storage
-from app.onboarding.models import FINISHED_STATUSES, OnboardingState, onboarding_problems
+from app.architecture.models import normalize_structure, render_architecture_markdown
+from app.onboarding.models import (
+    FINISHED_STATUSES, OnboardingState, draft_kind_changed, drafted_architecture_only,
+    onboarding_problems,
+)
 from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import execution_fields
 from app.temporal.registry import register
@@ -90,7 +94,7 @@ async def fork_onboarding(session_id: str, message_index: int) -> str:
                           "finish before forking.")
     messages = fork_messages(source.messages, message_index)
     drafts = {}
-    for key in ("requirements", "api", "language"):
+    for key in ("requirements", "api", "language", "architecture_structure", "conflicts"):
         drafts[key] = await state_at_message(
             session_id, source.messages, message_index,
             input_type=OnboardingState, default_input=OnboardingState(),
@@ -108,6 +112,12 @@ async def fork_onboarding(session_id: str, message_index: int) -> str:
         existing_artifacts=list(source.existing_artifacts),
         replaced_contract=source.replaced_contract,
         drafted=True,
+        architecture_missing=source.architecture_missing,
+        contract_problem=source.contract_problem,
+        architecture_only=source.architecture_only,
+        drafted_architecture_only=drafted_architecture_only(source),
+        architecture_structure=drafts["architecture_structure"],
+        conflicts=list(drafts["conflicts"] or []),
     )
     async with storage.branch_lock(repository["full_name"], repository["branch"]) as conn:
         # The original ends only once the fork that replaces it exists, so that a failed
@@ -146,14 +156,18 @@ async def update_checkout(session_id: str) -> None:
     logger.info("Updating the checkout of onboarding %s", session_id)
 
 
-async def decide_contract(session_id: str, replace: bool) -> str:
-    """Record the user's choice; returns the onboarding's status it leads to."""
+async def decide_contract(session_id: str, decision: str) -> str:
+    """Record the user's choice (replace, decline or architecture_only); returns the
+    onboarding's status it leads to."""
     state = await get_state(session_id)
-    await start_update(session_id, "contract_decision", replace)
-    logger.info("Onboarding %s: replace the existing contract: %s", session_id, replace)
-    if not replace:
+    await start_update(session_id, "contract_decision", decision)
+    logger.info("Onboarding %s: decision about the existing contract: %s", session_id,
+                decision)
+    if decision == "decline":
         return "declined"
-    return "interviewing" if state.drafted else "drafting"
+    # Drafts of the other kind than the decision asks for are discarded and drafted anew.
+    kept = state.drafted and not draft_kind_changed(state, decision == "architecture_only")
+    return "interviewing" if kept else "drafting"
 
 
 async def finalize(session_id: str) -> None:
@@ -193,13 +207,28 @@ async def instruct_findings(session_id: str, instructions: str) -> DeliveryProgr
 async def get_session(session_id: str) -> dict[str, Any]:
     state = await get_state(session_id)
     session = dataclasses.asdict(state)
-    del session["drafted"]
-    del session["artifacts_unknown"]
+    for key in ("drafted", "drafted_architecture_only", "artifacts_unknown",
+                "contract_problem", "conflicts"):
+        del session[key]
     delivery = None
     if _delivers(state):
+        delivered = await delivery_service.get_state(session_id)
+        if (delivered and state.architecture_only and delivered.spec.architecture_only
+                and delivered.spec.architecture_structure):
+            # Fix rounds requested on the pull request changed the pushed architecture.
+            session["architecture_structure"] = delivered.spec.architecture_structure
         delivery = dataclasses.asdict(
-            await delivery_service.get_progress(session_id)
-            or DeliveryProgress(verification_status="waiting"))
+            delivered.progress if delivered
+            else DeliveryProgress(verification_status=(
+                "not_applicable" if state.architecture_only else "waiting")))
+    architecture = None
+    if session["architecture_structure"]:
+        try:
+            architecture = render_architecture_markdown(
+                normalize_structure(session["architecture_structure"]))
+        except (TypeError, ValueError, KeyError):
+            logger.warning("Onboarding %s has a malformed architecture", session_id)
     return {"session_id": session_id, **session,
             "existing_contract": bool(state.existing_artifacts),
+            "architecture": architecture,
             "problems": onboarding_problems(state), "delivery": delivery}

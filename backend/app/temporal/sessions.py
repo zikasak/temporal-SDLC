@@ -112,7 +112,8 @@ async def state_at_message(
     for item in messages[prefix : message_index + 1]:
         if (item["role"] == "assistant" and turn < len(results)
                 and results[turn]["reply"] == item["content"]):
-            value = results[turn][key]
+            # Results recorded before a field existed leave it as it was.
+            value = results[turn].get(key, value)
             turn += 1
     return value
 

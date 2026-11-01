@@ -32,6 +32,10 @@ CHANGES = {
     'onboarding': ('Onboards the existing service: the contract in contracts/ drafted from '
                    'its code, contract tests in contract-tests/ that pass against it and a '
                    'root Dockerfile that builds it.'),
+    'onboarding_architecture': ('Adds the architecture of the existing service, drafted from '
+                                'its code, to the contract: contracts/architecture.md and '
+                                'contracts/architecture.json. The rest of the contract, the '
+                                'contract tests and the Dockerfile stay as they are.'),
 }
 # Said in the description of an onboarding that changed the existing code.
 CODE_CHANGED = ('The existing code was changed: the user confirmed that failing contract '

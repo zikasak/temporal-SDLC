@@ -1,6 +1,7 @@
 """The repository, branch and onboarding an execution works for, as GET /workflows lists them.
 
-Every OnboardingWorkflow, RequirementsWorkflow, ApiDesignWorkflow and DeliveryWorkflow, and
+Every OnboardingWorkflow, RequirementsWorkflow, ArchitectureWorkflow, ApiDesignWorkflow and
+DeliveryWorkflow, and
 every CodegenWorkflow a delivery starts, is started with them: as custom search attributes to
 filter on (the repository lower-cased, as GitHub compares names case-insensitively) and the
 whole repository selection in the memo. Continued runs keep both. Safe to import from

@@ -72,9 +72,13 @@ class RequirementsState:
     contract: dict[str, Any] | None = None
     # The commit of the checkout that contract was read from.
     contract_commit: str | None = None
-    # The API design the session started itself once the user finalized a task that
-    # designs its API; designs started later by hand are its children too.
+    # The API design such a session started itself before the architecture stage existed;
+    # no longer reported.
     api_design_session_id: str | None = None
+    # The architecture session the session started itself once the user finalized a new
+    # service or an API change; it hands the task on to the API design, which is a child
+    # of this session too, as are forks of either.
+    architecture_session_id: str | None = None
 
 
 def numbered_after(requirements: list[Requirement], published: Iterable[str],

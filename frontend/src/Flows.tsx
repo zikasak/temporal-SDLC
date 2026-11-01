@@ -7,6 +7,7 @@ import { questionList } from "./Questions";
 type FlowType =
   | "LLMRequestWorkflow"
   | "RequirementsWorkflow"
+  | "ArchitectureWorkflow"
   | "ApiDesignWorkflow"
   | "OnboardingWorkflow";
 
@@ -46,11 +47,12 @@ type Attention = {
   link: string;
 };
 
-// The flows the type filter offers: those a user starts, and the API designs that
-// finished requirements start.
+// The flows the type filter offers: those a user starts, and the architecture sessions and
+// API designs that finished requirements start.
 const flowTypes: [FlowType, string][] = [
   ["LLMRequestWorkflow", "Chat"],
   ["RequirementsWorkflow", "Requirements"],
+  ["ArchitectureWorkflow", "Architecture"],
   ["ApiDesignWorkflow", "API design"],
   ["OnboardingWorkflow", "Onboarding"],
 ];
@@ -70,8 +72,13 @@ const typeLabels: Record<string, string> = {
 // Flows that start flows of their own; the others are single steps.
 const parentTypes = ["RequirementsWorkflow", "ApiDesignWorkflow", "OnboardingWorkflow", "DeliveryWorkflow"];
 
+// Flows that are always children of a requirements session: filtering by them lists every
+// one, not only the top-level flows.
+const childTypes: string[] = ["ArchitectureWorkflow", "ApiDesignWorkflow"];
+
 const sessionPaths: Record<string, string> = {
   RequirementsWorkflow: "/api/requirements/sessions/",
+  ArchitectureWorkflow: "/api/architecture/sessions/",
   ApiDesignWorkflow: "/api/api-design/sessions/",
   OnboardingWorkflow: "/api/onboarding/sessions/",
 };
@@ -170,7 +177,7 @@ async function fetchPage(params: URLSearchParams, signal?: AbortSignal) {
 }
 
 function listParams(filters: Filters, pageToken: string | null) {
-  const params = new URLSearchParams({ top_level: "true" });
+  const params = new URLSearchParams(childTypes.includes(filters.type) ? {} : { top_level: "true" });
   if (filters.type) params.set("type", filters.type);
   for (const name of filterNames) if (filters[name]) params.set(name, filters[name]);
   if (pageToken) params.set("page_token", pageToken);
@@ -210,6 +217,8 @@ function flowLink(item: Flow) {
       return `?mode=chat&request_id=${id}`;
     case "RequirementsWorkflow":
       return `?mode=requirements&session_id=${id}`;
+    case "ArchitectureWorkflow":
+      return `?mode=architecture&session_id=${id}`;
     case "ApiDesignWorkflow":
       return `?mode=api-design&session_id=${id}`;
     case "OnboardingWorkflow":
@@ -235,7 +244,12 @@ function sessionAttention(flow: Flow, body: unknown): Attention[] {
   const last = messages.at(-1);
   if (body.status === "awaiting_confirmation") {
     items.push({ workflow_id: sessionId, scope: sessionId, link,
-      label: "Decide whether to replace the contract the branch already has" });
+      label: body.architecture_missing === true
+        ? "Decide whether to replace the contract the branch already has or add only its architecture"
+        : "Decide whether to replace the contract the branch already has" });
+  } else if (body.status === "interviewing" && isObject(body.skip_proposal)) {
+    items.push({ workflow_id: sessionId, scope: sessionId, link,
+      label: "Confirm or decline skipping the architecture stage" });
   } else if (body.status === "interviewing" && isObject(last) && last.role === "assistant") {
     const asked = questionList(last.questions).length;
     items.push({ workflow_id: sessionId, scope: sessionId, link,
@@ -268,10 +282,12 @@ async function fetchAttention(flow: Flow, signal: AbortSignal): Promise<Attentio
   const body = await readBody(response);
   if (!response.ok) throw new Error(errorMessage(body, response.status));
   const items = sessionAttention(flow, body);
-  // A requirements session's API designs are flows of their own, asking their own questions.
+  // A requirements session's architecture sessions and API designs are flows of their own,
+  // asking their own questions.
   if (flow.workflow_type === "RequirementsWorkflow") {
-    const designs = await fetchChildren(flow.workflow_id, signal, "ApiDesignWorkflow");
-    const nested = await Promise.all(designs.map((design) => fetchAttention(design, signal)));
+    const children = (await fetchChildren(flow.workflow_id, signal))
+      .filter((child) => childTypes.includes(child.workflow_type));
+    const nested = await Promise.all(children.map((child) => fetchAttention(child, signal)));
     items.push(...nested.flat());
   }
   return items;

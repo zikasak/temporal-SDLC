@@ -28,7 +28,11 @@ SAFE_ERROR = 'PullRequestTextError'
 KIND_NAMES = {'new_service': 'a new service', 'api_change': 'a change of the API',
               'bugfix': 'a bug fix', 'docs': 'a documentation change',
               'onboarding': ('an onboarding of an existing service: its contract drafted '
-                             'from the code, contract tests and a root Dockerfile')}
+                             'from the code, contract tests and a root Dockerfile'),
+              'onboarding_architecture': ('an onboarding that adds only the architecture '
+                                          '(contracts/architecture.md and '
+                                          'contracts/architecture.json) drafted from the '
+                                          'existing code to the existing contract')}
 
 PROMPT = f"""You write the title and the description of a GitHub pull request that a
 code-generating pipeline opens for its delivery. Base them on the task, its requirements
