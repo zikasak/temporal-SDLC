@@ -32,8 +32,8 @@ from app.test_generation.activities import generate_service_tests
 from app.test_generation.components import generate_component_tests
 from app.test_generation.workflows import ComponentTestGenerationWorkflow, TestGenerationWorkflow
 from app.verification.activities import (
-    build_baseline, build_repository_tests, snapshot_repository_tests, verify_documentation,
-    verify_service,
+    build_baseline, build_component_runner, build_repository_tests, run_component_suite,
+    snapshot_repository_tests, verify_documentation, verify_service,
 )
 from app.verification.workflows import VerificationWorkflow
 
@@ -50,7 +50,7 @@ STAGES = (
      ComponentTestGenerationWorkflow, [generate_component_tests]),
     ('Verification', VERIFICATION_TASK_QUEUE, VerificationWorkflow,
      [verify_service, build_baseline, snapshot_repository_tests, build_repository_tests,
-      verify_documentation]),
+      verify_documentation, build_component_runner, run_component_suite]),
     ('Diagnosis', DIAGNOSIS_TASK_QUEUE, DiagnosisWorkflow, [diagnose_failure]),
     ('Code review', REVIEW_TASK_QUEUE, ReviewWorkflow, [review_changes]),
     ('Documentation', DOCUMENTATION_TASK_QUEUE, DocumentationWorkflow, [write_documentation]),

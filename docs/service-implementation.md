@@ -481,12 +481,14 @@ flowchart LR
     routing -- a criterion unobservable --> stop
     tests -- a criterion unobservable --> stop
     components -- a criterion unobservable --> stop
-    components -- written, until component tests are run --> stop
     tests --> baseline[Baseline run]
+    components --> baseline
     repository[Repository service image] --> baseline
     baseline -- added tests fail, existing pass --> fix[ImplementationWorkflow]
     baseline -- anything else --> stop[Stop and report]
     fix --> verification[VerificationWorkflow and repair loop]
+    fix -- with component tests --> conformance[Conformance check, both suites]
+    conformance -- until review and push support them --> stop
 ```
 
 1. **Routing.** `ObservabilityWorkflow` (`app/routing/`, queue `routing`, settings
@@ -570,10 +572,10 @@ flowchart LR
    import against the code fails the stage. The result is `DeliveryProgress.component_tests`
    (`image_id`, `path` under `<session-id>/component-tests/suite`, `added_tests`); a
    failure sets `component_tests_error`, which the `tests` retry clears.
-   Nothing runs component tests yet (step 4 of `plans/component-contracts.md`), so once
-   they are written the delivery stops before the baseline, with `baseline_status:
-   skipped` and `baseline_error` saying so. A `tests` retry keeps the routing and writes
-   the tests again.
+   A `tests` retry keeps the routing and writes the tests again. Deliveries that wrote
+   component tests before they were run (without the `component-runs` workflow patch)
+   stop before the baseline, with `baseline_status: skipped` and `baseline_error` saying
+   so.
 3. **Baseline run.** The verification worker's `build_baseline` activity builds the service
    from the checkout, filtered exactly as the implementation author sees it, and publishes
    `<GENERATED_CODE_DIR>/<session-id>/baseline/image.json`. `VerificationWorkflow` then runs
@@ -590,6 +592,19 @@ flowchart LR
 
    Anything but `reproduced` ends the delivery with `baseline_error`, verification
    `skipped` and nothing pushed.
+
+   A change with component tests runs both suites. Its contract tests are its author's
+   suite, or, when no criterion was routed `contract`, the repository's own suite as
+   [recorded](#the-snapshot-of-the-repositorys-tests) (`build_repository_tests`, run with
+   no tracked test, which must pass); a repository without contract tests runs none. Its
+   component tests run in the runner their author built with the baseline's sources:
+   `run_component_suite` (`app/verification/activities.py`) starts one container from it
+   with `--network=none` and the usual limits, reads its JUnit report like a contract
+   run's, tracks the added tests and reports tests of the suite without a report as
+   `missing_tests`. The result is `DeliveryProgress.component_baseline`, and
+   `judge_baseline` holds both runs to the same rules, naming the suite whose run broke
+   one (a component test that skips itself is reported as a criterion its seam cannot
+   observe). A component run that could not complete runs once more.
 4. **The fix.** The implementation author's workspace is the checkout alone, without
    generated code, and its prompt asks for targeted edits for the brief.
 5. **Final run.** The whole suite against the changed service, with the usual repair loop.
@@ -601,6 +616,23 @@ flowchart LR
 A passed final run counts only when every test of the suite ran: with a skipped test, or
 one missing from the reports, `verification_error` says so and nothing is pushed. A test
 that fails without the fix and is skipped with it has not been seen to pass.
+
+The final run of a change with component tests starts with `build_component_runner`: the
+conformance check of the routing (`check_conformance`) against the implementation's
+sources, then the component tests' runner built with them, published as
+`<session-id>/component-verification/image.json`. A change whose code no longer matches
+its stubs, or with which the suite does not even collect, returns `conformance_error`
+instead: no test of either suite runs, verification is `skipped`, and the message is the
+`implementation_error`, so the `server` retry writes the fix again (a `tests` retry would
+keep it). Otherwise both suites run against the change, the component tests' result being
+`DeliveryProgress.component_verification`, and `unproven_green` checks both. Such a change
+is not diagnosed, repaired, reviewed or pushed yet (steps 5 and 6 of
+`plans/component-contracts.md`): a failure or a skip ends it with `verification_error`,
+which a `tests` retry answers with new tests against the same fix, and one that passed
+both suites ends with `publication_status: skipped` and `publication_error` saying it
+cannot be pushed yet. A `repository` retry is refused for it. The baseline tracks every
+added and corrected component test, so a suite with more than `MAX_TRACKED` (1000) of them
+ends the baseline with an error before anything runs.
 
 The push requires such a verification and a `reproduced` baseline. The published
 contract is the repository's without the retired requirements and with the brief's
@@ -614,8 +646,8 @@ analyst to say which IDs changed. Finalizing applies the same rule once more bef
 document is written. The conversation, the document, both authors, the tests and the
 repository therefore quote the same IDs. The API
 model is unchanged. `DeliveryProgress` reports `routing_status` and `baseline_status`
-(`not_applicable` for every other kind), `routing`, `routing_error`, `baseline` and
-`baseline_error`.
+(`not_applicable` for every other kind), `routing`, `routing_error`, `baseline`,
+`component_baseline`, `component_verification` and `baseline_error`.
 
 `GET /api/requirements/sessions/{id}` returns the progress as `delivery` (null until the
 session delivers), and `POST /api/requirements/sessions/{id}/generation/retry` retries a

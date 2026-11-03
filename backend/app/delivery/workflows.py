@@ -15,9 +15,10 @@ with workflow.unsafe.imports_passed_through():
     )
     from app.delivery.contract import with_requirements
     from app.delivery.models import (
-        MENTION_HANDLED, OUTCOME_OWED, STOPPED, TASK_IDLE_TIMEOUT, AgentQuestions, DeliveryProgress,
-        DeliveryState, is_mention, judge_baseline, judge_kept, kept_tests, mention_key,
-        open_review_findings, restorable_tests, unproven_green,
+        COMPONENT_CHANGE_UNPUBLISHED, COMPONENT_CHANGE_UNREPAIRED, MENTION_HANDLED,
+        OUTCOME_OWED, STOPPED, TASK_IDLE_TIMEOUT, AgentQuestions, DeliveryProgress,
+        DeliveryState, component_run, is_mention, judge_baseline, judge_kept, kept_tests,
+        mention_key, open_review_findings, restorable_tests, unproven_green,
     )
     from app.diagnosis.models import repair_request
     from app.github.checkout import SNAPSHOT_DIR
@@ -44,6 +45,11 @@ RESTORE_KEPT_PATCH = 'restore-kept-tests'
 # Marks the workflow code that writes component tests for criteria routed to a seam, which
 # stopped the delivery at its routing before.
 COMPONENT_TESTS_PATCH = 'component-tests'
+# Marks the workflow code that runs component tests, at the baseline and with the change,
+# where deliveries stopped once they were written before.
+COMPONENT_RUNS_PATCH = 'component-runs'
+# Failed tests a verification that is not repaired names.
+NAMED_FAILURES = 5
 # Runs of one verification whose result is an infrastructure error, not a verdict.
 VERIFICATION_ATTEMPTS = 2
 # An API change may add more tests than one run reports on singly; the run still
@@ -114,6 +120,8 @@ class DeliveryWorkflow:
         self.progress = state.progress
         # How often each child workflow ID was used in this run, to keep them unique.
         self._child_ids: dict[str, int] = {}
+        # How many contract tests the repository has, as this run's record of them says.
+        self._repository_tests = 0
         self._next: DeliveryState | None = None
         # The next review round when a mention's fix round started.
         self._mention_round = 0
@@ -632,7 +640,7 @@ class DeliveryWorkflow:
                 or self.spec.onboarding):
             return True
         try:
-            await workflow.execute_activity(
+            recorded = await workflow.execute_activity(
                 'snapshot_repository_tests', args=[self.spec.session_id, self.spec.language],
                 task_queue=VERIFICATION_TASK_QUEUE, result_type=dict,
                 start_to_close_timeout=timedelta(minutes=5),
@@ -647,6 +655,7 @@ class DeliveryWorkflow:
             else:
                 self.progress.code_error = error
             return False
+        self._repository_tests = int(recorded.get('tests') or 0)
         return True
 
     async def _generate(self) -> None:
@@ -704,9 +713,8 @@ class DeliveryWorkflow:
             self.progress.baseline_status = 'skipped'
             self.progress.verification_status = 'skipped'
             return
-        if self.progress.component_tests:
-            # Step 4 of plans/component-contracts.md: nothing runs component tests yet, so
-            # nothing could show them failing without the fix.
+        if self.progress.component_tests and not workflow.patched(COMPONENT_RUNS_PATCH):
+            # Deliveries that wrote component tests before they could run them stopped here.
             self.progress.baseline_status = 'skipped'
             self.progress.baseline_error = COMPONENT_TESTS_UNRUN
             self.progress.verification_status = 'skipped'
@@ -826,7 +834,10 @@ class DeliveryWorkflow:
     async def _reproduce(self, repair: int = 0) -> bool:
         """Run the changed suite against the service as the repository holds it: true
         when every added test fails there and every existing test passes, but for
-        those a repair corrected."""
+        those a repair corrected. A change with component tests runs them too, and is
+        judged on both suites."""
+        if self.progress.component_tests:
+            return await self._reproduce_components(repair)
         if not self.progress.tests or self.progress.tests_error:
             self.progress.baseline_status = 'skipped'
             return False
@@ -835,13 +846,7 @@ class DeliveryWorkflow:
         self.progress.baseline_error = None
         added, changed = (self.progress.tests[key] for key in ('added_tests', 'changed_tests'))
         try:
-            image = await workflow.execute_activity(
-                'build_baseline', args=[self.spec.session_id, self.spec.language],
-                task_queue=VERIFICATION_TASK_QUEUE, result_type=dict,
-                start_to_close_timeout=timedelta(minutes=30),
-                heartbeat_timeout=timedelta(minutes=2),
-                retry_policy=RetryPolicy(maximum_attempts=1),
-            )
+            image = await self._build_baseline()
             self.progress.baseline = await workflow.execute_child_workflow(
                 'VerificationWorkflow',
                 args=[self.spec.session_id, image['image_id'], self.progress.tests['image_id'],
@@ -858,6 +863,102 @@ class DeliveryWorkflow:
             return False
         self.progress.baseline_status, self.progress.baseline_error = judge_baseline(
             self.progress.baseline, added, changed)
+        workflow.logger.info('Baseline run: %s', self.progress.baseline_status)
+        return self.progress.baseline_status == 'reproduced'
+
+    async def _build_baseline(self) -> dict[str, Any]:
+        return await workflow.execute_activity(
+            'build_baseline', args=[self.spec.session_id, self.spec.language],
+            task_queue=VERIFICATION_TASK_QUEUE, result_type=dict,
+            start_to_close_timeout=timedelta(minutes=30),
+            heartbeat_timeout=timedelta(minutes=2),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+        )
+
+    async def _contract_suite(self) -> tuple[str, str, list[str], list[str]] | None:
+        """The contract tests a change with component tests runs: its author's suite, with
+        the tests it added and the corrected ones, or, when the change gave it no
+        criterion, the repository's own suite as it is, which the change has to keep
+        passing. None when the repository has no contract tests either."""
+        tests = self.progress.tests
+        if tests:
+            return tests['image_id'], 'tests', tests['added_tests'], tests['changed_tests']
+        if not self._repository_tests:
+            return None
+        image = await workflow.execute_activity(
+            'build_repository_tests', args=[self.spec.session_id, self.spec.language],
+            task_queue=VERIFICATION_TASK_QUEUE, result_type=dict,
+            start_to_close_timeout=timedelta(minutes=30),
+            heartbeat_timeout=timedelta(minutes=2),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+        )
+        return image['image_id'], SNAPSHOT_DIR, [], []
+
+    async def _run_components(self, runner_image: str, tracked: list[str]) -> dict[str, Any]:
+        """Run the component tests once, and once more when the run could not complete,
+        as a run of the contract tests is; each test of `tracked` is reported singly."""
+        for attempt in range(1, VERIFICATION_ATTEMPTS + 1):
+            result = await workflow.execute_activity(
+                'run_component_suite',
+                args=[self.spec.session_id, runner_image, self.spec.language, tracked],
+                task_queue=VERIFICATION_TASK_QUEUE, result_type=dict,
+                start_to_close_timeout=timedelta(minutes=15),
+                heartbeat_timeout=timedelta(minutes=2),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+            if result['status'] != 'error':
+                break
+            workflow.logger.warning('Component test run %d could not complete: %s', attempt,
+                                    result['error'])
+        return result
+
+    async def _reproduce_components(self, repair: int) -> bool:
+        """The baseline of a change with component tests: its contract tests, if it has
+        any, against the service as the repository holds it, and its component tests,
+        built by their author with the code as the repository holds it."""
+        if self.progress.tests_error or self.progress.component_tests_error:
+            self.progress.baseline_status = 'skipped'
+            return False
+        self.progress.baseline_status = 'running'
+        self.progress.baseline = None
+        self.progress.baseline_error = None
+        self.progress.component_baseline = None
+        components = self.progress.component_tests
+        tracked = [*components['added_tests'], *components['changed_tests']]
+        if len(tracked) > MAX_TRACKED:
+            # The baseline judges every added test on its own, so none may go unreported.
+            self.progress.baseline_error = (
+                f'The component tests added {len(tracked)} tests, more than one baseline run '
+                f'reports on singly ({MAX_TRACKED}), so the baseline cannot prove that each '
+                'fails without the fix. Write fewer regression tests.')
+            self.progress.baseline_status = 'error'
+            return False
+        added, changed = [], []
+        try:
+            suite = await self._contract_suite()
+            if suite:
+                test_image, suite_dir, added, changed = suite
+                image = await self._build_baseline()
+                self.progress.baseline = await workflow.execute_child_workflow(
+                    'VerificationWorkflow',
+                    args=[self.spec.session_id, image['image_id'], test_image,
+                          self.spec.language, [*added, *changed], suite_dir],
+                    id=self._child_id('baseline', repair),
+                    task_queue=VERIFICATION_TASK_QUEUE,
+                    result_type=dict,
+                )
+            self.progress.component_baseline = await self._run_components(
+                components['image_id'], tracked)
+        except (ActivityError, ChildWorkflowError) as exc:
+            workflow.logger.warning('Baseline run failed: %s', exc.cause or exc)
+            self.progress.baseline_error = ('The tests could not be run against the code as '
+                                            'the repository holds it.')
+            self.progress.baseline_status = 'error'
+            return False
+        self.progress.baseline_status, self.progress.baseline_error = judge_baseline(
+            self.progress.baseline, added, changed, component_run(
+                self.progress.component_baseline, components['added_tests'],
+                components['changed_tests']))
         workflow.logger.info('Baseline run: %s', self.progress.baseline_status)
         return self.progress.baseline_status == 'reproduced'
 
@@ -918,6 +1019,9 @@ class DeliveryWorkflow:
 
     async def _verify_built(self) -> None:
         """Verification needs both images; a failed build leaves nothing to verify."""
+        if self.progress.component_tests:
+            await self._verify_components()
+            return
         if (self.progress.implementation and self.progress.tests
                 and not self.progress.implementation_error and not self.progress.tests_error):
             await self._verify_and_repair()
@@ -941,6 +1045,99 @@ class DeliveryWorkflow:
                     and not self.progress.tests_error
                     and (self.spec.kind != 'bugfix'
                          or self.progress.baseline_status == 'reproduced'))
+
+    def _components_passed(self) -> bool:
+        """Whether verification showed a change with component tests passing both suites,
+        after both were red without it."""
+        contract, component = self.progress.verification, self.progress.component_verification
+        return bool(self.progress.verification_status == 'completed'
+                    and (contract is None or contract['status'] == 'passed')
+                    and component and component['status'] == 'passed'
+                    and not self.progress.verification_error
+                    and not self.progress.implementation_error
+                    and not self.progress.tests_error
+                    and not self.progress.component_tests_error
+                    and self.progress.baseline_status == 'reproduced')
+
+    async def _verify_components(self) -> None:
+        """Verify a change with component tests: the changed code must still conform to its
+        component contract, and then pass its contract tests, if it has any, and its
+        component tests, built with it. The change is not repaired, reviewed or pushed
+        yet, whatever the outcome."""
+        if (not self.progress.implementation or self.progress.implementation_error
+                or self.progress.tests_error or self.progress.component_tests_error):
+            self.progress.verification_status = 'skipped'
+            return
+        self.progress.verification_status = 'running'
+        self.progress.verification = None
+        self.progress.verification_error = None
+        self.progress.component_verification = None
+        service_image = self.progress.implementation['image_id']
+        try:
+            # The fix is held to the component contract before anything is run against it.
+            runner = await workflow.execute_activity(
+                'build_component_runner', args=[self.spec.session_id, self.spec.language],
+                task_queue=VERIFICATION_TASK_QUEUE, result_type=dict,
+                start_to_close_timeout=timedelta(minutes=30),
+                heartbeat_timeout=timedelta(minutes=2),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+            if 'conformance_error' in runner:
+                # The fix is at fault, whatever the tests: retrying the server writes it
+                # again, while retrying the tests would keep it.
+                self.progress.implementation_error = (
+                    f'{runner["conformance_error"]} The fix has to keep every signature of '
+                    'the component contract, so it was not verified. Retry the '
+                    'implementation to write the fix again.')
+                self.progress.verification_status = 'skipped'
+                return
+            suite = await self._contract_suite()
+            if suite:
+                test_image, suite_dir, added, _ = suite
+                for attempt in range(1, VERIFICATION_ATTEMPTS + 1):
+                    self.progress.verification = await workflow.execute_child_workflow(
+                        'VerificationWorkflow',
+                        args=[self.spec.session_id, service_image, test_image,
+                              self.spec.language, added[:MAX_TRACKED], suite_dir],
+                        id=self._child_id('verification'),
+                        task_queue=VERIFICATION_TASK_QUEUE,
+                        result_type=dict,
+                    )
+                    if self.progress.verification['status'] != 'error':
+                        break
+            # A passed run is judged as a whole, so it tracks what one run can report on.
+            self.progress.component_verification = await self._run_components(
+                runner['image_id'], self.progress.component_tests['added_tests'][:MAX_TRACKED])
+        except (ActivityError, ChildWorkflowError) as exc:
+            workflow.logger.warning('Verification of the change failed: %s', exc.cause or exc)
+            self.progress.verification_error = 'Service verification could not complete.'
+            self.progress.verification_status = 'error'
+            return
+        self.progress.verification_status = 'completed'
+        self.progress.verification_error = self._judge_components()
+        workflow.logger.info('Verification of the change: %s',
+                             'rejected' if self.progress.verification_error else 'passed')
+
+    def _judge_components(self) -> str | None:
+        """Why verification of a change with component tests did not show it working;
+        None when it did."""
+        contract, component = self.progress.verification, self.progress.component_verification
+        failed = []
+        for name, run in (('contract tests', contract), ('component tests', component)):
+            if run is None:
+                continue
+            if run['status'] == 'error':
+                return (f'The {name} could not be run against the changed code: '
+                        f'{run.get("error") or "the run did not complete"}.')
+            if run['status'] == 'failed':
+                named = ', '.join(f'{item["class_name"]}#{item["name"]}'
+                                  for item in run['test_failures'][:NAMED_FAILURES])
+                failed.append(f'{name} {run["failures"] + run["errors"]} of {run["tests"]}'
+                              + (f' ({named})' if named else ''))
+        if failed:
+            return (f'Tests fail against the changed code: {"; ".join(failed)}. '
+                    f'{COMPONENT_CHANGE_UNREPAIRED}')
+        return unproven_green(contract, component)
 
     async def _review_rounds(self, instructions: str | None = None,
                              corrected: list[ReviewFinding] | None = None) -> None:
@@ -1378,6 +1575,14 @@ class DeliveryWorkflow:
         of the repository. Documentation that no check exists for yet is pushed too, and
         marked as unverified."""
         if not self.spec.checkout:
+            return
+        if self.progress.component_tests:
+            # Neither the code review nor the push of a change with component tests is
+            # there yet: one that passed both suites says so where its push would be.
+            self.progress.publication_status = 'skipped'
+            self.progress.pull_request_status = 'skipped'
+            if self._components_passed():
+                self.progress.publication_error = COMPONENT_CHANGE_UNPUBLISHED
             return
         # Tests that pass with review findings left after the last round are pushed too,
         # marked as unverified, with the findings in the commit message.

@@ -273,6 +273,8 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
                              or progress.pull_request_text_error)}[stage]
     if not failed:
         raise SessionBusy('Only failed generation can be retried.')
+    if stage == 'repository' and progress.component_tests:
+        raise SessionBusy('A change with component tests cannot be pushed yet.')
     # An onboarding generates no code: its tests are written for the existing code.
     if stage == 'tests' and not progress.code and not change and not state.spec.onboarding:
         raise SessionBusy('Retry server generation first.')
@@ -299,6 +301,7 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
         # A repeated push keeps the verification it publishes.
         progress.verification = None
         progress.verification_error = None
+        progress.component_verification = None
         progress.existing_tests = None
         progress.verification_status = 'waiting'
         progress.repairs = []
@@ -319,6 +322,7 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
         if change:
             progress.baseline = None
             progress.baseline_error = None
+            progress.component_baseline = None
             progress.baseline_status = 'waiting'
             # Criteria were routed again unless every one had a suite that observes it.
             progress.routing_error = None
