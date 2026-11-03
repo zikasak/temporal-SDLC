@@ -3,9 +3,9 @@
 The title and the summary are written by an LLM from the task, its requirements and the
 delivery's code diff (app.delivery.pull_request_activities). When it cannot write them,
 the generic title of the task kind and a fixed sentence of what the delivery changed are
-used instead. Either way the description is the summary, followed only by the open review
-findings when the delivery has any, and the title of an unverified delivery carries the
-" (unverified)" marker."""
+used instead. Either way the description is the summary, followed by which suite proves
+each criterion of a routed change and by the open review findings when the delivery has
+any, and the title of an unverified delivery carries the " (unverified)" marker."""
 import re
 from typing import Any, TypedDict
 
@@ -75,6 +75,43 @@ def _findings(publication: dict[str, Any]) -> list[str]:
             '', *listed]
 
 
+# The suites a routed change's criteria are proved by, in the order they are listed.
+SUITES = {
+    'contract': 'Contract tests (`contract-tests/`), over HTTP against the service',
+    'component': ('Component tests (`component-tests/`), in-process at seams of the code '
+                  'whose stubs are in `contracts/components/`'),
+}
+# Criteria listed per suite; the rest are counted.
+LISTED_CRITERIA = 50
+
+
+def _proofs(change: dict[str, Any]) -> list[str]:
+    """Which suite proves each criterion of a routed change (`change['proofs']`: by suite,
+    the criteria with their ID, title and, at a seam, its module and symbols), as a part
+    of the description."""
+    proofs = change.get('proofs') or {}
+    lines: list[str] = []
+    for suite, heading in SUITES.items():
+        criteria = list(proofs.get(suite) or [])
+        if not criteria:
+            continue
+        lines += ['', f'{heading}:', '']
+        for item in criteria[:LISTED_CRITERIA]:
+            line = f"- {_line(item.get('id') or '', 40)}"
+            if item.get('title'):
+                line += f": {_line(item['title'], 200)}"
+            seam = item.get('seam') or {}
+            if seam.get('module'):
+                symbols = ', '.join(f'`{_line(symbol, 100)}`'
+                                    for symbol in list(seam.get('symbols') or [])[:10])
+                line += f" (at `{_line(seam['module'], 200)}`" + (
+                    f": {symbols})" if symbols else ")")
+            lines.append(line)
+        if len(criteria) > LISTED_CRITERIA:
+            lines.append(f'- and {len(criteria) - LISTED_CRITERIA} more')
+    return ['', '## How the criteria are proved', *lines] if lines else []
+
+
 def describe(subject: str, change: dict[str, Any], publication: dict[str, Any],
              text: dict[str, Any] | None = None) -> tuple[str, str]:
     """The title and the description of the pull request of `publication`. `text` is the
@@ -83,8 +120,9 @@ def describe(subject: str, change: dict[str, Any], publication: dict[str, Any],
     task's kind."""
     kind = change.get('kind') or 'new_service'
     verified = bool(publication.get('verified'))
-    findings = _findings(publication)
-    # The listed findings always fit whole: the summary gets what remains of the body.
+    findings = [*_proofs(change), *_findings(publication)]
+    # The proofs and the listed findings always fit whole: the summary gets what remains
+    # of the body.
     findings_chars = sum(len(line) + 1 for line in findings)
     if text and str(text.get('title') or '').strip() and str(text.get('summary') or '').strip():
         title = _title(text['title'], verified)

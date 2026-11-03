@@ -489,7 +489,7 @@ flowchart LR
     fix --> verification[VerificationWorkflow and repair loop]
     fix -- with component tests --> conformance[Conformance check, both suites, repair loop]
     conformance --> creview[Code review]
-    creview -- until the push supports them --> stop
+    creview --> push[Push with component tests and stubs]
 ```
 
 1. **Routing.** `ObservabilityWorkflow` (`app/routing/`, queue `routing`, settings
@@ -638,13 +638,31 @@ code-reviewed with both suites' changes and its stubs, and its findings are corr
 for any delivery: a finding about a file under `component-tests/` goes to the component
 tests' author, one under `tests/` to the contract tests' author, one about no file to
 both, and one about the stubs (`contracts/components/`) to nobody. No author may change
-the stubs, so such a finding stays open (`findings_open`) for the user. The push is not
-there yet (step 6 of `plans/component-contracts.md`): the change ends with
-`publication_status: skipped` and `publication_error` saying it was verified and reviewed
-but cannot be pushed yet, with the number of findings left open. A `repository` retry is
-refused for it. Deliveries that verified such a change before it was repaired and
-reviewed (without the `component-repairs` workflow patch) ended a failure or a skip with
-`verification_error`, and a pass with that `publication_error`, unreviewed. The baseline
+the stubs, so such a finding stays open (`findings_open`) for the user.
+
+Such a change is pushed as any other, as unverified while findings stay open (behind the
+`component-pushes` workflow patch). `publish_repository` is given
+`components: {contract_tests}`: the component tests' published files
+(`<session-id>/component-tests/suite`) replace those of the repository's
+`component-tests/`, and the routing's checked component contract
+(`<session-id>/routing/components/`) replaces `contracts/components/`. The contract
+tests replace `contract-tests/` only when an author of the change wrote them; otherwise
+the repository's suite, which the change was verified to keep passing, stays as it is.
+`write_contract` keeps `contracts/components/` for every push, so a later delivery without
+component tests leaves the published stubs alone. The commit message says where the
+component tests and stubs are, and the pull request description lists, under "How the
+criteria are proved", the criteria each suite proves (`proofs` of the change, from the
+routing; component criteria with their seams). Fix rounds from the user's instructions
+and from mentions in the pull request then work as for any delivery: the instructions go
+to the implementation and to both suites' authors.
+
+Deliveries that verified and reviewed such a change before it was pushed (without the
+`component-pushes` patch) ended with `publication_status: skipped` and
+`publication_error` saying it could not be pushed yet; a `repository` retry now pushes it.
+Deliveries that verified it before it was repaired and reviewed (without the
+`component-repairs` patch) ended a failure or a skip with `verification_error`, and a pass
+with a `publication_error` saying it was not reviewed; a `repository` retry is refused for
+those, as the push would skip the review. The baseline
 tracks every added and corrected component test, so a suite with more than `MAX_TRACKED`
 (1000) of them ends the baseline with an error before anything runs.
 

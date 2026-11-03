@@ -102,6 +102,10 @@ class FakeStages:
         self.turns = 0
         self.fail_checkout = False
         self.published: list[tuple[str, str]] = []
+        # What a push of a change with component tests was given, and each pull request
+        # step's description of the change.
+        self.published_components: dict[str, Any] | None = None
+        self.pull_request_changes: list[dict[str, Any]] = []
         self.published_kind: str | None = None
         self.fail_publication = False
         self.fail_documentation = False
@@ -158,13 +162,15 @@ class FakeStages:
     @activity.defn(name="publish_repository")
     async def publish_repository(self, session_id: str, repository: dict[str, Any],
                                  contract: dict[str, Any], kind: str | None,
-                                 findings: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                                 findings: list[dict[str, Any]] | None = None,
+                                 components: dict[str, Any] | None = None) -> dict[str, Any]:
         if self.fail_publication:
             raise ApplicationError("remote: Permission denied", non_retryable=True)
         self.published.append((session_id, repository["full_name"]))
         self.contract = contract
         self.published_kind = kind
         self.published_findings = findings
+        self.published_components = components
         return {"branch": "generated/abc", "commit": "2" * 40,
                 "url": repository["html_url"] + "/tree/generated/abc"}
 
@@ -177,6 +183,7 @@ class FakeStages:
     async def open_pull_request(self, session_id: str, repository: dict[str, Any],
                                 publication: dict[str, Any], change: dict[str, Any],
                                 text: dict[str, Any] | None = None) -> dict[str, Any]:
+        self.pull_request_changes.append(change)
         return {"number": 1, "title": "Change", "url": repository["html_url"] + "/pull/1",
                 "draft": not publication.get("verified", True), "base": "main"}
 

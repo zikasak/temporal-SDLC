@@ -52,6 +52,9 @@ COMPONENT_RUNS_PATCH = 'component-runs'
 # Marks the workflow code that diagnoses, repairs and reviews a change with component tests,
 # which ended with their verification before.
 COMPONENT_REPAIRS_PATCH = 'component-repairs'
+# Marks the workflow code that pushes a change with component tests, with its component
+# contract, which stopped where its push would be before.
+COMPONENT_PUSHES_PATCH = 'component-pushes'
 # Failed tests a verification that is not repaired names.
 NAMED_FAILURES = 5
 # Runs of one verification whose result is an infrastructure error, not a verdict.
@@ -418,6 +421,7 @@ class DeliveryWorkflow:
             progress.correction_failed = False
             progress.implementation_error = None
             progress.tests_error = None
+            progress.component_tests_error = None
             progress.verification_status = 'repairing'
             self.state.waiting = False
             self.state.retry_stage = None
@@ -1058,11 +1062,13 @@ class DeliveryWorkflow:
                     and (self.spec.kind != 'bugfix'
                          or self.progress.baseline_status == 'reproduced'))
 
-    def _components_passed(self) -> bool:
+    def _components_passed(self, findings_open: bool = False) -> bool:
         """Whether verification showed a change with component tests passing both suites,
-        after both were red without it."""
+        after both were red without it; with `findings_open`, also when code review
+        findings remained after it."""
         contract, component = self.progress.verification, self.progress.component_verification
-        return bool(self.progress.verification_status == 'completed'
+        statuses = ('completed', 'findings_open') if findings_open else ('completed',)
+        return bool(self.progress.verification_status in statuses
                     and (contract is None or contract['status'] == 'passed')
                     and component and component['status'] == 'passed'
                     and not self.progress.verification_error
@@ -1657,9 +1663,11 @@ class DeliveryWorkflow:
         marked as unverified."""
         if not self.spec.checkout:
             return
-        if self.progress.component_tests:
-            # Neither the code review nor the push of a change with component tests is
-            # there yet: one that passed both suites says so where its push would be.
+        components = bool(self.progress.component_tests)
+        if components and not (self._repairs_components()
+                               and workflow.patched(COMPONENT_PUSHES_PATCH)):
+            # Histories from before the code review or the push of a change with component
+            # tests: one that passed both suites says so where its push would be.
             self.progress.publication_status = 'skipped'
             self.progress.pull_request_status = 'skipped'
             if not self._repairs_components():
@@ -1682,7 +1690,10 @@ class DeliveryWorkflow:
         # verification says it has none: a check that ran and did not pass stops it too.
         unverified = bool(documentation and result and result['status'] == 'not_implemented')
         skip = not (unverified or result and result['status'] == 'passed')
-        if not skip and self.spec.kind in CHANGE_KINDS and (
+        if components:
+            # Both suites, the contract tests being none when the repository has none.
+            skip = not self._components_passed(findings_open=True)
+        elif not skip and self.spec.kind in CHANGE_KINDS and (
                 self.progress.verification_error
                 or self.spec.kind == 'bugfix' and self.progress.baseline_status != 'reproduced'):
             # Green alone is not enough for a change: all of its tests must have run, a
@@ -1736,6 +1747,10 @@ class DeliveryWorkflow:
                     contract, findings, self.progress.existing_code_changed]
             else:
                 push, args = publish_repository, [contract, self.spec.kind, findings]
+                if components:
+                    # With its component tests and contract; its contract tests are
+                    # pushed only when an author of the change wrote them.
+                    args.append({'contract_tests': bool(self.progress.tests)})
         try:
             self.progress.publication = await workflow.execute_activity(
                 push,
@@ -1838,6 +1853,9 @@ class DeliveryWorkflow:
         }
         if self.spec.onboarding and self.progress.existing_code_changed:
             change['existing_code_changed'] = True
+        proofs = self._proofs()
+        if proofs:
+            change['proofs'] = proofs
         args = [self.spec.session_id, self.spec.repository, self.progress.publication, change]
         text = None
         if workflow.patched('pull-request-text'):
@@ -1884,6 +1902,22 @@ class DeliveryWorkflow:
             if text:
                 # The pull request now carries LLM-written text.
                 self.progress.pull_request_text_error = None
+
+    def _proofs(self) -> dict[str, list[dict[str, Any]]]:
+        """Which suite proves each criterion of a routed change, by suite, for its pull
+        request: each criterion's ID, title and, at a seam, the seam. Empty for a change that
+        was not routed, or with no criterion a suite proves."""
+        titles = {item['id']: item.get('title') or ''
+                  for item in (self.spec.brief or {}).get('requirements') or []}
+        proofs: dict[str, list[dict[str, Any]]] = {}
+        for requirement, route in (self.progress.routing or {}).items():
+            if route['route'] not in ('contract', 'component'):
+                continue
+            item: dict[str, Any] = {'id': requirement, 'title': titles.get(requirement, '')}
+            if route.get('seam'):
+                item['seam'] = route['seam']
+            proofs.setdefault(route['route'], []).append(item)
+        return proofs
 
     @staticmethod
     def _stage_name(stage: str, repair: dict[str, Any] | None) -> str:

@@ -10,13 +10,13 @@ from typing import Any
 from app import docker_agents
 from app.agent_workflows.host import copy_file, copy_regular_files
 from app.asyncio_utils import run_sync
-from app.github.checkout import CONTRACTS_DIR
+from app.github.checkout import COMPONENTS_DIR, CONTRACTS_DIR
 from app.languages import RUNTIME_FILE, ComponentContract
 
 logger = logging.getLogger(__name__)
 
-# Where the contract is published in the repository, and kept beside the routing.
-COMPONENTS_DIR = 'components'
+# Where the contract is published in the repository, and kept beside the routing
+# (COMPONENTS_DIR).
 PUBLISHED_DIR = Path(CONTRACTS_DIR) / COMPONENTS_DIR
 # Where the routing keeps the component contract it checked against the code, in the
 # session's artifacts: the stubs every later stage of the delivery is given.

@@ -36,6 +36,8 @@ SNAPSHOT_DIR = 'repository-tests'
 COMPONENT_SNAPSHOT = 'components'
 # The published contract the repository's later tasks start from.
 CONTRACTS_DIR = 'contracts'
+# Where, inside it, the component contract is: the stubs of the seams component tests use.
+COMPONENTS_DIR = 'components'
 BRANCH_PREFIX = 'generated/'
 GITHUB_URL = 'https://github.com/'
 GIT_TIMEOUT = 540

@@ -14,7 +14,7 @@ from app.architecture.models import (
     normalize_structure,
     render_architecture_json,
 )
-from app.github.checkout import CONTRACTS_DIR
+from app.github.checkout import COMPONENTS_DIR, CONTRACTS_DIR
 from app.requirements.document import render_requirements_markdown, requirements_narrative
 from app.requirements.models import CATEGORY_PREFIXES, Requirement
 
@@ -79,7 +79,9 @@ def write_architecture(repository: Path, architecture: str,
 
 
 def write_contract(repository: Path, contract: RepositoryContract) -> None:
-    """Make the repository's contract directory exactly this contract."""
+    """Make the repository's contract directory exactly this contract. Its component
+    contract (`components/`) is not part of it and stays as the repository has it: a
+    delivery with component tests replaces it on its own."""
     directory = repository / CONTRACTS_DIR
     # The architecture of a contract that carries none is kept as the repository has it.
     kept = {}
@@ -87,9 +89,15 @@ def write_contract(repository: Path, contract: RepositoryContract) -> None:
         for name in (ARCHITECTURE_FILENAME, ARCHITECTURE_JSON_FILENAME):
             if (directory / name).is_file():
                 kept[name] = (directory / name).read_text()
-    if directory.exists():
-        shutil.rmtree(directory)
-    directory.mkdir()
+    if directory.is_dir() and not directory.is_symlink():
+        for item in directory.iterdir():
+            if item.is_symlink() or not item.is_dir():
+                item.unlink()
+            elif item.name != COMPONENTS_DIR:
+                shutil.rmtree(item)
+    elif directory.exists() or directory.is_symlink():
+        directory.unlink()
+    directory.mkdir(exist_ok=True)
     for name, text in {
         LANGUAGE_FILENAME: _json({'name': contract['language']}),
         REQUIREMENTS_FILENAME: _json(contract['requirements']),
