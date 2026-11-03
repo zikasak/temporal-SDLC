@@ -34,7 +34,8 @@ def test_status_is_stored_metadata_not_a_credential_or_live_check(http, github_h
     assert response.json() == {"configured": True, "encryption_ready": True,
                                "app": {"id": 123, "slug": "my-app"},
                                "installation": {"id": 99, "account": "octocat"},
-                               "validated_at": "2026-01-01T00:00:00+00:00"}
+                               "validated_at": "2026-01-01T00:00:00+00:00",
+                               "webhook_secret_set": False, "webhook_events_missing": False}
     assert "encrypted_private_key" not in response.text
     assert TOKEN not in response.text + caplog.text
     assert not github_http[1]

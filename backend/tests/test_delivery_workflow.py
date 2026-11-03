@@ -11,12 +11,14 @@ from httpx import ASGITransport, AsyncClient
 from temporalio import activity
 from temporalio.client import WorkflowExecutionStatus, WorkflowUpdateFailedError
 from temporalio.exceptions import ApplicationError
+from temporalio.service import RPCError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from app.api.routes.requirements import router
 from app.api_design import service as api_design_service
 from app.api_design.models import empty_api
+from app.architecture.workflows import ArchitectureWorkflow
 from app.delivery import service as delivery_service
 from app.delivery.models import (
     STOPPED, DeliveryProgress, DeliveryState, TaskSpec, delivery_id,
@@ -106,6 +108,17 @@ class FakeActivities(FakeStages):
             raise ApplicationError(NO_CONTRACT, type="ContractError", non_retryable=True)
         return CONTRACT
 
+    @activity.defn(name="architecture_turn")
+    async def architecture_turn(self, state: Any) -> dict[str, Any]:
+        return {"reply": "Draft ready.", "structure": {
+            "components": [{"name": "Rooms API", "responsibilities": ["Book rooms"]}],
+            "data_flows": [], "technology_choices": [{"topic": "Storage", "choice": "Memory"}]}}
+
+    @activity.defn(name="write_architecture_document")
+    async def write_architecture_document(self, session_id: str, structure: dict[str, Any]
+                                          ) -> dict[str, Any]:
+        return {**DOCUMENT, "filename": "architecture.md", "json": DOCUMENT}
+
     @activity.defn(name="api_design_turn")
     async def api_design_turn(self, state: Any) -> dict[str, Any]:
         return {"reply": "Draft ready.", "api": API, "language": "java"}
@@ -116,9 +129,14 @@ class FakeActivities(FakeStages):
         return DOCUMENT
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 async def env():
-    async with await WorkflowEnvironment.start_time_skipping() as env:
+    """The dev server: deliveries start their code generation with the repository's
+    search attributes, which the time-skipping server cannot register, and it tells a
+    parent that its child was terminated and terminates children with their parent. No
+    test here needs time skipped."""
+    async with await WorkflowEnvironment.start_local() as env:
+        await ensure_search_attributes(env.client)
         yield env
 
 
@@ -128,14 +146,9 @@ async def worker(env, monkeypatch):
         yield activities
 
 
-@pytest.fixture(scope="module")
-async def server():
-    """The dev server, for what the time-skipping one does not do: tell a parent that its
-    child was terminated, and terminate children with their parent."""
-    async with await WorkflowEnvironment.start_local() as server:
-        # Children are started with the repository's search attributes.
-        await ensure_search_attributes(server.client)
-        yield server
+@pytest.fixture
+def server(env):
+    return env
 
 
 @pytest.fixture
@@ -155,13 +168,16 @@ async def workers(env, monkeypatch):
         monkeypatch.setattr(module, "connect_temporal", connect)
     async with Worker(
         env.client, task_queue=TASK_QUEUE,
-        workflows=[RequirementsWorkflow, ApiDesignWorkflow, DeliveryWorkflow],
+        workflows=[RequirementsWorkflow, ArchitectureWorkflow, ApiDesignWorkflow,
+                   DeliveryWorkflow],
         activities=[activities.requirements_turn, activities.write_requirements_document,
                     activities.read_requirements_document, activities.read_repository_contract,
                     activities.register_session,
                     activities.checkout_repository, activities.update_repository_checkout,
                     activities.publish_repository, activities.publish_documentation,
-                    activities.open_pull_request, activities.api_design_turn, activities.write_openapi_document],
+                    activities.write_pull_request_text, activities.open_pull_request,
+                    activities.architecture_turn, activities.write_architecture_document,
+                    activities.api_design_turn, activities.write_openapi_document],
     ), stage_workers(env, activities):
         yield activities
 
@@ -571,8 +587,10 @@ async def test_bugfix_is_delivered_red_to_green_from_the_requirements_session(en
     # The API is as it was. What the fix required is now required of the service, so
     # that a later task keeps the tests written for it.
     required = [*PUBLISHED, *brief["requirements"]]
+    # The repository's architecture is kept: the bugfix carries none.
     assert worker.contract == {**CONTRACT, "requirements": required,
-                               "requirements_document": render_requirements_markdown(required, "A hotel.")}
+                               "requirements_document": render_requirements_markdown(required, "A hotel."),
+                               "architecture": None, "architecture_structure": None}
     assert worker.published_kind == "bugfix"
 
     # The session API reports the brief with its delivery, and not the contract.
@@ -580,8 +598,8 @@ async def test_bugfix_is_delivered_red_to_green_from_the_requirements_session(en
     assert response["delivery"]["baseline_status"] == "reproduced"
     assert response["delivery"]["publication"]["branch"] == "generated/abc"
     assert "contract" not in response
-    # Such a task has no API design.
-    assert response["api_design_session_id"] is None
+    # Such a task has no architecture, nor the API design that follows it.
+    assert response["architecture_session_id"] is None
 
 
 @pytest.mark.parametrize('baseline, status, error', [
@@ -855,7 +873,8 @@ async def test_documentation_is_written_alone_and_pushed_as_unverified(env, work
 
     response = await requirements_service.get_session(handle.id)
     assert response["delivery"]["publication"]["verified"] is False
-    assert response["api_design_session_id"] is None
+    # A documentation task has no architecture, nor the API design that follows it.
+    assert response["architecture_session_id"] is None
 
 
 @pytest.mark.parametrize("kind", ["bugfix", "api_change", "docs"])
@@ -965,16 +984,34 @@ async def test_agent_questions_wait_for_the_users_answers(env, worker):
 
 
 async def test_a_task_is_one_workflow_tree_open_until_its_delivery_closes(server, live, repository_selection):
-    """Requirements → API design → delivery, retries included, stay under one root, so no
-    part of a task falls to the namespace's retention while another goes on."""
+    """Requirements → architecture → API design → delivery, retries included, stay under
+    one root, so no part of a task falls to the namespace's retention while another goes
+    on."""
     live.kind = "new_service"
     live.fail_tests = True
     requirements = await specify_bugfix(server, repository_selection)
     await requirements.execute_update(RequirementsWorkflow.finalize)
-    # The session starts the design itself once the document is written.
-    state = await wait_until(requirements, lambda state: state.api_design_session_id)
-    design = server.client.get_workflow_handle(state.api_design_session_id)
-    assert (await design.describe()).parent_id == requirements.id
+    # The session starts the architecture itself once the document is written.
+    state = await wait_until(requirements, lambda state: state.architecture_session_id)
+    architecture = server.client.get_workflow_handle(state.architecture_session_id)
+    assert (await architecture.describe()).parent_id == requirements.id
+    for _ in range(100):
+        if (await architecture.query(ArchitectureWorkflow.get_state)).status == "interviewing":
+            break
+        await asyncio.sleep(0.05)
+    await architecture.execute_update(ArchitectureWorkflow.finalize)
+    # Finalized, it hands the design on to the requirements session, whose child it is.
+    design_id = (await architecture.query(ArchitectureWorkflow.get_state)).api_design_session_id
+    design = server.client.get_workflow_handle(design_id)
+    for _ in range(100):
+        try:
+            if (await design.describe()).parent_id == requirements.id:
+                break
+        except RPCError:
+            pass
+        await asyncio.sleep(0.05)
+    else:
+        raise AssertionError("the API design was never started under the requirements")
     for _ in range(100):
         if (await design.query(ApiDesignWorkflow.get_state)).status == "interviewing":
             break

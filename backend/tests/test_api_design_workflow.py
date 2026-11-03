@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any
 
@@ -23,6 +24,7 @@ from app.delivery.workflows import DeliveryWorkflow
 from app.requirements.document import render_requirements_markdown
 from app.requirements.models import RequirementsState
 from app.temporal import sessions
+from app.temporal.executions import ensure_search_attributes
 from app.temporal.workflows import ApiDesignWorkflow
 from tests.pipeline import CODE, FakeCodegenWorkflow, FakeStages, finished, stage_workers
 
@@ -90,15 +92,37 @@ async def env():
         yield env
 
 
-@pytest.fixture
-async def worker(env):
+@pytest.fixture(scope="module")
+async def server():
+    """The dev server, for sessions that start their deliveries and forks with the
+    repository's search attributes, which the time-skipping one does not know."""
+    async with await WorkflowEnvironment.start_local() as server:
+        await ensure_search_attributes(server.client)
+        yield server
+
+
+@asynccontextmanager
+async def workers(env):
     activities = FakeActivities()
     async with Worker(
         env.client, task_queue=TASK_QUEUE, workflows=[ApiDesignWorkflow, DeliveryWorkflow],
         activities=[activities.api_design_turn, activities.write_openapi_document,
                     activities.checkout_repository, activities.publish_repository,
-                    activities.open_pull_request, activities.read_repository_contract],
+                    activities.write_pull_request_text, activities.open_pull_request,
+                    activities.read_repository_contract],
     ), stage_workers(env, activities):
+        yield activities
+
+
+@pytest.fixture
+async def worker(env):
+    async with workers(env) as activities:
+        yield activities
+
+
+@pytest.fixture
+async def live(server):
+    async with workers(server) as activities:
         yield activities
 
 
@@ -139,7 +163,7 @@ def requirement(number: int, title: str) -> dict[str, Any]:
 
 
 @pytest.fixture
-def change(connected, repository_selection):
+def change(repository_selection):
     """A finished requirements session that changes the API of a published service: it
     adds FR-3 and ends FR-2, which one of the service's endpoints is linked to."""
     published = [requirement(1, "Book rooms"), requirement(2, "List rooms by floor")]
@@ -156,9 +180,9 @@ def change(connected, repository_selection):
     return source
 
 
-async def test_api_change_is_designed_from_the_repository_contract(env, worker, change):
-    worker.draft_endpoints = [endpoint("/bookings")]
-    handle = await start_from(env, change, "# Change")
+async def test_api_change_is_designed_from_the_repository_contract(server, live, live_connected, change):
+    live.draft_endpoints = [endpoint("/bookings")]
+    handle = await start_from(server, change, "# Change")
     state = await wait_for_status(handle, "interviewing")
     # The designer starts from the API and the language the service has, not from nothing.
     assert [item["path"] for item in state.api["endpoints"]] == ["/rooms", "/bookings"]
@@ -169,23 +193,25 @@ async def test_api_change_is_designed_from_the_repository_contract(env, worker, 
     assert state.api["endpoints"][0]["requirement_ids"] == ["FR-1"]
 
     # A fork changes the same service.
-    fork = env.client.get_workflow_handle(await service.fork_session(handle.id, 0))
+    fork = server.client.get_workflow_handle(await service.fork_session(handle.id, 0))
     forked = await wait_for_status(fork, "interviewing")
     assert forked.change_document == "# Change" and forked.api == state.api
     await fork.terminate()
 
     await handle.execute_update(ApiDesignWorkflow.finalize)
-    progress = await delivered(env, handle)
+    progress = await delivered(server, handle)
     # The service is built and published with the contract as the change leaves it.
     merged = render_requirements_markdown(required, "A hotel.")
-    assert worker.contract == {"language": "java", "requirements": required,
-                               "requirements_document": merged, "api": state.api}
-    assert worker.published_kind == "api_change"
+    # Designed without an architecture, it keeps the repository's.
+    assert live.contract == {"language": "java", "requirements": required,
+                             "requirements_document": merged, "api": state.api,
+                             "architecture": None, "architecture_structure": None}
+    assert live.published_kind == "api_change"
     assert progress.implementation["context"]["requirements_document"] == merged
 
 
 @pytest.mark.parametrize("same_contract", [True, False])
-async def test_api_change_goes_on_from_a_moved_repository_only_with_the_same_contract(env, worker, change, same_contract):
+async def test_api_change_goes_on_from_a_moved_repository_only_with_the_same_contract(env, worker, connected, change, same_contract):
     # The branch moved between the requirements session's clone and this session's.
     change.contract_commit = "0" * 40
     worker.repository_contract = (
@@ -202,18 +228,18 @@ async def test_api_change_goes_on_from_a_moved_repository_only_with_the_same_con
     assert worker.turns == 0 and state.messages == []
 
 
-async def test_repository_is_checked_out_first_and_pushed_once_verified(env, worker, connected, repository_selection):
-    worker.release_turn.clear()
-    handle = await start(env, repository_selection)
+async def test_repository_is_checked_out_first_and_pushed_once_verified(server, live, live_connected, repository_selection):
+    live.release_turn.clear()
+    handle = await start(server, repository_selection)
     # Nothing reaches the model, and no message is accepted, before the checkout.
     assert (await handle.query(ApiDesignWorkflow.get_state)).status in {"preparing", "turn_running"}
-    worker.release_turn.set()
+    live.release_turn.set()
     await wait_for_status(handle, "interviewing")
-    assert worker.checkouts == [(repository_selection["full_name"], False)]
+    assert live.checkouts == [(repository_selection["full_name"], False)]
     await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
-    worker.fail_publication = True
+    live.fail_publication = True
     await handle.execute_update(ApiDesignWorkflow.finalize)
-    state = await delivered(env, handle)
+    state = await delivered(server, handle)
     # Both authors are told to work in the repository the session checked out.
     assert state.implementation["context"]["repository"] == repository_selection
     assert state.tests["context"]["repository"] == repository_selection
@@ -222,34 +248,35 @@ async def test_repository_is_checked_out_first_and_pushed_once_verified(env, wor
     assert "Permission denied" in state.publication_error
 
     # A rejected push is repeated on its own: nothing is generated or verified again.
-    worker.fail_publication = False
+    live.fail_publication = False
     await service.retry_generation(handle.id, "repository")
-    state = await delivered(env, handle)
+    state = await delivered(server, handle)
     assert state.publication["branch"] == "generated/abc" and state.publication_error is None
     assert state.publication_status == "completed" and state.verification["status"] == "passed"
-    assert worker.published == [(handle.id, repository_selection["full_name"])]
+    assert live.published == [(handle.id, repository_selection["full_name"])]
     # The contract the authors worked from is published with their sources.
     built = state.implementation["context"]
-    assert worker.contract == {
+    assert live.contract == {
         "language": built["language"], "requirements": built["requirements"],
-        "requirements_document": built["requirements_document"], "api": built["api_design"]}
-    assert len(worker.verified_images) == 1 and len(worker.checkouts) == 1
+        "requirements_document": built["requirements_document"], "api": built["api_design"],
+        "architecture": None, "architecture_structure": None}
+    assert len(live.verified_images) == 1 and len(live.checkouts) == 1
     with pytest.raises(sessions.SessionBusy):
         await service.retry_generation(handle.id, "repository")
 
 
-async def test_pre_checkout_history_replays_without_checkout_or_push(env, worker, monkeypatch, repository_selection):
+async def test_pre_checkout_history_replays_without_checkout_or_push(server, live, monkeypatch, repository_selection):
     """A session that selected a repository before checkouts existed keeps its history."""
     patched = workflow.patched
     with monkeypatch.context() as legacy:
         legacy.setattr(workflow, 'patched', lambda name: False if name == 'repository-checkout' else patched(name))
-        handle = await start(env, repository_selection)
+        handle = await start(server, repository_selection)
         await wait_for_status(handle, "interviewing")
         await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
         await handle.execute_update(ApiDesignWorkflow.finalize)
-        state = await delivered(env, handle)
+        state = await delivered(server, handle)
         assert state.verification['status'] == 'passed' and state.publication_status == 'not_applicable'
-        assert not worker.checkouts and not worker.published
+        assert not live.checkouts and not live.published
         assert 'repository' not in state.implementation['context']
         history = await handle.fetch_history()
     await Replayer(workflows=[ApiDesignWorkflow]).replay_workflow(history)
@@ -280,15 +307,24 @@ async def progress(env, handle) -> DeliveryProgress:
     return (await delivery(env, handle).query(DeliveryWorkflow.get_state)).progress
 
 
-@pytest.fixture
-def connected(env, monkeypatch):
-    """Point the session services at the test server."""
+def serve_from(env, monkeypatch):
+    """Point the session services at `env`'s server."""
     async def connect():
         return env.client
 
     for module in (service, delivery_service, sessions):
         monkeypatch.setattr(module, "connect_temporal", connect)
     monkeypatch.setattr(service, "TASK_QUEUE", TASK_QUEUE)
+
+
+@pytest.fixture
+def connected(env, monkeypatch):
+    serve_from(env, monkeypatch)
+
+
+@pytest.fixture
+def live_connected(server, monkeypatch):
+    serve_from(server, monkeypatch)
 
 
 async def wait_for_status(handle, status: str) -> ApiDesignState:
@@ -399,7 +435,7 @@ async def test_failed_draft_falls_back_to_opening_question(env, worker):
     await handle.terminate()
 
 
-async def failed_change_opening(env, worker, change) -> Any:
+async def failed_change_opening(env, worker, connected, change) -> Any:
     worker.fail_draft = True
     handle = await start_from(env, change, "# Change")
     state = await wait_for_status(handle, "interviewing")
@@ -407,9 +443,9 @@ async def failed_change_opening(env, worker, change) -> Any:
     return handle
 
 
-async def test_failed_change_opening_is_retried_not_disguised_as_a_question(env, worker, change):
+async def test_failed_change_opening_is_retried_not_disguised_as_a_question(env, worker, connected, change):
     worker.draft_endpoints = [endpoint("/bookings")]
-    handle = await failed_change_opening(env, worker, change)
+    handle = await failed_change_opening(env, worker, connected, change)
     # Nothing can go on from an opening that failed, least of all the unchanged API.
     for update, *args in ((ApiDesignWorkflow.send_message, "/rooms"),
                           (ApiDesignWorkflow.answer_questions, ["/rooms"]),
@@ -437,7 +473,7 @@ async def test_failed_change_opening_is_retried_not_disguised_as_a_question(env,
     await handle.terminate()
 
 
-async def test_failed_change_opening_replays_with_its_fallback_from_older_histories(env, worker, change, monkeypatch):
+async def test_failed_change_opening_replays_with_its_fallback_from_older_histories(env, worker, connected, change, monkeypatch):
     patched = workflow.patched
     with monkeypatch.context() as legacy:
         legacy.setattr(workflow, 'patched', lambda name: False if name == 'retryable-change-opening' else patched(name))
@@ -451,8 +487,8 @@ async def test_failed_change_opening_replays_with_its_fallback_from_older_histor
     await Replayer(workflows=[ApiDesignWorkflow]).replay_workflow(history)
 
 
-async def test_session_with_a_failed_opening_expires_without_a_document(env, worker, change):
-    handle = await failed_change_opening(env, worker, change)
+async def test_session_with_a_failed_opening_expires_without_a_document(env, worker, connected, change):
+    handle = await failed_change_opening(env, worker, connected, change)
     await env.sleep(timedelta(hours=25))
     state = await wait_for_status(handle, "failed")
     assert state.error == "The session expired before the API was complete."
@@ -549,14 +585,14 @@ async def test_idle_session_with_problems_fails(env, worker):
     assert state.status == "failed" and worker.documents == []
 
 
-async def test_fork_keeps_api_as_it_was_at_the_message(env, worker, connected, repository_selection):
-    worker.draft_endpoints = [endpoint("/rooms")]
-    source = await start(env, repository_selection)
+async def test_fork_keeps_api_as_it_was_at_the_message(server, live, live_connected, repository_selection):
+    live.draft_endpoints = [endpoint("/rooms")]
+    source = await start(server, repository_selection)
     await wait_for_status(source, "interviewing")
     await source.execute_update(ApiDesignWorkflow.send_message, "/bookings")
     # draft, /bookings, Recorded.
 
-    fork = env.client.get_workflow_handle(await service.fork_session(source.id, 0))
+    fork = server.client.get_workflow_handle(await service.fork_session(source.id, 0))
     # A fork checks out its own copy of the repository first.
     state = await wait_for_status(fork, "interviewing")
     assert [item["path"] for item in state.api["endpoints"]] == ["/rooms"]
@@ -565,12 +601,12 @@ async def test_fork_keeps_api_as_it_was_at_the_message(env, worker, connected, r
     assert (await service.get_session(fork.id))["repository"] == repository_selection
 
     # Forking after a user message answers it again from the API it had then.
-    regenerated = env.client.get_workflow_handle(await service.fork_session(source.id, 1))
+    regenerated = server.client.get_workflow_handle(await service.fork_session(source.id, 1))
     state = await wait_for_status(regenerated, "interviewing")
     assert len(state.messages) == 3
     assert [item["path"] for item in state.api["endpoints"]] == ["/rooms", "/bookings"]
     assert state.repository == repository_selection
-    nested = env.client.get_workflow_handle(await service.fork_session(fork.id, 0))
+    nested = server.client.get_workflow_handle(await service.fork_session(fork.id, 0))
     assert (await wait_for_status(nested, "interviewing")).repository == repository_selection
     await nested.terminate()
     for handle in (source, fork, regenerated):

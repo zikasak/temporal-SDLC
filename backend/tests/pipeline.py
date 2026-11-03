@@ -141,10 +141,15 @@ class FakeStages:
         return {"branch": "generated/abc", "commit": "2" * 40,
                 "url": repository["html_url"] + "/tree/generated/abc"}
 
+    @activity.defn(name="write_pull_request_text")
+    async def write_pull_request_text(self, session_id: str, publication: dict[str, Any],
+                                      change: dict[str, Any]) -> dict[str, Any]:
+        return {"title": "Change", "summary": "What changed."}
+
     @activity.defn(name="open_pull_request")
     async def open_pull_request(self, session_id: str, repository: dict[str, Any],
-                                publication: dict[str, Any], change: dict[str, Any]
-                                ) -> dict[str, Any]:
+                                publication: dict[str, Any], change: dict[str, Any],
+                                text: dict[str, Any] | None = None) -> dict[str, Any]:
         return {"number": 1, "title": "Change", "url": repository["html_url"] + "/pull/1",
                 "draft": not publication.get("verified", True), "base": "main"}
 

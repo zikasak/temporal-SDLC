@@ -12,6 +12,7 @@ from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from app.api_design.models import ApiDesignState
+from app.architecture.models import ArchitectureResult, ArchitectureState
 from app.requirements import service
 from app.requirements.models import RequirementsState
 from app.temporal import sessions
@@ -89,6 +90,21 @@ class FakeApiDesign:
         designs[workflow.info().workflow_id] = state
 
 
+# The API design each architecture session handed on, by the architecture session's ID.
+architectures: dict[str, str] = {}
+
+
+@workflow.defn(name="ArchitectureWorkflow", sandboxed=False)
+class FakeArchitecture:
+    """Hands the requirements' API design on at once, as a skipped session does."""
+
+    @workflow.run
+    async def run(self, state: ArchitectureState) -> ArchitectureResult:
+        design_id = f"api-design-session-{workflow.uuid4().hex}"
+        architectures[workflow.info().workflow_id] = design_id
+        return ArchitectureResult(api_design_session_id=design_id, design=state.design)
+
+
 @pytest.fixture(scope="session")
 async def env():
     async with await WorkflowEnvironment.start_time_skipping() as env:
@@ -108,7 +124,7 @@ async def server():
 async def workers(env):
     activities = FakeActivities()
     async with Worker(
-        env.client, task_queue=TASK_QUEUE, workflows=[RequirementsWorkflow, FakeApiDesign],
+        env.client, task_queue=TASK_QUEUE, workflows=[RequirementsWorkflow, FakeApiDesign, FakeArchitecture],
         activities=[activities.requirements_turn, activities.write_requirements_document,
                     activities.checkout_repository, activities.read_requirements_document,
                     activities.register_session],
@@ -149,14 +165,26 @@ async def wait_for_status(handle, status: str) -> RequirementsState:
     raise AssertionError(f"status never became {status}")
 
 
-@pytest.fixture
-def temporal(env, monkeypatch):
+def serve_from(env, monkeypatch):
+    """Have the service and the session helpers reach `env`'s server."""
     async def connect():
         return env.client
 
     monkeypatch.setattr(service, "connect_temporal", connect)
     monkeypatch.setattr(sessions, "connect_temporal", connect)
     monkeypatch.setattr(service, "TASK_QUEUE", TASK_QUEUE)
+
+
+@pytest.fixture
+def temporal(env, monkeypatch):
+    serve_from(env, monkeypatch)
+
+
+@pytest.fixture
+def live_temporal(server, monkeypatch):
+    """The service on the dev server: sessions started with a repository carry its search
+    attributes, which the time-skipping server does not know."""
+    serve_from(server, monkeypatch)
 
 
 async def test_interview_and_finalize(env, worker):
@@ -244,19 +272,21 @@ async def test_finalized_session_starts_its_api_design(server, live, repository_
     await handle.execute_update(RequirementsWorkflow.send_message, "Book rooms")
     await handle.execute_update(RequirementsWorkflow.finalize)
 
+    # A new service's architecture is designed first; it hands the task on to the design.
     for _ in range(100):
         state = await handle.query(RequirementsWorkflow.get_state)
-        if state.api_design_session_id in designs:
+        if architectures.get(state.architecture_session_id) in designs:
             break
         await asyncio.sleep(0.05)
-    design_id = state.api_design_session_id
-    assert design_id and design_id.startswith("api-design-session-")
+    architecture_id = state.architecture_session_id
+    assert architecture_id and architecture_id.startswith("architecture-session-")
+    design_id = architectures[architecture_id]
     design = designs[design_id]
     assert design.source_session_id == handle.id
     assert design.requirements_document == "# Requirements"
     assert design.requirements == state.requirements and design.kind == "new_service"
     assert design.repository == repository_selection
-    assert live.registered == [design_id]
+    assert live.registered == [architecture_id, design_id]
     description = await server.client.get_workflow_handle(design_id).describe()
     assert description.parent_id == handle.id
     await handle.terminate()
@@ -329,9 +359,9 @@ async def start_from_intake(env, repository, task: str):
         answers=["Data storage and retrieval", "Rooms vanish"], task=task))
 
 
-async def test_session_starts_from_the_intake(env, worker, temporal, repository_selection):
-    worker.kind = None
-    handle = await start_from_intake(env, repository_selection, "  Keep booked rooms  ")
+async def test_session_starts_from_the_intake(server, live, live_temporal, repository_selection):
+    live.kind = None
+    handle = await start_from_intake(server, repository_selection, "  Keep booked rooms  ")
     state = await wait_for_status(handle, "interviewing")
     # The intake is the opening of the transcript, and the analyst answers it at once.
     assert [item["role"] for item in state.messages] == ["assistant", "user", "assistant"]
@@ -348,25 +378,25 @@ async def test_session_starts_from_the_intake(env, worker, temporal, repository_
     await handle.terminate()
 
 
-async def test_fork_keeps_requirements_as_they_were_at_the_message(env, worker, temporal, repository_selection):
-    source = await start_from_intake(env, repository_selection, "A")
+async def test_fork_keeps_requirements_as_they_were_at_the_message(server, live, live_temporal, repository_selection):
+    source = await start_from_intake(server, repository_selection, "A")
     # No message is accepted until the repository is checked out.
     assert (await wait_for_status(source, "interviewing")).repository == repository_selection
     await source.execute_update(RequirementsWorkflow.send_message, "B")
     # intake, A, Question 1?, B, Question 2?
 
-    fork = env.client.get_workflow_handle(await service.fork_session(source.id, 2))
+    fork = server.client.get_workflow_handle(await service.fork_session(source.id, 2))
     state = await wait_for_status(fork, "interviewing")
     assert [item["content"] for item in state.messages][2:] == ["Question 1?"]
     assert titles(state) == ["A"]
     assert state.forked_from == {"session_id": source.id, "message_index": 2}
     assert (await service.get_session(fork.id))["repository"] == repository_selection
     # Every session, forks included, works in its own checkout.
-    assert worker.checkouts == [source.id, fork.id]
+    assert live.checkouts == [source.id, fork.id]
     assert state.checkout == {"commit": "1" * 40}
 
     # Forking after a user message answers it again.
-    regenerated = env.client.get_workflow_handle(await service.fork_session(source.id, 3))
+    regenerated = server.client.get_workflow_handle(await service.fork_session(source.id, 3))
     state = await wait_for_status(regenerated, "interviewing")
     assert [item["content"] for item in state.messages][3:] == ["B", "Question 2?"]
     assert titles(state) == ["A", "B"]
@@ -376,7 +406,7 @@ async def test_fork_keeps_requirements_as_they_were_at_the_message(env, worker, 
     state = await fork.query(RequirementsWorkflow.get_state)
     assert titles(state) == ["A", "C"]
     for index, expected in [(0, []), (2, ["A"]), (4, ["A", "C"])]:
-        nested = env.client.get_workflow_handle(await service.fork_session(fork.id, index))
+        nested = server.client.get_workflow_handle(await service.fork_session(fork.id, index))
         nested_state = await wait_for_status(nested, "interviewing")
         assert titles(nested_state) == expected
         assert nested_state.repository == repository_selection
