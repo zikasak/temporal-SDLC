@@ -227,11 +227,14 @@ async def test_named_tests_are_reported_one_by_one(transport, tmp_path):
 
 async def test_baseline_image_is_the_repositorys_service_without_its_tests(tmp_path, monkeypatch):
     monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
-    checkout = tmp_path / 'session/repository'
-    for name in ('src/main/Orders.java', 'src/test/OrdersTest.java', 'contract-tests/pom.xml',
-                 'contracts/api.json', '.git/config'):
-        (checkout / name).parent.mkdir(parents=True, exist_ok=True)
-        (checkout / name).write_text(name)
+
+    def check_out(session_id, *extra):
+        checkout = tmp_path / session_id / 'repository'
+        for name in ('src/main/Orders.java', 'src/test/OrdersTest.java', 'contract-tests/pom.xml',
+                     'contracts/api.json', '.git/config', *extra):
+            (checkout / name).parent.mkdir(parents=True, exist_ok=True)
+            (checkout / name).write_text('FROM scratch' if name == 'Dockerfile' else name)
+
     built = []
 
     async def docker(*args, **kwargs):
@@ -242,9 +245,11 @@ async def test_baseline_image_is_the_repositorys_service_without_its_tests(tmp_p
         return ''
 
     monkeypatch.setattr(docker_agents, 'docker', docker)
-    run = lambda: ActivityEnvironment().run(activities.build_baseline, 'session', 'java')
+    run = lambda session_id: ActivityEnvironment().run(
+        activities.build_baseline, session_id, 'java')
+    check_out('no-dockerfile')
     with pytest.raises(ApplicationError, match='no Dockerfile'):
-        await run()
-    (checkout / 'Dockerfile').write_text('FROM scratch')
-    assert (await run())['image_id'] == SERVICE_IMAGE
+        await run('no-dockerfile')
+    check_out('session', 'Dockerfile')
+    assert (await run('session'))['image_id'] == SERVICE_IMAGE
     assert built == ['Dockerfile', 'src/main/Orders.java']

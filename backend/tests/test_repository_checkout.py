@@ -32,6 +32,10 @@ CONTRACT = {
             "requirement_ids": ["FR-1"],
         }],
     },
+    "architecture": "# Orders architecture\n",
+    "architecture_structure": {
+        "components": [{"name": "Orders API", "responsibilities": ["Place orders"]}],
+        "data_flows": [], "technology_choices": []},
 }
 
 
@@ -112,7 +116,8 @@ async def test_verified_sources_are_pushed_to_a_new_branch(tmp_path, remote, rep
                      "src/test/UnitTest.java", "contract-tests/pom.xml",
                      "contract-tests/src/test/java/OrdersTest.java", "contracts/language.json",
                      "contracts/requirements.json", "contracts/requirements.md",
-                     "contracts/api.json", "contracts/openapi.yaml"}
+                     "contracts/api.json", "contracts/openapi.yaml",
+                     "contracts/architecture.md", "contracts/architecture.json"}
     assert "/orders" in git("show", f"{BRANCH}:contracts/openapi.yaml", cwd=remote)
     # A later task reads back exactly what this one was built from.
     assert read_contract(session / "repository") == CONTRACT
