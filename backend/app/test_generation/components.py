@@ -96,11 +96,13 @@ def runner_context(suite: ComponentSuite, repository: Path, tests: Path, context
 
 
 async def build_runner(language: Language, session_dir: Path, tests: Path,
-                       log_path: Path) -> str:
-    """Build the suite's runner with the service's sources as the delivery started from
-    them: the build collects the suite, so a test that does not even import fails here."""
+                       log_path: Path, repository: Path | None = None) -> str:
+    """Build the suite's runner with the service's sources in `repository`, by default as
+    the delivery started from them: the build collects the suite, so a test that does not
+    even import fails here."""
     suite, contract = language.component_suite, language.component_contract
-    repository = await run_sync(record_baseline, language, session_dir)
+    if repository is None:
+        repository = await run_sync(record_baseline, language, session_dir)
     text = await run_sync((_contract(session_dir) / RUNTIME_FILE).read_text)
     try:
         runtime = contract.read_runtime(json.loads(text), repository)

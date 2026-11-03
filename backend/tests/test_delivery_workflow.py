@@ -21,18 +21,20 @@ from app.api_design.models import empty_api
 from app.architecture.workflows import ArchitectureWorkflow
 from app.delivery import service as delivery_service
 from app.delivery.models import (
-    STOPPED, DeliveryProgress, DeliveryState, TaskSpec, delivery_id,
+    COMPONENT_CHANGE_UNPUBLISHED, STOPPED, DeliveryProgress, DeliveryState, TaskSpec,
+    delivery_id,
 )
+from app.github.checkout import SNAPSHOT_DIR
 from app.delivery.workflows import DeliveryWorkflow
 from app.requirements import service as requirements_service
 from app.requirements.document import render_requirements_markdown
 from app.requirements.models import RequirementsState
-from app.routing.models import COMPONENT_TESTS_UNRUN
 from app.temporal import sessions
 from app.temporal.executions import ensure_search_attributes
 from app.temporal.workflows import ApiDesignWorkflow, RequirementsWorkflow
 from tests.pipeline import (
-    ADDED_COMPONENT_TESTS, ADDED_TESTS, SEAM, BASELINE_IMAGE, BROKEN_TEST, CODE, FakeCodegenWorkflow, FakeStages,
+    ADDED_COMPONENT_TESTS, ADDED_TESTS, BASELINE_IMAGE, BROKEN_TEST, CHANGED_COMPONENT_IMAGE,
+    CODE, COMPONENT_IMAGE, SEAM, FakeCodegenWorkflow, FakeStages,
     finished, stage_workers,
 )
 
@@ -65,6 +67,8 @@ class FakeActivities(FakeStages):
         self.kind = "bugfix"
         # Requirements of the repository's contract the interview ends.
         self.retired: list[dict[str, Any]] = []
+        # A second acceptance criterion of the brief, by its ID, if any.
+        self.second_requirement: str | None = None
 
     @activity.defn(name="requirements_turn")
     async def requirements_turn(
@@ -72,10 +76,13 @@ class FakeActivities(FakeStages):
         kind: str | None, retired: list[dict[str, Any]],
     ) -> dict[str, Any]:
         self.turns += 1
+        second = [{"id": self.second_requirement, "category": "functional",
+                   "title": "Closed rooms stay closed", "description": "D", "priority": "must"}
+                  ] if self.second_requirement else []
         return {"reply": "Recorded.", "kind": self.kind, "retired": self.retired, "requirements": [{
             "id": "FR-1", "category": "functional", "title": messages[-1]["content"],
             "description": "D", "priority": "must",
-        }]}
+        }, *second]}
 
     @activity.defn(name="write_requirements_document")
     async def write_requirements_document(
@@ -674,27 +681,31 @@ async def test_criteria_routed_to_a_seam_get_component_tests_written_from_their_
     worker.component_declined = ['FR-2'] if outcome == 'declined' else []
     worker.fail_component_tests = outcome == 'failed'
     handle, state = await fixed(env, repository_selection)
-    # The only criterion is the component tests': the contract tests' author does not run.
-    assert worker.stages == ['routing', 'component-tests']
     context, = worker.component_contexts
     assert context['routes'] == {'FR-2': {'route': 'component', 'reason': 'Route of FR-2.',
                                           'source': 'routing', 'seam': SEAM}}
     assert context['repository'] == repository_selection and context['brief']
-    # Nothing is run against the service yet, nothing changes it and nothing is pushed.
-    assert state.tests is None and state.baseline is None and state.implementation is None
-    assert state.baseline_status == 'skipped' and state.verification_status == 'skipped'
-    assert state.publication_status == 'skipped' and not worker.published
+    # The only criterion is the component tests': the contract tests' author does not run.
+    assert 'tests' not in worker.stages and state.tests is None
     if outcome == 'written':
         assert state.routing_status == 'routed' and state.routing_error is None
         assert state.component_tests['added_tests'] == ADDED_COMPONENT_TESTS
-        assert state.baseline_error == COMPONENT_TESTS_UNRUN
-    elif outcome == 'declined':
+        assert state.baseline_status == 'reproduced'
+    else:
+        # Nothing is run against the service, nothing changes it and nothing is pushed.
+        assert worker.stages == ['routing', 'component-tests']
+        assert state.baseline is None and state.implementation is None
+        assert state.baseline_status == 'skipped' and state.verification_status == 'skipped'
+        assert state.publication_status == 'skipped' and not worker.published
+    if outcome == 'declined':
         assert state.routing_status == 'unobservable' and state.component_tests is None
         assert state.routing['FR-2']['source'] == 'tests'
         assert 'FR-2: Happens in no stubbed symbol.' in state.routing_error
-    else:
+    elif outcome == 'failed':
         assert state.component_tests is None
         assert 'component tests could not be generated' in state.component_tests_error
+    if outcome == 'written':
+        return
 
     # Retrying the tests writes them again; a routing that found a suite for each
     # criterion is kept.
@@ -702,10 +713,137 @@ async def test_criteria_routed_to_a_seam_get_component_tests_written_from_their_
     await requirements_service.retry_generation(handle.id, 'tests')
     state = await delivered(env, handle.id)
     assert worker.stages.count('routing') == (2 if outcome == 'declined' else 1)
-    assert worker.stages[-1] == 'component-tests'
     assert state.component_tests_error is None
     assert state.component_tests['added_tests'] == ADDED_COMPONENT_TESTS
-    assert state.baseline_error == COMPONENT_TESTS_UNRUN
+    assert state.baseline_status == 'reproduced'
+
+
+async def test_a_bugfix_proved_at_a_seam_runs_its_component_tests_red_then_green(
+        env, worker, repository_selection):
+    worker.routes = [{'FR-2': 'component'}]
+    handle, state = await fixed(env, repository_selection)
+    # Both suites run red without the fix, then the conformance check and both green with it.
+    assert worker.stages == ['routing', 'component-tests', 'baseline', 'component-baseline',
+                             'implementation', 'component-runner', 'component-verification']
+    # The component tests ran in the runner their author built with the code as the
+    # repository holds it, then in the one built with the changed code, answering for the
+    # tests the change added.
+    assert worker.component_runs == [(COMPONENT_IMAGE, ADDED_COMPONENT_TESTS),
+                                     (CHANGED_COMPONENT_IMAGE, ADDED_COMPONENT_TESTS)]
+    # The change gave the contract tests no criterion: the repository's own suite runs as
+    # it is, without the fix and with it, and has to pass both times.
+    assert worker.existing_runs == [(SNAPSHOT_DIR, []), (SNAPSHOT_DIR, [])]
+    assert state.baseline_status == 'reproduced' and state.baseline_error is None
+    assert state.component_baseline['status'] == 'failed'
+    assert state.component_baseline['tracked'] == {
+        case: {'tests': 1, 'failed': 1} for case in ADDED_COMPONENT_TESTS}
+    assert state.verification['status'] == 'passed'
+    assert state.component_verification['status'] == 'passed'
+    assert state.verification_status == 'completed' and state.verification_error is None
+    # Not reviewed or pushed yet: the delivery says so where the push would be.
+    assert worker.reviewed == [] and not worker.published
+    assert state.publication_status == 'skipped'
+    assert state.publication_error == COMPONENT_CHANGE_UNPUBLISHED
+    with pytest.raises(sessions.SessionBusy):
+        await requirements_service.retry_generation(handle.id, 'repository')
+
+
+async def test_a_bugfix_proved_by_both_suites_runs_each_at_the_baseline_and_with_the_fix(
+        env, worker, repository_selection):
+    worker.second_requirement = 'FR-5'
+    worker.routes = [{'FR-5': 'component'}]
+    _, state = await fixed(env, repository_selection)
+    assert state.routing['FR-2']['route'] == 'contract'
+    # The authors write side by side, each given only its criteria.
+    assert sorted(worker.stages[:3]) == ['component-tests', 'routing', 'tests']
+    assert list(worker.test_contexts[0]['routes']) == ['FR-2']
+    assert list(worker.component_contexts[0]['routes']) == ['FR-5']
+    assert worker.stages[3:] == ['baseline', 'baseline-run', 'component-baseline',
+                                 'implementation', 'verification', 'component-runner',
+                                 'component-verification']
+    # The contract tests' baseline and verification answer for the tests the change added.
+    assert worker.baselines == [(BASELINE_IMAGE, ORIGINAL[1], ADDED_TESTS)]
+    assert worker.verified_images == [ORIGINAL] and worker.verified_tracked == [ADDED_TESTS]
+    assert worker.existing_runs == []
+    assert state.baseline_status == 'reproduced'
+    assert state.publication_error == COMPONENT_CHANGE_UNPUBLISHED
+
+
+async def test_a_repository_without_contract_tests_is_proved_by_its_component_tests_alone(
+        env, worker, repository_selection):
+    worker.routes = [{'FR-2': 'component'}]
+    worker.repository_tests = 0
+    _, state = await fixed(env, repository_selection)
+    # No service runs at all: the component tests are in-process.
+    assert worker.stages == ['routing', 'component-tests', 'component-baseline',
+                             'implementation', 'component-runner', 'component-verification']
+    assert worker.existing_runs == [] and state.baseline is None and state.verification is None
+    assert state.baseline_status == 'reproduced'
+    assert state.publication_error == COMPONENT_CHANGE_UNPUBLISHED
+
+
+@pytest.mark.parametrize('baseline, status, error', [
+    ('not_reproduced', 'not_reproduced', 'Added tests that do not fail against the service '
+                                         'as the repository holds it: '
+                                         f'{ADDED_COMPONENT_TESTS[0]} (1 of 1)'),
+    ('skipped', 'error', 'Component tests: Tests skipped themselves in the baseline run: 1. '
+                         'A test that skips itself was written for a criterion the component '
+                         'tests cannot observe'),
+    ('error', 'error', 'Component tests: The baseline run could not complete.'),
+])
+async def test_nothing_is_fixed_unless_the_component_tests_fail_without_the_fix(
+        env, worker, baseline, status, error, repository_selection):
+    worker.routes = [{'FR-2': 'component'}]
+    # One that could not complete could not twice.
+    worker.component_baseline_results = [baseline] * (1 + (baseline == 'error')) + ['reproduced']
+    handle, state = await fixed(env, repository_selection)
+    assert state.baseline_status == status and error in state.baseline_error
+    if baseline == 'skipped':
+        assert 'behaviour a seam of the code shows' in state.baseline_error
+    # A run that could not complete runs once more before it is judged.
+    assert worker.stages.count('component-baseline') == (2 if baseline == 'error' else 1)
+    assert state.implementation is None and 'implementation' not in worker.stages
+    assert state.verification_status == 'skipped' and not worker.published
+
+    # Retrying the tests writes them again and holds them against the baseline again.
+    await requirements_service.retry_generation(handle.id, 'tests')
+    state = await delivered(env, handle.id)
+    assert state.baseline_status == 'reproduced' and state.baseline_error is None
+    assert state.component_verification['status'] == 'passed'
+
+
+@pytest.mark.parametrize('outcome, error', [
+    ('conformance', 'The component contract does not match the code: stubtest: '
+                    'app.rooms.Rooms.close is inconsistent The fix has to keep every '
+                    'signature of the component contract.'),
+    ('failed', 'Tests fail against the changed code: component tests 1 of 4 '
+               f'(tests.test_rooms#{ADDED_COMPONENT_TESTS[0]})'),
+    ('skipped', 'Component tests: Tests skipped in the run against the changed service: 1'),
+    ('contract', 'Tests fail against the changed code: contract tests 1 of 1 (RoomsTest#lists)'),
+])
+async def test_a_change_with_component_tests_is_verified_on_both_suites_and_its_contract(
+        env, worker, outcome, error, repository_selection):
+    worker.second_requirement = 'FR-5'
+    worker.routes = [{'FR-5': 'component'}]
+    worker.conformance_error = (
+        'The component contract does not match the code: stubtest: '
+        'app.rooms.Rooms.close is inconsistent' if outcome == 'conformance' else None)
+    worker.component_results = ['skipped' if outcome == 'skipped' else
+                                'failed' if outcome == 'failed' else 'passed']
+    worker.verification_result = 'failed' if outcome == 'contract' else 'passed'
+    _, state = await fixed(env, repository_selection)
+    assert state.baseline_status == 'reproduced'
+    assert state.verification_status == 'completed' and error in state.verification_error
+    if outcome == 'conformance':
+        # No component test proves anything against code that left its contract.
+        assert state.component_verification is None
+        assert 'component-verification' not in worker.stages
+    if outcome != 'skipped':
+        assert 'cannot yet diagnose or repair' in state.verification_error
+    # Nothing is diagnosed or repaired yet, and nothing is pushed.
+    assert worker.diagnosed == [] and worker.repairs == []
+    assert worker.reviewed == [] and not worker.published
+    assert state.publication_status == 'skipped' and state.publication_error is None
 
 
 @pytest.mark.parametrize('outcome', ['skipped', 'error'])

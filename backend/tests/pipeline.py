@@ -30,6 +30,10 @@ BASELINE_IMAGE = "sha256:" + "e" * 64
 REPOSITORY_TESTS_IMAGE = "sha256:" + "f" * 64
 ADDED_TESTS = ["com.example.RoomsTest#refusesDoubleBooking", "com.example.OverlapTest#refuses"]
 ADDED_COMPONENT_TESTS = ["tests.test_rooms#test_a_merged_room_is_closed"]
+# The component tests' runner as their author built it, with the code the delivery started
+# from, and as verification builds it with the changed code.
+COMPONENT_IMAGE = "sha256:" + "9" * 64
+CHANGED_COMPONENT_IMAGE = "sha256:" + "8" * 64
 SEAM = {"module": "service.rooms", "symbols": ["Rooms.close"]}
 BROKEN_TEST = {"class_name": "RoomsTest", "name": "lists"}
 
@@ -104,6 +108,8 @@ class FakeStages:
         self.published_documentation: list[tuple[str, str, bool]] = []
         # What had already run each time the repository's tests were recorded.
         self.snapshots: list[list[str]] = []
+        # How many contract tests the repository has.
+        self.repository_tests = 3
         self.fail_snapshot = False
         # Repository tests the test author of an API change rewrote, and those of them
         # that still pass, as they were, against the changed service.
@@ -129,6 +135,15 @@ class FakeStages:
         self.component_contexts: list[dict[str, Any]] = []
         self.component_declined: list[str] = []
         self.fail_component_tests = False
+        # Outcomes of successive component test runs at the baseline: 'reproduced',
+        # 'not_reproduced', 'skipped' or 'error'; and with the change: 'passed', 'failed',
+        # 'skipped' or 'error'. The last one of each repeats.
+        self.component_baseline_results = ['reproduced']
+        self.component_results = ['passed']
+        # Why the changed code no longer conforms to the component contract, if it does not.
+        self.conformance_error: str | None = None
+        # Each component test run: its runner image and the tests it tracked.
+        self.component_runs: list[tuple[str, list[str]]] = []
 
     @activity.defn(name="checkout_repository")
     async def checkout_repository(self, session_id: str, repository: dict[str, Any]) -> dict[str, Any]:
@@ -218,7 +233,7 @@ class FakeStages:
             return {'session_id': session_id, 'unobservable': [
                 {'requirement_id': requirement, 'reason': 'Happens in no stubbed symbol.'}
                 for requirement in self.component_declined]}
-        return {'session_id': session_id, 'image_id': 'sha256:' + '9' * 64,
+        return {'session_id': session_id, 'image_id': COMPONENT_IMAGE,
                 'path': '/component-tests/suite', 'added_tests': ADDED_COMPONENT_TESTS,
                 'changed_tests': [], 'removed_tests': []}
 
@@ -258,11 +273,47 @@ class FakeStages:
         if self.fail_snapshot:
             raise ApplicationError('disk full', non_retryable=True)
         self.snapshots.append(list(self.stages))
-        return {'tests': 3}
+        return {'tests': self.repository_tests, 'component_tests': 0}
 
     @activity.defn(name='build_repository_tests')
     async def build_repository_tests(self, session_id: str, language: str) -> dict[str, Any]:
         return {'image_id': REPOSITORY_TESTS_IMAGE, 'session_id': session_id}
+
+    @activity.defn(name='build_component_runner')
+    async def build_component_runner(self, session_id: str, language: str) -> dict[str, Any]:
+        self.stages.append('component-runner')
+        if self.conformance_error:
+            return {'session_id': session_id, 'conformance_error': self.conformance_error}
+        return {'session_id': session_id, 'image_id': CHANGED_COMPONENT_IMAGE}
+
+    @activity.defn(name='run_component_suite')
+    async def run_component_suite(self, session_id: str, runner_image: str, language: str,
+                                  tracked_tests: list[str]) -> dict[str, Any]:
+        baseline = runner_image == COMPONENT_IMAGE
+        self.stages.append('component-baseline' if baseline else 'component-verification')
+        runs = [image for image, _ in self.component_runs if (image == COMPONENT_IMAGE) == baseline]
+        outcomes = self.component_baseline_results if baseline else self.component_results
+        outcome = outcomes[min(len(runs), len(outcomes) - 1)]
+        self.component_runs.append((runner_image, tracked_tests))
+        result = {'session_id': session_id, 'duration_seconds': 1.0, 'details_truncated': False,
+                  'service_log': '', 'runner_log': '', 'path': '/component-runs',
+                  'test_failures': [], 'test_skips': [], 'missing_tests': [], 'error': None,
+                  'tests': 4, 'errors': 0, 'skipped': int(outcome == 'skipped')}
+        if outcome == 'error':
+            return {**result, 'status': 'error', 'exit_code': None, 'tests': 0, 'passed': 0,
+                    'failures': 0, 'skipped': 0, 'tracked': {},
+                    'error': 'The component tests timed out or were terminated'}
+        failed = (tracked_tests[1:] if outcome == 'not_reproduced'
+                  else tracked_tests if baseline or outcome == 'failed' else [])
+        if failed and not baseline:
+            result['test_failures'] = [{'class_name': 'tests.test_rooms', 'name': case,
+                                        'kind': 'failure', 'message': 'assert False'}
+                                       for case in failed]
+        return {**result, 'status': 'failed' if failed else 'passed',
+                'exit_code': 1 if failed else 0, 'failures': len(failed),
+                'passed': 4 - len(failed) - result['skipped'],
+                'tracked': {case: {'tests': 1, 'failed': int(case in failed)}
+                            for case in tracked_tests}}
 
     @activity.defn(name='diagnose_failure')
     async def diagnose_failure(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
@@ -381,6 +432,7 @@ async def stage_workers(env, stages: FakeStages):
         # The check of documentation is the real one: it starts nothing.
         activities=[stages.verify_service, stages.build_baseline,
                     stages.snapshot_repository_tests, stages.build_repository_tests,
+                    stages.build_component_runner, stages.run_component_suite,
                     verify_documentation],
     ), Worker(
         env.client, task_queue=DOCUMENTATION_TASK_QUEUE,

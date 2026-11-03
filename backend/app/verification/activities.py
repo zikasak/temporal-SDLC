@@ -28,7 +28,12 @@ from app.github.checkout import (
 from app.implementation.activities import copy_service
 from app.review.activities import record_baseline
 from app.test_generation.activities import copy_test_suite
-from app.languages import Language, TestReports, TestSuite, UnsupportedLanguage, get_language
+from app.languages import (
+    ComponentContract, Language, TestReports, TestSuite, UnsupportedLanguage, get_language,
+)
+from app.routing.components import check_conformance
+from app.test_generation.components import ARTIFACT_DIR as COMPONENT_TESTS_ARTIFACT
+from app.test_generation.components import ROUTED_CONTRACT, build_runner
 from app.config import GENERATED_CODE_DIR
 from app.verification.models import TestFailure, TestSkip, TrackedTest, VerificationResult
 from app.temporal.tracing import trace_activity
@@ -460,4 +465,201 @@ async def build_baseline(session_id: str, language: str) -> dict[str, str]:
     result = {'image_id': image_id, 'session_id': session_id}
     await run_sync(publish_manifest, artifact_dir, result)
     logger.info('Baseline service image built (session=%s, image=%s)', session_id, image_id)
+    return result
+
+
+# The image of the component tests built with the changed code, and the runs of either.
+COMPONENT_RUNNER_DIR = 'component-verification'
+COMPONENT_RUNS_DIR = 'component-runs'
+# Exit statuses of a runner that was stopped, not one that reported.
+STOPPED_EXIT_CODES = {124, 125, 137, 143}
+
+
+def _stub_modules(contract: ComponentContract, components: Path) -> list[str]:
+    """The modules the component contract kept by the routing has stubs of."""
+    return sorted(contract.module(path.relative_to(components))
+                  for path in components.rglob(f'*{contract.stub_suffix}')
+                  if path.is_file() and not path.is_symlink())
+
+
+@activity.defn
+@trace_activity('build-component-runner', feature='verification', input_parameter='language')
+async def build_component_runner(session_id: str, language: str) -> dict[str, str]:
+    """Check that the changed code still conforms to the component contract, then build
+    the component tests' runner with it. Returns the runner's `image_id`, or the
+    `conformance_error` that says how the change broke the contract, which no run of the
+    tests could then prove anything against."""
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
+        raise ApplicationError('Invalid session ID', non_retryable=True)
+    stack = session_language(language)
+    contract, suite = stack.component_contract, stack.component_suite
+    if contract is None or suite is None:
+        raise ApplicationError(f'{stack.label} has no component tests', non_retryable=True)
+    session_dir = GENERATED_CODE_DIR / session_id
+    service = session_dir / 'implementation' / 'service'
+    tests = session_dir / COMPONENT_TESTS_ARTIFACT / 'suite'
+    components = session_dir / ROUTED_CONTRACT
+    for path, what in ((service, 'changed code'), (tests, 'component tests'),
+                       (components, 'component contract')):
+        if not await run_sync(path.is_dir):
+            raise ApplicationError(f'The {what} is unavailable', non_retryable=True)
+    modules = await run_sync(_stub_modules, contract, components)
+    artifact_dir = session_dir / COMPONENT_RUNNER_DIR
+    await run_sync(artifact_dir.mkdir, parents=True, exist_ok=True)
+    async with docker_agents.keep_activity_alive('Building the component tests with the change'):
+        async with async_context(tempfile.TemporaryDirectory, dir=artifact_dir) as temporary:
+            work = Path(temporary)
+            try:
+                await check_conformance(contract, service, components, modules, work,
+                                        artifact_dir)
+            except RuntimeError as exc:
+                logger.info('Changed code breaks the component contract (session=%s)',
+                            session_id)
+                return {'session_id': session_id, 'conformance_error': str(exc)}
+            await run_sync(shutil.copytree, tests, work / 'suite')
+            try:
+                image_id = await build_runner(stack, session_dir, work / 'suite',
+                                              artifact_dir / 'image-build.log',
+                                              repository=service)
+            except RuntimeError as exc:
+                # The contract holds, but the suite does not even collect with the change.
+                return {'session_id': session_id, 'conformance_error': (
+                    'The component tests could not be built with the changed code: '
+                    f'{str(exc)[-2000:]}')}
+    result = {'image_id': image_id, 'session_id': session_id}
+    await run_sync(publish_manifest, artifact_dir, result)
+    logger.info('Component test image built with the change (session=%s, image=%s)',
+                session_id, image_id)
+    return result
+
+
+def _component_suite_tests(session_dir: Path, runner_image: str, suite: TestSuite) -> set[str]:
+    """Every test of the component suite, when `runner_image` was built from it: by its
+    author against the code the delivery started from, or with the changed code."""
+    for directory in (COMPONENT_TESTS_ARTIFACT, COMPONENT_RUNNER_DIR):
+        try:
+            manifest = json.loads((session_dir / directory / 'image.json').read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(manifest, dict) and manifest.get('image_id') == runner_image:
+            return set(suite.test_cases(session_dir / COMPONENT_TESTS_ARTIFACT / 'suite'))
+    raise ApplicationError('The sources of the component test image are unavailable',
+                           non_retryable=True)
+
+
+def _empty_result(session_id: str, path: Path) -> VerificationResult:
+    return {'session_id': session_id, 'status': 'error',
+            'tests': 0, 'passed': 0, 'failures': 0, 'errors': 0, 'skipped': 0,
+            'duration_seconds': 0, 'exit_code': None, 'test_failures': [], 'test_skips': [],
+            'details_truncated': False, 'tracked': None, 'missing_tests': None,
+            'service_log': '', 'runner_log': '', 'error': None, 'path': str(path)}
+
+
+@activity.defn
+@trace_activity('run-component-suite', feature='verification', input_parameter='runner_image')
+async def run_component_suite(session_id: str, runner_image: str, language: str,
+                              tracked_tests: list[str]) -> VerificationResult:
+    """Run the component tests in-process in their runner, one container without a
+    network, and read its reports as a verification reads the contract tests'. The run
+    answers for every test of the suite, and for each of `tracked_tests` singly."""
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
+        raise ApplicationError('Invalid session ID', non_retryable=True)
+    if not re.fullmatch(r'sha256:[0-9a-f]{64}', runner_image):
+        raise ApplicationError('Invalid component test image ID', non_retryable=True)
+    if len(tracked_tests) > MAX_TRACKED_TESTS:
+        raise ApplicationError('Too many tests to track', non_retryable=True)
+    stack = session_language(language)
+    suite = stack.component_suite
+    if suite is None:
+        raise ApplicationError(f'{stack.label} has no component tests', non_retryable=True)
+    session_dir = GENERATED_CODE_DIR / session_id
+    suite_tests = await run_sync(_component_suite_tests, session_dir, runner_image, suite)
+    tracked: dict[str, TrackedTest] = {item: {'tests': 0, 'failed': 0} for item in tracked_tests}
+    token = uuid.uuid4().hex
+    runner = f'component-tests-{token}'
+    artifact_dir = session_dir / COMPONENT_RUNS_DIR
+    run_dir = artifact_dir / token
+    await run_sync(run_dir.mkdir, parents=True)
+    result = {**_empty_result(session_id, run_dir), 'tracked': tracked}
+    started = time.monotonic()
+    logger.info('Component tests starting (session=%s, runner=%s)', session_id, runner)
+    created = False
+    state: dict = {}
+    try:
+        async with docker_agents.keep_activity_alive('Running the component tests'):
+            try:
+                user = await docker_agents.docker(
+                    'image', 'inspect', '--format', '{{.Config.User}}', runner_image, timeout=30)
+                account = user.split(':', 1)[0]
+                if not account or account == 'root' or (account.isdigit() and int(account) == 0):
+                    raise RuntimeError('The component test image must declare a non-root '
+                                       'runtime user')
+                # In-process tests: no service, and no network at all.
+                await docker_agents.docker(
+                    'create', '--name', runner, '--pull=never', '--network=none',
+                    '--label', f'temporal.verification={session_id}', *CONSTRAINTS,
+                    runner_image, timeout=30)
+                created = True
+                await docker_agents.docker('start', runner, timeout=30)
+                async with docker_agents.forward_logs(runner, f'component tests {session_id}'):
+                    # The runner's own timeout and its forced-kill grace period.
+                    await docker_agents.docker('wait', runner, timeout=750)
+            except Exception as exc:
+                result['error'] = str(exc)[-2000:]
+                logger.error('Component test Docker execution failed (session=%s): %s',
+                             session_id, result['error'])
+            finally:
+                if created:
+                    try:
+                        log = await docker_agents.docker('logs', '--tail', '200', runner,
+                                                         timeout=30)
+                        result['runner_log'] = log[-LOG_LIMIT:]
+                        await run_sync((run_dir / 'runner_log.log').write_text,
+                                       result['runner_log'], encoding='utf-8')
+                    except Exception as exc:
+                        result['runner_log'] = f'Could not retrieve logs: {str(exc)[-1000:]}'
+                    try:
+                        state = json.loads(await docker_agents.docker(
+                            'inspect', '--format', '{{json .State}}', runner, timeout=30))
+                        result['exit_code'] = state['ExitCode']
+                    except Exception as exc:
+                        result['error'] = (result['error']
+                                           or f'Could not inspect container: {str(exc)[-1000:]}')
+                    try:
+                        await collect_reports(runner, run_dir / 'reports', stack.test_reports)
+                        result.update(await run_sync(
+                            summarize_reports, run_dir / 'reports', stack.test_reports,
+                            tracked, suite.case_id, suite_tests))
+                    except Exception as exc:
+                        result['error'] = (result['error']
+                                           or f'Could not read test reports: {str(exc)[-1000:]}')
+            if state.get('OOMKilled'):
+                result['error'] = 'The component test container was OOM killed'
+            elif result['exit_code'] in STOPPED_EXIT_CODES:
+                result['error'] = 'The component tests timed out or were terminated'
+            if not result['error']:
+                has_failures = result['failures'] + result['errors'] > 0
+                if result['exit_code'] == 0 and not has_failures:
+                    result['status'] = 'passed'
+                elif result['exit_code'] == 1 and has_failures:
+                    result['status'] = 'failed'
+                else:
+                    result['error'] = 'Runner exit status does not match the test reports'
+    finally:
+        if created:
+            # Removed whatever cancelled the run, but bounded like every Docker operation.
+            task = asyncio.create_task(docker_agents.docker('rm', '-f', runner, timeout=30))
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
+            except Exception:
+                activity.logger.warning('Could not remove component test container %s', runner)
+    result['duration_seconds'] = round(time.monotonic() - started, 3)
+    await run_sync((run_dir / 'result.json').write_text,
+                   json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+    logger.info('Component tests finished (session=%s, status=%s, tests=%d, failures=%d, '
+                'errors=%d, %.2fs, path=%s)', session_id, result['status'], result['tests'],
+                result['failures'], result['errors'], result['duration_seconds'], run_dir)
     return result

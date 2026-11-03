@@ -544,6 +544,9 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
   onRetry: (stage: GenerationStage) => void;
 }) {
   const publication = progress.publication;
+  // A verified change with component tests cannot be pushed yet; the error says so, and
+  // retrying the push would only say it again.
+  const unpublishable = progress.component_tests !== null && Boolean(progress.publication_error);
   if (progress.publication_status === "not_applicable") return null;
   return <>
     <h3>Repository branch</h3>
@@ -552,7 +555,7 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
       : "Verified sources are pushed to a new branch once the tests pass."}</p>}
     {progress.publication_status === "running" && <p role="status">{documentation
       ? "Pushing the documentation to a new branch…" : "Pushing the verified sources to a new branch…"}</p>}
-    {progress.publication_status === "skipped" && <p>{documentation
+    {progress.publication_status === "skipped" && !unpublishable && <p>{documentation
       ? "Nothing was pushed because the documentation was not completed."
       : "Nothing was pushed because verification did not pass."}</p>}
     {publication && <p className="verification-outcome verification-passed" role="status">
@@ -569,10 +572,10 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
     </p>}
     {progress.publication_error && <div className="generation-failure">
       <p role="alert">{progress.publication_error}</p>
-      <button type="button" className="generate-button" disabled={disabled}
+      {!unpublishable && <button type="button" className="generate-button" disabled={disabled}
         onClick={() => onRetry("repository")}>
         {retrying === "repository" ? "Pushing again…" : "Retry push"}
-      </button>
+      </button>}
     </div>}
     {progress.pull_request_status === "running" && <p role="status">Opening or updating the pull request…</p>}
     {progress.pull_request && <p className="verification-outcome verification-passed" role="status">

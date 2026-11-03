@@ -225,6 +225,15 @@ Each step lands with its own tests (`backend/tests/`, stage fakes in
    imports `temporalio`.
 4. **Verification.** `run_component_suite`, the component baseline, the conformance
    check, both results in `judge_baseline`, `unproven_green` and `_publish`.
+   *Done:* `run_component_suite` and `build_component_runner` (conformance check, then the
+   runner built with the changed code) in `app/verification/activities.py`,
+   `DeliveryProgress.component_baseline` and `component_verification`, and `SuiteRun` for
+   `judge_baseline`, behind the `component-runs` workflow patch. A change with no
+   `contract` route runs the repository's own contract tests as they are, at the baseline
+   and with the fix, or none when the repository has none. Until steps 5 and 6 land, a
+   change with component tests is not repaired, reviewed or pushed: a failure ends it
+   with `verification_error`, and a pass ends it with `publication_error` saying it
+   cannot be pushed yet (`COMPONENT_CHANGE_UNREPAIRED`, `COMPONENT_CHANGE_UNPUBLISHED`).
 5. **Implementation, diagnosis, repair, review** integration (3.6).
 6. **Publication and UI** (3.7).
 7. **End to end.** Run the flow-closing bugfix through the real pipeline with real

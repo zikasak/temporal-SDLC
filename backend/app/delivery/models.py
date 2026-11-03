@@ -123,6 +123,12 @@ class DeliveryProgress:
     baseline: VerificationResult | None = None
     baseline_error: str | None = None
     baseline_status: BaselineStatus = 'not_applicable'
+    # The component tests' runs beside the contract tests': against the code as the
+    # repository holds it, judged with `baseline` into `baseline_status`, and against the
+    # changed code, which verification runs once the change conforms to its component
+    # contract.
+    component_baseline: VerificationResult | None = None
+    component_verification: VerificationResult | None = None
     verification: VerificationResult | None = None
     verification_error: str | None = None
     verification_status: VerificationStatus = 'not_applicable'
@@ -168,45 +174,85 @@ class DeliveryProgress:
     existing_code_changed: bool = False
 
 
-def judge_baseline(result: VerificationResult, added: list[str], changed: list[str],
-                   ) -> tuple[BaselineStatus, str | None]:
+@dataclass(frozen=True)
+class SuiteRun:
+    """One suite's run of a change: what it is called, what it ran, the tests the change
+    added to it and the repository's tests a repair corrected in it."""
+    name: str
+    result: VerificationResult
+    added: list[str]
+    changed: list[str] = field(default_factory=list)
+    # What a criterion its tests skip on should be rephrased as.
+    observable: str = "behaviour the service's HTTP API shows"
+
+
+def contract_run(result: VerificationResult, added: list[str],
+                 changed: list[str]) -> SuiteRun:
+    return SuiteRun('contract tests', result, added, changed)
+
+
+def component_run(result: VerificationResult, added: list[str],
+                  changed: list[str] | None = None) -> SuiteRun:
+    return SuiteRun('component tests', result, added, changed or [],
+                    observable='behaviour a seam of the code shows')
+
+
+def judge_baseline(result: VerificationResult | None, added: list[str], changed: list[str],
+                   component: SuiteRun | None = None) -> tuple[BaselineStatus, str | None]:
     """What a baseline run proves, and what to tell the user when it proves too little.
 
     `added` are the tests the change added. `changed` are repository tests a repair
-    corrected because the change made them wrong; those may fail or pass here."""
-    tracked = result['tracked']
+    corrected because the change made them wrong; those may fail or pass here. A change
+    with component tests is judged on both suites' runs: `component`, and `result`, which
+    is None when it has no contract tests to run at all."""
+    runs = [*([contract_run(result, added, changed)] if result is not None else []),
+            *([component] if component else [])]
+    for run in runs:
+        error = _baseline_error(run, prefix=bool(component))
+        if error:
+            return 'error', error
+    added_all = [(run, case) for run in runs for case in run.added]
+    passing = [case for run, case in added_all
+               if run.result['tracked'][case]['failed'] < run.result['tracked'][case]['tests']]
+    if passing or not added_all:
+        return 'not_reproduced', (
+            (f'Added tests that do not fail against the service as the repository holds it: '
+             f'{", ".join(passing[:NAMED_TESTS])} ({len(passing)} of {len(added_all)}).'
+             if passing else 'No added test is left in the suite.')
+            + ' The problem was not reproduced, so nothing was changed.')
+    return 'reproduced', None
+
+
+def _baseline_error(run: SuiteRun, prefix: bool) -> str | None:
+    """Why one suite's baseline run proves nothing. `prefix` names the suite, for a change
+    that has two."""
+    result, tracked = run.result, run.result['tracked']
+    named = f'{run.name[0].upper()}{run.name[1:]}: ' if prefix else ''
     if result['status'] == 'error' or tracked is None:
-        return 'error', 'The baseline run could not complete.'
+        return f'{named}The baseline run could not complete.'
     if result['skipped']:
         # However it came to be skipped, a test that does not run protects nothing. A
         # regression test that skips itself was written for a criterion its suite cannot
         # observe: the routing sent it to the wrong suite, and a new test fares no better.
-        return 'error', (f'Tests skipped themselves in the baseline run: {result["skipped"]}'
-                         f'{named_skips(result)}. A test that skips itself was written for '
-                         'a criterion the contract tests cannot observe, so the routing of '
-                         'that criterion to them was wrong and the baseline proves nothing. '
-                         'Rephrase the criterion as behaviour the service\'s HTTP API shows, '
-                         'in a fork of the interview, or write the regression tests again if '
-                         'the skip has another cause.')
+        return (f'{named}Tests skipped themselves in the baseline run: {result["skipped"]}'
+                f'{named_skips(result)}. A test that skips itself was written for '
+                f'a criterion the {run.name} cannot observe, so the routing of '
+                'that criterion to them was wrong and the baseline proves nothing. '
+                f'Rephrase the criterion as {run.observable}, '
+                'in a fork of the interview, or write the regression tests again if '
+                'the skip has another cause.')
     missing = result['missing_tests']
     if missing:
-        return 'error', ('Tests of the suite that did not run in the baseline run: '
-                         f'{", ".join(missing[:NAMED_TESTS])} ({len(missing)}). Every test '
-                         'of the suite has to run for the baseline to prove anything.')
+        return (f'{named}Tests of the suite that did not run in the baseline run: '
+                f'{", ".join(missing[:NAMED_TESTS])} ({len(missing)}). Every test '
+                'of the suite has to run for the baseline to prove anything.')
     existing = result['failures'] + result['errors'] - sum(
-        tracked[case]['failed'] for case in {*added, *changed})
+        tracked[case]['failed'] for case in {*run.added, *run.changed})
     if existing:
-        return 'error', ('Existing tests failing against the service as the repository holds '
-                         f'it: {existing}. The added tests prove nothing until the existing '
-                         'suite passes there.')
-    passing = [case for case in added if tracked[case]['failed'] < tracked[case]['tests']]
-    if passing or not added:
-        return 'not_reproduced', (
-            (f'Added tests that do not fail against the service as the repository holds it: '
-             f'{", ".join(passing[:NAMED_TESTS])} ({len(passing)} of {len(added)}).'
-             if passing else 'No added test is left in the suite.')
-            + ' The problem was not reproduced, so nothing was changed.')
-    return 'reproduced', None
+        return (f'{named}Existing tests failing against the service as the repository holds '
+                f'it: {existing}. The added tests prove nothing until the existing '
+                'suite passes there.')
+    return None
 
 
 SKIP_REASON_CHARS = 300
@@ -227,17 +273,38 @@ def named_skips(result: VerificationResult) -> str:
     return f' ({named}{f"; {more} more" if more > 0 else ""})'
 
 
-def unproven_green(result: VerificationResult) -> str | None:
-    """Why a passed run of a change's suite does not show the change working: a test that
-    did not run, such as one skipped by an assumption once the fix is in, passed nothing."""
-    if result['skipped']:
-        return (f'Tests skipped in the run against the changed service: {result["skipped"]}'
-                f'{named_skips(result)}. Every test of the suite has to run and pass: remove '
-                'the skip, or whatever makes the test skip itself, rather than the test.')
-    if result['missing_tests']:
-        return ('Tests of the suite that did not run against the changed service: '
-                f'{", ".join(result["missing_tests"][:NAMED_TESTS])}.')
+def unproven_green(result: VerificationResult | None,
+                   component: VerificationResult | None = None) -> str | None:
+    """Why a passed run of a change's suites does not show the change working: a test that
+    did not run, such as one skipped by an assumption once the fix is in, passed nothing.
+    `component` is the run of a change's component tests, and `result` is None when the
+    change has no contract tests to run."""
+    for run, named in ((result, ''), (component, 'Component tests: ')):
+        if run is None:
+            continue
+        if run['skipped']:
+            return (f'{named}Tests skipped in the run against the changed service: '
+                    f'{run["skipped"]}{named_skips(run)}. Every test of the suite has to run '
+                    'and pass: remove the skip, or whatever makes the test skip itself, '
+                    'rather than the test.')
+        if run['missing_tests']:
+            return (f'{named}Tests of the suite that did not run against the changed service: '
+                    f'{", ".join(run["missing_tests"][:NAMED_TESTS])}.')
     return None
+
+
+# Why a change proved by component tests stops when they did not pass with the change:
+# their diagnosis and repair come with step 5 of plans/component-contracts.md.
+COMPONENT_CHANGE_UNREPAIRED = (
+    'Deliveries cannot yet diagnose or repair a change with component tests, so the change '
+    'was not repaired and nothing was pushed. Retry the tests to write the tests and the '
+    'change again.')
+# Why one that passed is not pushed all the same: neither the code review nor the push of
+# its component tests and contract is there yet (steps 5 and 6).
+COMPONENT_CHANGE_UNPUBLISHED = (
+    'The change was verified: its tests failed without the fix and pass with it, its '
+    'component tests included. Deliveries cannot yet review or push a change with component '
+    'tests, so nothing was pushed.')
 
 
 def kept_tests(result: VerificationResult, touched: list[str]) -> list[str]:
