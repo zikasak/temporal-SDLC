@@ -1,6 +1,12 @@
 """Bounded verification payloads stored in Temporal and exposed by the session API."""
 from typing import Literal, NotRequired, TypedDict
 
+# The session artifacts that hold each run of the contract tests and of the component tests,
+# and the component tests their author published.
+VERIFICATION_RUNS_DIR = 'verification'
+COMPONENT_RUNS_DIR = 'component-runs'
+COMPONENT_TESTS_ARTIFACT = 'component-tests'
+
 # `reviewing` while the code review runs; `findings_open` when the tests pass but review
 # findings remained after the last review round.
 VerificationStatus = Literal['not_applicable', 'waiting', 'running', 'diagnosing', 'repairing',

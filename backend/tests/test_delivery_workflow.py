@@ -8,12 +8,12 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from temporalio import activity
+from temporalio import activity, workflow
 from temporalio.client import WorkflowExecutionStatus, WorkflowUpdateFailedError
 from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Worker
+from temporalio.worker import Replayer, Worker
 
 from app.api.routes.requirements import router
 from app.api_design import service as api_design_service
@@ -21,7 +21,7 @@ from app.api_design.models import empty_api
 from app.architecture.workflows import ArchitectureWorkflow
 from app.delivery import service as delivery_service
 from app.delivery.models import (
-    COMPONENT_CHANGE_UNPUBLISHED, STOPPED, DeliveryProgress, DeliveryState, TaskSpec,
+    COMPONENT_CHANGE_UNPUSHED, STOPPED, DeliveryProgress, DeliveryState, TaskSpec,
     delivery_id,
 )
 from app.github.checkout import SNAPSHOT_DIR
@@ -740,10 +740,20 @@ async def test_a_bugfix_proved_at_a_seam_runs_its_component_tests_red_then_green
     assert state.verification['status'] == 'passed'
     assert state.component_verification['status'] == 'passed'
     assert state.verification_status == 'completed' and state.verification_error is None
-    # Not reviewed or pushed yet: the delivery says so where the push would be.
-    assert worker.reviewed == [] and not worker.published
+    # The fix was written knowing the seams whose stubs it has to keep.
+    implementation, = worker.implementation_contexts
+    assert implementation['component_routes'] == {
+        'FR-2': {'route': 'component', 'reason': 'Route of FR-2.', 'source': 'routing',
+                 'seam': SEAM}}
+    # The code review reads the component tests and the stubs; there are no contract
+    # tests of the change's own to read.
+    review, = worker.reviewed
+    assert review['component_routes'] == implementation['component_routes']
+    assert review['contract_tests'] is False
+    # Not pushed yet: the delivery says so where the push would be.
+    assert not worker.published
     assert state.publication_status == 'skipped'
-    assert state.publication_error == COMPONENT_CHANGE_UNPUBLISHED
+    assert state.publication_error == COMPONENT_CHANGE_UNPUSHED
     with pytest.raises(sessions.SessionBusy):
         await requirements_service.retry_generation(handle.id, 'repository')
 
@@ -767,7 +777,8 @@ async def test_a_bugfix_proved_by_both_suites_runs_each_at_the_baseline_and_with
     assert worker.verified_images == [ORIGINAL] and worker.verified_tracked == [ADDED_TESTS]
     assert worker.existing_runs == []
     assert state.baseline_status == 'reproduced'
-    assert state.publication_error == COMPONENT_CHANGE_UNPUBLISHED
+    assert worker.reviewed[0]['contract_tests'] is True
+    assert state.publication_error == COMPONENT_CHANGE_UNPUSHED
 
 
 async def test_a_repository_without_contract_tests_is_proved_by_its_component_tests_alone(
@@ -780,7 +791,7 @@ async def test_a_repository_without_contract_tests_is_proved_by_its_component_te
                              'implementation', 'component-runner', 'component-verification']
     assert worker.existing_runs == [] and state.baseline is None and state.verification is None
     assert state.baseline_status == 'reproduced'
-    assert state.publication_error == COMPONENT_CHANGE_UNPUBLISHED
+    assert state.publication_error == COMPONENT_CHANGE_UNPUSHED
 
 
 @pytest.mark.parametrize('baseline, status, error', [
@@ -813,32 +824,118 @@ async def test_nothing_is_fixed_unless_the_component_tests_fail_without_the_fix(
     assert state.component_verification['status'] == 'passed'
 
 
-@pytest.mark.parametrize('outcome, error', [
-    ('failed', 'Tests fail against the changed code: component tests 1 of 4 '
-               f'(tests.test_rooms#{ADDED_COMPONENT_TESTS[0]})'),
-    ('skipped', 'Component tests: Tests skipped in the run against the changed service: 1'),
-    ('contract', 'Tests fail against the changed code: contract tests 1 of 1 (RoomsTest#lists)'),
-])
-async def test_a_change_with_component_tests_is_verified_on_both_suites(
-        env, worker, outcome, error, repository_selection):
+async def test_a_change_with_component_tests_is_not_green_while_one_of_its_tests_skips(
+        env, worker, repository_selection):
     worker.second_requirement = 'FR-5'
     worker.routes = [{'FR-5': 'component'}]
-    worker.component_results = ['skipped' if outcome == 'skipped' else
-                                'failed' if outcome == 'failed' else 'passed']
-    worker.verification_result = 'failed' if outcome == 'contract' else 'passed'
-    handle, state = await fixed(env, repository_selection)
-    assert state.baseline_status == 'reproduced'
-    assert state.verification_status == 'completed' and error in state.verification_error
-    if outcome != 'skipped':
-        assert 'cannot yet diagnose or repair' in state.verification_error
-        assert 'against the same fix' in state.verification_error
-    # Nothing is diagnosed or repaired yet, and nothing is pushed.
-    assert worker.diagnosed == [] and worker.repairs == []
-    assert worker.reviewed == [] and not worker.published
+    worker.component_results = ['skipped']
+    _, state = await fixed(env, repository_selection)
+    assert state.baseline_status == 'reproduced' and state.verification_status == 'completed'
+    assert 'Component tests: Tests skipped in the run against the changed service: 1' in (
+        state.verification_error)
+    # A skip is no failure to diagnose: nothing is repaired, reviewed or pushed.
+    assert worker.diagnosed == [] and worker.repairs == [] and worker.reviewed == []
     assert state.publication_status == 'skipped' and state.publication_error is None
-    # The tests are retried; the fix is not at fault as far as anything knows.
-    with pytest.raises(sessions.SessionBusy):
-        await requirements_service.retry_generation(handle.id, 'server')
+
+
+@pytest.mark.parametrize('failed, diagnosis, repaired', [
+    # A component test fails, and the diagnosis blames the fix.
+    ('component', 'implementation', 'implementation'),
+    # It blames the component test: only that suite's author corrects it.
+    ('component', 'tests:component', 'component-tests'),
+    # A contract test fails, and the diagnosis blames it.
+    ('contract', 'tests:contract', 'tests'),
+])
+async def test_a_change_with_component_tests_is_diagnosed_and_repaired_on_both_suites(
+        env, worker, failed, diagnosis, repaired, repository_selection):
+    worker.second_requirement = 'FR-5'
+    worker.routes = [{'FR-5': 'component'}]
+    worker.diagnoses = [diagnosis]
+    if failed == 'component':
+        worker.component_results = ['failed', 'passed']
+    else:
+        worker.verification_results = ['failed', 'passed']
+    _, state = await fixed(env, repository_selection)
+    # The diagnosis saw both suites' runs, and which contract tests ran.
+    context, = worker.diagnosed
+    assert context['component_verification']['status'] == (
+        'failed' if failed == 'component' else 'passed')
+    assert context['verification']['status'] == ('failed' if failed == 'contract' else 'passed')
+    assert context['contract_suite'] == 'tests' and context['component_routes']['FR-5']
+    (side, repair), = worker.repairs
+    assert side == repaired
+    round_, = state.repairs
+    assert round_['target'] == diagnosis.partition(':')[0]
+    assert round_.get('suite') == (diagnosis.partition(':')[2] or None)
+    if repaired == 'implementation':
+        # The fix sees the failing tests of both suites, never their sources.
+        assert repair['test_failures'][0]['class_name'] == 'tests.test_rooms'
+        assert 'broken_tests' not in repair
+    else:
+        assert repair['broken_tests'] == [BROKEN_TEST]
+        # Repaired tests are shown to fail without the fix once more.
+        assert worker.stages.count('component-baseline') == 2
+    # Each author ran once more at most: the other suite's never did.
+    assert worker.stages.count('component-tests') == 1 + (repaired == 'component-tests')
+    assert worker.stages.count('tests') == 1 + (repaired == 'tests')
+    assert worker.stages.count('component-runner') == 2
+    assert state.verification_status == 'completed' and state.verification_error is None
+    assert state.component_verification['status'] == 'passed'
+    assert len(worker.reviewed) == 1
+    assert state.publication_error == COMPONENT_CHANGE_UNPUSHED
+
+
+async def test_a_history_from_before_component_repairs_replays_unrepaired(
+        env, worker, monkeypatch, repository_selection):
+    worker.routes = [{'FR-2': 'component'}]
+    worker.component_results = ['failed']
+    patched = workflow.patched
+    with monkeypatch.context() as legacy:
+        legacy.setattr(workflow, 'patched',
+                       lambda name: False if name == 'component-repairs' else patched(name))
+        handle, state = await fixed(env, repository_selection)
+        # Such a delivery ended with its verification, as it did then.
+        assert 'cannot yet diagnose or repair' in state.verification_error
+        assert worker.diagnosed == [] and worker.repairs == [] and worker.reviewed == []
+        history = await env.client.get_workflow_handle(delivery_id(handle.id)).fetch_history()
+    await Replayer(workflows=[DeliveryWorkflow]).replay_workflow(history)
+
+
+async def test_component_tests_that_keep_failing_end_the_repairs(env, worker,
+                                                                 repository_selection):
+    worker.routes = [{'FR-2': 'component'}]
+    worker.component_results = ['failed']
+    _, state = await fixed(env, repository_selection)
+    assert len(state.repairs) == 5 and state.verification_status == 'completed'
+    assert state.verification_error == 'Tests still fail after 5 automatic repair rounds.'
+    # The contract tests are the repository's own, which no author of this change wrote.
+    assert worker.diagnosed[0]['contract_suite'] == 'repository-tests'
+    assert worker.reviewed == [] and not worker.published
+    assert state.publication_error is None
+
+
+async def test_review_findings_go_to_the_suite_they_are_about(env, worker, repository_selection):
+    worker.second_requirement = 'FR-5'
+    worker.routes = [{'FR-5': 'component'}]
+    component = {'summary': 'The test fakes the seam.', 'target': 'tests', 'reason': 'R',
+                 'path': 'component-tests/tests/test_rooms.py'}
+    stub = {'summary': 'The docstring names a private helper.', 'target': 'both',
+            'reason': 'R', 'path': 'contracts/components/app/rooms.pyi'}
+    worker.review_findings = [[component, stub], [stub]]
+    _, state = await fixed(env, repository_selection)
+    # The component tests' author alone corrects its finding, and the corrected tests are
+    # shown to fail without the fix again.
+    (side, repair), = worker.repairs
+    assert side == 'component-tests'
+    assert repair['review']['findings'] == [
+        {key: value for key, value in component.items() if key != 'target'}]
+    assert worker.stages.count('tests') == 1 and worker.stages.count('implementation') == 1
+    assert worker.stages.count('component-baseline') == 2
+    # No author may change the stubs: that finding is left open for the user.
+    assert len(worker.reviewed) == 2
+    assert state.verification_status == 'findings_open'
+    assert state.publication_error == (COMPONENT_CHANGE_UNPUSHED
+                                       + ' 1 code review findings remain open.')
 
 
 async def test_a_fix_that_breaks_its_component_contract_is_written_again(
@@ -867,7 +964,7 @@ async def test_a_fix_that_breaks_its_component_contract_is_written_again(
     assert worker.stages.count('component-baseline') == 1
     assert state.implementation_error is None
     assert state.component_verification['status'] == 'passed'
-    assert state.publication_error == COMPONENT_CHANGE_UNPUBLISHED
+    assert state.publication_error == COMPONENT_CHANGE_UNPUSHED
 
 
 async def test_more_component_tests_than_a_baseline_tracks_are_not_judged_in_part(

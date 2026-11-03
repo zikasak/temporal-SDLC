@@ -28,7 +28,11 @@ type RequirementRoute = {
   route: "contract" | "component" | "unobservable"; reason: string; source: "routing" | "tests"; seam?: Seam;
 };
 // `tests` are the failing tests the diagnosis found broken: the only ones a repair may change.
-type RepairRound = { attempt: number; target: "implementation" | "tests"; tests: TestRef[]; summary: string };
+// `suite` names the tests a repair of a change with component tests corrected.
+type RepairRound = {
+  attempt: number; target: "implementation" | "tests"; tests: TestRef[]; summary: string;
+  suite?: "contract" | "component";
+};
 type VerificationResult = {
   // `not_implemented`: this kind of task has no check yet, so nothing was run.
   status: "passed" | "failed" | "error" | "not_implemented";
@@ -182,6 +186,7 @@ function repairRounds(value: unknown): RepairRound[] {
     ...item,
     tests: Array.isArray(item.tests) ? item.tests.filter((test: unknown): test is TestRef =>
       isObject(test) && typeof test.class_name === "string" && typeof test.name === "string") : [],
+    suite: item.suite === "contract" || item.suite === "component" ? item.suite : undefined,
   }) as RepairRound);
 }
 
@@ -755,6 +760,16 @@ export function DeliveryResults({ progress, kind = null, documentation = false, 
     (change || Boolean(progress.code)) &&
     (Boolean(progress.verification_error) || result?.status === "error");
   const service = progress.implementation ? "built" : progress.implementation_error ? "build failed" : "building";
+  const repairs = progress.repairs.length > 0 && <ol className="verification-failures">
+    {progress.repairs.map((round) => <li key={round.attempt}>
+      <strong>Repair round {round.attempt}: {round.target === "tests" && round.suite
+        ? `${round.suite} tests` : round.target} corrected</strong>
+      {round.tests.length > 0 && <span>
+        Tests found broken: {round.tests.map((test) => `${test.class_name}.${test.name}`).join(", ")}
+      </span>}
+      {round.summary && <span>{round.summary}</span>}
+    </li>)}
+  </ol>;
   return <>
     {questions}
     {change && progress.routing_status !== "not_applicable" &&
@@ -820,18 +835,10 @@ export function DeliveryResults({ progress, kind = null, documentation = false, 
         <p className={`verification-outcome verification-${result.status}`} role="status">
           {result.status === "passed" ? "Tests passed" : result.status === "failed" ? "Tests failed" : "Verification could not complete"}
         </p>
-        <TestRun result={result}>
-          {progress.repairs.length > 0 && <ol className="verification-failures">
-            {progress.repairs.map((round) => <li key={round.attempt}>
-              <strong>Repair round {round.attempt}: {round.target} corrected</strong>
-              {round.tests.length > 0 && <span>
-                Tests found broken: {round.tests.map((test) => `${test.class_name}.${test.name}`).join(", ")}
-              </span>}
-              {round.summary && <span>{round.summary}</span>}
-            </li>)}
-          </ol>}
-        </TestRun>
+        <TestRun result={result}>{repairs}</TestRun>
       </>}
+      {/* A change proved by its component tests alone has no contract test run. */}
+      {!result && repairs}
       <CodeReview progress={progress} retrying={retrying} disabled={disabled} onRetry={onRetry}
         onFindings={onFindings} />
       <Publication progress={progress} documentation={false} retrying={retrying} disabled={disabled} onRetry={onRetry} />

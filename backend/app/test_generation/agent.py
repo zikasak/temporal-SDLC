@@ -180,6 +180,36 @@ A criterion of `routes` may turn out not to be observable through the stubbed sy
 after all: the behaviour it is about happens outside every symbol the stubs declare, or
 needs a collaborator the stubs do not name. """ + DECLINE_PROMPT
 
+COMPONENT_REPAIR_PROMPT = """
+This is a repair run. /workspace/tests already holds your previous component suite. It ran,
+built with the changed code, but some tests failed, and a reviewer who compared them with
+the brief and the stubs concluded that those tests, not the code, are wrong. The `repair`
+entry of the input holds the reviewer's `instructions`, the failing `test_failures` and
+`broken_tests`: the tests the reviewer found wrong. Those are the only tests you may
+change. Every other test must stay exactly as it is, including a failing one, and the
+outer worker rejects a suite in which one of them differs or is missing.
+Correct each broken test with targeted edits so that it asserts exactly what the brief and
+the stubs' docstrings state; do not start over. Never make a test pass by weakening it: do
+not disable tests, drop assertions the brief supports, or fake the seam. Remove an
+assertion, or a whole broken test, only when neither the brief nor a docstring supports
+what it asserts. The corrected tests are run against the code as it was before the change
+again, where each one you added must still fail. The brief and the stubs remain the
+authority: where the instructions contradict them, follow them. The service's source
+stays unavailable.
+"""
+
+COMPONENT_REVIEW_PROMPT = """
+This is a correction run after a code review. /workspace/tests already holds your previous
+component suite, which passes with the changed code. A code review of the delivery's
+changes found problems the component tests must correct. The `repair.review` entry of the
+input holds the `findings` sent to you (each with its summary, the file it is about, when
+it is about one, and why it was sent to you) and, when present, the user's `instructions`
+about them, which take precedence over the findings. Correct each finding with targeted
+edits; do not start over or change tests the findings do not concern. Never weaken a test
+to make it pass. The brief and the stubs remain the authority. The service's source stays
+unavailable.
+"""
+
 
 REPAIR_PROMPT = """
 This is a repair run. /workspace/tests already holds your previous suite. It compiled, but
@@ -257,9 +287,12 @@ def validate_completion(test_glob: str, root: Path) -> None:
 def prompt(inputs: dict, language: dict) -> str:
     instructions = language['instructions']
     if inputs.get('component'):
-        # A change's criteria observed at seams; only its first author writes them.
+        # A change's criteria observed at seams; only its first author may decline one.
+        repair = inputs.get('repair')
         return (COMPONENT_PROMPT.format(instructions=instructions)
-                + COMPONENT_UNOBSERVABLE_PROMPT)
+                + (COMPONENT_UNOBSERVABLE_PROMPT if not repair
+                   else COMPONENT_REVIEW_PROMPT if repair.get('review')
+                   else COMPONENT_REPAIR_PROMPT))
     if inputs.get('brief'):
         # A change to an existing service is told about its repository by its own prompt.
         return (CHANGE_PROMPT.format(instructions=instructions)

@@ -346,3 +346,53 @@ async def test_every_project_of_the_checkout_is_the_authors_to_change(tmp_path, 
         {'path': 'frontend', 'toolchain': 'Node.js (npm)'}] if told else None)
     prompt = agent.base_prompt(inputs, '')
     assert (agent.PARTS_PROMPT.splitlines()[1] in prompt) is told
+
+
+async def test_a_change_proved_at_seams_gets_the_stubs_it_has_to_keep(tmp_path, monkeypatch):
+    monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
+    session = tmp_path / 'session'
+    for name, text in {'repository/app/rooms.py': 'code', 'repository/Dockerfile': 'FROM scratch',
+                       'repository/component-tests/tests/test_rooms.py': 'component tests',
+                       'repository/contracts/components/app/rooms.pyi': 'published stub',
+                       'routing/components/app/rooms.pyi': 'routed stub',
+                       'routing/components/runtime.json': '{}'}.items():
+        (session / name).parent.mkdir(parents=True, exist_ok=True)
+        (session / name).write_text(text)
+    routes = {'FR-2': {'route': 'component', 'reason': 'R.',
+                       'seam': {'module': 'app.rooms', 'symbols': ['close']}}}
+    context = {'requirements': [], 'language': 'python', 'component_routes': routes,
+               'brief': {'requirements': [], 'requirements_document': 'Close rooms.'},
+               'repository': {'full_name': 'octocat/project', 'branch': 'main'}}
+    sent = {}
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': 0})
+        if args[0] == 'cp' and args[1] == '-a':
+            import tarfile
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.update({item.name: archive.extractfile(item).read().decode()
+                             for item in archive.getmembers() if item.isfile()})
+        if args[0] == 'cp' and args[1].endswith(':/workspace/service/.'):
+            (Path(args[2]) / 'Dockerfile').write_text('FROM scratch')
+        if args[0] == 'build' and '--iidfile' in args:
+            Path(args[args.index('--iidfile') + 1]).write_text('sha256:' + 'c' * 64)
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    await ActivityEnvironment().run(activities.implement_service, 'session', context)
+    inputs = json.loads(sent['input.json'])
+    assert inputs['component_routes'] == routes
+    # The stubs the routing checked, beside the checkout; never the component tests.
+    assert sent['contracts/components/app/rooms.pyi'] == 'routed stub'
+    assert not any('component-tests' in name or name.startswith('service/contracts')
+                   for name in sent)
+    prompt = agent.base_prompt(inputs, '')
+    assert agent.COMPONENT_PROMPT in prompt and 'keep every signature' in prompt
+    assert agent.COMPONENT_PROMPT not in agent.base_prompt({'brief': {}}, '')
+
+    # Without the routing's stubs nothing can be held to them.
+    import shutil
+    shutil.rmtree(session / 'routing/components')
+    with pytest.raises(ApplicationError, match='component contract of the routing'):
+        await ActivityEnvironment().run(activities.implement_service, 'session', context)

@@ -15,7 +15,8 @@ with workflow.unsafe.imports_passed_through():
     )
     from app.delivery.contract import with_requirements
     from app.delivery.models import (
-        COMPONENT_CHANGE_UNPUBLISHED, COMPONENT_CHANGE_UNREPAIRED, MENTION_HANDLED,
+        COMPONENT_CHANGE_UNPUBLISHED, COMPONENT_CHANGE_UNPUSHED, COMPONENT_CHANGE_UNREPAIRED,
+        MENTION_HANDLED,
         OUTCOME_OWED, STOPPED, TASK_IDLE_TIMEOUT, AgentQuestions, DeliveryProgress,
         DeliveryState, component_run, is_mention, judge_baseline, judge_kept, kept_tests,
         mention_key, open_review_findings, restorable_tests, unproven_green,
@@ -27,8 +28,8 @@ with workflow.unsafe.imports_passed_through():
     from app.requirements.models import CHANGE_KINDS
     from app.routing.models import COMPONENT_TESTS_UNRUN, judge_routes
     from app.review.models import (
-        MAX_REVIEW_ROUNDS, ReviewFinding, ReviewRound, earlier_findings, for_worker,
-        review_request,
+        MAX_REVIEW_ROUNDS, ReviewFinding, ReviewRound, correctable, earlier_findings,
+        for_suite, for_worker, review_request,
     )
     from app.temporal.activities import (
         open_pull_request, publish_documentation, publish_onboarding,
@@ -48,6 +49,9 @@ COMPONENT_TESTS_PATCH = 'component-tests'
 # Marks the workflow code that runs component tests, at the baseline and with the change,
 # where deliveries stopped once they were written before.
 COMPONENT_RUNS_PATCH = 'component-runs'
+# Marks the workflow code that diagnoses, repairs and reviews a change with component tests,
+# which ended with their verification before.
+COMPONENT_REPAIRS_PATCH = 'component-repairs'
 # Failed tests a verification that is not repaired names.
 NAMED_FAILURES = 5
 # Runs of one verification whose result is an infrastructure error, not a verdict.
@@ -1020,7 +1024,13 @@ class DeliveryWorkflow:
     async def _verify_built(self) -> None:
         """Verification needs both images; a failed build leaves nothing to verify."""
         if self.progress.component_tests:
-            await self._verify_components()
+            if not self._repairs_components():
+                # Histories from before such changes were repaired and reviewed.
+                await self._verify_components()
+                return
+            await self._verify_components_and_repair()
+            if self._components_passed():
+                await self._review_rounds()
             return
         if (self.progress.implementation and self.progress.tests
                 and not self.progress.implementation_error and not self.progress.tests_error):
@@ -1037,6 +1047,8 @@ class DeliveryWorkflow:
     def _passed(self) -> bool:
         """Whether verification showed the implementation and the tests passing against
         each other, with everything a change needs proved."""
+        if self.progress.component_tests:
+            return self._components_passed()
         return bool(self.progress.verification_status == 'completed'
                     and self.progress.verification
                     and self.progress.verification['status'] == 'passed'
@@ -1059,11 +1071,39 @@ class DeliveryWorkflow:
                     and not self.progress.component_tests_error
                     and self.progress.baseline_status == 'reproduced')
 
-    async def _verify_components(self) -> None:
+    def _repairs_components(self) -> bool:
+        """Whether a change with component tests is diagnosed, repaired and reviewed as one
+        with contract tests alone is."""
+        return workflow.patched(COMPONENT_REPAIRS_PATCH)
+
+    def _component_tests_failed(self) -> bool:
+        """Whether verification of a change with component tests ran, and tests of either
+        suite failed against the changed code."""
+        return bool(self.progress.verification_status == 'completed'
+                    and not self.progress.implementation_error
+                    and any(run and run['status'] == 'failed' for run in (
+                        self.progress.verification, self.progress.component_verification)))
+
+    async def _verify_components_and_repair(self) -> None:
+        """Verify a change with component tests; while tests of either suite fail, repair
+        the side the diagnosis condemns, and only the suite it names of the tests, then
+        verify again."""
+        await self._verify_components()
+        if not self._component_tests_failed():
+            return
+        for attempt in range(1, MAX_REPAIR_ROUNDS + 1):
+            if not await self._repair(attempt):
+                return
+            await self._verify_components(attempt)
+            if not self._component_tests_failed():
+                return
+        self.progress.verification_error = (
+            f'Tests still fail after {MAX_REPAIR_ROUNDS} automatic repair rounds.')
+
+    async def _verify_components(self, repair: int = 0) -> None:
         """Verify a change with component tests: the changed code must still conform to its
         component contract, and then pass its contract tests, if it has any, and its
-        component tests, built with it. The change is not repaired, reviewed or pushed
-        yet, whatever the outcome."""
+        component tests, built with it."""
         if (not self.progress.implementation or self.progress.implementation_error
                 or self.progress.tests_error or self.progress.component_tests_error):
             self.progress.verification_status = 'skipped'
@@ -1099,7 +1139,7 @@ class DeliveryWorkflow:
                         'VerificationWorkflow',
                         args=[self.spec.session_id, service_image, test_image,
                               self.spec.language, added[:MAX_TRACKED], suite_dir],
-                        id=self._child_id('verification'),
+                        id=self._child_id('verification', repair),
                         task_queue=VERIFICATION_TASK_QUEUE,
                         result_type=dict,
                     )
@@ -1135,8 +1175,9 @@ class DeliveryWorkflow:
                 failed.append(f'{name} {run["failures"] + run["errors"]} of {run["tests"]}'
                               + (f' ({named})' if named else ''))
         if failed:
-            return (f'Tests fail against the changed code: {"; ".join(failed)}. '
-                    f'{COMPONENT_CHANGE_UNREPAIRED}')
+            # Histories from before such changes were repaired said they could not be.
+            unrepaired = '' if self._repairs_components() else f' {COMPONENT_CHANGE_UNREPAIRED}'
+            return f'Tests fail against the changed code: {"; ".join(failed)}.{unrepaired}'
         return unproven_green(contract, component)
 
     async def _review_rounds(self, instructions: str | None = None,
@@ -1161,6 +1202,10 @@ class DeliveryWorkflow:
             if not new:
                 workflow.logger.info('The review only repeats findings already corrected')
                 break
+            if not any(correctable(item) for item in new):
+                # Such as findings about the stubs of a component contract: the user decides.
+                workflow.logger.info('The review found nothing an author can correct')
+                break
             if count == MAX_REVIEW_ROUNDS:
                 workflow.logger.info('Review findings remain after %d rounds',
                                      MAX_REVIEW_ROUNDS)
@@ -1178,6 +1223,9 @@ class DeliveryWorkflow:
         self.progress.verification_status = 'reviewing'
         number = len(self.progress.reviews) + 1
         context = self._coding_context()
+        if 'component_routes' in context:
+            # The criteria the HTTP suite proves have contract tests of the change's own.
+            context['contract_tests'] = bool(self.progress.tests)
         if instructions:
             context['instructions'] = instructions
         if earlier:
@@ -1209,7 +1257,7 @@ class DeliveryWorkflow:
 
     async def _correct(self, findings: list[ReviewFinding], number: int,
                        instructions: str | None = None,
-                       restore: list[str] | None = None) -> bool:
+                       restore: list[str] | None = None, suite: str | None = None) -> bool:
         """Have each worker the findings concern correct them, or with the user's
         instructions both, then verify again. True when verification passed again.
         A correction of the review's own findings that did not pass is left for the user
@@ -1218,8 +1266,9 @@ class DeliveryWorkflow:
         workers = [worker for worker in ('implementation', 'tests')
                    if instructions or for_worker(findings, worker)]
         await asyncio.gather(*(
-            (self._implement_service if worker == 'implementation' else self._generate_tests)(
-                review_request(findings, worker, number, instructions, restore))
+            self._implement_service(review_request(findings, worker, number, instructions))
+            if worker == 'implementation' else self._generate_tests(
+                review_request(findings, worker, number, instructions, restore), suite)
             for worker in workers))
         if await self._verify_correction(workers, number):
             return True
@@ -1236,13 +1285,15 @@ class DeliveryWorkflow:
         number = self.progress.reviews[-1]['round']
         rejected = self._rejected_suite() if workflow.patched('correct-rejected-suite') else None
         if (self.progress.implementation_error or self.progress.tests_error
+                or self.progress.component_tests_error
                 or self.spec.kind == 'bugfix' and self.progress.baseline_status != 'reproduced'):
             self.progress.implementation_error = None
             self.progress.tests_error = None
+            self.progress.component_tests_error = None
             corrected = await self._correct(open_review_findings(self.progress), number)
         elif rejected:
-            finding, restore = rejected
-            corrected = await self._correct([finding], number, restore=restore)
+            finding, restore, suite = rejected
+            corrected = await self._correct([finding], number, restore=restore, suite=suite)
         else:
             self.progress.verification_status = 'repairing'
             corrected = await self._verify_correction([], number)
@@ -1250,19 +1301,32 @@ class DeliveryWorkflow:
         if corrected:
             await self._review_rounds(corrected=open_review_findings(self.progress))
 
-    def _rejected_suite(self) -> tuple[ReviewFinding, list[str]] | None:
+    def _rejected_suite(self) -> tuple[ReviewFinding, list[str], str | None] | None:
         """Why the last verification, which ran and passed, still rejected the suite of a
         change, as a finding for the test author, with the repository's tests it has to
         put back as they were: those it changed or removed that the changed service
-        still passes. None when the verification proved nothing about the suite."""
+        still passes, and the suite whose author it is, for a change with component
+        tests. None when the verification proved nothing about the suite."""
+        reason = 'Verification of the corrected delivery rejected its tests.'
+        if self.progress.component_tests:
+            contract, component = (self.progress.verification,
+                                   self.progress.component_verification)
+            if not component or component['status'] != 'passed' or (
+                    contract and contract['status'] != 'passed'):
+                return None
+            for run, suite, author in ((contract, 'contract', self.progress.tests),
+                                       (component, 'component', True)):
+                unrun = unproven_green(run) if run and author else None
+                if unrun:
+                    return {'summary': unrun, 'target': 'tests', 'reason': reason}, [], suite
+            return None
         result = self.progress.verification
         if (self.spec.kind not in CHANGE_KINDS or not result
                 or result['status'] != 'passed' or not self.progress.tests):
             return None
-        reason = 'Verification of the corrected delivery rejected its tests.'
         unrun = unproven_green(result)
         if unrun:
-            return {'summary': unrun, 'target': 'tests', 'reason': reason}, []
+            return {'summary': unrun, 'target': 'tests', 'reason': reason}, [], None
         existing = self.progress.existing_tests
         if self.spec.kind != 'api_change' or not existing:
             return None
@@ -1271,7 +1335,7 @@ class DeliveryWorkflow:
         kept = kept_tests(existing, touched)
         if not kept:
             return None
-        return restore_finding(kept, reason), kept
+        return restore_finding(kept, reason), kept, None
 
     async def _restore_kept(self) -> None:
         """While verification of an API change passed but rejected its suite for tests of
@@ -1298,7 +1362,8 @@ class DeliveryWorkflow:
 
     async def _verify_correction(self, workers: list[str], number: int) -> bool:
         """Verify the delivery as the workers corrected it; true when it passed again."""
-        if self.progress.implementation_error or self.progress.tests_error:
+        if (self.progress.implementation_error or self.progress.tests_error
+                or self.progress.component_tests_error):
             self.progress.verification_status = 'error'
             return False
         if ('tests' in workers and self.spec.kind == 'bugfix'
@@ -1375,6 +1440,9 @@ class DeliveryWorkflow:
 
     async def _verify_and_repair(self) -> None:
         """Verify; while tests fail, repair the side at fault and verify again."""
+        if self.progress.component_tests:
+            await self._verify_components_and_repair()
+            return
         await self._verify_service()
         if not self._tests_failed():
             return
@@ -1428,11 +1496,16 @@ class DeliveryWorkflow:
     async def _repair(self, attempt: int) -> bool:
         """Decide which side the failed tests condemn and have its own stage correct it."""
         self.progress.verification_status = 'diagnosing'
+        context = {**self._coding_context(), 'verification': self.progress.verification}
+        if self.progress.component_tests:
+            # Both suites' runs; the contract tests are the repository's own when the change
+            # gave them no criterion.
+            context['component_verification'] = self.progress.component_verification
+            context['contract_suite'] = 'tests' if self.progress.tests else SNAPSHOT_DIR
         try:
             diagnosis = await workflow.execute_child_workflow(
                 'DiagnosisWorkflow',
-                args=[self.spec.session_id, {**self._coding_context(),
-                                             'verification': self.progress.verification}],
+                args=[self.spec.session_id, context],
                 id=self._child_id('diagnosis', attempt),
                 task_queue=DIAGNOSIS_TASK_QUEUE,
                 result_type=dict,
@@ -1449,19 +1522,22 @@ class DeliveryWorkflow:
             diagnosis, code_change = await self._confirm_bug(diagnosis)
             target = diagnosis['target']
         workflow.logger.info('Repair round %d: correcting the %s', attempt, target)
+        suite = diagnosis.get('suite')
         self.progress.repairs.append(
             {'attempt': attempt, 'target': target, 'tests': diagnosis['tests'],
-             'summary': diagnosis['summary']})
+             'summary': diagnosis['summary'], **({'suite': suite} if suite else {})})
         self.progress.verification_status = 'repairing'
-        repair = repair_request(diagnosis, self.progress.verification, attempt)
+        repair = repair_request(diagnosis, self.progress.verification, attempt,
+                                self.progress.component_verification)
         if code_change:
             repair['code_change'] = True
         # A failed repair keeps the previous image and records the stage's own error.
         if target == 'implementation':
             await self._implement_service(repair)
         else:
-            await self._generate_tests(repair)
-        if self.progress.implementation_error or self.progress.tests_error:
+            await self._generate_tests(repair, suite)
+        if (self.progress.implementation_error or self.progress.tests_error
+                or self.progress.component_tests_error):
             self.progress.verification_status = 'completed'
             return False
         if (target == 'tests' and self.spec.kind == 'bugfix'
@@ -1559,6 +1635,11 @@ class DeliveryWorkflow:
             # The task's top-level architecture, which the code follows; the agents never
             # change it.
             context['architecture'] = self.spec.architecture
+        component = self._component_routes()
+        if component:
+            # The criteria proved at seams of the code: the fix keeps their stubs'
+            # signatures, and the diagnosis and the review read their tests.
+            context['component_routes'] = component
         return context
 
     def _stage_context(self, repair: dict[str, Any] | None) -> dict[str, Any]:
@@ -1581,8 +1662,14 @@ class DeliveryWorkflow:
             # there yet: one that passed both suites says so where its push would be.
             self.progress.publication_status = 'skipped'
             self.progress.pull_request_status = 'skipped'
-            if self._components_passed():
-                self.progress.publication_error = COMPONENT_CHANGE_UNPUBLISHED
+            if not self._repairs_components():
+                if self._components_passed():
+                    self.progress.publication_error = COMPONENT_CHANGE_UNPUBLISHED
+            elif self._components_passed() or (
+                    self.progress.verification_status == 'findings_open'):
+                remaining = len(open_review_findings(self.progress))
+                self.progress.publication_error = COMPONENT_CHANGE_UNPUSHED + (
+                    f' {remaining} code review findings remain open.' if remaining else '')
             return
         # Tests that pass with review findings left after the last round are pushed too,
         # marked as unverified, with the findings in the commit message.
@@ -1820,11 +1907,16 @@ class DeliveryWorkflow:
             workflow.logger.warning("Service implementation failed: %s", exc.cause or exc)
             self.progress.implementation_error = "The service could not be implemented or built."
 
-    async def _generate_tests(self, repair: dict[str, Any] | None = None) -> None:
+    async def _generate_tests(self, repair: dict[str, Any] | None = None,
+                              suite: str | None = None) -> None:
         """Write the tests: the contract tests, and, for the first run of a change's tests
         with criteria routed to a seam, the component tests beside them. The contract
         tests' author is then given the criteria routed to it, and not run when there are
-        none."""
+        none. A repair of a change with component tests runs the author of `suite`, or,
+        for review findings, of each suite they concern."""
+        if repair and self.progress.component_tests and self._repairs_components():
+            await self._repair_suites(repair, suite)
+            return
         component = {} if repair else self._component_routes()
         routes = {requirement: {'route': route['route'], 'reason': route['reason']}
                   for requirement, route in (self.progress.routing or {}).items()
@@ -1834,21 +1926,58 @@ class DeliveryWorkflow:
             authors.append(self._generate_contract_tests(repair, routes))
         await asyncio.gather(*authors)
 
-    async def _generate_component_tests(self, routes: dict[str, Any]) -> None:
-        self.progress.component_tests = None
+    async def _repair_suites(self, repair: dict[str, Any], suite: str | None) -> None:
+        """Have the authors of a change with component tests correct their suites: the
+        one a diagnosis named, or those review findings concern, given only their own
+        findings. A finding about no file concerns both, as do the user's instructions."""
+        review = repair.get('review')
+        if not suite and not review:
+            # A diagnosis names the suite; one recorded without it condemns the failed one.
+            component = self.progress.component_verification
+            suite = 'component' if component and component['status'] == 'failed' else 'contract'
+        if suite == 'contract' and not self.progress.tests:
+            self.progress.tests_error = ("The repository's own contract tests are not "
+                                         'repaired: no author of this change wrote any.')
+            return
+        suites = [suite] if suite else ['component', *(['contract'] if self.progress.tests else [])]
+        authors = []
+        for name in suites:
+            own = repair
+            if review and not suite:
+                findings = for_suite(review['findings'], name)
+                if not findings and not review.get('instructions'):
+                    continue
+                own = {**repair, 'review': {**review, 'findings': findings}}
+            if name == 'component':
+                authors.append(self._generate_component_tests(self._component_routes(), own))
+            else:
+                routes = {requirement: {'route': route['route'], 'reason': route['reason']}
+                          for requirement, route in (self.progress.routing or {}).items()
+                          if route['route'] == 'contract'}
+                authors.append(self._generate_contract_tests(own, routes))
+        await asyncio.gather(*authors)
+
+    async def _generate_component_tests(self, routes: dict[str, Any],
+                                        repair: dict[str, Any] | None = None) -> None:
+        """Write the component tests, or with `repair` correct them; a failed repair keeps
+        the suite it was to correct, and records its error."""
+        if not repair:
+            self.progress.component_tests = None
         self.progress.component_tests_error = None
         try:
             tests = await workflow.execute_child_workflow(
                 'ComponentTestGenerationWorkflow',
-                args=[self.spec.session_id, {**self._stage_context(None), 'routes': routes}],
-                id=self._child_id('component-test-generation'),
+                args=[self.spec.session_id, {**self._stage_context(repair), 'routes': routes}],
+                id=self._child_id(self._stage_name('component-test-generation', repair),
+                                  repair['attempt'] if repair else 0),
                 task_queue=COMPONENT_TEST_GENERATION_TASK_QUEUE,
                 result_type=dict,
             )
         except ChildWorkflowError as exc:
             workflow.logger.warning('Component test generation failed: %s', exc.cause or exc)
-            self.progress.component_tests_error = ('The component tests could not be '
-                                                   'generated or built with the code.')
+            self.progress.component_tests_error = (
+                'The component tests could not be repaired or built with the code.' if repair
+                else 'The component tests could not be generated or built with the code.')
             return
         if 'unobservable' in tests:
             self._declined(tests['unobservable'])

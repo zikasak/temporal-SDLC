@@ -189,7 +189,7 @@ async def test_the_author_may_name_only_its_own_criteria_unobservable(session, m
 
 @pytest.mark.parametrize('change, error', [
     ({'language': 'java'}, 'has no component tests'),
-    ({'repair': {'attempt': 1}}, 'only for the first run'),
+    ({'brief': None}, "only for a change's criteria"),
     ({'routes': {'FR-2': {'route': 'contract', 'reason': 'GET.'}}}, 'No criterion is routed'),
     ({'routes': {'FR-3': {'route': 'component', 'reason': 'R.'}}}, 'names no seam'),
 ])
@@ -218,6 +218,80 @@ async def test_the_contract_author_is_given_its_criteria_and_may_decline_only_th
     assert json.loads(sent['input.json'])['routes'] == context['routes']
 
 
+BROKEN = {'class_name': 'tests.test_rooms', 'name': 'test_a_merged_room_is_closed'}
+SECOND = '''
+
+def test_an_unmerged_room_is_closed():
+    rooms = Rooms()
+    rooms.close("a", merged=False)
+    assert rooms.state("a") == "closed"
+'''
+
+
+async def published(session, monkeypatch, files=None):
+    """The suite as its first run publishes it: the repository's test and two added ones."""
+    fake_docker(monkeypatch, files or {**SUITE_FILES, 'tests/test_rooms.py':
+                                       SUITE_FILES['tests/test_rooms.py'] + SECOND}, {}, [])
+    return await ActivityEnvironment().run(components.generate_component_tests, 'session',
+                                           CONTEXT)
+
+
+@pytest.mark.parametrize('repair', ['diagnosis', 'review'])
+async def test_a_repair_continues_the_published_suite_and_changes_only_what_it_may(
+        session, monkeypatch, repair):
+    first = await published(session, monkeypatch)
+    suite = (session / 'component-tests/suite/tests/test_rooms.py').read_text()
+    context = {**CONTEXT, 'repair': {
+        'attempt': 1, 'instructions': 'Close it.', 'broken_tests': [BROKEN],
+        'test_failures': []} if repair == 'diagnosis' else {
+        'attempt': 1, 'review': {'findings': [{'summary': 'Weak.', 'reason': 'R.'}]}}}
+    # The diagnosis found one added test broken: the other added one stays as published.
+    # A review correction may change the delivery's own tests, never the repository's.
+    corrected = suite.replace('rooms.close("a", merged=True)', 'rooms.close("a", True)')
+    touched = suite.replace('merged=False', 'False')
+    sent: dict = {}
+    fake_docker(monkeypatch, {**SUITE_FILES, 'tests/test_rooms.py': corrected}, sent, [])
+    result = await ActivityEnvironment().run(components.generate_component_tests, 'session',
+                                             context)
+    # It starts from its own published suite, with the stubs and the repair.
+    assert sent['tests/tests/test_rooms.py'] == suite
+    assert sent['contracts/components/service/rooms.pyi'] == STUB
+    payload = json.loads(sent['input.json'])
+    assert payload['repair'] == context['repair'] and payload['component'] is True
+    assert result['added_tests'] == first['added_tests']
+    assert (session / 'component-tests/suite/tests/test_rooms.py').read_text() == corrected
+    # No regression test needs adding, and none may be declined.
+    fake_docker(monkeypatch, {**SUITE_FILES, 'tests/test_rooms.py': EXISTING}, {}, [])
+    if repair == 'diagnosis':
+        with pytest.raises(RuntimeError, match='changed or removed tests it may not touch'):
+            await ActivityEnvironment().run(components.generate_component_tests, 'session',
+                                            context)
+        fake_docker(monkeypatch, {**SUITE_FILES, 'tests/test_rooms.py': touched}, {}, [])
+        with pytest.raises(RuntimeError, match='test_an_unmerged_room_is_closed'):
+            await ActivityEnvironment().run(components.generate_component_tests, 'session',
+                                            context)
+    else:
+        assert (await ActivityEnvironment().run(
+            components.generate_component_tests, 'session', context))['added_tests'] == []
+        fake_docker(monkeypatch, {**SUITE_FILES, 'tests/test_rooms.py':
+                                  EXISTING.replace('"open"', '"closed"')}, {}, [])
+        with pytest.raises(RuntimeError, match='test_a_new_room_is_open'):
+            await ActivityEnvironment().run(components.generate_component_tests, 'session',
+                                            context)
+    fake_docker(monkeypatch, {'unobservable.json': json.dumps({'unobservable': [
+        {'requirement_id': 'FR-3', 'reason': 'R.'}]}), **SUITE_FILES,
+        'tests/test_rooms.py': corrected}, {}, [])
+    assert 'unobservable' not in await ActivityEnvironment().run(
+        components.generate_component_tests, 'session', context)
+
+
+async def test_a_repair_needs_the_published_suite(session, monkeypatch):
+    fake_docker(monkeypatch, SUITE_FILES, {}, [])
+    with pytest.raises(ApplicationError, match='Generated component tests are unavailable'):
+        await ActivityEnvironment().run(components.generate_component_tests, 'session',
+                                        {**CONTEXT, 'repair': {'attempt': 1, 'broken_tests': []}})
+
+
 def test_each_author_is_told_its_own_task():
     language = {'instructions': 'INSTRUCTIONS'}
     component = agent.prompt({'component': True, 'brief': BRIEF, 'routes': ROUTES}, language)
@@ -229,6 +303,14 @@ def test_each_author_is_told_its_own_task():
     assert agent.ROUTES_PROMPT in routed
     assert agent.UNOBSERVABLE_PROMPT not in agent.prompt(
         {'brief': BRIEF, 'routes': {'FR-2': {}}, 'repair': {'attempt': 1}}, language)
+    # The component tests' repairs keep to the stubs; neither may decline a criterion.
+    inputs = {'component': True, 'brief': BRIEF, 'routes': ROUTES}
+    repaired = agent.prompt({**inputs, 'repair': {'attempt': 1}}, language)
+    reviewed = agent.prompt({**inputs, 'repair': {'attempt': 1, 'review': {'findings': []}}},
+                            language)
+    assert repaired.endswith(agent.COMPONENT_REPAIR_PROMPT)
+    assert reviewed.endswith(agent.COMPONENT_REVIEW_PROMPT)
+    assert all(agent.UNOBSERVABLE not in text for text in (repaired, reviewed))
 
 
 def test_the_component_suite_template_publishes_no_runner(tmp_path):

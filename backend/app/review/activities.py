@@ -21,15 +21,20 @@ from app.agent_workflows.host import (
     ANSWERS_KEY, copy_regular_files, paused_result, session_language, write_language,
 )
 from app.config import GENERATED_CODE_DIR
-from app.github.checkout import CHECKOUT_DIR, SNAPSHOT_DIR
+from app.github.checkout import (
+    CHECKOUT_DIR, COMPONENT_SNAPSHOT, COMPONENT_TESTS_DIR, SNAPSHOT_DIR,
+)
 from app.implementation.activities import checkout_parts, copy_service
 from app.languages import Language
 from app.requirements.document import without_repeated_tables
+from app.routing.components import PUBLISHED_DIR as PUBLISHED_STUBS
+from app.routing.components import ROUTED_CONTRACT
 from app.review.agent import FINDINGS
 from app.review.models import (
     MAX_FINDINGS, PATH_CHARS, PREVIOUS_SUMMARY_CHARS, REASON_CHARS, REVIEW_TARGETS,
     SUMMARY_CHARS, REVIEW_INSTRUCTIONS_CHARS, ReviewFinding,
 )
+from app.verification.models import COMPONENT_TESTS_ARTIFACT
 from app.temporal.tracing import activity_metadata
 from app.tracing import trace_operation
 
@@ -128,19 +133,44 @@ def review_parts(diffs: dict[str, str]) -> list[list[str]]:
 def prepare_review(language: Language, session_dir: Path, context: dict[str, Any],
                    workspace: Path, part: int = 0) -> tuple[dict[str, list[str]], int]:
     """Both verified source trees, the changes of the given part and the contracts; nothing
-    else. Returns the changed files of each side in that part, and the number of parts."""
+    else. Returns the changed files of each side in that part, and the number of parts.
+    A change with criteria routed to seams (`component_routes` in the context) also has
+    its component tests reviewed, and the stubs of its component contract, which no
+    author of the delivery may change; it has contract tests of its own only when
+    `contract_tests` says so."""
+    component = bool(context.get('component_routes'))
+    contract = not component or bool(context.get('contract_tests'))
     service = session_dir / 'implementation/service'
     suite = session_dir / 'tests/suite'
-    if not all(item.is_dir() for item in (service, suite)):
+    trees = [service, *([suite] if contract else [])]
+    if component:
+        tests, stubs = session_dir / COMPONENT_TESTS_ARTIFACT / 'suite', session_dir / ROUTED_CONTRACT
+        trees += [tests, stubs]
+    if not all(item.is_dir() for item in trees):
         raise ApplicationError('The verified sources are unavailable', non_retryable=True)
     service_before = record_baseline(language, session_dir)
-    snapshot = session_dir / SNAPSHOT_DIR / 'suite'
-    tests_before = snapshot if snapshot.is_dir() else language.test_suite.template
     review = workspace / 'review'
     copy_service(language, service, review / 'service')
-    copy_regular_files(suite, review / 'tests', include=lambda relative: True)
-    diffs = {**changed_files(service_before, review / 'service', 'service'),
-             **changed_files(tests_before, review / 'tests', 'tests')}
+    diffs = changed_files(service_before, review / 'service', 'service')
+    sides = ['service']
+    if contract:
+        snapshot = session_dir / SNAPSHOT_DIR / 'suite'
+        tests_before = snapshot if snapshot.is_dir() else language.test_suite.template
+        copy_regular_files(suite, review / 'tests', include=lambda relative: True)
+        diffs.update(changed_files(tests_before, review / 'tests', 'tests'))
+        sides.append('tests')
+    if component:
+        everything = lambda relative: True  # noqa: E731
+        copy_regular_files(tests, review / COMPONENT_TESTS_DIR, include=everything)
+        # Recorded before any author ran, as the template's files when the repository had
+        # no component tests.
+        diffs.update(changed_files(session_dir / SNAPSHOT_DIR / COMPONENT_SNAPSHOT,
+                                   review / COMPONENT_TESTS_DIR, COMPONENT_TESTS_DIR))
+        copy_regular_files(stubs, review / PUBLISHED_STUBS, include=everything)
+        # The stubs the repository published, which the routing reused or extended.
+        diffs.update(changed_files(session_dir / CHECKOUT_DIR / PUBLISHED_STUBS,
+                                   review / PUBLISHED_STUBS, PUBLISHED_STUBS.as_posix()))
+        sides += [COMPONENT_TESTS_DIR, PUBLISHED_STUBS.as_posix()]
     parts = review_parts(diffs)
     if part >= max(len(parts), 1):
         raise ApplicationError(f'The changes have no review part {part}', non_retryable=True)
@@ -153,13 +183,14 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
 
     def by_side(paths: list[str]) -> dict[str, list[str]]:
         return {side: [path for path in paths if path.startswith(f'{side}/')][:LISTED_CHANGES]
-                for side in ('service', 'tests')}
+                for side in sides}
 
     changes = by_side(own)
     others = [path for path in diffs if path not in own]
     contracts = without_repeated_tables(
         {key: value for key, value in context.items()
-         if key not in ('instructions', 'repository', 'language', PREVIOUS_KEY)})
+         if key not in ('instructions', 'repository', 'language', 'contract_tests',
+                        PREVIOUS_KEY)})
     index, files = on_demand_contracts(contracts, len(json.dumps(contracts))) or (contracts, {})
     write_language(workspace, language, label=language.label)
     if files:
@@ -171,6 +202,7 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
                 if checkout.is_dir() and not context.get('onboarding') else [])
     (workspace / 'input.json').write_text(json.dumps(
         {**index, 'changes': changes,
+         **({'contract_tests': contract} if component else {}),
          **({'repository_parts': projects} if projects else {}),
          **({PART_KEY: {'part': part + 1, 'of': len(parts), 'other_changes': by_side(others)}}
             if len(parts) > 1 else {}),

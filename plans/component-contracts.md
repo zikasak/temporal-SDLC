@@ -237,6 +237,18 @@ Each step lands with its own tests (`backend/tests/`, stage fakes in
    saying it cannot be pushed yet (`COMPONENT_CHANGE_UNREPAIRED`,
    `COMPONENT_CHANGE_UNPUBLISHED`).
 5. **Implementation, diagnosis, repair, review** integration (3.6).
+   *Done:* behind the `component-repairs` workflow patch. The implementation author gets
+   `component_routes` and the routing's stubs in `contracts/components/`. The diagnosis
+   sees both runs, and a verdict against the tests names their `suite` (`Diagnosis.suite`,
+   `RepairRound.suite`). `generate_component_tests` takes a `repair`, and only the named
+   suite's author runs. The code review gets `component-tests/` and
+   `contracts/components/` as changes. Its findings go to the suite whose files they name
+   (`for_suite`). Findings about the stubs go to no author (`correctable`) and stay open.
+   A change that passed and was reviewed still stops before the push
+   (`COMPONENT_CHANGE_UNPUSHED`). Learned while doing it: a contract suite that is the
+   repository's own, run because no criterion was routed `contract`, has no author to
+   repair it. All of its tests passed without the fix, so the diagnosis may not blame it.
+   Mention and instruction fix rounds need a push, so they wait for step 6.
 6. **Publication and UI** (3.7).
 7. **End to end.** Run the flow-closing bugfix through the real pipeline with real
    agents and Docker. It is the acceptance case for the whole plan: routes go to

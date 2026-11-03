@@ -1,6 +1,7 @@
 """Container-only reviewer. It decides which side failed verification; it repairs nothing."""
 import asyncio
 import json
+from functools import partial
 from pathlib import Path
 
 from app.asyncio_utils import run_sync
@@ -73,8 +74,40 @@ existing code. The user is asked to confirm such a bug before the code is change
 explain in `summary` what the code does and why that contradicts the contract.
 """
 
+COMPONENT_PROMPT = """
+Besides the HTTP contract tests, the change has component tests: in-process tests of the
+acceptance criteria that HTTP cannot observe, each driven through a seam of the service's
+code. Another author wrote them from the stubs of the component contract alone, faking the
+collaborators the stubs name, and they ran built with the changed code. /workspace/review
+also contains, read-only for your purposes:
+- component-tests/ the component test sources
+- component-contract/ the stubs: the signatures, types and behaviour docstrings of every
+  symbol the component tests may use
+- component-verification/ their run, when it failed: reports/{report_pattern} and
+  runner_log.log
+The `component_verification` entry of the input lists their failing tests, and the
+`verification` entry those of the contract tests, when the change has contract tests; the
+`status` of each says whether that run failed. The brief and the stubs' docstrings are the
+component tests' authority. They are wrong when they assert behaviour neither states, use
+a symbol the stubs do not declare, fake or patch the seam itself rather than its
+collaborators, or are broken themselves. The implementation is wrong when the seam does
+not behave as the brief and the docstrings state. The fix has to keep every stubbed
+signature exactly, so the correction is never to change one.
+When the target is the tests, add "suite": "contract" or "component" to verdict.json: the
+suite whose tests are wrong. Only that suite's author repairs them, so `tests` lists
+failing tests of that suite alone; when both suites have wrong tests, choose the one with
+the most and the other is reviewed again after the next verification.
+"""
 
-def validate_completion(root: Path) -> None:
+REPOSITORY_SUITE_PROMPT = """
+The `contract_suite` entry says the contract tests are the repository's own: the change
+added none, every one of them passed against the service before the change, and no author
+of this delivery may change them. A contract test that fails now was broken by the change,
+so the target for it is the implementation.
+"""
+
+
+def validate_completion(component: bool, root: Path) -> None:
     try:
         verdict = json.loads((root / VERDICT).read_text())
     except (OSError, ValueError) as exc:
@@ -83,19 +116,33 @@ def validate_completion(root: Path) -> None:
         raise RuntimeError('Agent verdict does not name the implementation or the tests')
     if verdict['target'] == 'tests' and not verdict.get('tests'):
         raise RuntimeError('Agent verdict against the tests lists no broken test')
+    if (component and verdict['target'] == 'tests'
+            and verdict.get('suite') not in ('contract', 'component')):
+        raise RuntimeError('Agent verdict against the tests does not name their suite as '
+                           '"contract" or "component"')
+
+
+def prompt(inputs: dict, language: dict) -> str:
+    text = (PROMPT.format(label=language['label'], report_pattern=language['report_pattern'])
+            + (CHANGE_PROMPT if inputs.get('brief') else '')
+            + (ONBOARDING_PROMPT if inputs.get('onboarding') else ''))
+    if 'component_verification' in inputs:
+        text += COMPONENT_PROMPT.format(report_pattern=language['report_pattern'])
+        if inputs.get('contract_suite') == 'repository':
+            text += REPOSITORY_SUITE_PROMPT
+    return text
 
 
 async def main() -> None:
     context = await run_sync(Path('/workspace/input.json').read_text)
+    inputs = json.loads(context)
     language = json.loads(await run_sync(LANGUAGE.read_text))
+    component = 'component_verification' in inputs
     await run_agent(AgentProfile(
-        root=ROOT, prompt=(PROMPT.format(label=language['label'],
-                                         report_pattern=language['report_pattern'])
-                           + (CHANGE_PROMPT if json.loads(context).get('brief') else '')
-                           + (ONBOARDING_PROMPT if json.loads(context).get('onboarding')
-                              else '')),
+        root=ROOT, prompt=prompt(inputs, language),
         initial_messages=[context],
-        max_turns_env='DIAGNOSIS_MAX_TURNS', validate_completion=validate_completion,
+        max_turns_env='DIAGNOSIS_MAX_TURNS',
+        validate_completion=partial(validate_completion, component),
         completion_message='Diagnosis completed',
         exhaustion_message='Diagnosis exceeded the tool-turn limit',
         contracts=CONTRACTS if await run_sync(CONTRACTS.is_dir) else None,

@@ -83,6 +83,25 @@ toolchain (for a package.json project, npm ci and its build script), without run
 tests, and fix failures before you finish.
 """
 PARTS_BRIEF = ' and the brief'
+COMPONENT_PROMPT = """
+Some acceptance criteria cannot be observed over HTTP, so the `component_routes` entry of
+the input routes each of them to a seam of the code: `seam` names the dotted module and
+its symbols at which independently written component tests observe the criterion, and
+`reason` says how. Those tests drive the seam in-process, faking the collaborators it
+calls. The component contract in /workspace/contracts/components holds a stub of each
+module of the seams, at the module's path (such as components/app/module.pyi): the
+signature, types and behaviour docstring of every symbol the tests use, and the
+collaborators they fake, as signatures only. Read it with read_contract and
+search_contracts. The stubs are a contract like the API: keep every signature they declare
+exactly as it is, with the same names, parameters, types, return types and kinds of
+symbol, in the same modules. Make the criteria true behind those signatures, as their
+docstrings and the brief state. The outer worker checks the changed code against the stubs
+before it runs any test, and rejects a change that breaks one. Do not create, change or
+remove contracts/components or component-tests in the checkout, and do not look for the
+component tests: they stay unavailable, as the contract tests do. In a repair run the
+failing tests in `repair.test_failures` may be component tests as well as contract tests.
+"""
+
 
 REPAIR_PROMPT = """
 This is a repair run. /workspace/service already holds your previous implementation. It
@@ -166,7 +185,9 @@ def base_prompt(inputs: dict, instructions: str) -> str:
         return ONBOARDING_PROMPT.format(instructions=instructions)
     # A change to an existing service is told about its checkout by its own prompt.
     if inputs.get('brief'):
-        return CHANGE_PROMPT.format(instructions=instructions) + parts_prompt(inputs)
+        return (CHANGE_PROMPT.format(instructions=instructions)
+                + (COMPONENT_PROMPT if inputs.get('component_routes') else '')
+                + parts_prompt(inputs))
     return (PROMPT.format(instructions=instructions) + repository_prompt(inputs)
             + parts_prompt(inputs))
 

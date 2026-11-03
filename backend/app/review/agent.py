@@ -125,6 +125,28 @@ the delivery writes the contract tests and the root Dockerfile for it. The exist
 not part of the changes unless the user confirmed a bug in it: do not report how the
 existing code could be better, only problems in what the delivery changed.
 """
+COMPONENT_PROMPT = """
+Some acceptance criteria cannot be observed over HTTP, so the `component_routes` entry of
+the input routes each of them to a seam of the code (`seam`: a dotted module and its
+symbols), where component tests prove it in-process. Their author wrote them from the
+stubs of the component contract alone, faking the collaborators the stubs name, and they
+pass with the changed code; the fix was checked to keep every stubbed signature.
+/workspace/review also contains, read-only for your purposes:
+- component-tests/ the component test sources after the delivery
+- contracts/components/ the stubs: the signature, types and behaviour docstring of every
+  symbol the component tests use, and of the collaborators they fake
+Their changes are in changes.diff and `changes` too; the path of a finding about one of
+them starts with component-tests/ or contracts/components/. When `contract_tests` is false
+the change has no contract tests of its own, and tests/ is absent.
+Review the component tests as you review contract tests, and also report a component test
+that fakes, patches or subclasses the seam itself rather than its collaborators, or uses
+anything of the service's code the stubs do not declare; send those to "tests".
+Check every docstring of the stubs the delivery added or changed: it has to state
+behaviour that the brief or the existing contract supports, as the tests rely on it, and
+never how the code does it, such as its private names, internal steps or data structures.
+Report each docstring that breaks this rule, with the stub's path and target "both". No
+author of this delivery may change the stubs, so such a finding is left for the user.
+"""
 
 INSTRUCTIONS_PROMPT = """
 The user gave instructions about the findings of the previous review, in the
@@ -170,6 +192,7 @@ async def main() -> None:
                            + (CHANGE_PROMPT if inputs.get('brief') else '')
                            + (PARTS_PROMPT if inputs.get('repository_parts') else '')
                            + (ONBOARDING_PROMPT if inputs.get('onboarding') else '')
+                           + (COMPONENT_PROMPT if inputs.get('component_routes') else '')
                            + (INSTRUCTIONS_PROMPT if inputs.get('instructions') else '')
                            + (PREVIOUS_PROMPT if inputs.get('previous_findings') else '')),
         initial_messages=[context],

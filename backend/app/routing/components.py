@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 # Where the contract is published in the repository, and kept beside the routing.
 COMPONENTS_DIR = 'components'
 PUBLISHED_DIR = Path(CONTRACTS_DIR) / COMPONENTS_DIR
+# Where the routing keeps the component contract it checked against the code, in the
+# session's artifacts: the stubs every later stage of the delivery is given.
+ROUTED_CONTRACT = Path('routing') / COMPONENTS_DIR
 MAX_STUBS = 50
 MAX_STUB_BYTES = 256 * 1024
 MAX_RUNTIME_BYTES = 16 * 1024

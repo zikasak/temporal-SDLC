@@ -35,7 +35,9 @@ from app.routing.components import check_conformance
 from app.test_generation.components import ARTIFACT_DIR as COMPONENT_TESTS_ARTIFACT
 from app.test_generation.components import ROUTED_CONTRACT, build_runner
 from app.config import GENERATED_CODE_DIR
-from app.verification.models import TestFailure, TestSkip, TrackedTest, VerificationResult
+from app.verification.models import (
+    COMPONENT_RUNS_DIR, TestFailure, TestSkip, TrackedTest, VerificationResult,
+)
 from app.temporal.tracing import trace_activity
 
 logger = logging.getLogger(__name__)
@@ -470,7 +472,6 @@ async def build_baseline(session_id: str, language: str) -> dict[str, str]:
 
 # The image of the component tests built with the changed code, and the runs of either.
 COMPONENT_RUNNER_DIR = 'component-verification'
-COMPONENT_RUNS_DIR = 'component-runs'
 # Exit statuses of a runner that was stopped, not one that reported.
 STOPPED_EXIT_CODES = {124, 125, 137, 143}
 

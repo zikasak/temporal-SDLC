@@ -293,18 +293,24 @@ def unproven_green(result: VerificationResult | None,
     return None
 
 
-# Why a change proved by component tests stops when they did not pass with the change:
-# their diagnosis and repair come with step 5 of plans/component-contracts.md.
+# Why a change proved by component tests stopped when they did not pass with the change, in
+# histories from before such changes were diagnosed and repaired.
 COMPONENT_CHANGE_UNREPAIRED = (
     'Deliveries cannot yet diagnose or repair a change with component tests, so the change '
     'was not repaired and nothing was pushed. Retrying the tests writes them again and '
     'verifies them against the same fix.')
-# Why one that passed is not pushed all the same: neither the code review nor the push of
-# its component tests and contract is there yet (steps 5 and 6).
+# Why one that passed was not pushed all the same, in histories from before such changes
+# were reviewed.
 COMPONENT_CHANGE_UNPUBLISHED = (
     'The change was verified: its tests failed without the fix and pass with it, its '
     'component tests included. Deliveries cannot yet review or push a change with component '
     'tests, so nothing was pushed.')
+# Why one that passed and was reviewed is not pushed: the push of its component tests and
+# contract is step 6 of plans/component-contracts.md.
+COMPONENT_CHANGE_UNPUSHED = (
+    'The change was verified and reviewed: its tests failed without the fix and pass with it, '
+    'its component tests included. Deliveries cannot yet push a change with component tests, '
+    'so nothing was pushed.')
 
 
 def kept_tests(result: VerificationResult, touched: list[str]) -> list[str]:
