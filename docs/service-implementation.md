@@ -487,8 +487,9 @@ flowchart LR
     baseline -- added tests fail, existing pass --> fix[ImplementationWorkflow]
     baseline -- anything else --> stop[Stop and report]
     fix --> verification[VerificationWorkflow and repair loop]
-    fix -- with component tests --> conformance[Conformance check, both suites]
-    conformance -- until review and push support them --> stop
+    fix -- with component tests --> conformance[Conformance check, both suites, repair loop]
+    conformance --> creview[Code review]
+    creview -- until the push supports them --> stop
 ```
 
 1. **Routing.** `ObservabilityWorkflow` (`app/routing/`, queue `routing`, settings
@@ -606,7 +607,11 @@ flowchart LR
    one (a component test that skips itself is reported as a criterion its seam cannot
    observe). A component run that could not complete runs once more.
 4. **The fix.** The implementation author's workspace is the checkout alone, without
-   generated code, and its prompt asks for targeted edits for the brief.
+   generated code, and its prompt asks for targeted edits for the brief. A change with
+   component tests also gives it `component_routes` (the criteria routed to seams, with
+   their seams) and the routing's checked stubs in `/workspace/contracts/components/`,
+   read through the contract tools, with the rule to keep every stubbed signature
+   exactly. It never sees `component-tests/` or the repository's published stubs.
 5. **Final run.** The whole suite against the changed service, with the usual repair loop.
    When a repair corrects the tests, the baseline is run again with the repaired suite.
    Added tests must still fail there, or the delivery ends as `not_reproduced`. A
@@ -625,14 +630,23 @@ its stubs, or with which the suite does not even collect, returns `conformance_e
 instead: no test of either suite runs, verification is `skipped`, and the message is the
 `implementation_error`, so the `server` retry writes the fix again (a `tests` retry would
 keep it). Otherwise both suites run against the change, the component tests' result being
-`DeliveryProgress.component_verification`, and `unproven_green` checks both. Such a change
-is not diagnosed, repaired, reviewed or pushed yet (steps 5 and 6 of
-`plans/component-contracts.md`): a failure or a skip ends it with `verification_error`,
-which a `tests` retry answers with new tests against the same fix, and one that passed
-both suites ends with `publication_status: skipped` and `publication_error` saying it
-cannot be pushed yet. A `repository` retry is refused for it. The baseline tracks every
-added and corrected component test, so a suite with more than `MAX_TRACKED` (1000) of them
-ends the baseline with an error before anything runs.
+`DeliveryProgress.component_verification`, and `unproven_green` checks both. A failure of
+either suite goes through the [repair loop](#automatic-repair-of-failed-tests), whose
+diagnosis sees both runs and names the suite of tests it blames; each repair is checked
+for conformance again before anything runs. A change that passed both suites is
+code-reviewed with both suites' changes and its stubs, and its findings are corrected as
+for any delivery: a finding about a file under `component-tests/` goes to the component
+tests' author, one under `tests/` to the contract tests' author, one about no file to
+both, and one about the stubs (`contracts/components/`) to nobody. No author may change
+the stubs, so such a finding stays open (`findings_open`) for the user. The push is not
+there yet (step 6 of `plans/component-contracts.md`): the change ends with
+`publication_status: skipped` and `publication_error` saying it was verified and reviewed
+but cannot be pushed yet, with the number of findings left open. A `repository` retry is
+refused for it. Deliveries that verified such a change before it was repaired and
+reviewed (without the `component-repairs` workflow patch) ended a failure or a skip with
+`verification_error`, and a pass with that `publication_error`, unreviewed. The baseline
+tracks every added and corrected component test, so a suite with more than `MAX_TRACKED`
+(1000) of them ends the baseline with an error before anything runs.
 
 The push requires such a verification and a `reproduced` baseline. The published
 contract is the repository's without the retired requirements and with the brief's
@@ -938,8 +952,22 @@ verification passes. Each round is:
    image as usual. Source isolation is kept: neither author receives the other's sources.
 3. **Verification** of the current images.
 
-`DeliveryWorkflow.get_state().progress.repairs` lists each round's `attempt`, `target` and
-`summary`, and the page shows them. The loop stops when verification passes, or without
+A change with [component tests](#changing-an-existing-service-bugfix) is repaired the same
+way, on both suites. The diagnosis context also holds `component_verification` and
+`contract_suite` (`tests`, or `repository-tests` when the contract tests are the
+repository's own and no author wrote any), and its workspace also holds
+`component-tests/`, the stubs in `component-contract/` and the failed component run in
+`component-verification/`. A verdict against the tests names their `suite` (`contract` or
+`component`), inferred when only one suite failed; one that names a suite that did not
+fail, or the repository's own contract tests, is rejected. The implementation's author
+gets the failures of both suites. A repair of the tests runs only that suite's author:
+the component tests' author continues its published suite and may change only the
+`broken_tests`, and its prompt keeps the brief and the stubs as the authority. Repaired
+tests of either suite are held against the baseline again.
+
+`DeliveryWorkflow.get_state().progress.repairs` lists each round's `attempt`, `target`,
+`summary` and, for a change with component tests whose tests were blamed, `suite`, and the
+page shows them. The loop stops when verification passes, or without
 passing when:
 
 - verification ends with an infrastructure `error` rather than failed tests;

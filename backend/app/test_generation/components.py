@@ -22,15 +22,14 @@ from app.github.checkout import COMPONENT_SNAPSHOT, SNAPSHOT_DIR
 from app.languages import RUNTIME_FILE, ComponentSuite, Language
 from app.requirements.document import without_repeated_tables
 from app.review.activities import record_baseline
-from app.routing.components import COMPONENTS_DIR
+from app.routing.components import COMPONENTS_DIR, ROUTED_CONTRACT
 from app.routing.models import read_seam
+from app.verification.models import COMPONENT_TESTS_ARTIFACT
 from app.test_generation.activities import copy_test_suite, read_unobservable, validate_output
 
-# Where the routing kept the component contract it checked against the code, in the
-# session's artifacts, and where the author reads it, below its read-only contracts.
-ROUTED_CONTRACT = Path('routing') / COMPONENTS_DIR
+# Where the author reads the component contract, below its read-only contracts.
 WORKSPACE_CONTRACT = Path('contracts') / COMPONENTS_DIR
-ARTIFACT_DIR = 'component-tests'
+ARTIFACT_DIR = COMPONENT_TESTS_ARTIFACT
 # The parts of the runner's build context around the trusted runner files.
 CONTEXT_REPOSITORY = 'repository'
 CONTEXT_SUITE = 'suite'
@@ -71,10 +70,20 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
     snapshot = session_dir / SNAPSHOT_DIR / COMPONENT_SNAPSHOT
     if context.get('repository') and not snapshot.is_dir():
         raise ApplicationError('The repository tests were not recorded', non_retryable=True)
+    repair = context.get('repair')
+    previous = session_dir / ARTIFACT_DIR / 'suite'
+    if repair:
+        if not previous.is_dir():
+            raise ApplicationError('Generated component tests are unavailable',
+                                   non_retryable=True)
+        contracts['repair'] = repair
 
     def populate(workspace: Path) -> None:
         copy_test_suite(suite, suite.template, workspace / 'tests')
-        if context.get('repository'):
+        if repair:
+            # A repair continues from the published suite.
+            copy_test_suite(suite, previous, workspace / 'tests')
+        elif context.get('repository'):
             # The repository's own component tests, which the author continues.
             copy_test_suite(suite, snapshot, workspace / 'tests')
         # Validated by the routing: regular files only.
@@ -116,9 +125,10 @@ async def build_runner(language: Language, session_dir: Path, tests: Path,
 
 
 def stage(language: Language, session_dir: Path, frozen: dict[str, str],
-          requirement_ids: list[str]) -> StageSpec:
-    """`frozen` holds the repository's component tests, which the author must leave as they
-    are, and `requirement_ids` the criteria it may name as unobservable instead."""
+          requirement_ids: list[str] | None) -> StageSpec:
+    """`frozen` holds the tests, by identity, whose source the author must leave as it is,
+    and `requirement_ids` the criteria it may name as unobservable instead; None for a
+    repair, which may not. Only the first run must add a test."""
     suite = language.component_suite
     return StageSpec(
         role='test_generation', artifact_subdir=ARTIFACT_DIR, workspace_name='tests',
@@ -128,25 +138,43 @@ def stage(language: Language, session_dir: Path, frozen: dict[str, str],
                                         dockerfile=language.agent_dockerfile),
         prepare_inputs=partial(prepare_inputs, language),
         sanitize_output=partial(copy_test_suite, suite),
-        validate_output=partial(validate_output, suite, frozen, True),
-        declined_result=partial(read_unobservable, requirement_ids),
+        validate_output=partial(validate_output, suite, frozen, requirement_ids is not None),
+        declined_result=(partial(read_unobservable, requirement_ids)
+                         if requirement_ids is not None else None),
         build_output=partial(build_runner, language, session_dir),
     )
+
+
+def frozen_tests(suite: ComponentSuite, repository: dict[str, str], published: Path,
+                 repair: dict[str, Any] | None) -> dict[str, str]:
+    """The tests, by identity, an author of the component tests must leave as they are.
+    The first run adds to the repository's tests. A repair of tests a diagnosis found
+    broken may change those alone, and a correction of review findings concerns the
+    delivery's own tests: the repository's that it left as they were stay so."""
+    if not repair:
+        return repository
+    cases = suite.test_cases(published)
+    if repair.get('review'):
+        return {case: source for case, source in repository.items()
+                if cases.get(case) == source}
+    broken = {suite.case_id(item['class_name'], item['name'])
+              for item in repair.get('broken_tests', [])}
+    return {case: source for case, source in cases.items() if case not in broken}
 
 
 @activity.defn
 async def generate_component_tests(session_id: str, context: dict[str, Any]) -> dict[str, Any]:
     """Regression tests of a change's criteria routed to a seam, added to the repository's
     component tests. Like the contract tests' first author, the author may instead name
-    criteria it finds no test of the seam can observe (`unobservable`)."""
+    criteria it finds no test of the seam can observe (`unobservable`). With `repair` in
+    the context it corrects the suite it published: the tests a diagnosis found broken, or
+    the code review's findings about it."""
     language = session_language(context.get('language'))
     if language.component_suite is None or language.component_contract is None:
         raise ApplicationError(f'{language.label} has no component tests', non_retryable=True)
-    if not context.get('brief') or context.get('repair'):
-        # Diagnosis and repair of component tests are step 5 of
-        # plans/component-contracts.md.
-        raise ApplicationError('Component tests are written only for the first run of a '
-                               "change's tests", non_retryable=True)
+    if not context.get('brief'):
+        raise ApplicationError("Component tests are written only for a change's criteria",
+                               non_retryable=True)
     try:
         routes = component_routes(context.get('routes'))
     except RuntimeError as exc:
@@ -160,7 +188,11 @@ async def generate_component_tests(session_id: str, context: dict[str, Any]) -> 
     snapshot = session_dir / SNAPSHOT_DIR / COMPONENT_SNAPSHOT
     continued = bool(context.get('repository'))
     repository = await run_sync(suite.test_cases, snapshot) if continued else {}
-    result = await run_stage(stage(language, session_dir, repository, list(routes)),
+    repair = context.get('repair')
+    frozen = await run_sync(frozen_tests, suite, repository,
+                            session_dir / ARTIFACT_DIR / 'suite', repair)
+    result = await run_stage(stage(language, session_dir, frozen,
+                                   None if repair else list(routes)),
                              session_id, context, GENERATED_CODE_DIR)
     if 'questions' in result or 'unobservable' in result:
         return result

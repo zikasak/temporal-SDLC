@@ -84,7 +84,8 @@ class FakeStages:
         self.baselines: list[tuple[str, str, list[str]]] = []
         # Repository tests a repair of the tests corrects, as that stage reports them.
         self.corrected_tests: list[str] = []
-        # The side each successive diagnosis blames; the last one repeats.
+        # The side each successive diagnosis blames, as `tests:component` or
+        # `tests:contract` when it names the suite of the tests; the last one repeats.
         self.diagnoses = ['implementation']
         self.diagnosed: list[dict[str, Any]] = []
         self.fail_diagnosis = False
@@ -231,6 +232,8 @@ class FakeStages:
         self.component_contexts.append(context)
         if self.fail_component_tests:
             raise ApplicationError('ImportError while collecting', non_retryable=True)
+        if 'repair' in context:
+            self.repairs.append(('component-tests', context['repair']))
         if self.component_declined:
             return {'session_id': session_id, 'unobservable': [
                 {'requirement_id': requirement, 'reason': 'Happens in no stubbed symbol.'}
@@ -321,11 +324,13 @@ class FakeStages:
     async def diagnose_failure(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
         if self.fail_diagnosis:
             raise ApplicationError('no verdict', non_retryable=True)
-        target = self.diagnoses[min(len(self.diagnosed), len(self.diagnoses) - 1)]
+        target, _, suite = self.diagnoses[
+            min(len(self.diagnosed), len(self.diagnoses) - 1)].partition(':')
         self.diagnosed.append(context)
         return {'session_id': session_id, 'target': target, 'summary': f'The {target} is wrong.',
                 'tests': [BROKEN_TEST] if target == 'tests' else [],
-                'instructions': f'Correct the {target}.', 'path': '/diagnosis'}
+                'instructions': f'Correct the {target}.', 'path': '/diagnosis',
+                **({'suite': suite} if suite else {})}
 
     @activity.defn(name='review_changes')
     async def review_changes(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:

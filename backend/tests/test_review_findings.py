@@ -27,3 +27,83 @@ def test_findings_are_marked_with_the_earlier_finding_they_repeat(tmp_path):
     # Without earlier findings nothing repeats.
     assert all('repeats' not in item for item in findings(tmp_path, [
         {**base, 'summary': 'GET /rooms does not sort.', 'repeats': 1}], previous=None))
+
+
+def test_a_change_with_component_tests_has_its_tests_and_stubs_reviewed(tmp_path):
+    import shutil
+
+    from app.languages import get_language
+    from app.review import activities as review
+    from app.review import agent
+
+    language = get_language('python')
+    session = tmp_path / 'session'
+    files = {
+        # The repository as the delivery found it.
+        'checkout/app/rooms.py': 'def close(): pass\n',
+        'checkout/contracts/components/app/rooms.pyi': 'def close() -> None: ...\n',
+        'repository-tests/components/tests/test_rooms.py': 'def test_open(): pass\n',
+        # What the delivery made of it.
+        'implementation/service/app/rooms.py': 'def close(): return None\n',
+        'component-tests/suite/tests/test_rooms.py': 'def test_open(): pass\n'
+                                                     'def test_closed(): pass\n',
+        'routing/components/app/rooms.pyi': 'def close() -> None:\n    """Closes."""\n',
+        'routing/components/runtime.json': '{}',
+    }
+    for path, text in files.items():
+        (session / path).parent.mkdir(parents=True, exist_ok=True)
+        (session / path).write_text(text)
+    context = {'component_routes': {'FR-2': {'route': 'component'}}, 'contract_tests': False}
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    changes, _ = review.prepare_review(language, session, context, workspace)
+    # No contract tests of the change's own: only the service, its component tests and
+    # the stubs that differ from the repository's.
+    assert changes == {'service': ['service/app/rooms.py'],
+                       'component-tests': ['component-tests/tests/test_rooms.py'],
+                       'contracts/components': ['contracts/components/app/rooms.pyi',
+                                                'contracts/components/runtime.json']}
+    inputs = json.loads((workspace / 'input.json').read_text())
+    assert inputs['contract_tests'] is False and inputs['component_routes']
+    assert (workspace / 'review/contracts/components/app/rooms.pyi').is_file()
+    assert not (workspace / 'review/tests').exists()
+    diff = (workspace / 'review/changes.diff').read_text()
+    assert '+def test_closed(): pass' in diff and '+    """Closes."""' in diff
+    # With contract tests of its own, they are reviewed too.
+    shutil.copytree(language.test_suite.template, session / 'tests/suite')
+    other = tmp_path / 'other'
+    other.mkdir()
+    changes, _ = review.prepare_review(language, session, {**context, 'contract_tests': True},
+                                       other)
+    assert set(changes) == {'service', 'tests', 'component-tests', 'contracts/components'}
+    # The stubs' docstrings are the reviewer's to check, and its findings about them the
+    # user's to decide.
+    assert 'contracts/components/' in agent.COMPONENT_PROMPT
+    findings = review.read_findings(_written(tmp_path, [
+        {'summary': 'Leaks a private helper.', 'target': 'both',
+         'path': 'contracts/components/app/rooms.pyi'}]),
+        {'contracts/components/app/rooms.pyi'})
+    assert findings[0]['path'] == 'contracts/components/app/rooms.pyi'
+
+
+def _written(tmp_path, items):
+    output = tmp_path / 'findings-output'
+    output.mkdir(exist_ok=True)
+    (output / 'findings.json').write_text(json.dumps({'findings': items}))
+    return output
+
+
+def test_findings_about_the_stubs_go_to_no_author_and_tests_findings_to_their_suite():
+    from app.review.models import correctable, for_suite, for_worker, review_request
+    stub = {'summary': 'S', 'target': 'both', 'reason': 'R', 'path': 'contracts/components/a.pyi'}
+    component = {'summary': 'C', 'target': 'tests', 'reason': 'R',
+                 'path': 'component-tests/tests/test_a.py'}
+    contract = {'summary': 'H', 'target': 'tests', 'reason': 'R', 'path': 'tests/test_a.py'}
+    anywhere = {'summary': 'A', 'target': 'tests', 'reason': 'R'}
+    findings = [stub, component, contract, anywhere]
+    assert not correctable(stub) and all(map(correctable, findings[1:]))
+    assert for_worker(findings, 'implementation') == []
+    assert for_worker(findings, 'tests') == [component, contract, anywhere]
+    tests = review_request(findings, 'tests', 1)['review']['findings']
+    assert [item['summary'] for item in for_suite(tests, 'component')] == ['C', 'A']
+    assert [item['summary'] for item in for_suite(tests, 'contract')] == ['H', 'A']

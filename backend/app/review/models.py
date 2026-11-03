@@ -58,9 +58,31 @@ class FindingsAcceptance(TypedDict):
     accepted_by: str
 
 
+# Where the code review finds a change's component tests and the stubs of its component
+# contract, as the paths of findings name them.
+COMPONENT_TESTS_PATH = 'component-tests/'
+STUBS_PATH = 'contracts/components/'
+CONTRACT_TESTS_PATH = 'tests/'
+
+
+def correctable(finding: ReviewFinding) -> bool:
+    """Whether an author of the delivery can correct the finding: not one about the stubs
+    of the component contract, which the routing wrote and the fix has to keep."""
+    return not finding.get('path', '').startswith(STUBS_PATH)
+
+
 def for_worker(findings: list[ReviewFinding], worker: str) -> list[ReviewFinding]:
     """The findings one worker has to correct."""
-    return [item for item in findings if item['target'] in (worker, 'both')]
+    return [item for item in findings
+            if item['target'] in (worker, 'both') and correctable(item)]
+
+
+def for_suite(findings: list[ReviewFinding], suite: str) -> list[ReviewFinding]:
+    """The findings about the tests of a change with component tests that the author of
+    one suite, `contract` or `component`, corrects: those about its files, and those
+    about no file, which concern either."""
+    other = CONTRACT_TESTS_PATH if suite == 'component' else COMPONENT_TESTS_PATH
+    return [item for item in findings if not item.get('path', '').startswith(other)]
 
 
 def earlier_findings(findings: list[ReviewFinding]) -> list[dict[str, Any]]:

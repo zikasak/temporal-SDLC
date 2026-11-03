@@ -20,6 +20,7 @@ from app.docker_agents import default_agent_image
 from app.github.checkout import CHECKOUT_DIR, COMPONENT_TESTS_DIR, CONTRACTS_DIR, TESTS_DIR
 from app.languages import Language
 from app.requirements.document import without_repeated_tables
+from app.routing.components import COMPONENTS_DIR, ROUTED_CONTRACT
 
 
 EXCLUDED = {'.git', '.openapi-generator', '__pycache__', '.agent-output'}
@@ -86,6 +87,11 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
     context = without_repeated_tables(context)
     index, files = on_demand_contracts(context, len(json.dumps(context))) or (context, {})
     contract_paths = language.implementation.contract_paths
+    # A change with criteria routed to seams of the code keeps their stubs' signatures.
+    stubs = session_dir / ROUTED_CONTRACT if context.get('component_routes') else None
+    if stubs and not stubs.is_dir():
+        raise ApplicationError('The component contract of the routing is unavailable',
+                               non_retryable=True)
 
     def populate(workspace: Path) -> None:
         project = workspace / 'service'
@@ -104,6 +110,10 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
                        instructions=language.implementation.instructions)
         if files:
             write_contracts(workspace, files)
+        if stubs:
+            # Read-only beside the checkout, as the contracts are; never published from here.
+            copy_regular_files(stubs, workspace / 'contracts' / COMPONENTS_DIR,
+                               include=lambda relative: True)
 
     return StageInputs(context=index, populate=populate)
 
