@@ -2,6 +2,7 @@ import re
 import time
 from collections.abc import Callable
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -57,6 +58,9 @@ from app.requirements.document import DOCUMENT_FILENAME, render_requirements_mar
 from app.requirements.models import Requirement
 from app.requirements.prompt import document_messages, interview_messages
 from app.review.models import COMMIT_FINDINGS, ReviewFinding, commit_findings
+from app.routing.components import PUBLISHED_DIR as PUBLISHED_STUBS
+from app.routing.components import ROUTED_CONTRACT
+from app.verification.models import COMPONENT_TESTS_ARTIFACT
 from app.tools import ToolContext, build_tools
 from app.tools import api_design as api_design_tools
 from app.tools import questions as question_tools
@@ -74,6 +78,10 @@ ARCHITECTURE_SUBJECT = "Add the service's architecture to the contract"
 # Added to the commit of an onboarding that changed the repository's existing code.
 CODE_CHANGED_NOTE = ("The existing code was changed: the user confirmed that failing "
                      "contract tests revealed bugs in it.")
+# Added to the commit of a change with criteria proved at seams of the code.
+COMPONENTS_NOTE = ("Criteria the contract tests cannot observe are proved by the component "
+                   "tests in component-tests/, at the seams whose stubs are in "
+                   "contracts/components/.")
 # Added to the commit of sources that were pushed without a check of them.
 UNVERIFIED_NOTE = "Not verified: no check exists for this kind of change yet."
 # Added to the commit of sources whose tests pass but whose code review left findings.
@@ -215,31 +223,62 @@ async def _publish(session_id: str, repository: RepositorySelection, subject: st
 async def publish_repository(
     session_id: str, repository: RepositorySelection, contract: RepositoryContract,
     kind: str | None = None, findings: list[ReviewFinding] | None = None,
+    components: dict[str, Any] | None = None,
 ) -> RepositoryPublication:
     """Commit the verified service, its contract tests and the contract they were built
     from to a new branch and push it. With open review `findings` the tests pass but the
-    code review was not satisfied: the commit is marked as unverified and lists them."""
-    service_files = partial(is_service_file, session_language(contract['language']))
+    code review was not satisfied: the commit is marked as unverified and lists them.
+
+    A change with criteria proved at seams of the code passes `components`: its component
+    tests replace the repository's `component-tests/`, and the component contract its
+    routing checked replaces `contracts/components/`. Its contract tests replace the
+    repository's only when an author of the change wrote them (`contract_tests`); otherwise
+    the repository's suite, which the change was verified to keep passing, stays."""
+    registered = session_language(contract['language'])
+    service_files = partial(is_service_file, registered)
     target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
     service = target.parent / 'implementation/service'
     suite = target.parent / 'tests/suite'
-    if not await run_sync(all, (item.is_dir() for item in (target, service, suite))):
+    contract_tests = components is None or bool(components.get('contract_tests'))
+    sources = [target, service, *([suite] if contract_tests else [])]
+    component_suite = registered.component_suite
+    if components is not None:
+        if component_suite is None:
+            raise ApplicationError(f"{registered.label} has no component tests to push.",
+                                   non_retryable=True)
+        tests = target.parent / COMPONENT_TESTS_ARTIFACT / 'suite'
+        stubs = target.parent / ROUTED_CONTRACT
+        sources += [tests, stubs]
+    if not await run_sync(all, (item.is_dir() for item in sources)):
         raise ApplicationError("The verified sources or the repository checkout are unavailable.",
                                non_retryable=True)
 
     def update() -> None:
         repository_checkout.replace_files(service, target, service_files)
-        repository_checkout.replace_files(suite, target / repository_checkout.TESTS_DIR,
-                                          lambda relative: True)
+        if contract_tests:
+            repository_checkout.replace_files(suite, target / repository_checkout.TESTS_DIR,
+                                              lambda relative: True)
         write_contract(target, contract)
+        if components is not None:
+            # Only what the suite publishes: any other file the repository keeps beside it
+            # was never shown to the author, as with the service's files.
+            published = {Path(item) for item in component_suite.published}
+            repository_checkout.replace_files(
+                tests, target / repository_checkout.COMPONENT_TESTS_DIR,
+                lambda relative: relative in published
+                or not published.isdisjoint(relative.parents))
+            # The routing kept every published stub and only extended them.
+            repository_checkout.replace_files(stubs, target / PUBLISHED_STUBS,
+                                              lambda relative: True)
 
     subject = COMMIT_SUBJECTS.get(kind, COMMIT_SUBJECT)
+    details = COMPONENTS_NOTE if components is not None else ""
     if not findings:
-        result = await _publish(session_id, repository, subject, update)
+        result = await _publish(session_id, repository, subject, update, details=details)
         return {**result, 'findings': [], 'findings_count': 0}
     result = await _publish(
         session_id, repository, f"{subject} (unverified)", update, verified=False,
-        note=f"{FINDINGS_NOTE}\n\n{commit_findings(findings)}")
+        note=f"{FINDINGS_NOTE}\n\n{commit_findings(findings)}", details=details)
     return {**result, 'findings': findings[:COMMIT_FINDINGS], 'findings_count': len(findings)}
 
 

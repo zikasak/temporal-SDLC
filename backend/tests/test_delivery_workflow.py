@@ -21,7 +21,7 @@ from app.api_design.models import empty_api
 from app.architecture.workflows import ArchitectureWorkflow
 from app.delivery import service as delivery_service
 from app.delivery.models import (
-    COMPONENT_CHANGE_UNPUSHED, STOPPED, DeliveryProgress, DeliveryState, TaskSpec,
+    COMPONENT_CHANGE_UNPUBLISHED, COMPONENT_CHANGE_UNPUSHED, STOPPED, DeliveryProgress, DeliveryState, TaskSpec,
     delivery_id,
 )
 from app.github.checkout import SNAPSHOT_DIR
@@ -750,12 +750,17 @@ async def test_a_bugfix_proved_at_a_seam_runs_its_component_tests_red_then_green
     review, = worker.reviewed
     assert review['component_routes'] == implementation['component_routes']
     assert review['contract_tests'] is False
-    # Not pushed yet: the delivery says so where the push would be.
-    assert not worker.published
-    assert state.publication_status == 'skipped'
-    assert state.publication_error == COMPONENT_CHANGE_UNPUSHED
-    with pytest.raises(sessions.SessionBusy):
-        await requirements_service.retry_generation(handle.id, 'repository')
+    # Pushed with its component tests and contract; the repository's own contract tests
+    # stay as they are, as no author of the change wrote any.
+    assert worker.published == [(handle.id, 'octocat/private-project')]
+    assert worker.published_components == {'contract_tests': False}
+    assert worker.published_kind == 'bugfix' and not worker.published_findings
+    assert state.publication_status == 'completed' and state.publication_error is None
+    assert state.pull_request_status == 'completed'
+    # The pull request says which suite proves each criterion, and at which seam.
+    change, = worker.pull_request_changes
+    assert change['proofs'] == {'component': [
+        {'id': 'FR-2', 'title': 'Rooms double-book', 'seam': SEAM}]}
 
 
 async def test_a_bugfix_proved_by_both_suites_runs_each_at_the_baseline_and_with_the_fix(
@@ -778,7 +783,13 @@ async def test_a_bugfix_proved_by_both_suites_runs_each_at_the_baseline_and_with
     assert worker.existing_runs == []
     assert state.baseline_status == 'reproduced'
     assert worker.reviewed[0]['contract_tests'] is True
-    assert state.publication_error == COMPONENT_CHANGE_UNPUSHED
+    # Both suites are pushed, and the pull request lists the criteria of each.
+    assert worker.published_components == {'contract_tests': True}
+    assert state.publication_status == 'completed'
+    change, = worker.pull_request_changes
+    assert [item['id'] for item in change['proofs']['contract']] == ['FR-2']
+    assert [item['id'] for item in change['proofs']['component']] == ['FR-5']
+    assert 'seam' not in change['proofs']['contract'][0]
 
 
 async def test_a_repository_without_contract_tests_is_proved_by_its_component_tests_alone(
@@ -791,7 +802,8 @@ async def test_a_repository_without_contract_tests_is_proved_by_its_component_te
                              'implementation', 'component-runner', 'component-verification']
     assert worker.existing_runs == [] and state.baseline is None and state.verification is None
     assert state.baseline_status == 'reproduced'
-    assert state.publication_error == COMPONENT_CHANGE_UNPUSHED
+    assert worker.published_components == {'contract_tests': False}
+    assert state.publication_status == 'completed'
 
 
 @pytest.mark.parametrize('baseline, status, error', [
@@ -882,7 +894,7 @@ async def test_a_change_with_component_tests_is_diagnosed_and_repaired_on_both_s
     assert state.verification_status == 'completed' and state.verification_error is None
     assert state.component_verification['status'] == 'passed'
     assert len(worker.reviewed) == 1
-    assert state.publication_error == COMPONENT_CHANGE_UNPUSHED
+    assert state.publication_status == 'completed' and worker.published_components
 
 
 async def test_a_history_from_before_component_repairs_replays_unrepaired(
@@ -934,8 +946,66 @@ async def test_review_findings_go_to_the_suite_they_are_about(env, worker, repos
     # No author may change the stubs: that finding is left open for the user.
     assert len(worker.reviewed) == 2
     assert state.verification_status == 'findings_open'
-    assert state.publication_error == (COMPONENT_CHANGE_UNPUSHED
-                                       + ' 1 code review findings remain open.')
+    # Pushed as unverified, with the open finding, for the user to decide about.
+    assert state.publication_status == 'completed' and state.publication_error is None
+    assert worker.published_findings == [stub] and state.open_findings
+    assert worker.published_components == {'contract_tests': True}
+
+
+async def test_instructions_about_a_pushed_component_change_go_to_every_author(
+        env, worker, repository_selection):
+    worker.second_requirement = 'FR-5'
+    worker.routes = [{'FR-5': 'component'}]
+    stub = {'summary': 'The docstring names a private helper.', 'target': 'both',
+            'reason': 'R', 'path': 'contracts/components/app/rooms.pyi'}
+    worker.review_findings = [[stub], []]
+    handle, state = await fixed(env, repository_selection)
+    assert state.verification_status == 'findings_open' and state.open_findings
+    assert len(worker.published) == 1 and state.publication['branch']
+
+    await delivery_service.instruct_findings(handle.id, 'Describe what close does instead.')
+    state = await delivered(env, handle.id)
+    # The fix and both suites' authors carry the instructions out; the corrected tests
+    # are shown to fail without the fix again, then verified, reviewed and pushed again.
+    assert sorted(side for side, _ in worker.repairs) == [
+        'component-tests', 'implementation', 'tests']
+    assert all(repair['review']['instructions'] == 'Describe what close does instead.'
+               for _, repair in worker.repairs)
+    assert worker.stages.count('component-baseline') == 2
+    assert worker.stages.count('component-verification') == 2
+    assert state.verification_status == 'completed' and not state.open_findings
+    assert len(worker.published) == 2 and worker.published_findings == []
+    assert worker.published_components == {'contract_tests': True}
+
+
+@pytest.mark.parametrize('reviewed', [True, False])
+async def test_a_history_from_before_component_pushes_replays_unpushed(
+        env, worker, monkeypatch, reviewed, repository_selection):
+    worker.routes = [{'FR-2': 'component'}]
+    patched = workflow.patched
+    legacy = {'component-pushes', *([] if reviewed else ['component-repairs'])}
+    with monkeypatch.context() as context:
+        context.setattr(workflow, 'patched',
+                        lambda name: False if name in legacy else patched(name))
+        handle, state = await fixed(env, repository_selection)
+        # Such a delivery said where its push would be that it could not push yet.
+        assert not worker.published and state.publication_status == 'skipped'
+        assert state.publication_error == (
+            COMPONENT_CHANGE_UNPUSHED if reviewed else COMPONENT_CHANGE_UNPUBLISHED)
+        assert len(worker.reviewed) == (1 if reviewed else 0)
+        history = await env.client.get_workflow_handle(delivery_id(handle.id)).fetch_history()
+    await Replayer(workflows=[DeliveryWorkflow]).replay_workflow(history)
+    if not reviewed:
+        # A push now would skip the code review it never had.
+        with pytest.raises(sessions.SessionBusy, match='before changes with component'):
+            await requirements_service.retry_generation(handle.id, 'repository')
+        return
+    # One that was reviewed is pushed by retrying the push, as it was verified.
+    await requirements_service.retry_generation(handle.id, 'repository')
+    state = await delivered(env, handle.id)
+    assert worker.published_components == {'contract_tests': False}
+    assert state.publication_status == 'completed' and state.publication_error is None
+    assert worker.stages.count('implementation') == 1 and len(worker.reviewed) == 1
 
 
 async def test_a_fix_that_breaks_its_component_contract_is_written_again(
@@ -964,7 +1034,7 @@ async def test_a_fix_that_breaks_its_component_contract_is_written_again(
     assert worker.stages.count('component-baseline') == 1
     assert state.implementation_error is None
     assert state.component_verification['status'] == 'passed'
-    assert state.publication_error == COMPONENT_CHANGE_UNPUSHED
+    assert state.publication_status == 'completed' and len(worker.published) == 1
 
 
 async def test_more_component_tests_than_a_baseline_tracks_are_not_judged_in_part(

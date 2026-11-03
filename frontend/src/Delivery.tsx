@@ -87,9 +87,13 @@ export type DeliveryProgress = {
   routing_error: string | null;
   baseline_status: BaselineStatus;
   baseline: VerificationResult | null;
+  // The component tests' run against the code as the repository holds it.
+  component_baseline: VerificationResult | null;
   baseline_error: string | null;
   verification_status: VerificationStatus;
   verification: VerificationResult | null;
+  // The component tests' run with the change, once it conforms to its component contract.
+  component_verification: VerificationResult | null;
   verification_error: string | null;
   repairs: RepairRound[];
   publication: RepositoryPublication | null;
@@ -290,10 +294,12 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     baseline_status: baselineStatuses.includes(value.baseline_status as BaselineStatus)
       ? value.baseline_status as BaselineStatus : "not_applicable",
     baseline: verificationRecord(value.baseline),
+    component_baseline: verificationRecord(value.component_baseline),
     baseline_error: text(value.baseline_error),
     verification_status: verificationStatuses.includes(value.verification_status as VerificationStatus)
       ? value.verification_status as VerificationStatus : "not_applicable",
     verification: verificationRecord(value.verification),
+    component_verification: verificationRecord(value.component_verification),
     verification_error: text(value.verification_error),
     repairs: repairRounds(value.repairs),
     publication: repositoryPublication(value.publication, repository),
@@ -387,7 +393,7 @@ export function retriedProgress(progress: DeliveryProgress, stage: GenerationSta
       : stage === "tests" ? { tests: null, tests_error: null, component_tests: null, component_tests_error: null }
       : stage === "documentation" ? { documentation: null, documentation_error: null } : {}),
     ...(stage === "tests" && change
-      ? { baseline: null, baseline_error: null, baseline_status: "waiting" as const, routing_error: null } : {}),
+      ? { baseline: null, component_baseline: null, baseline_error: null, baseline_status: "waiting" as const, routing_error: null } : {}),
     // The criteria are routed again unless every one had a suite that observes it.
     ...(stage === "tests" && change && progress.routing_status !== "routed" &&
       progress.routing_status !== "not_applicable"
@@ -396,6 +402,7 @@ export function retriedProgress(progress: DeliveryProgress, stage: GenerationSta
     ...(stage === "repository" ? {} : {
       review_error: null,
       verification: null,
+      component_verification: null,
       verification_error: null,
       verification_status: "waiting" as const,
       repairs: [],
@@ -428,6 +435,30 @@ function TestRun({ result, children }: { result: VerificationResult; children?: 
       {result.service_log && <><h4>Service</h4><pre>{result.service_log}</pre></>}
       {result.runner_log && <><h4>Test runner</h4><pre>{result.runner_log}</pre></>}
     </details>}
+  </>;
+}
+
+/** The runs of a change's suites: its contract tests, its component tests, or both. Each
+ * is named by its suite when the change has component tests. */
+function SuiteRuns({ contract, component, outcome, children }: {
+  contract: VerificationResult | null;
+  component: VerificationResult | null;
+  // The line above a run's counts, by its suite's name; none above a baseline's.
+  outcome?: (result: VerificationResult, suite: string) => ReactNode;
+  children?: ReactNode;
+}) {
+  const runs = [
+    ...(contract ? [{ suite: "Contract tests", result: contract }] : []),
+    ...(component ? [{ suite: "Component tests", result: component }] : []),
+  ];
+  const named = component !== null;
+  return <>
+    {runs.map(({ suite, result }, index) => <div key={suite}>
+      {named && !outcome && <h4>{suite}</h4>}
+      {outcome?.(result, named ? suite : "Tests")}
+      <TestRun result={result}>{index === runs.length - 1 && children}</TestRun>
+    </div>)}
+    {runs.length === 0 && children}
   </>;
 }
 
@@ -505,12 +536,14 @@ function Baseline({ progress, retrying, disabled, onRetry }: {
       {stage === "skipped" && <p>
         {progress.routing_error
           ? "The baseline was skipped because the acceptance criteria could not all be routed to tests."
-          : components && !progress.tests_error
-          ? "The baseline was skipped because deliveries cannot run component tests yet."
+          : progress.baseline_error
+          ? "The baseline was skipped."
           : "The baseline was skipped because the regression tests were not written."}
       </p>}
       {stage === "reproduced" && <p className="verification-outcome verification-passed" role="status">
-        Reproduced: the added tests fail against the unchanged service and the existing tests pass
+        {components
+          ? "Reproduced: the added tests of both suites fail against the unchanged code and the existing tests pass"
+          : "Reproduced: the added tests fail against the unchanged service and the existing tests pass"}
       </p>}
       {suite && suite.added_tests.length > 0 && <p>Added tests: {suite.added_tests.join(", ")}</p>}
       {components && components.added_tests.length > 0 && <p>
@@ -535,7 +568,8 @@ function Baseline({ progress, retrying, disabled, onRetry }: {
           {retrying === "tests" ? "Writing the regression tests again…" : "Write the regression tests again"}
         </button>
       </div>}
-      {progress.baseline && stage !== "reproduced" && <TestRun result={progress.baseline} />}
+      {stage !== "reproduced" &&
+        <SuiteRuns contract={progress.baseline} component={progress.component_baseline} />}
     </section>
   );
 }
@@ -549,9 +583,11 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
   onRetry: (stage: GenerationStage) => void;
 }) {
   const publication = progress.publication;
-  // A verified change with component tests cannot be pushed yet; the error says so, and
-  // retrying the push would only say it again.
-  const unpublishable = progress.component_tests !== null && Boolean(progress.publication_error);
+  // A change with component tests verified before such changes were code-reviewed was
+  // never reviewed, so it is not pushed as it is; the error says so. One that was reviewed
+  // is pushed by retrying the push.
+  const unpublishable = progress.component_tests !== null && progress.publication_status === "skipped" &&
+    progress.reviews.length === 0 && Boolean(progress.publication_error);
   if (progress.publication_status === "not_applicable") return null;
   return <>
     <h3>Repository branch</h3>
@@ -560,7 +596,7 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
       : "Verified sources are pushed to a new branch once the tests pass."}</p>}
     {progress.publication_status === "running" && <p role="status">{documentation
       ? "Pushing the documentation to a new branch…" : "Pushing the verified sources to a new branch…"}</p>}
-    {progress.publication_status === "skipped" && !unpublishable && <p>{documentation
+    {progress.publication_status === "skipped" && !progress.publication_error && <p>{documentation
       ? "Nothing was pushed because the documentation was not completed."
       : "Nothing was pushed because verification did not pass."}</p>}
     {publication && <p className="verification-outcome verification-passed" role="status">
@@ -779,7 +815,9 @@ export function DeliveryResults({ progress, kind = null, documentation = false, 
       <h3 id="verification-title">Service verification</h3>
       {pending && (
         <div role="status">
-          <p>{stage === "running" ? "Running contract tests against the service…" :
+          <p>{stage === "running" ? (progress.component_tests
+              ? "Running the contract and component tests against the change…"
+              : "Running contract tests against the service…") :
             onboarding ? `Building the existing code with the new Dockerfile: ${service} · Tests: ${progress.tests ? "compiled" : progress.tests_error ? "generation or build failed" : "generating and compiling"}…` :
             change ? (progress.baseline_status === "reproduced" ? `Changing the service: ${service}…` : "Waiting for the baseline…") :
             !progress.code ? "Waiting for server code…" : "Waiting for service and test builds…"}</p>
@@ -831,14 +869,12 @@ export function DeliveryResults({ progress, kind = null, documentation = false, 
             : retrying === "tests" ? "Writing the tests again…" : "Write the tests again"}
         </button>
       </div>}
-      {result && <>
-        <p className={`verification-outcome verification-${result.status}`} role="status">
-          {result.status === "passed" ? "Tests passed" : result.status === "failed" ? "Tests failed" : "Verification could not complete"}
-        </p>
-        <TestRun result={result}>{repairs}</TestRun>
-      </>}
       {/* A change proved by its component tests alone has no contract test run. */}
-      {!result && repairs}
+      <SuiteRuns contract={result} component={progress.component_verification}
+        outcome={(run, suite) => <p className={`verification-outcome verification-${run.status}`} role="status">
+          {run.status === "passed" ? `${suite} passed` : run.status === "failed" ? `${suite} failed`
+            : progress.component_tests ? `${suite} could not complete` : "Verification could not complete"}
+        </p>}>{repairs}</SuiteRuns>
       <CodeReview progress={progress} retrying={retrying} disabled={disabled} onRetry={onRetry}
         onFindings={onFindings} />
       <Publication progress={progress} documentation={false} retrying={retrying} disabled={disabled} onRetry={onRetry} />

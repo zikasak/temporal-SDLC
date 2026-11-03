@@ -250,6 +250,16 @@ Each step lands with its own tests (`backend/tests/`, stage fakes in
    repair it. All of its tests passed without the fix, so the diagnosis may not blame it.
    Mention and instruction fix rounds need a push, so they wait for step 6.
 6. **Publication and UI** (3.7).
+   *Done:* behind the `component-pushes` workflow patch. `publish_repository` takes
+   `components` and pushes `component-tests/` and `contracts/components/`, and the
+   contract tests only when an author of the change wrote them. `write_contract` no longer
+   deletes `contracts/components/`, which every push before did. The pull request
+   description lists the criteria of each suite (`proofs`, with the seams). The delivery
+   page shows the component runs beside the contract runs at the baseline and with the
+   change. Mention and instruction fix rounds need nothing of their own: once the change
+   is pushed they run as for any delivery. A history that stopped with
+   `COMPONENT_CHANGE_UNPUSHED` is pushed by a `repository` retry; one with
+   `COMPONENT_CHANGE_UNPUBLISHED` was never reviewed and is refused.
 7. **End to end.** Run the flow-closing bugfix through the real pipeline with real
    agents and Docker. It is the acceptance case for the whole plan: routes go to
    `component`, the stubs are the workflows' signal or update and queries, the component

@@ -305,8 +305,8 @@ COMPONENT_CHANGE_UNPUBLISHED = (
     'The change was verified: its tests failed without the fix and pass with it, its '
     'component tests included. Deliveries cannot yet review or push a change with component '
     'tests, so nothing was pushed.')
-# Why one that passed and was reviewed is not pushed: the push of its component tests and
-# contract is step 6 of plans/component-contracts.md.
+# Why one that passed and was reviewed was not pushed, in histories from before such
+# changes were pushed; a `repository` retry pushes it now.
 COMPONENT_CHANGE_UNPUSHED = (
     'The change was verified and reviewed: its tests failed without the fix and pass with it, '
     'its component tests included. Deliveries cannot yet push a change with component tests, '

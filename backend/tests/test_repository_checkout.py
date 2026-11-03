@@ -156,6 +156,77 @@ async def test_bugfix_of_a_requirements_session_gets_its_own_branch(tmp_path, re
     assert await environment.run(activities.read_repository_contract, session_id) == CONTRACT
 
 
+async def test_a_change_with_component_tests_pushes_them_with_its_component_contract(
+        tmp_path, remote, repository_selection):
+    environment = ActivityEnvironment()
+    await environment.run(activities.checkout_repository, SESSION, repository_selection)
+    session = tmp_path / "generated" / SESSION
+    working_copy = session / "repository"
+    # The repository's own component tests and stubs, as a delivery before this one left
+    # them, and a file beside the suite that it does not publish.
+    for name, text in {"component-tests/tests/test_old.py": "old component test",
+                       "component-tests/notes.txt": "kept beside the suite",
+                       "contracts/components/app/old.pyi": "published stub"}.items():
+        (working_copy / name).parent.mkdir(parents=True, exist_ok=True)
+        (working_copy / name).write_text(text)
+    for name, text in {"implementation/service/app/rooms.py": "fixed",
+                       "component-tests/suite/tests/test_rooms.py": "component test",
+                       "component-tests/suite/pytest.ini": "[pytest]",
+                       "component-tests/suite/requirements.txt": "pytest",
+                       "routing/components/runtime.json": "{}",
+                       "routing/components/app/old.pyi": "published stub",
+                       "routing/components/app/rooms.pyi": "new stub"}.items():
+        (session / name).parent.mkdir(parents=True, exist_ok=True)
+        (session / name).write_text(text)
+    contract = {**CONTRACT, "language": "python"}
+
+    published = await environment.run(activities.publish_repository, SESSION,
+                                      repository_selection, contract, "bugfix", None,
+                                      {"contract_tests": False})
+    files = set(git("ls-tree", "-r", "--name-only", published["branch"], cwd=remote).splitlines())
+    # The suite replaces the published files of the repository's; the rest stay.
+    assert {"component-tests/tests/test_rooms.py", "component-tests/pytest.ini",
+            "component-tests/requirements.txt", "component-tests/notes.txt"} <= files
+    assert "component-tests/tests/test_old.py" not in files
+    # The checked component contract is published beside the rest of the contract.
+    assert {"contracts/components/runtime.json", "contracts/components/app/old.pyi",
+            "contracts/components/app/rooms.pyi", "contracts/openapi.yaml"} <= files
+    # No author of the change wrote contract tests: the repository's stay as they are.
+    assert git("show", f"{published['branch']}:contract-tests/src/test/java/StaleTest.java",
+               cwd=remote) == "stale"
+    message = git("log", "-1", "--format=%B", published["branch"], cwd=remote)
+    assert "component tests in component-tests/" in message
+
+    # A later push of a change without component tests keeps the component contract.
+    for name in ("implementation/service/app/rooms.py", "tests/suite/tests/test_api.py"):
+        (session / name).parent.mkdir(parents=True, exist_ok=True)
+        (session / name).write_text("again")
+    await environment.run(activities.publish_repository, SESSION, repository_selection,
+                          contract, "bugfix")
+    files = set(git("ls-tree", "-r", "--name-only", published["branch"], cwd=remote).splitlines())
+    assert {"contracts/components/app/rooms.pyi", "component-tests/tests/test_rooms.py",
+            "contract-tests/tests/test_api.py"} <= files
+
+    # Without the component tests there is nothing to push.
+    for name in ("component-tests/suite", "routing/components"):
+        subprocess.run(["rm", "-r", str(session / name)], check=True)
+    with pytest.raises(ApplicationError, match="unavailable"):
+        await environment.run(activities.publish_repository, SESSION, repository_selection,
+                              contract, "bugfix", None, {"contract_tests": False})
+
+
+def test_writing_the_contract_keeps_the_component_contract(tmp_path):
+    for name in ("contracts/obsolete.json", "contracts/old/nested.json",
+                 "contracts/components/app/rooms.pyi"):
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text("before")
+    write_contract(tmp_path, CONTRACT)
+    assert read_contract(tmp_path) == CONTRACT
+    assert not (tmp_path / "contracts/obsolete.json").exists()
+    assert not (tmp_path / "contracts/old").exists()
+    assert (tmp_path / "contracts/components/app/rooms.pyi").read_text() == "before"
+
+
 async def test_documentation_is_pushed_alone_and_marked_as_unverified(tmp_path, remote, repository_selection):
     environment = ActivityEnvironment()
     await environment.run(activities.checkout_repository, SESSION, repository_selection)

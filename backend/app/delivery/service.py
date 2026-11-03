@@ -12,7 +12,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from app.delivery.models import (
-    MENTION_HANDLED, OUTCOME_OWED, RETRY_STAGES, DeliveryProgress, DeliveryState, RetryStage, delivery_id, interrupted,
+    COMPONENT_CHANGE_UNPUBLISHED, MENTION_HANDLED, OUTCOME_OWED, RETRY_STAGES, DeliveryProgress, DeliveryState, RetryStage, delivery_id, interrupted,
     restorable_tests,
 )
 from app.delivery import mentions as mention_history
@@ -205,6 +205,7 @@ async def instruct_findings(session_id: str, instructions: str) -> DeliveryProgr
     # A failed earlier fix round keeps its images; its errors would stop this round.
     progress.implementation_error = None
     progress.tests_error = None
+    progress.component_tests_error = None
     progress.verification_status = 'repairing'
     # The flag stays raised and the earlier push stays until a new push replaces it.
     state.retry_stage = None
@@ -273,8 +274,11 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
                              or progress.pull_request_text_error)}[stage]
     if not failed:
         raise SessionBusy('Only failed generation can be retried.')
-    if stage == 'repository' and progress.component_tests:
-        raise SessionBusy('A change with component tests cannot be pushed yet.')
+    if stage == 'repository' and progress.publication_error == COMPONENT_CHANGE_UNPUBLISHED:
+        # Verified before such changes were reviewed: a push now would skip the review.
+        raise SessionBusy('This change was verified before changes with component tests '
+                          'were code-reviewed, so it cannot be pushed as it is. Fork the '
+                          'session from a message to deliver it again.')
     # An onboarding generates no code: its tests are written for the existing code.
     if stage == 'tests' and not progress.code and not change and not state.spec.onboarding:
         raise SessionBusy('Retry server generation first.')
