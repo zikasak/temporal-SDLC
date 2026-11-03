@@ -53,7 +53,7 @@ python -m app.agent_workflows.worker
 Run each command in a separate terminal/process. `backend/tools/dev_stack.py` launches
 all three workers, and `.zed/debug.json` includes individual worker launch profiles.
 `app.agent_workflows.worker` is the sandbox worker: one process that polls the task
-queues of every sandboxed stage (implementation, test generation, verification,
+queues of every sandboxed stage (routing, implementation, test generation, verification,
 diagnosis, review and documentation), each with its own one-activity-at-a-time Temporal
 `Worker`. The stage requirements below therefore all apply to that one process.
 Both coding stages need the Docker CLI, a running Docker daemon and writable
@@ -68,6 +68,8 @@ not registry tags. It also builds the baseline image of a
 The diagnosis worker has the same Docker and `GENERATED_CODE_DIR` needs as the coding
 workers and reads the published service, test suite and verification artifacts.
 `TEMPORAL_DIAGNOSIS_TASK_QUEUE` defaults to `diagnosis`.
+The routing worker of a [bugfix](#changing-an-existing-service-bugfix) has the same needs
+and reads the session's checkout. `TEMPORAL_ROUTING_TASK_QUEUE` defaults to `routing`.
 The documentation worker needs Docker and `GENERATED_CODE_DIR` too, to run its author; it
 builds no image of the output. `TEMPORAL_DOCUMENTATION_TASK_QUEUE` defaults to
 `documentation`.
@@ -466,7 +468,10 @@ No code is generated, and the stages run in sequence, red to green:
 
 ```mermaid
 flowchart LR
-    brief[Requirements session] --> tests[TestGenerationWorkflow]
+    brief[Requirements session] --> routing[ObservabilityWorkflow]
+    routing -- every criterion observable over HTTP --> tests[TestGenerationWorkflow]
+    routing -- a criterion unobservable --> stop
+    tests -- a criterion unobservable --> stop
     tests --> baseline[Baseline run]
     repository[Repository service image] --> baseline
     baseline -- added tests fail, existing pass --> fix[ImplementationWorkflow]
@@ -474,13 +479,35 @@ flowchart LR
     fix --> verification[VerificationWorkflow and repair loop]
 ```
 
-1. **Regression tests.** The test author's workspace is the repository's `contract-tests/`
+1. **Routing.** `ObservabilityWorkflow` (`app/routing/`, queue `routing`, settings
+   workflow type `routing`) decides, before any test is written, whether the contract
+   tests can observe each requirement of the brief. Its agent reads a copy of the
+   checkout without `.git` and build output (the root `Dockerfile`, the service's code
+   and `contract-tests/README.md` say what the running suite has) and writes
+   `routes.json`: one `{requirement_id, route, reason}` per requirement, `route` being
+   `contract` or `unobservable`. The host rejects a routing that leaves out, repeats or
+   invents a requirement, has another route or gives no reason (`read_routes` in
+   `app/routing/models.py`). The result is `DeliveryProgress.routing`, by requirement ID,
+   each with `source: routing`. If any route is `unobservable`, `routing_status` is
+   `unobservable`, `routing_error` names the criteria with their reasons and asks the user
+   to rephrase them in a fork of the interview, and the delivery stops with the baseline
+   and verification `skipped`: no test is written and nothing is pushed. A routing that
+   failed sets `routing_status: error`. A routing with every criterion `contract`
+   (`routed`) is kept for later retries of the tests; any other is done again.
+   The component route of `plans/component-contracts.md` comes later.
+2. **Regression tests.** The test author's workspace is the repository's `contract-tests/`
    as usual. It adds tests wherever they belong, in an existing class or a new one, and
    may not change or remove an existing test; the stage fails otherwise (see
    [Which tests an author may change](#which-tests-an-author-may-change)). The stage
    result describes the suite against the repository's: `added_tests`, and after repairs
-   `changed_tests` and `removed_tests`.
-2. **Baseline run.** The verification worker's `build_baseline` activity builds the service
+   `changed_tests` and `removed_tests`. Instead of a suite, the first author (not a
+   repair) may write `unobservable.json`, `{"unobservable": [{requirement_id, reason}]}`,
+   naming criteria of the brief no test of the suite can observe. The host validates it
+   like a routing (`read_unobservable` in `app/test_generation/activities.py`, through the
+   stage's `declined_result`) and the stage returns `unobservable` with no suite; the
+   delivery records those routes with `source: tests` and stops as the routing does. This
+   replaces a test skipped behind a variable nothing sets, which the prompt still forbids.
+3. **Baseline run.** The verification worker's `build_baseline` activity builds the service
    from the checkout, filtered exactly as the implementation author sees it, and publishes
    `<GENERATED_CODE_DIR>/<session-id>/baseline/image.json`. `VerificationWorkflow` then runs
    the new suite against that image and reports each added and changed test on its own
@@ -488,15 +515,17 @@ flowchart LR
    `baseline_status`:
    - `reproduced`: every added test fails and every existing test passes;
    - `not_reproduced`: an added test does not fail. Nothing is changed;
-   - `error`: an existing test fails, any test is skipped, a test in the suite's sources
+   - `error`: an existing test fails, any test is skipped (reported as a routing failure:
+     a test that skips itself was written for a criterion the contract tests cannot
+     observe), a test in the suite's sources
      has no report (`missing_tests`: the build configuration left it out, for example), or
      the run could not complete.
 
    Anything but `reproduced` ends the delivery with `baseline_error`, verification
    `skipped` and nothing pushed.
-3. **The fix.** The implementation author's workspace is the checkout alone, without
+4. **The fix.** The implementation author's workspace is the checkout alone, without
    generated code, and its prompt asks for targeted edits for the brief.
-4. **Final run.** The whole suite against the changed service, with the usual repair loop.
+5. **Final run.** The whole suite against the changed service, with the usual repair loop.
    When a repair corrects the tests, the baseline is run again with the repaired suite.
    Added tests must still fail there, or the delivery ends as `not_reproduced`. A
    repository test the repair corrected because the change made it wrong may fail there;
@@ -517,13 +546,14 @@ that are renumbered when the kind is set (`numbered_after`), and the tool tells 
 analyst to say which IDs changed. Finalizing applies the same rule once more before the
 document is written. The conversation, the document, both authors, the tests and the
 repository therefore quote the same IDs. The API
-model is unchanged. `DeliveryProgress` reports `baseline_status`
-(`not_applicable` for every other kind), `baseline` and `baseline_error`.
+model is unchanged. `DeliveryProgress` reports `routing_status` and `baseline_status`
+(`not_applicable` for every other kind), `routing`, `routing_error`, `baseline` and
+`baseline_error`.
 
 `GET /api/requirements/sessions/{id}` returns the progress as `delivery` (null until the
 session delivers), and `POST /api/requirements/sessions/{id}/generation/retry` retries a
-failed stage as for a design session. Retrying `tests` is also how a failed or
-unreproduced baseline, or a verification that ended with an error or could not complete,
+failed stage as for a design session. Retrying `tests` is also how a failed routing, one that found an
+unobservable criterion, a failed or unreproduced baseline, or a verification that ended with an error or could not complete,
 is retried: the tests are written again and held against the
 baseline again, and the fix is written only if there is none yet. An API design cannot be
 started from such a session.

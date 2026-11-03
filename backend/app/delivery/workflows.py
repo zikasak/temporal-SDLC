@@ -9,8 +9,8 @@ from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflow
 with workflow.unsafe.imports_passed_through():
     from app.config import (
         CODEGEN_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, DOCUMENTATION_TASK_QUEUE,
-        IMPLEMENTATION_TASK_QUEUE, REVIEW_TASK_QUEUE, TEST_GENERATION_TASK_QUEUE,
-        VERIFICATION_TASK_QUEUE,
+        IMPLEMENTATION_TASK_QUEUE, REVIEW_TASK_QUEUE, ROUTING_TASK_QUEUE,
+        TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
     )
     from app.delivery.contract import with_requirements
     from app.delivery.models import (
@@ -23,6 +23,7 @@ with workflow.unsafe.imports_passed_through():
     from app.github.models import PullRequestMention
     from app.temporal.execution_fields import task_fields
     from app.requirements.models import CHANGE_KINDS
+    from app.routing.models import judge_routes
     from app.review.models import (
         MAX_REVIEW_ROUNDS, ReviewFinding, ReviewRound, earlier_findings, for_worker,
         review_request,
@@ -682,10 +683,16 @@ class DeliveryWorkflow:
         await self._verify_built()
 
     async def _change(self) -> None:
-        """Change the repository's service red to green: regression tests first, proof
-        that they fail against the service as it is, then the fix and the whole suite."""
+        """Change the repository's service red to green: the suite that can prove each
+        criterion, regression tests, proof that they fail against the service as it is,
+        then the fix and the whole suite."""
         self.progress.verification_status = 'waiting'
         self.progress.baseline_status = 'waiting'
+        # No test is written for criteria no suite can observe.
+        if not await self._route():
+            self.progress.baseline_status = 'skipped'
+            self.progress.verification_status = 'skipped'
+            return
         await self._generate_tests()
         # Nothing is fixed before the added tests are shown to fail without the fix.
         if not await self._reproduce():
@@ -695,6 +702,47 @@ class DeliveryWorkflow:
         if not self.progress.implementation:
             await self._implement_service()
         await self._verify_built()
+
+    async def _route(self) -> bool:
+        """Decide which suite can prove each criterion of the brief: true when every one
+        has one. A routing that found one for each is kept for the retries of the tests."""
+        if self.progress.routing_status == 'routed':
+            return True
+        self.progress.routing_status = 'running'
+        self.progress.routing = None
+        self.progress.routing_error = None
+        try:
+            result = await workflow.execute_child_workflow(
+                'ObservabilityWorkflow',
+                args=[self.spec.session_id, self._stage_context(None)],
+                id=self._child_id('routing'),
+                task_queue=ROUTING_TASK_QUEUE,
+                result_type=dict,
+            )
+        except ChildWorkflowError as exc:
+            workflow.logger.warning('Routing failed: %s', exc.cause or exc)
+            self.progress.routing_error = ('It could not be decided which tests can prove the '
+                                           'acceptance criteria.')
+            self.progress.routing_status = 'error'
+            return False
+        self.progress.routing = {
+            requirement: {**route, 'source': 'routing'}
+            for requirement, route in result['routes'].items()}
+        self.progress.routing_status, self.progress.routing_error = judge_routes(
+            self.progress.routing)
+        workflow.logger.info('Routing: %s', self.progress.routing_status)
+        return self.progress.routing_status == 'routed'
+
+    def _declined(self, unobservable: list[dict[str, str]]) -> None:
+        """Record criteria the test author found the contract tests cannot observe."""
+        routing = dict(self.progress.routing or {})
+        for item in unobservable:
+            routing[item['requirement_id']] = {
+                'route': 'unobservable', 'reason': item['reason'], 'source': 'tests'}
+        self.progress.routing = routing
+        self.progress.routing_status, self.progress.routing_error = judge_routes(routing)
+        workflow.logger.info('The test author found %d criteria unobservable',
+                             len(unobservable))
 
     async def _document(self, instructions: str | None = None) -> None:
         """Change the repository's documentation: its author, then the check of what it
@@ -1548,7 +1596,7 @@ class DeliveryWorkflow:
             # The repository's tests the changed service was seen to pass as they are.
             context['keep'] = list(self.state.kept_tests)
         try:
-            self.progress.tests = await workflow.execute_child_workflow(
+            tests = await workflow.execute_child_workflow(
                 "TestGenerationWorkflow",
                 args=[self.spec.session_id, context],
                 id=self._child_id(self._stage_name('test-generation', repair),
@@ -1559,3 +1607,9 @@ class DeliveryWorkflow:
         except ChildWorkflowError as exc:
             workflow.logger.warning("Service test generation failed: %s", exc.cause or exc)
             self.progress.tests_error = "The service tests could not be generated or built."
+            return
+        if 'unobservable' in tests:
+            # No suite was written: the delivery stops, as when the routing found these.
+            self._declined(tests['unobservable'])
+            return
+        self.progress.tests = tests

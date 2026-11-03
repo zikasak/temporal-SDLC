@@ -20,10 +20,12 @@ from app.docker_agents import default_agent_image
 from app.github.checkout import SNAPSHOT_DIR
 from app.languages import Language, TestSuite
 from app.requirements.document import without_repeated_tables
+from app.routing.models import UNOBSERVABLE_FILE, read_routes
 
 # Supplied by every language's template; the runner never comes from the test author.
 RUNNER_FILES = ('Dockerfile', '.dockerignore', 'run-tests.sh')
 MAX_NAMED_TESTS = 5
+MAX_UNOBSERVABLE_BYTES = 256 * 1024
 
 
 def copy_test_suite(suite: TestSuite, source: Path, target: Path) -> None:
@@ -111,9 +113,37 @@ def validate_output(suite: TestSuite, frozen: dict[str, str] | None, must_add: b
         raise RuntimeError('Test generation did not add a regression test')
 
 
+def read_unobservable(requirement_ids: list[str], output: Path) -> dict[str, Any] | None:
+    """The criteria of the brief the author found no test of the suite can observe, as
+    `unobservable`, when it wrote UNOBSERVABLE_FILE instead of a suite. The file is
+    untrusted: it has to name criteria of the brief, each with its reason."""
+    file = output / UNOBSERVABLE_FILE
+    if file.is_symlink() or not file.exists():
+        return None
+    if not file.is_file() or file.stat().st_size > MAX_UNOBSERVABLE_BYTES:
+        raise RuntimeError(f'Test generation wrote an unreadable {UNOBSERVABLE_FILE}')
+    try:
+        data = json.loads(file.read_text())
+    except ValueError as exc:
+        raise RuntimeError(f'{UNOBSERVABLE_FILE} is not valid JSON') from exc
+    items = data.get('unobservable') if isinstance(data, dict) else None
+    if not isinstance(items, list) or not items:
+        raise RuntimeError(f'{UNOBSERVABLE_FILE} names no criterion')
+    named = {item.get('requirement_id') for item in items if isinstance(item, dict)}
+    # The same checks as a routing's, but only of the criteria the file names.
+    routes = read_routes(
+        {'routes': [{**item, 'route': 'unobservable'} if isinstance(item, dict) else item
+                    for item in items]},
+        [requirement for requirement in requirement_ids if requirement in named])
+    return {'unobservable': [{'requirement_id': requirement, 'reason': route['reason']}
+                             for requirement, route in routes.items()]}
+
+
 def stage(language: Language, frozen: dict[str, str] | None = None,
-          must_add: bool = False) -> StageSpec:
-    """`frozen` holds the tests, by identity, whose source the author must leave as it is."""
+          must_add: bool = False, requirement_ids: list[str] | None = None) -> StageSpec:
+    """`frozen` holds the tests, by identity, whose source the author must leave as it is.
+    `requirement_ids` are the criteria of a brief the author may name as unobservable
+    instead of writing a suite; None when it may not."""
     suite = language.test_suite
     return StageSpec(
         role='test_generation', artifact_subdir='tests', workspace_name='tests',
@@ -124,6 +154,8 @@ def stage(language: Language, frozen: dict[str, str] | None = None,
         prepare_inputs=partial(prepare_inputs, language),
         sanitize_output=partial(copy_test_suite, suite),
         validate_output=partial(validate_output, suite, frozen, must_add),
+        declined_result=(partial(read_unobservable, requirement_ids)
+                         if requirement_ids is not None else None),
     )
 
 
@@ -176,9 +208,14 @@ async def generate_service_tests(session_id: str, context: dict[str, Any]) -> di
         frozen = {**(frozen or {}), **keep}
     context = {**context, 'keep': keep} if keep else {
         key: value for key, value in context.items() if key != 'keep'}
-    result = await run_stage(stage(language, frozen, must_add=change and not repair),
+    # The first author of a change's tests may find a criterion of its brief that no test
+    # of the suite can observe, and say so instead of writing a suite.
+    requirement_ids = ([item['id'] for item in context['brief']['requirements']]
+                       if change and not repair else None)
+    result = await run_stage(stage(language, frozen, must_add=change and not repair,
+                                   requirement_ids=requirement_ids),
                              session_id, context, GENERATED_CODE_DIR)
-    if not continued or 'questions' in result:
+    if not continued or 'questions' in result or 'unobservable' in result:
         return result
     # What the suite now differs in from the repository's, for the runs that judge it.
     cases = await run_sync(suite.test_cases, Path(result['path']))

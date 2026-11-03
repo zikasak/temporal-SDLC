@@ -5,13 +5,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 WorkflowType = Literal[
     'chat', 'requirements', 'api_design', 'implementation', 'test_generation',
-    'diagnosis', 'documentation', 'review',
+    'diagnosis', 'documentation', 'review', 'routing',
 ]
 Adapter = Literal['pi', 'openai', 'claude']
 WORKFLOW_LABELS: dict[str, str] = {
     'chat': 'Chat', 'requirements': 'Requirements', 'api_design': 'API design',
     'implementation': 'Implementation', 'test_generation': 'Test generation',
     'diagnosis': 'Diagnosis', 'documentation': 'Documentation', 'review': 'Review',
+    'routing': 'Routing',
 }
 SETTINGS_FILENAME = 'llm-settings.json'
 

@@ -540,8 +540,13 @@ async def test_bugfix_is_delivered_red_to_green_from_the_requirements_session(en
     handle, state = await fixed(env, repository_selection)
     # No code is generated, and nothing is fixed before the tests are seen to fail.
     assert FakeCodegenWorkflow.languages == [] and state.code is None
-    assert worker.stages == ['tests', 'baseline', 'baseline-run', 'implementation', 'verification']
+    assert worker.stages == ['routing', 'tests', 'baseline', 'baseline-run', 'implementation',
+                             'verification']
     assert state.baseline_status == 'reproduced' and state.baseline_error is None
+    # Each criterion was routed to the contract tests before any test was written.
+    assert state.routing_status == 'routed' and state.routing_error is None
+    assert state.routing == {'FR-2': {'route': 'contract', 'reason': 'Route of FR-2.',
+                                      'source': 'routing'}}
     # The baseline runs the added tests against the service as the repository holds it.
     assert worker.baselines == [(BASELINE_IMAGE, ORIGINAL[1], ADDED_TESTS)]
     assert worker.verified_images == [ORIGINAL]
@@ -582,7 +587,7 @@ async def test_bugfix_is_delivered_red_to_green_from_the_requirements_session(en
 @pytest.mark.parametrize('baseline, status, error', [
     ('not_reproduced', 'not_reproduced', 'com.example.RoomsTest#refusesDoubleBooking (1 of 2)'),
     ('existing_failed', 'error', 'Existing tests failing against the service as the repository holds it: 1'),
-    ('skipped', 'error', 'Tests skipped in the baseline run: 1'),
+    ('skipped', 'error', 'the routing of that criterion to them was wrong'),
     ('left_out', 'error', 'did not run in the baseline run: com.example.RoomsTest#lists (1)'),
     ('error', 'error', 'The baseline run could not complete.'),
 ])
@@ -599,9 +604,48 @@ async def test_nothing_is_fixed_unless_the_added_tests_fail_alone(env, worker, b
         await requirements_service.retry_generation(handle.id, 'server')
     await requirements_service.retry_generation(handle.id, 'tests')
     state = await delivered(env, handle.id)
+    # The criteria were routed once: a retry of the tests keeps that routing.
+    assert worker.stages.count('routing') == 1
     assert worker.stages[-5:] == ['tests', 'baseline', 'baseline-run', 'implementation', 'verification']
     assert state.baseline_status == 'reproduced' and state.baseline_error is None
     assert state.verification['status'] == 'passed' and state.publication_status == 'completed'
+
+
+@pytest.mark.parametrize('found_by', ['routing', 'tests', 'failure'])
+async def test_a_criterion_no_suite_can_observe_stops_the_bugfix_before_its_tests_run(env, worker, found_by, repository_selection):
+    if found_by == 'routing':
+        worker.routes = [{'FR-2': 'unobservable'}, {}]
+    elif found_by == 'tests':
+        worker.declined = ['FR-2']
+    else:
+        worker.fail_routing = True
+    handle, state = await fixed(env, repository_selection)
+    # Nothing is run against the service, nothing changes it and nothing is pushed.
+    assert worker.stages == (['routing', 'tests'] if found_by == 'tests' else ['routing'])
+    assert state.tests is None and state.tests_error is None and state.baseline is None
+    assert state.baseline_status == 'skipped' and state.verification_status == 'skipped'
+    assert state.implementation is None and not worker.published
+    assert state.publication_status == 'skipped'
+    if found_by == 'failure':
+        assert state.routing_status == 'error' and state.routing is None
+        assert 'could not be decided' in state.routing_error
+    else:
+        # The user is told which criterion and why, early and as a matter of the brief.
+        assert state.routing_status == 'unobservable'
+        assert state.routing['FR-2']['route'] == 'unobservable'
+        assert state.routing['FR-2']['source'] == found_by
+        reason = 'Route of FR-2.' if found_by == 'routing' else 'Needs a pull request.'
+        assert f'FR-2: {reason}' in state.routing_error
+        assert 'Rephrase' in state.routing_error
+        assert state.routing_error.startswith('The test author found') == (found_by == 'tests')
+
+    # Retrying the tests routes the criteria again first.
+    worker.declined, worker.fail_routing = [], False
+    await requirements_service.retry_generation(handle.id, 'tests')
+    state = await delivered(env, handle.id)
+    assert worker.stages.count('routing') == 2
+    assert state.routing_status == 'routed' and state.routing_error is None
+    assert state.baseline_status == 'reproduced' and state.publication_status == 'completed'
 
 
 @pytest.mark.parametrize('outcome', ['skipped', 'error'])

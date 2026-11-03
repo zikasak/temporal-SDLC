@@ -36,7 +36,7 @@ container_logger = logging.getLogger('app.containers')
 # The *_MAX_TURNS budgets are read inside the container by each stage's AgentProfile.
 AGENT_SETTINGS = ('AGENT_CONTEXT_TOKENS', 'LOG_LEVEL', 'IMPLEMENTATION_MAX_TURNS',
                   'TEST_GENERATION_MAX_TURNS', 'REVIEW_MAX_TURNS', 'DIAGNOSIS_MAX_TURNS',
-                  'DOCUMENTATION_MAX_TURNS')
+                  'DOCUMENTATION_MAX_TURNS', 'ROUTING_MAX_TURNS')
 CONTAINER_LINE_CHARS = 4000
 # How long a container's remaining output may take to arrive once it was waited for.
 LOG_DRAIN_SECONDS = 2
