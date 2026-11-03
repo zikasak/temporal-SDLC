@@ -894,15 +894,13 @@ class DeliveryWorkflow:
         )
         return image['image_id'], SNAPSHOT_DIR, [], []
 
-    async def _run_components(self, runner_image: str) -> dict[str, Any]:
+    async def _run_components(self, runner_image: str, tracked: list[str]) -> dict[str, Any]:
         """Run the component tests once, and once more when the run could not complete,
-        as a run of the contract tests is."""
-        tests = self.progress.component_tests
+        as a run of the contract tests is; each test of `tracked` is reported singly."""
         for attempt in range(1, VERIFICATION_ATTEMPTS + 1):
             result = await workflow.execute_activity(
                 'run_component_suite',
-                args=[self.spec.session_id, runner_image, self.spec.language,
-                      [*tests['added_tests'], *tests['changed_tests']][:MAX_TRACKED]],
+                args=[self.spec.session_id, runner_image, self.spec.language, tracked],
                 task_queue=VERIFICATION_TASK_QUEUE, result_type=dict,
                 start_to_close_timeout=timedelta(minutes=15),
                 heartbeat_timeout=timedelta(minutes=2),
@@ -926,6 +924,15 @@ class DeliveryWorkflow:
         self.progress.baseline_error = None
         self.progress.component_baseline = None
         components = self.progress.component_tests
+        tracked = [*components['added_tests'], *components['changed_tests']]
+        if len(tracked) > MAX_TRACKED:
+            # The baseline judges every added test on its own, so none may go unreported.
+            self.progress.baseline_error = (
+                f'The component tests added {len(tracked)} tests, more than one baseline run '
+                f'reports on singly ({MAX_TRACKED}), so the baseline cannot prove that each '
+                'fails without the fix. Write fewer regression tests.')
+            self.progress.baseline_status = 'error'
+            return False
         added, changed = [], []
         try:
             suite = await self._contract_suite()
@@ -941,7 +948,7 @@ class DeliveryWorkflow:
                     result_type=dict,
                 )
             self.progress.component_baseline = await self._run_components(
-                components['image_id'])
+                components['image_id'], tracked)
         except (ActivityError, ChildWorkflowError) as exc:
             workflow.logger.warning('Baseline run failed: %s', exc.cause or exc)
             self.progress.baseline_error = ('The tests could not be run against the code as '
@@ -1067,6 +1074,23 @@ class DeliveryWorkflow:
         self.progress.component_verification = None
         service_image = self.progress.implementation['image_id']
         try:
+            # The fix is held to the component contract before anything is run against it.
+            runner = await workflow.execute_activity(
+                'build_component_runner', args=[self.spec.session_id, self.spec.language],
+                task_queue=VERIFICATION_TASK_QUEUE, result_type=dict,
+                start_to_close_timeout=timedelta(minutes=30),
+                heartbeat_timeout=timedelta(minutes=2),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+            if 'conformance_error' in runner:
+                # The fix is at fault, whatever the tests: retrying the server writes it
+                # again, while retrying the tests would keep it.
+                self.progress.implementation_error = (
+                    f'{runner["conformance_error"]} The fix has to keep every signature of '
+                    'the component contract, so it was not verified. Retry the '
+                    'implementation to write the fix again.')
+                self.progress.verification_status = 'skipped'
+                return
             suite = await self._contract_suite()
             if suite:
                 test_image, suite_dir, added, _ = suite
@@ -1081,34 +1105,23 @@ class DeliveryWorkflow:
                     )
                     if self.progress.verification['status'] != 'error':
                         break
-            runner = await workflow.execute_activity(
-                'build_component_runner', args=[self.spec.session_id, self.spec.language],
-                task_queue=VERIFICATION_TASK_QUEUE, result_type=dict,
-                start_to_close_timeout=timedelta(minutes=30),
-                heartbeat_timeout=timedelta(minutes=2),
-                retry_policy=RetryPolicy(maximum_attempts=1),
-            )
-            if 'conformance_error' not in runner:
-                self.progress.component_verification = await self._run_components(
-                    runner['image_id'])
+            # A passed run is judged as a whole, so it tracks what one run can report on.
+            self.progress.component_verification = await self._run_components(
+                runner['image_id'], self.progress.component_tests['added_tests'][:MAX_TRACKED])
         except (ActivityError, ChildWorkflowError) as exc:
             workflow.logger.warning('Verification of the change failed: %s', exc.cause or exc)
             self.progress.verification_error = 'Service verification could not complete.'
             self.progress.verification_status = 'error'
             return
         self.progress.verification_status = 'completed'
-        self.progress.verification_error = self._judge_components(runner)
+        self.progress.verification_error = self._judge_components()
         workflow.logger.info('Verification of the change: %s',
                              'rejected' if self.progress.verification_error else 'passed')
 
-    def _judge_components(self, runner: dict[str, Any]) -> str | None:
+    def _judge_components(self) -> str | None:
         """Why verification of a change with component tests did not show it working;
         None when it did."""
         contract, component = self.progress.verification, self.progress.component_verification
-        if 'conformance_error' in runner:
-            # The check says what differs; the fix has to keep the seam as it is.
-            return (f'{runner["conformance_error"]} The fix has to keep every signature of '
-                    f'the component contract. {COMPONENT_CHANGE_UNREPAIRED}')
         failed = []
         for name, run in (('contract tests', contract), ('component tests', component)):
             if run is None:

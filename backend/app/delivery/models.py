@@ -297,8 +297,8 @@ def unproven_green(result: VerificationResult | None,
 # their diagnosis and repair come with step 5 of plans/component-contracts.md.
 COMPONENT_CHANGE_UNREPAIRED = (
     'Deliveries cannot yet diagnose or repair a change with component tests, so the change '
-    'was not repaired and nothing was pushed. Retry the tests to write the tests and the '
-    'change again.')
+    'was not repaired and nothing was pushed. Retrying the tests writes them again and '
+    'verifies them against the same fix.')
 # Why one that passed is not pushed all the same: neither the code review nor the push of
 # its component tests and contract is there yet (steps 5 and 6).
 COMPONENT_CHANGE_UNPUBLISHED = (

@@ -231,9 +231,11 @@ Each step lands with its own tests (`backend/tests/`, stage fakes in
    `judge_baseline`, behind the `component-runs` workflow patch. A change with no
    `contract` route runs the repository's own contract tests as they are, at the baseline
    and with the fix, or none when the repository has none. Until steps 5 and 6 land, a
-   change with component tests is not repaired, reviewed or pushed: a failure ends it
-   with `verification_error`, and a pass ends it with `publication_error` saying it
-   cannot be pushed yet (`COMPONENT_CHANGE_UNREPAIRED`, `COMPONENT_CHANGE_UNPUBLISHED`).
+   change with component tests is not repaired, reviewed or pushed: a fix that breaks the
+   component contract ends it with `implementation_error` (retried by writing the fix
+   again), a failing test with `verification_error`, and a pass with `publication_error`
+   saying it cannot be pushed yet (`COMPONENT_CHANGE_UNREPAIRED`,
+   `COMPONENT_CHANGE_UNPUBLISHED`).
 5. **Implementation, diagnosis, repair, review** integration (3.6).
 6. **Publication and UI** (3.7).
 7. **End to end.** Run the flow-closing bugfix through the real pipeline with real

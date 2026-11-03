@@ -144,6 +144,8 @@ class FakeStages:
         self.conformance_error: str | None = None
         # Each component test run: its runner image and the tests it tracked.
         self.component_runs: list[tuple[str, list[str]]] = []
+        # The tests the component tests' author adds.
+        self.component_added = ADDED_COMPONENT_TESTS
 
     @activity.defn(name="checkout_repository")
     async def checkout_repository(self, session_id: str, repository: dict[str, Any]) -> dict[str, Any]:
@@ -234,7 +236,7 @@ class FakeStages:
                 {'requirement_id': requirement, 'reason': 'Happens in no stubbed symbol.'}
                 for requirement in self.component_declined]}
         return {'session_id': session_id, 'image_id': COMPONENT_IMAGE,
-                'path': '/component-tests/suite', 'added_tests': ADDED_COMPONENT_TESTS,
+                'path': '/component-tests/suite', 'added_tests': self.component_added,
                 'changed_tests': [], 'removed_tests': []}
 
     @activity.defn(name="generate_service_tests")

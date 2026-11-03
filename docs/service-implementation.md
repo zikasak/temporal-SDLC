@@ -622,13 +622,17 @@ conformance check of the routing (`check_conformance`) against the implementatio
 sources, then the component tests' runner built with them, published as
 `<session-id>/component-verification/image.json`. A change whose code no longer matches
 its stubs, or with which the suite does not even collect, returns `conformance_error`
-instead, and no component test is run. Otherwise both suites run against the change, the
-component tests' result being `DeliveryProgress.component_verification`, and
-`unproven_green` checks both. Such a change is not diagnosed, repaired, reviewed or
-pushed yet (steps 5 and 6 of `plans/component-contracts.md`): a failure, a skip or a
-broken contract ends it with `verification_error`, and one that passed both suites ends
-with `publication_status: skipped` and `publication_error` saying it cannot be pushed
-yet. A `repository` retry is refused for it.
+instead: no test of either suite runs, verification is `skipped`, and the message is the
+`implementation_error`, so the `server` retry writes the fix again (a `tests` retry would
+keep it). Otherwise both suites run against the change, the component tests' result being
+`DeliveryProgress.component_verification`, and `unproven_green` checks both. Such a change
+is not diagnosed, repaired, reviewed or pushed yet (steps 5 and 6 of
+`plans/component-contracts.md`): a failure or a skip ends it with `verification_error`,
+which a `tests` retry answers with new tests against the same fix, and one that passed
+both suites ends with `publication_status: skipped` and `publication_error` saying it
+cannot be pushed yet. A `repository` retry is refused for it. The baseline tracks every
+added and corrected component test, so a suite with more than `MAX_TRACKED` (1000) of them
+ends the baseline with an error before anything runs.
 
 The push requires such a verification and a `reproduced` baseline. The published
 contract is the repository's without the retired requirements and with the brief's

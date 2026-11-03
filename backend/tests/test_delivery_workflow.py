@@ -758,8 +758,9 @@ async def test_a_bugfix_proved_by_both_suites_runs_each_at_the_baseline_and_with
     assert sorted(worker.stages[:3]) == ['component-tests', 'routing', 'tests']
     assert list(worker.test_contexts[0]['routes']) == ['FR-2']
     assert list(worker.component_contexts[0]['routes']) == ['FR-5']
+    # The fix is held to its component contract before either suite runs against it.
     assert worker.stages[3:] == ['baseline', 'baseline-run', 'component-baseline',
-                                 'implementation', 'verification', 'component-runner',
+                                 'implementation', 'component-runner', 'verification',
                                  'component-verification']
     # The contract tests' baseline and verification answer for the tests the change added.
     assert worker.baselines == [(BASELINE_IMAGE, ORIGINAL[1], ADDED_TESTS)]
@@ -813,37 +814,73 @@ async def test_nothing_is_fixed_unless_the_component_tests_fail_without_the_fix(
 
 
 @pytest.mark.parametrize('outcome, error', [
-    ('conformance', 'The component contract does not match the code: stubtest: '
-                    'app.rooms.Rooms.close is inconsistent The fix has to keep every '
-                    'signature of the component contract.'),
     ('failed', 'Tests fail against the changed code: component tests 1 of 4 '
                f'(tests.test_rooms#{ADDED_COMPONENT_TESTS[0]})'),
     ('skipped', 'Component tests: Tests skipped in the run against the changed service: 1'),
     ('contract', 'Tests fail against the changed code: contract tests 1 of 1 (RoomsTest#lists)'),
 ])
-async def test_a_change_with_component_tests_is_verified_on_both_suites_and_its_contract(
+async def test_a_change_with_component_tests_is_verified_on_both_suites(
         env, worker, outcome, error, repository_selection):
     worker.second_requirement = 'FR-5'
     worker.routes = [{'FR-5': 'component'}]
-    worker.conformance_error = (
-        'The component contract does not match the code: stubtest: '
-        'app.rooms.Rooms.close is inconsistent' if outcome == 'conformance' else None)
     worker.component_results = ['skipped' if outcome == 'skipped' else
                                 'failed' if outcome == 'failed' else 'passed']
     worker.verification_result = 'failed' if outcome == 'contract' else 'passed'
-    _, state = await fixed(env, repository_selection)
+    handle, state = await fixed(env, repository_selection)
     assert state.baseline_status == 'reproduced'
     assert state.verification_status == 'completed' and error in state.verification_error
-    if outcome == 'conformance':
-        # No component test proves anything against code that left its contract.
-        assert state.component_verification is None
-        assert 'component-verification' not in worker.stages
     if outcome != 'skipped':
         assert 'cannot yet diagnose or repair' in state.verification_error
+        assert 'against the same fix' in state.verification_error
     # Nothing is diagnosed or repaired yet, and nothing is pushed.
     assert worker.diagnosed == [] and worker.repairs == []
     assert worker.reviewed == [] and not worker.published
     assert state.publication_status == 'skipped' and state.publication_error is None
+    # The tests are retried; the fix is not at fault as far as anything knows.
+    with pytest.raises(sessions.SessionBusy):
+        await requirements_service.retry_generation(handle.id, 'server')
+
+
+async def test_a_fix_that_breaks_its_component_contract_is_written_again(
+        env, worker, repository_selection):
+    worker.second_requirement = 'FR-5'
+    worker.routes = [{'FR-5': 'component'}]
+    worker.conformance_error = ('The component contract does not match the code: stubtest: '
+                                'app.rooms.Rooms.close is inconsistent')
+    handle, state = await fixed(env, repository_selection)
+    assert state.baseline_status == 'reproduced'
+    # The fix is at fault: nothing is run against it, and its stage is the one retried.
+    assert state.implementation_error.startswith(worker.conformance_error)
+    assert 'Retry the implementation' in state.implementation_error
+    assert state.verification_status == 'skipped' and state.verification_error is None
+    assert state.verification is None and state.component_verification is None
+    assert worker.stages[-2:] == ['implementation', 'component-runner']
+    assert not worker.published
+    with pytest.raises(sessions.SessionBusy):
+        await requirements_service.retry_generation(handle.id, 'tests')
+
+    worker.conformance_error = None
+    await requirements_service.retry_generation(handle.id, 'server')
+    state = await delivered(env, handle.id)
+    # The fix is written again and verified, without new tests or a new baseline.
+    assert worker.stages.count('implementation') == 2
+    assert worker.stages.count('component-baseline') == 1
+    assert state.implementation_error is None
+    assert state.component_verification['status'] == 'passed'
+    assert state.publication_error == COMPONENT_CHANGE_UNPUBLISHED
+
+
+async def test_more_component_tests_than_a_baseline_tracks_are_not_judged_in_part(
+        env, worker, repository_selection):
+    worker.routes = [{'FR-2': 'component'}]
+    worker.component_added = [f'tests.test_rooms#test_{index}' for index in range(1001)]
+    _, state = await fixed(env, repository_selection)
+    assert state.baseline_status == 'error'
+    assert 'added 1001 tests, more than one baseline run reports on singly (1000)' in (
+        state.baseline_error)
+    # Nothing is run: a baseline of some of them would not prove the rest.
+    assert worker.component_runs == [] and 'baseline' not in worker.stages
+    assert state.implementation is None and not worker.published
 
 
 @pytest.mark.parametrize('outcome', ['skipped', 'error'])
