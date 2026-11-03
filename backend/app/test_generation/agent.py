@@ -7,6 +7,9 @@ from pathlib import Path
 from app.asyncio_utils import run_sync
 from app.agent_workflows.runtime import AgentProfile, configure_container_logging, run_agent
 
+# Written instead of tests when a criterion of the brief cannot be observed over HTTP.
+UNOBSERVABLE = 'unobservable.json'
+
 ROOT = Path('/workspace/tests')
 OPENAPI = Path('/workspace/openapi.yaml')
 # Supplied instead of the embedded OpenAPI contract when the contracts are too large.
@@ -102,6 +105,22 @@ The outer worker builds the test runner image and independently compiles the sui
 Only finish when the regression tests and a successful build are complete.
 """
 
+UNOBSERVABLE_PROMPT = """
+The suite runs in its own container against the service built from the repository's root
+Dockerfile and started alone, and reaches it only over HTTP. An acceptance criterion may
+need something the suite does not have to be observed, such as an outside system the
+service depends on that is not running beside it, an event only such a system sends, or
+state the public API cannot create. Never write a test for such a criterion that skips
+itself, passes vacuously or asserts something else instead. Write /workspace/tests/{file}
+with write_file, containing exactly this JSON object, and finish:
+{{"unobservable": [{{"requirement_id": "FR-…", "reason": "…"}}]}}
+with one entry for each such criterion: `requirement_id` is the `id` of its requirement in
+the brief, and `reason` says in one or two sentences, for the user who wrote it, what a
+test would need that the suite does not have. The delivery then stops and the user is
+asked to rephrase those criteria; any test you wrote is discarded. Do this only when you
+are sure that no test of the suite can observe the criterion.
+""".format(file=UNOBSERVABLE)
+
 REPAIR_PROMPT = """
 This is a repair run. /workspace/tests already holds your previous suite. It compiled, but
 some tests failed against the running service and a reviewer who compared them with the
@@ -162,6 +181,15 @@ def repair_prompt(inputs: dict) -> str:
 
 
 def validate_completion(test_glob: str, root: Path) -> None:
+    unobservable = root / UNOBSERVABLE
+    if unobservable.is_file():
+        try:
+            items = json.loads(unobservable.read_text()).get('unobservable')
+        except (OSError, ValueError, AttributeError) as exc:
+            raise RuntimeError(f'{UNOBSERVABLE} is not a JSON object') from exc
+        if not isinstance(items, list) or not items:
+            raise RuntimeError(f'{UNOBSERVABLE} names no criterion')
+        return
     if not any(root.glob(test_glob)):
         raise RuntimeError('Agent finished without test files')
 
@@ -173,6 +201,8 @@ async def main() -> None:
     await run_agent(AgentProfile(
         # A change to an existing service is told about its repository by its own prompt.
         root=ROOT, prompt=((CHANGE_PROMPT.format(instructions=language['instructions'])
+                            # Only the first author of a change's tests may decline one.
+                            + ('' if inputs.get('repair') else UNOBSERVABLE_PROMPT)
                             if inputs.get('brief')
                             else PROMPT.format(instructions=language['instructions'])
                             + (ONBOARDING_PROMPT if inputs.get('onboarding')

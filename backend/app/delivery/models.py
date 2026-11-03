@@ -12,6 +12,7 @@ from app.github.models import (
 from app.llm.questions import Question
 from app.requirements.models import Requirement, TaskKind
 from app.review.models import FindingsAcceptance, ReviewRound
+from app.routing.models import RequirementRoute, RoutingStatus
 from app.verification.models import VerificationResult, VerificationStatus
 
 # `review` runs a failed code review again on the verified delivery, or goes on from a
@@ -108,6 +109,12 @@ class DeliveryProgress:
     # What the author of a documentation task wrote: the only stage such a task has.
     documentation: dict[str, Any] | None = None
     documentation_error: str | None = None
+    # Which suite can prove each acceptance criterion of a bugfix, by requirement ID,
+    # decided before any test is written. A criterion no suite can observe stops the
+    # delivery there, with routing_error saying which and why.
+    routing: dict[str, RequirementRoute] | None = None
+    routing_error: str | None = None
+    routing_status: RoutingStatus = 'not_applicable'
     # The run of a change's tests against the service as the repository holds it.
     baseline: VerificationResult | None = None
     baseline_error: str | None = None
@@ -167,10 +174,16 @@ def judge_baseline(result: VerificationResult, added: list[str], changed: list[s
     if result['status'] == 'error' or tracked is None:
         return 'error', 'The baseline run could not complete.'
     if result['skipped']:
-        # However it came to be skipped, a test that does not run protects nothing.
-        return 'error', (f'Tests skipped in the baseline run: {result["skipped"]}'
-                         f'{named_skips(result)}. Every test of the suite has to run for '
-                         'the baseline to prove anything.')
+        # However it came to be skipped, a test that does not run protects nothing. A
+        # regression test that skips itself was written for a criterion its suite cannot
+        # observe: the routing sent it to the wrong suite, and a new test fares no better.
+        return 'error', (f'Tests skipped themselves in the baseline run: {result["skipped"]}'
+                         f'{named_skips(result)}. A test that skips itself was written for '
+                         'a criterion the contract tests cannot observe, so the routing of '
+                         'that criterion to them was wrong and the baseline proves nothing. '
+                         'Rephrase the criterion as behaviour the service\'s HTTP API shows, '
+                         'in a fork of the interview, or write the regression tests again if '
+                         'the skip has another cause.')
     missing = result['missing_tests']
     if missing:
         return 'error', ('Tests of the suite that did not run in the baseline run: '
@@ -371,6 +384,11 @@ def interrupted(state: DeliveryState) -> DeliveryState:
         # A correction of review findings; retrying the review goes on from it.
         progress.correction_failed = True
         progress.verification_status = 'error'
+    elif progress.routing_status == 'running':
+        progress.routing_error = STOPPED
+        progress.routing_status = 'error'
+        progress.baseline_status = 'skipped'
+        progress.verification_status = 'skipped'
     elif progress.verification_status in ('waiting', 'running', 'diagnosing', 'repairing'):
         # Before the delivery was verified, the author whose retry starts it over failed.
         if state.spec.kind == 'docs':

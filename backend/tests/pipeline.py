@@ -10,14 +10,15 @@ from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from app.config import (
     CODEGEN_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, DOCUMENTATION_TASK_QUEUE,
-    IMPLEMENTATION_TASK_QUEUE, REVIEW_TASK_QUEUE, TEST_GENERATION_TASK_QUEUE,
-    VERIFICATION_TASK_QUEUE,
+    IMPLEMENTATION_TASK_QUEUE, REVIEW_TASK_QUEUE, ROUTING_TASK_QUEUE,
+    TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
 )
 from app.delivery.models import DeliveryProgress, DeliveryState, delivery_id
 from app.diagnosis.workflows import DiagnosisWorkflow
 from app.documentation.workflows import DocumentationWorkflow
 from app.implementation.workflows import ImplementationWorkflow
 from app.review.workflows import ReviewWorkflow
+from app.routing.workflows import ObservabilityWorkflow
 from app.test_generation.workflows import TestGenerationWorkflow as ServiceTestWorkflow
 from app.verification.activities import verify_documentation
 from app.verification.workflows import VerificationWorkflow
@@ -112,6 +113,13 @@ class FakeStages:
         # The findings of successive code reviews; the last one repeats.
         self.review_findings: list[list[dict[str, Any]]] = [[]]
         self.reviewed: list[dict[str, Any]] = []
+        # The route of each requirement of a brief, by ID, that is not 'contract', for
+        # successive routings; the last one repeats.
+        self.routes: list[dict[str, str]] = [{}]
+        self.fail_routing = False
+        self.routed: list[dict[str, Any]] = []
+        # Requirements of the brief the first author of a change's tests finds unobservable.
+        self.declined: list[str] = []
 
     @activity.defn(name="checkout_repository")
     async def checkout_repository(self, session_id: str, repository: dict[str, Any]) -> dict[str, Any]:
@@ -172,6 +180,18 @@ class FakeStages:
             return {"image_id": "sha256:" + "c" * 64}
         return {"image_id": "sha256:" + "a" * 64, "context": context}
 
+    @activity.defn(name='route_requirements')
+    async def route_requirements(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
+        self.stages.append('routing')
+        if self.fail_routing:
+            raise ApplicationError('no routes', non_retryable=True)
+        routes = self.routes[min(len(self.routed), len(self.routes) - 1)]
+        self.routed.append(context)
+        return {'session_id': session_id, 'path': '/routing', 'routes': {
+            item['id']: {'route': routes.get(item['id'], 'contract'),
+                         'reason': f'Route of {item["id"]}.'}
+            for item in context['brief']['requirements']}}
+
     @activity.defn(name="generate_service_tests")
     async def generate_service_tests(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
         self.stages.append('tests')
@@ -180,6 +200,10 @@ class FakeStages:
         await self.release_tests.wait()
         if self.fail_tests:
             raise ApplicationError("test compilation failed", non_retryable=True)
+        if self.declined and 'brief' in context and 'repair' not in context:
+            return {'session_id': session_id, 'unobservable': [
+                {'requirement_id': requirement, 'reason': 'Needs a pull request.'}
+                for requirement in self.declined]}
         changed = {"added_tests": ADDED_TESTS, "changed_tests": [], "removed_tests": []}
         if 'repair' in context:
             self.repairs.append(('tests', context['repair']))
@@ -337,6 +361,9 @@ async def stage_workers(env, stages: FakeStages):
     ), Worker(
         env.client, task_queue=REVIEW_TASK_QUEUE,
         workflows=[ReviewWorkflow], activities=[stages.review_changes],
+    ), Worker(
+        env.client, task_queue=ROUTING_TASK_QUEUE,
+        workflows=[ObservabilityWorkflow], activities=[stages.route_requirements],
     ):
         FakeCodegenWorkflow.fail = False
         FakeCodegenWorkflow.languages = []

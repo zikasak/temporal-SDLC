@@ -197,6 +197,10 @@ Each step lands with its own tests (`backend/tests/`, stage fakes in
    `contract` and `unobservable` routes only. The test author's structured
    `unobservable` result. The reworded skip message in `judge_baseline`. On its own this
    turns the flow-closing case into a clear stop before tests are written.
+   *Done:* `app/routing/` (`ObservabilityWorkflow`), `DeliveryProgress.routing*`, the
+   test author's `unobservable.json`, and the Routing section of the delivery page; see
+   "Changing an existing service" in `docs/service-implementation.md`. The test author
+   does not get the routes yet (3.3).
 2. **Component contract.** The `component` route, stub output, and its validation (no
    bodies, `stubtest` against the checkout) for Python.
 3. **Component tests.** `ComponentSuite` for Python, the template runner, the second

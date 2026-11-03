@@ -259,8 +259,9 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
     failed = {'server': progress.code_error or progress.implementation_error,
               # The tests of a change are retried with the baseline run that judges them,
               # and that retry is also the way on from a verification that proved nothing.
+              # So is a routing that failed or found a criterion no suite can observe.
               'tests': (progress.tests_error or progress.baseline_error
-                        or proved and unverified),
+                        or progress.routing_error or proved and unverified),
               # A documentation task has one stage, which is also the way on from a check
               # of it that could not complete.
               'documentation': (progress.documentation_error
@@ -316,6 +317,11 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
             progress.baseline = None
             progress.baseline_error = None
             progress.baseline_status = 'waiting'
+            # Criteria were routed again unless every one had a suite that observes it.
+            progress.routing_error = None
+            if progress.routing_status != 'routed':
+                progress.routing = None
+                progress.routing_status = 'waiting'
     await _restart(finished, session_id)
     logger.info('Restarted %s generation for session %s', stage, session_id)
     return progress

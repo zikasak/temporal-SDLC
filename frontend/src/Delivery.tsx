@@ -18,6 +18,11 @@ type VerificationStatus = "not_applicable" | "waiting" | "running" | "diagnosing
 // How the tests a change added fared against the service as the repository holds it.
 type BaselineStatus = "not_applicable" | "waiting" | "running" | "reproduced" | "not_reproduced" |
   "skipped" | "error";
+// Which suite can prove each acceptance criterion of a change: `routed` when every one has
+// one, `unobservable` when one has none and the delivery stopped before its tests ran.
+type RoutingStatus = "not_applicable" | "waiting" | "running" | "routed" | "unobservable" | "error";
+// `source`: who decided the route, the routing stage or the test author.
+type RequirementRoute = { route: "contract" | "unobservable"; reason: string; source: "routing" | "tests" };
 // `tests` are the failing tests the diagnosis found broken: the only ones a repair may change.
 type RepairRound = { attempt: number; target: "implementation" | "tests"; tests: TestRef[]; summary: string };
 type VerificationResult = {
@@ -65,6 +70,10 @@ export type DeliveryProgress = {
   tests_error: string | null;
   documentation: Documentation | null;
   documentation_error: string | null;
+  routing_status: RoutingStatus;
+  // By requirement ID.
+  routing: Record<string, RequirementRoute> | null;
+  routing_error: string | null;
   baseline_status: BaselineStatus;
   baseline: VerificationResult | null;
   baseline_error: string | null;
@@ -143,6 +152,9 @@ const verificationStatuses: VerificationStatus[] = [
 const baselineStatuses: BaselineStatus[] = [
   "not_applicable", "waiting", "running", "reproduced", "not_reproduced", "skipped", "error",
 ];
+const routingStatuses: RoutingStatus[] = [
+  "not_applicable", "waiting", "running", "routed", "unobservable", "error",
+];
 const publicationStatuses: PublicationStatus[] = [
   "not_applicable", "waiting", "running", "completed", "skipped", "error",
 ];
@@ -164,6 +176,13 @@ function repairRounds(value: unknown): RepairRound[] {
     tests: Array.isArray(item.tests) ? item.tests.filter((test: unknown): test is TestRef =>
       isObject(test) && typeof test.class_name === "string" && typeof test.name === "string") : [],
   }) as RepairRound);
+}
+
+function routes(value: unknown): Record<string, RequirementRoute> | null {
+  if (!isObject(value)) return null;
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => isObject(item) &&
+    (item.route === "contract" || item.route === "unobservable") && typeof item.reason === "string" &&
+    (item.source === "routing" || item.source === "tests")) as [string, RequirementRoute][]);
 }
 
 function reviewRounds(value: unknown): ReviewRound[] {
@@ -243,6 +262,10 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     documentation: isObject(value.documentation)
       ? { changed_files: strings(value.documentation.changed_files) } : null,
     documentation_error: text(value.documentation_error),
+    routing_status: routingStatuses.includes(value.routing_status as RoutingStatus)
+      ? value.routing_status as RoutingStatus : "not_applicable",
+    routing: routes(value.routing),
+    routing_error: text(value.routing_error),
     baseline_status: baselineStatuses.includes(value.baseline_status as BaselineStatus)
       ? value.baseline_status as BaselineStatus : "not_applicable",
     baseline: verificationRecord(value.baseline),
@@ -281,6 +304,7 @@ const agentLabels: Record<string, string> = {
   tests: "The test agent",
   documentation: "The documentation agent",
   diagnosis: "The reviewer of the failed tests",
+  routing: "The router of the acceptance criteria",
 };
 
 /** Open questions of the coding agents; each waits, paused, for its own answers. */
@@ -342,7 +366,11 @@ export function retriedProgress(progress: DeliveryProgress, stage: GenerationSta
       : stage === "tests" ? { tests: null, tests_error: null }
       : stage === "documentation" ? { documentation: null, documentation_error: null } : {}),
     ...(stage === "tests" && change
-      ? { baseline: null, baseline_error: null, baseline_status: "waiting" as const } : {}),
+      ? { baseline: null, baseline_error: null, baseline_status: "waiting" as const, routing_error: null } : {}),
+    // The criteria are routed again unless every one had a suite that observes it.
+    ...(stage === "tests" && change && progress.routing_status !== "routed" &&
+      progress.routing_status !== "not_applicable"
+      ? { routing: null, routing_status: "waiting" as const } : {}),
     // A repeated push keeps the verification it publishes.
     ...(stage === "repository" ? {} : {
       review_error: null,
@@ -382,6 +410,48 @@ function TestRun({ result, children }: { result: VerificationResult; children?: 
   </>;
 }
 
+/** Which suite can prove each acceptance criterion of a change, decided before its tests. */
+function Routing({ progress, retrying, disabled, onRetry }: {
+  progress: DeliveryProgress;
+  retrying: GenerationStage | null;
+  disabled: boolean;
+  onRetry: (stage: GenerationStage) => void;
+}) {
+  const stage = progress.routing_status;
+  const entries = Object.entries(progress.routing ?? {});
+  return (
+    <section className="verification-results" aria-labelledby="routing-title">
+      <h3 id="routing-title">Routing</h3>
+      {stage === "waiting" && <p role="status">Waiting to route the acceptance criteria.</p>}
+      {stage === "running" && <p role="status">
+        Deciding which tests can prove each acceptance criterion…
+      </p>}
+      {stage === "routed" && <p className="verification-outcome verification-passed" role="status">
+        Every acceptance criterion can be proved by the contract tests
+      </p>}
+      {stage === "unobservable" && <p className="verification-outcome verification-failed" role="status">
+        Some acceptance criteria cannot be proved by any test
+      </p>}
+      {stage === "error" && <p className="verification-outcome verification-error" role="status">
+        The routing did not complete
+      </p>}
+      {entries.length > 0 && <ul className="verification-failures">
+        {entries.map(([requirement, item]) => <li key={requirement}>
+          <strong>{requirement}: {item.route === "contract" ? "contract tests" : "cannot be observed"}</strong>
+          <span>{item.reason}{item.source === "tests" ? " (found by the test author)" : ""}</span>
+        </li>)}
+      </ul>}
+      {progress.routing_error && <div className="generation-failure">
+        <p role="alert">{progress.routing_error}</p>
+        <button type="button" className="generate-button" disabled={disabled}
+          onClick={() => onRetry("tests")}>
+          {retrying === "tests" ? "Routing the criteria again…" : "Route the criteria again"}
+        </button>
+      </div>}
+    </section>
+  );
+}
+
 /** The baseline run of a change: its added tests against the unchanged service. */
 function Baseline({ progress, retrying, disabled, onRetry }: {
   progress: DeliveryProgress;
@@ -395,12 +465,17 @@ function Baseline({ progress, retrying, disabled, onRetry }: {
     <section className="verification-results" aria-labelledby="baseline-title">
       <h3 id="baseline-title">Baseline</h3>
       {stage === "waiting" && <p role="status">
-        {progress.tests_error ? "Waiting for regression tests." : "Writing regression tests for the brief…"}
+        {["waiting", "running"].includes(progress.routing_status) ? "Waiting for the routing of the acceptance criteria."
+          : progress.tests_error ? "Waiting for regression tests." : "Writing regression tests for the brief…"}
       </p>}
       {stage === "running" && <p role="status">
         Running the regression tests against the service as the repository holds it…
       </p>}
-      {stage === "skipped" && <p>The baseline was skipped because the regression tests were not written.</p>}
+      {stage === "skipped" && <p>
+        {progress.routing_error
+          ? "The baseline was skipped because the acceptance criteria could not all be routed to tests."
+          : "The baseline was skipped because the regression tests were not written."}
+      </p>}
       {stage === "reproduced" && <p className="verification-outcome verification-passed" role="status">
         Reproduced: the added tests fail against the unchanged service and the existing tests pass
       </p>}
@@ -648,6 +723,8 @@ export function DeliveryResults({ progress, kind = null, documentation = false, 
   const service = progress.implementation ? "built" : progress.implementation_error ? "build failed" : "building";
   return <>
     {questions}
+    {change && progress.routing_status !== "not_applicable" &&
+      <Routing progress={progress} retrying={retrying} disabled={disabled} onRetry={onRetry} />}
     {change && <Baseline progress={progress} retrying={retrying} disabled={disabled} onRetry={onRetry} />}
     <section className="verification-results" aria-labelledby="verification-title">
       <h3 id="verification-title">Service verification</h3>

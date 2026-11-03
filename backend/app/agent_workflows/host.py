@@ -42,6 +42,10 @@ class StageSpec:
     prepare_inputs: Callable[[Path, dict[str, Any]], StageInputs]
     sanitize_output: Callable[[Path, Path], None]
     validate_output: Callable[[Path], None]
+    # Reads, from the agent's raw output, a result that takes the place of the stage's
+    # output, such as a test author's finding that nothing it could write can test a
+    # criterion. None goes on to sanitize, validate and publish the output.
+    declined_result: Callable[[Path], dict[str, Any] | None] | None = None
 
 
 # The language's authoring instructions, placed beside the agent's project.
@@ -156,6 +160,12 @@ async def _run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
                 )
             except docker_agents.AgentPaused as exc:
                 return paused_result(session_id, exc)
+            if stage.declined_result:
+                declined = await run_sync(stage.declined_result, output)
+                if declined is not None:
+                    logger.info('%s stage declined to publish an output (session=%s)',
+                                stage.role, session_id)
+                    return {**declined, 'session_id': session_id}
             logger.info('%s stage sanitizing agent output (session=%s)', stage.role, session_id)
             clean = work / 'build'
             await run_sync(stage.sanitize_output, output, clean)

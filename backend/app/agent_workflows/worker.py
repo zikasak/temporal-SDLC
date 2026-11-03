@@ -12,7 +12,8 @@ from temporalio.worker import Worker
 
 from app.config import (
     DIAGNOSIS_TASK_QUEUE, DOCUMENTATION_TASK_QUEUE, IMPLEMENTATION_TASK_QUEUE,
-    REVIEW_TASK_QUEUE, TEMPORAL_ADDRESS, TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
+    REVIEW_TASK_QUEUE, ROUTING_TASK_QUEUE, TEMPORAL_ADDRESS, TEST_GENERATION_TASK_QUEUE,
+    VERIFICATION_TASK_QUEUE,
 )
 from app.diagnosis.activities import diagnose_failure
 from app.diagnosis.workflows import DiagnosisWorkflow
@@ -23,6 +24,8 @@ from app.implementation.workflows import ImplementationWorkflow
 from app.logging_setup import configure_logging
 from app.review.activities import review_changes
 from app.review.workflows import ReviewWorkflow
+from app.routing.activities import route_requirements
+from app.routing.workflows import ObservabilityWorkflow
 from app.settings.storage import ensure_schema as ensure_settings_schema
 from app.temporal.lifecycle import run_worker
 from app.test_generation.activities import generate_service_tests
@@ -37,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 # (label, task queue, workflow, activities) of each sandboxed stage.
 STAGES = (
+    ('Routing', ROUTING_TASK_QUEUE, ObservabilityWorkflow, [route_requirements]),
     ('Implementation', IMPLEMENTATION_TASK_QUEUE, ImplementationWorkflow, [implement_service]),
     ('Test generation', TEST_GENERATION_TASK_QUEUE, TestGenerationWorkflow,
      [generate_service_tests]),
