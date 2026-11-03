@@ -213,6 +213,16 @@ Each step lands with its own tests (`backend/tests/`, stage fakes in
    be self-contained: a type from an unstubbed module is stubbed too or written `Any`.
 3. **Component tests.** `ComponentSuite` for Python, the template runner, the second
    test-author run with `COMPONENT_PROMPT`, snapshot and freeze of `component-tests/`.
+   *Done:* `ComponentSuite` in `app/languages/` (Python's template in
+   `app/languages/python/component_suite/`), `ComponentTestGenerationWorkflow` and
+   `app/test_generation/components.py` on its own queue, `DeliveryProgress.component_tests*`,
+   and the contract tests' author given its `routes`. The suite is checked by building its
+   runner against the baseline sources, which collects it. `judge_routes` no longer stops
+   at `unsupported` (only histories without the `component-tests` patch do); the delivery
+   stops after the tests are written, on the baseline, until step 4 runs them. Already
+   here from 3.6: `component-tests/` is never a service source (`is_service_file`).
+   Open question answered: the runner fetches Temporal's test servers only when the code
+   imports `temporalio`.
 4. **Verification.** `run_component_suite`, the component baseline, the conformance
    check, both results in `judge_baseline`, `unproven_green` and `_publish`.
 5. **Implementation, diagnosis, repair, review** integration (3.6).

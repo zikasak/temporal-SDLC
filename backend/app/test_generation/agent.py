@@ -105,12 +105,7 @@ The outer worker builds the test runner image and independently compiles the sui
 Only finish when the regression tests and a successful build are complete.
 """
 
-UNOBSERVABLE_PROMPT = """
-The suite runs in its own container against the service built from the repository's root
-Dockerfile and started alone, and reaches it only over HTTP. An acceptance criterion may
-need something the suite does not have to be observed, such as an outside system the
-service depends on that is not running beside it, an event only such a system sends, or
-state the public API cannot create. Never write a test for such a criterion that skips
+DECLINE_PROMPT = """Never write a test for such a criterion that skips
 itself, passes vacuously or asserts something else instead. Write /workspace/tests/{file}
 with write_file, containing exactly this JSON object, and finish:
 {{"unobservable": [{{"requirement_id": "FR-…", "reason": "…"}}]}}
@@ -120,6 +115,71 @@ test would need that the suite does not have. The delivery then stops and the us
 asked to rephrase those criteria; any test you wrote is discarded. Do this only when you
 are sure that no test of the suite can observe the criterion.
 """.format(file=UNOBSERVABLE)
+
+UNOBSERVABLE_PROMPT = """
+The suite runs in its own container against the service built from the repository's root
+Dockerfile and started alone, and reaches it only over HTTP. An acceptance criterion may
+need something the suite does not have to be observed, such as an outside system the
+service depends on that is not running beside it, an event only such a system sends, or
+state the public API cannot create. """ + DECLINE_PROMPT
+
+ROUTES_PROMPT = """
+The `routes` entry of the input lists the acceptance criteria of the brief this suite
+proves, each with the requests that set it up and observe it as the routing found them.
+Write one test for each of them, and none for a criterion of the brief it does not list:
+those are proved at seams of the code by component tests another author writes.
+"""
+
+COMPONENT_PROMPT = """Add regression tests to the component test suite in /workspace/tests,
+the component-tests directory of the project's Git repository named by the `repository`
+entry of the input. The `brief` entry of the input describes a change to the service: the
+problem, the expected behaviour and the acceptance criteria. The project's HTTP contract
+tests cannot observe the criteria in the `routes` entry, so each of them is observed at a
+seam of the service's code instead: `seam` names the dotted module and the symbols of it a
+test uses, and `reason` says how a test drives it. Another author writes the HTTP tests of
+the brief's other criteria: write none for them.
+
+The component contract is in /workspace/contracts/components: a stub of each module of
+the seams, at the module's path, with every symbol a test may use (its signature, types
+and a docstring stating its behaviour), and the collaborators the seam calls, such as
+activities, repositories and clients, as signatures only. Read it with read_contract and
+search_contracts (names such as components/app/module.pyi). The service's source, image
+and logs are unavailable. Derive all expected behaviour from the brief, the stubs'
+docstrings and the supplied requirements.
+{instructions}
+Write tests that fail while the problem exists and pass once the expected behaviour is in
+place: one for each criterion of `routes`, asserting the expected behaviour through the
+stubbed symbols exactly as the brief states it. The code under test is the seam itself:
+drive it through the symbols its stub declares and never fake, patch or subclass it, or
+anything else of the service but the collaborators the stubs name. Replace every one of
+those with a fake of your own that has the stubbed signature and records or answers the
+calls as the test needs. Never use anything of the service's code the stubs do not
+declare. The suite is first run against the code as it is today, where every test you add
+must fail and every existing test must pass; a new test that passes there does not
+reproduce the problem and stops the task.
+Add each test where it belongs: in the existing test class that covers the behaviour, or
+in a new class. Do not change, rename or delete any existing test: the outer worker
+rejects a suite in which one of them differs. Follow the structure, helpers and
+conventions the existing tests use.
+
+Use independent expected values and bounded waits. Avoid assertion-free probes, source
+inspections, invented contracts and tests that only verify their own fakes. Do not
+disable/skip tests or swallow failures. Keep tests independent and repeatable; do not
+assume anything of the code the stubs do not state. Use only the brief, the stubs and the
+supplied requirements as your authority. Credentials must come from environment
+variables; never put secrets in files.
+Create files with write_file and change existing files with edit_file, not by rewriting
+them. Locate code with list_files and search_files, read only the relevant line ranges
+with read_file, and use shell to adjust and check test dependencies. The outer worker
+builds the suite with the service's code and collects it, and runs it later. Only finish
+when the regression tests are complete and checked.
+"""
+
+COMPONENT_UNOBSERVABLE_PROMPT = """
+A criterion of `routes` may turn out not to be observable through the stubbed symbols
+after all: the behaviour it is about happens outside every symbol the stubs declare, or
+needs a collaborator the stubs do not name. """ + DECLINE_PROMPT
+
 
 REPAIR_PROMPT = """
 This is a repair run. /workspace/tests already holds your previous suite. It compiled, but
@@ -194,20 +254,31 @@ def validate_completion(test_glob: str, root: Path) -> None:
         raise RuntimeError('Agent finished without test files')
 
 
+def prompt(inputs: dict, language: dict) -> str:
+    instructions = language['instructions']
+    if inputs.get('component'):
+        # A change's criteria observed at seams; only its first author writes them.
+        return (COMPONENT_PROMPT.format(instructions=instructions)
+                + COMPONENT_UNOBSERVABLE_PROMPT)
+    if inputs.get('brief'):
+        # A change to an existing service is told about its repository by its own prompt.
+        return (CHANGE_PROMPT.format(instructions=instructions)
+                + (ROUTES_PROMPT if inputs.get('routes') else '')
+                # Only the first author of a change's tests may decline one.
+                + ('' if inputs.get('repair') else UNOBSERVABLE_PROMPT)
+                + repair_prompt(inputs))
+    return (PROMPT.format(instructions=instructions)
+            + (ONBOARDING_PROMPT if inputs.get('onboarding')
+               else REPOSITORY_PROMPT if inputs.get('repository') else '')
+            + repair_prompt(inputs))
+
+
 async def main() -> None:
     context = await run_sync(Path('/workspace/input.json').read_text)
     inputs = json.loads(context)
     language = json.loads(await run_sync(LANGUAGE.read_text))
     await run_agent(AgentProfile(
-        # A change to an existing service is told about its repository by its own prompt.
-        root=ROOT, prompt=((CHANGE_PROMPT.format(instructions=language['instructions'])
-                            # Only the first author of a change's tests may decline one.
-                            + ('' if inputs.get('repair') else UNOBSERVABLE_PROMPT)
-                            if inputs.get('brief')
-                            else PROMPT.format(instructions=language['instructions'])
-                            + (ONBOARDING_PROMPT if inputs.get('onboarding')
-                               else REPOSITORY_PROMPT if inputs.get('repository') else ''))
-                           + repair_prompt(inputs)),
+        root=ROOT, prompt=prompt(inputs, language),
         initial_messages=[context,
                           *(['OpenAPI contract:\n' + (await run_sync(OPENAPI.read_text))]
                             if await run_sync(OPENAPI.is_file) else [])],

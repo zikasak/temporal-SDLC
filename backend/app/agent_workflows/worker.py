@@ -11,7 +11,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from app.config import (
-    DIAGNOSIS_TASK_QUEUE, DOCUMENTATION_TASK_QUEUE, IMPLEMENTATION_TASK_QUEUE,
+    COMPONENT_TEST_GENERATION_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, DOCUMENTATION_TASK_QUEUE, IMPLEMENTATION_TASK_QUEUE,
     REVIEW_TASK_QUEUE, ROUTING_TASK_QUEUE, TEMPORAL_ADDRESS, TEST_GENERATION_TASK_QUEUE,
     VERIFICATION_TASK_QUEUE,
 )
@@ -29,7 +29,8 @@ from app.routing.workflows import ObservabilityWorkflow
 from app.settings.storage import ensure_schema as ensure_settings_schema
 from app.temporal.lifecycle import run_worker
 from app.test_generation.activities import generate_service_tests
-from app.test_generation.workflows import TestGenerationWorkflow
+from app.test_generation.components import generate_component_tests
+from app.test_generation.workflows import ComponentTestGenerationWorkflow, TestGenerationWorkflow
 from app.verification.activities import (
     build_baseline, build_repository_tests, snapshot_repository_tests, verify_documentation,
     verify_service,
@@ -44,6 +45,9 @@ STAGES = (
     ('Implementation', IMPLEMENTATION_TASK_QUEUE, ImplementationWorkflow, [implement_service]),
     ('Test generation', TEST_GENERATION_TASK_QUEUE, TestGenerationWorkflow,
      [generate_service_tests]),
+    # A queue of its own, so that a change's two authors write their suites side by side.
+    ('Component test generation', COMPONENT_TEST_GENERATION_TASK_QUEUE,
+     ComponentTestGenerationWorkflow, [generate_component_tests]),
     ('Verification', VERIFICATION_TASK_QUEUE, VerificationWorkflow,
      [verify_service, build_baseline, snapshot_repository_tests, build_repository_tests,
       verify_documentation]),

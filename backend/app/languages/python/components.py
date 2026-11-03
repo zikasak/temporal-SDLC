@@ -135,9 +135,15 @@ def _read_runtime(data: object, repository: Path) -> dict:
     }
 
 
-def _build_args(runtime: dict) -> dict[str, str]:
-    return {"MYPY": MYPY, "SOURCE_ROOT": runtime["source_root"],
+def runner_build_args(runtime: dict) -> dict[str, str]:
+    """How a runner image installs the code the contract describes: the component tests'
+    as well as the conformance check's."""
+    return {"SOURCE_ROOT": runtime["source_root"],
             "REQUIREMENTS": " ".join(runtime["requirements"])}
+
+
+def _build_args(runtime: dict) -> dict[str, str]:
+    return {"MYPY": MYPY, **runner_build_args(runtime)}
 
 
 COMPONENT_CONTRACT = ComponentContract(

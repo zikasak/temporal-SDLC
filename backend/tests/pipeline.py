@@ -9,7 +9,8 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from app.config import (
-    CODEGEN_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, DOCUMENTATION_TASK_QUEUE,
+    CODEGEN_TASK_QUEUE, COMPONENT_TEST_GENERATION_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE,
+    DOCUMENTATION_TASK_QUEUE,
     IMPLEMENTATION_TASK_QUEUE, REVIEW_TASK_QUEUE, ROUTING_TASK_QUEUE,
     TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
 )
@@ -19,6 +20,7 @@ from app.documentation.workflows import DocumentationWorkflow
 from app.implementation.workflows import ImplementationWorkflow
 from app.review.workflows import ReviewWorkflow
 from app.routing.workflows import ObservabilityWorkflow
+from app.test_generation.workflows import ComponentTestGenerationWorkflow
 from app.test_generation.workflows import TestGenerationWorkflow as ServiceTestWorkflow
 from app.verification.activities import verify_documentation
 from app.verification.workflows import VerificationWorkflow
@@ -27,6 +29,8 @@ CODE = {"server": {"path": "/generated/server", "files": 8}}
 BASELINE_IMAGE = "sha256:" + "e" * 64
 REPOSITORY_TESTS_IMAGE = "sha256:" + "f" * 64
 ADDED_TESTS = ["com.example.RoomsTest#refusesDoubleBooking", "com.example.OverlapTest#refuses"]
+ADDED_COMPONENT_TESTS = ["tests.test_rooms#test_a_merged_room_is_closed"]
+SEAM = {"module": "service.rooms", "symbols": ["Rooms.close"]}
 BROKEN_TEST = {"class_name": "RoomsTest", "name": "lists"}
 
 
@@ -120,6 +124,11 @@ class FakeStages:
         self.routed: list[dict[str, Any]] = []
         # Requirements of the brief the first author of a change's tests finds unobservable.
         self.declined: list[str] = []
+        # The contexts of the component tests' author, and the requirements it finds
+        # unobservable.
+        self.component_contexts: list[dict[str, Any]] = []
+        self.component_declined: list[str] = []
+        self.fail_component_tests = False
 
     @activity.defn(name="checkout_repository")
     async def checkout_repository(self, session_id: str, repository: dict[str, Any]) -> dict[str, Any]:
@@ -194,8 +203,24 @@ class FakeStages:
         self.routed.append(context)
         return {'session_id': session_id, 'path': '/routing', 'routes': {
             item['id']: {'route': routes.get(item['id'], 'contract'),
-                         'reason': f'Route of {item["id"]}.'}
+                         'reason': f'Route of {item["id"]}.',
+                         **({'seam': SEAM} if routes.get(item['id']) == 'component' else {})}
             for item in context['brief']['requirements']}}
+
+    @activity.defn(name='generate_component_tests')
+    async def generate_component_tests(self, session_id: str,
+                                       context: dict[str, Any]) -> dict[str, Any]:
+        self.stages.append('component-tests')
+        self.component_contexts.append(context)
+        if self.fail_component_tests:
+            raise ApplicationError('ImportError while collecting', non_retryable=True)
+        if self.component_declined:
+            return {'session_id': session_id, 'unobservable': [
+                {'requirement_id': requirement, 'reason': 'Happens in no stubbed symbol.'}
+                for requirement in self.component_declined]}
+        return {'session_id': session_id, 'image_id': 'sha256:' + '9' * 64,
+                'path': '/component-tests/suite', 'added_tests': ADDED_COMPONENT_TESTS,
+                'changed_tests': [], 'removed_tests': []}
 
     @activity.defn(name="generate_service_tests")
     async def generate_service_tests(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
@@ -369,6 +394,10 @@ async def stage_workers(env, stages: FakeStages):
     ), Worker(
         env.client, task_queue=ROUTING_TASK_QUEUE,
         workflows=[ObservabilityWorkflow], activities=[stages.route_requirements],
+    ), Worker(
+        env.client, task_queue=COMPONENT_TEST_GENERATION_TASK_QUEUE,
+        workflows=[ComponentTestGenerationWorkflow],
+        activities=[stages.generate_component_tests],
     ):
         FakeCodegenWorkflow.fail = False
         FakeCodegenWorkflow.languages = []

@@ -106,6 +106,10 @@ class DeliveryProgress:
     implementation_error: str | None = None
     tests: dict[str, Any] | None = None
     tests_error: str | None = None
+    # The component tests of a change's criteria routed to a seam of the code, written
+    # beside its contract tests: the stage result, with `added_tests`.
+    component_tests: dict[str, Any] | None = None
+    component_tests_error: str | None = None
     # What the author of a documentation task wrote: the only stage such a task has.
     documentation: dict[str, Any] | None = None
     documentation_error: str | None = None

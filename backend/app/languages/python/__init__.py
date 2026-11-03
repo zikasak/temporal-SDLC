@@ -4,8 +4,10 @@ import ast
 import re
 from pathlib import Path
 
-from app.languages import Implementation, Language, TestReports, TestSuite, register
-from app.languages.python.components import COMPONENT_CONTRACT
+from app.languages import (
+    ComponentSuite, Implementation, Language, TestReports, TestSuite, register,
+)
+from app.languages.python.components import COMPONENT_CONTRACT, MYPY, runner_build_args
 
 PACKAGE_NAME = "service"
 
@@ -22,6 +24,26 @@ Test* classes, named test_*. Read SERVICE_BASE_URL inside fixtures or tests, nev
 import time, so that the suite can be collected without the service.
 List any further dependency in requirements.txt and install it with pip install --user.
 Check the suite with python -m pytest --collect-only -q and fix failures."""
+
+COMPONENT_SUITE_INSTRUCTIONS = """The suite is a pytest project with pytest-asyncio
+(asyncio_mode = auto, so a test may be an async def). Write test modules named test_*.py
+under tests/, with test functions, or test methods of Test* classes, named test_*. Each
+test imports the stubbed modules by their dotted names, as the code under test is
+importable when the suite runs, and calls only the symbols the stubs declare, with the
+signatures they declare. Write each fake of a collaborator in the suite itself, with the
+signature its stub gives it. When a seam is a Temporal workflow, start an in-process
+`temporalio.testing.WorkflowEnvironment` (`start_time_skipping()`, or `start_local()` when
+the test sends an update), run a `temporalio.worker.Worker` on it with the stubbed workflow
+and your fakes of its activities, registered under the activity names the stubs give, and
+drive the workflow through its stubbed signals, updates and queries. Both environments'
+servers are fetched when the suite is built and work without a network.
+List any further dependency of the tests in requirements.txt; never list the service or
+its own dependencies, which the runner installs from the service's requirements.
+The service's code is not available here, so the suite cannot be collected or run. Check
+it from /workspace/tests instead: python -m compileall -q tests, then
+pip install --user {mypy} and the packages the stubs import, and
+MYPYPATH=/workspace/contracts/components python -m mypy --ignore-missing-imports
+--follow-imports=silent tests, and fix every error about a stubbed symbol."""
 
 TEST_GLOB = "tests/**/test_*.py"
 TEST_FUNCTION = re.compile(r"^test")
@@ -195,4 +217,13 @@ PYTHON = register(Language(
     # The shared agent image has Python 3.12 and pip.
     agent_dockerfile=Path(__file__).resolve().parents[2] / "agent_workflows" / "Dockerfile",
     component_contract=COMPONENT_CONTRACT,
+    component_suite=ComponentSuite(
+        template=Path(__file__).parent / "component_suite",
+        instructions=COMPONENT_SUITE_INSTRUCTIONS.replace("{mypy}", MYPY),
+        published=("tests", "pytest.ini", "requirements.txt", "README.md"),
+        test_glob=TEST_GLOB, test_cases=_test_cases, case_id=_case_id,
+        required=("pytest.ini", "requirements.txt"),
+        runner=("Dockerfile", ".dockerignore", "run-tests.sh", "prepare.py"),
+        build_args=runner_build_args,
+    ),
 ))

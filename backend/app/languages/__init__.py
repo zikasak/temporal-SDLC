@@ -49,6 +49,22 @@ class TestSuite:
     case_id: Callable[[str, str], str]
     # Files a complete suite always has.
     required: tuple[str, ...] = ()
+    # Files of the template that are the trusted runner (its Dockerfile, .dockerignore and
+    # scripts): the author can never replace them.
+    runner: tuple[str, ...] = ('Dockerfile', '.dockerignore', 'run-tests.sh')
+
+
+@dataclass(frozen=True)
+class ComponentSuite(TestSuite):
+    """The standalone in-process test project of criteria routed to a seam: written from
+    the component contract's stubs alone, with fakes of the collaborators they name, and
+    run by the trusted runner, which builds it with the service's sources it never saw.
+
+    The runner's build context holds the template's runner files, the service's sources
+    under `repository/` and the suite's published files under `suite/`."""
+    # Docker build arguments of the runner image, from the component contract's
+    # normalized runtime file.
+    build_args: Callable[[dict], dict[str, str]] = lambda runtime: {}
 
 
 @dataclass(frozen=True)
@@ -107,6 +123,8 @@ class Language:
     post_process: Callable[[Path], None] = lambda project: None
     # None when criteria cannot be routed to a component seam in the language yet.
     component_contract: ComponentContract | None = None
+    # The suite of the criteria routed to a seam; given with `component_contract`.
+    component_suite: ComponentSuite | None = None
 
 
 # Dependencies and build output of the other projects a repository may hold beside the

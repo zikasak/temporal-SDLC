@@ -8,7 +8,8 @@ from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflow
 
 with workflow.unsafe.imports_passed_through():
     from app.config import (
-        CODEGEN_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, DOCUMENTATION_TASK_QUEUE,
+        CODEGEN_TASK_QUEUE, COMPONENT_TEST_GENERATION_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE,
+        DOCUMENTATION_TASK_QUEUE,
         IMPLEMENTATION_TASK_QUEUE, REVIEW_TASK_QUEUE, ROUTING_TASK_QUEUE,
         TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
     )
@@ -23,7 +24,7 @@ with workflow.unsafe.imports_passed_through():
     from app.github.models import PullRequestMention
     from app.temporal.execution_fields import task_fields
     from app.requirements.models import CHANGE_KINDS
-    from app.routing.models import judge_routes
+    from app.routing.models import COMPONENT_TESTS_UNRUN, judge_routes
     from app.review.models import (
         MAX_REVIEW_ROUNDS, ReviewFinding, ReviewRound, earlier_findings, for_worker,
         review_request,
@@ -40,6 +41,9 @@ MAX_REPAIR_ROUNDS = 5
 MAX_RESTORE_ROUNDS = 2
 # Marks the workflow code that sends a suite rejected for such tests back to its author.
 RESTORE_KEPT_PATCH = 'restore-kept-tests'
+# Marks the workflow code that writes component tests for criteria routed to a seam, which
+# stopped the delivery at its routing before.
+COMPONENT_TESTS_PATCH = 'component-tests'
 # Runs of one verification whose result is an infrastructure error, not a verdict.
 VERIFICATION_ATTEMPTS = 2
 # An API change may add more tests than one run reports on singly; the run still
@@ -694,6 +698,19 @@ class DeliveryWorkflow:
             self.progress.verification_status = 'skipped'
             return
         await self._generate_tests()
+        # A failed author, or one that found a criterion its suite cannot observe, leaves
+        # nothing to hold against the service, whatever the other author wrote.
+        if self.progress.component_tests_error or self.progress.routing_status != 'routed':
+            self.progress.baseline_status = 'skipped'
+            self.progress.verification_status = 'skipped'
+            return
+        if self.progress.component_tests:
+            # Step 4 of plans/component-contracts.md: nothing runs component tests yet, so
+            # nothing could show them failing without the fix.
+            self.progress.baseline_status = 'skipped'
+            self.progress.baseline_error = COMPONENT_TESTS_UNRUN
+            self.progress.verification_status = 'skipped'
+            return
         # Nothing is fixed before the added tests are shown to fail without the fix.
         if not await self._reproduce():
             self.progress.verification_status = 'skipped'
@@ -728,19 +745,31 @@ class DeliveryWorkflow:
         self.progress.routing = {
             requirement: {**route, 'source': 'routing'}
             for requirement, route in result['routes'].items()}
-        self.progress.routing_status, self.progress.routing_error = judge_routes(
+        self.progress.routing_status, self.progress.routing_error = self._judge_routes(
             self.progress.routing)
         workflow.logger.info('Routing: %s', self.progress.routing_status)
         return self.progress.routing_status == 'routed'
 
+    def _judge_routes(self, routing: dict[str, Any]) -> tuple[str, str | None]:
+        component = any(item['route'] == 'component' for item in routing.values())
+        # Asked only when it decides something, so other deliveries' histories stay as
+        # they were.
+        return judge_routes(routing, component_tests=(
+            component and workflow.patched(COMPONENT_TESTS_PATCH)))
+
+    def _component_routes(self) -> dict[str, Any]:
+        """The criteria routed to a seam, with their reasons and seams."""
+        return {requirement: route for requirement, route in (self.progress.routing or {}).items()
+                if route['route'] == 'component'}
+
     def _declined(self, unobservable: list[dict[str, str]]) -> None:
-        """Record criteria the test author found the contract tests cannot observe."""
+        """Record criteria a test author found its suite cannot observe."""
         routing = dict(self.progress.routing or {})
         for item in unobservable:
             routing[item['requirement_id']] = {
                 'route': 'unobservable', 'reason': item['reason'], 'source': 'tests'}
         self.progress.routing = routing
-        self.progress.routing_status, self.progress.routing_error = judge_routes(routing)
+        self.progress.routing_status, self.progress.routing_error = self._judge_routes(routing)
         workflow.logger.info('The test author found %d criteria unobservable',
                              len(unobservable))
 
@@ -1587,11 +1616,50 @@ class DeliveryWorkflow:
             self.progress.implementation_error = "The service could not be implemented or built."
 
     async def _generate_tests(self, repair: dict[str, Any] | None = None) -> None:
+        """Write the tests: the contract tests, and, for the first run of a change's tests
+        with criteria routed to a seam, the component tests beside them. The contract
+        tests' author is then given the criteria routed to it, and not run when there are
+        none."""
+        component = {} if repair else self._component_routes()
+        routes = {requirement: {'route': route['route'], 'reason': route['reason']}
+                  for requirement, route in (self.progress.routing or {}).items()
+                  if route['route'] == 'contract'} if component else None
+        authors = [self._generate_component_tests(component)] if component else []
+        if routes or not component:
+            authors.append(self._generate_contract_tests(repair, routes))
+        await asyncio.gather(*authors)
+
+    async def _generate_component_tests(self, routes: dict[str, Any]) -> None:
+        self.progress.component_tests = None
+        self.progress.component_tests_error = None
+        try:
+            tests = await workflow.execute_child_workflow(
+                'ComponentTestGenerationWorkflow',
+                args=[self.spec.session_id, {**self._stage_context(None), 'routes': routes}],
+                id=self._child_id('component-test-generation'),
+                task_queue=COMPONENT_TEST_GENERATION_TASK_QUEUE,
+                result_type=dict,
+            )
+        except ChildWorkflowError as exc:
+            workflow.logger.warning('Component test generation failed: %s', exc.cause or exc)
+            self.progress.component_tests_error = ('The component tests could not be '
+                                                   'generated or built with the code.')
+            return
+        if 'unobservable' in tests:
+            self._declined(tests['unobservable'])
+            return
+        self.progress.component_tests = tests
+
+    async def _generate_contract_tests(self, repair: dict[str, Any] | None,
+                                       routes: dict[str, Any] | None) -> None:
         # Tests put back as the repository holds them were seen passing so: they stay so.
         restore = (repair or {}).get('review', {}).get('restore') or []
         if restore:
             self.state.kept_tests = sorted({*self.state.kept_tests, *restore})
         context = self._stage_context(repair)
+        if routes:
+            # The criteria the contract tests prove, when the component tests prove others.
+            context['routes'] = routes
         if self.state.kept_tests and self.spec.checkout:
             # The repository's tests the changed service was seen to pass as they are.
             context['keep'] = list(self.state.kept_tests)
