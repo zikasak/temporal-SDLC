@@ -72,6 +72,9 @@ export type DeliveryProgress = {
   implementation_error: string | null;
   tests: TestSuite | null;
   tests_error: string | null;
+  // The component tests of a change's criteria routed to a seam of the code.
+  component_tests: TestSuite | null;
+  component_tests_error: string | null;
   documentation: Documentation | null;
   documentation_error: string | null;
   routing_status: RoutingStatus;
@@ -270,6 +273,8 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     implementation_error: text(value.implementation_error),
     tests: testSuite(value.tests),
     tests_error: text(value.tests_error),
+    component_tests: testSuite(value.component_tests),
+    component_tests_error: text(value.component_tests_error),
     documentation: isObject(value.documentation)
       ? { changed_files: strings(value.documentation.changed_files) } : null,
     documentation_error: text(value.documentation_error),
@@ -374,7 +379,7 @@ export function retriedProgress(progress: DeliveryProgress, stage: GenerationSta
     correction_failed: false,
     ...(stage === "server"
       ? { code_error: null, implementation: null, implementation_error: null }
-      : stage === "tests" ? { tests: null, tests_error: null }
+      : stage === "tests" ? { tests: null, tests_error: null, component_tests: null, component_tests_error: null }
       : stage === "documentation" ? { documentation: null, documentation_error: null } : {}),
     ...(stage === "tests" && change
       ? { baseline: null, baseline_error: null, baseline_status: "waiting" as const, routing_error: null } : {}),
@@ -438,13 +443,15 @@ function Routing({ progress, retrying, disabled, onRetry }: {
         Deciding which tests can prove each acceptance criterion…
       </p>}
       {stage === "routed" && <p className="verification-outcome verification-passed" role="status">
-        Every acceptance criterion can be proved by the contract tests
+        {entries.some(([, item]) => item.route === "component")
+          ? "Every acceptance criterion can be proved by the contract or component tests"
+          : "Every acceptance criterion can be proved by the contract tests"}
       </p>}
       {stage === "unobservable" && <p className="verification-outcome verification-failed" role="status">
         Some acceptance criteria cannot be proved by any test
       </p>}
       {stage === "unsupported" && <p className="verification-outcome verification-failed" role="status">
-        Some acceptance criteria can only be proved by component tests, which deliveries cannot write yet
+        Some acceptance criteria can only be proved by component tests, which this delivery does not write
       </p>}
       {stage === "error" && <p className="verification-outcome verification-error" role="status">
         The routing did not complete
@@ -479,6 +486,7 @@ function Baseline({ progress, retrying, disabled, onRetry }: {
 }) {
   const stage = progress.baseline_status;
   const suite = progress.tests;
+  const components = progress.component_tests;
   return (
     <section className="verification-results" aria-labelledby="baseline-title">
       <h3 id="baseline-title">Baseline</h3>
@@ -492,12 +500,17 @@ function Baseline({ progress, retrying, disabled, onRetry }: {
       {stage === "skipped" && <p>
         {progress.routing_error
           ? "The baseline was skipped because the acceptance criteria could not all be routed to tests."
+          : components && !progress.tests_error
+          ? "The baseline was skipped because deliveries cannot run component tests yet."
           : "The baseline was skipped because the regression tests were not written."}
       </p>}
       {stage === "reproduced" && <p className="verification-outcome verification-passed" role="status">
         Reproduced: the added tests fail against the unchanged service and the existing tests pass
       </p>}
       {suite && suite.added_tests.length > 0 && <p>Added tests: {suite.added_tests.join(", ")}</p>}
+      {components && components.added_tests.length > 0 && <p>
+        Added component tests: {components.added_tests.join(", ")}
+      </p>}
       {suite && suite.changed_tests.length > 0 && <p>
         Existing tests corrected by a repair: {suite.changed_tests.join(", ")}
       </p>}
@@ -775,6 +788,13 @@ export function DeliveryResults({ progress, kind = null, documentation = false, 
         <button type="button" className="generate-button" disabled={disabled}
           onClick={() => onRetry("server")}>
           {retrying === "server" ? "Restarting server generation…" : "Retry server generation"}
+        </button>
+      </div>}
+      {progress.component_tests_error && <div className="generation-failure">
+        <p role="alert">{progress.component_tests_error}</p>
+        <button type="button" className="generate-button" disabled={disabled}
+          onClick={() => onRetry("tests")}>
+          {retrying === "tests" ? "Restarting test generation…" : "Retry test generation"}
         </button>
       </div>}
       {progress.tests_error && <div className="generation-failure">

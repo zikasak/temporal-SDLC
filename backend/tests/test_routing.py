@@ -284,14 +284,17 @@ async def test_the_agent_extends_the_published_contract_and_is_told_how(
     assert 'Component contract (Python)' in json.loads(sent['language.json'])['components']
 
 
-def test_criteria_only_component_tests_can_prove_stop_the_delivery_until_they_exist():
+def test_criteria_component_tests_prove_are_routed():
     routes = {'FR-1': {'route': 'contract', 'reason': 'GET /rooms.', 'source': 'routing'},
               'FR-2': {'route': 'component', 'reason': 'Signal, then query.', 'source': 'routing',
                        'seam': {'module': 'app.workflows', 'symbols': ['Flow.close']}}}
-    status, error = judge_routes(routes)
+    assert judge_routes(routes) == ('routed', None)
+    # A delivery started before deliveries wrote component tests stops there, as it did.
+    status, error = judge_routes(routes, component_tests=False)
     assert status == 'unsupported'
     assert error.startswith('1 of the 2 acceptance criteria can only be observed through the '
                             'code, not over HTTP (FR-2 at app.workflows)')
     # A criterion no suite can observe is the stop the user has to act on first.
     routes['FR-3'] = {'route': 'unobservable', 'reason': 'R.', 'source': 'routing'}
     assert judge_routes(routes)[0] == 'unobservable'
+    assert judge_routes(routes, component_tests=False)[0] == 'unobservable'

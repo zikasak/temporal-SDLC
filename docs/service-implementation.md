@@ -72,6 +72,11 @@ The routing worker of a [bugfix](#changing-an-existing-service-bugfix) has the s
 and reads the session's checkout. When it checks a component contract it also builds an
 image that installs the repository's dependencies, so its Docker daemon needs outbound
 access then. `TEMPORAL_ROUTING_TASK_QUEUE` defaults to `routing`.
+The author of a bugfix's component tests runs on its own queue,
+`TEMPORAL_COMPONENT_TEST_GENERATION_TASK_QUEUE` (default `component-test-generation`), so
+that it writes beside the contract tests' author. It needs what the test worker needs, plus
+the session's checkout: the trusted runner it builds installs the repository's
+dependencies, so its Docker daemon needs outbound access too.
 The documentation worker needs Docker and `GENERATED_CODE_DIR` too, to run its author; it
 builds no image of the output. `TEMPORAL_DOCUMENTATION_TASK_QUEUE` defaults to
 `documentation`.
@@ -472,9 +477,11 @@ No code is generated, and the stages run in sequence, red to green:
 flowchart LR
     brief[Requirements session] --> routing[ObservabilityWorkflow]
     routing -- every criterion observable over HTTP --> tests[TestGenerationWorkflow]
+    routing -- criteria observable only at a seam --> components[ComponentTestGenerationWorkflow]
     routing -- a criterion unobservable --> stop
-    routing -- a criterion observable only at a seam --> stop
     tests -- a criterion unobservable --> stop
+    components -- a criterion unobservable --> stop
+    components -- written, until component tests are run --> stop
     tests --> baseline[Baseline run]
     repository[Repository service image] --> baseline
     baseline -- added tests fail, existing pass --> fix[ImplementationWorkflow]
@@ -517,10 +524,10 @@ flowchart LR
    stubbed signature (`Literal` type aliases, which stubtest cannot compare, are compared
    by the runner's `literals.py`). A failed check fails the routing. A checked contract is
    kept in `<GENERATED_CODE_DIR>/<session-id>/routing/components/` and named by the
-   result's `components`. Deliveries cannot write component tests yet (steps 3 and 4 of
-   `plans/component-contracts.md`), so a routing with a `component` route and no
-   `unobservable` one sets `routing_status: unsupported`, and the delivery stops as for
-   an unobservable criterion, with `routing_error` naming those criteria and their seams.
+   result's `components`. A routing with `component` routes and no `unobservable` one is
+   `routed`, and their criteria get component tests (step 2a). Deliveries started before
+   component tests were written (marked by the `component-tests` workflow patch) still set
+   `routing_status: unsupported` for it and stop there, so their histories replay.
 2. **Regression tests.** The test author's workspace is the repository's `contract-tests/`
    as usual. It adds tests wherever they belong, in an existing class or a new one, and
    may not change or remove an existing test; the stage fails otherwise (see
@@ -533,6 +540,40 @@ flowchart LR
    stage's `declined_result`) and the stage returns `unobservable` with no suite; the
    delivery records those routes with `source: tests` and stops as the routing does. This
    replaces a test skipped behind a variable nothing sets, which the prompt still forbids.
+   When the routing sent criteria to a seam, the author's input carries `routes`: the
+   criteria routed `contract`, with their reasons. It writes tests for those only, and may
+   decline only those. With no `contract` route the author does not run.
+2a. **Component tests.** Beside it, for criteria routed `component`,
+   `ComponentTestGenerationWorkflow` (`app/test_generation/components.py`) runs a second
+   test author in a workspace of its own. Its input is the brief, the service's
+   requirements and `routes` (the `component` routes with their seams), with
+   `component: true`; it gets no service source, OpenAPI contract or image. The routing's
+   checked component contract is in `/workspace/contracts/components/`, read through the
+   read-only contract tools, and `/workspace/tests` holds the repository's
+   `component-tests/` as [recorded](#the-snapshot-of-the-repositorys-tests) (or the
+   language's template). Its prompt (`COMPONENT_PROMPT` in `app/test_generation/agent.py`)
+   asks for one test per routed criterion through the stubbed symbols only, with a fake of
+   its own for every collaborator the stubs name, and never a fake of the seam. It may not
+   change an existing component test and must add one, as the first contract-test author,
+   and may decline criteria of its own routes in `unobservable.json` the same way.
+   The language's `ComponentSuite` (Python: `app/languages/python/component_suite/`, a
+   pytest and pytest-asyncio project) decides what is published (never a runner file)
+   and the test identities. The suite is checked by building its trusted runner, not the
+   author's files: the build context holds the template's `Dockerfile`, `.dockerignore`,
+   `run-tests.sh` and `prepare.py`, the service's sources as the
+   [baseline](#changing-an-existing-service-bugfix) records them under `repository/`, and
+   the suite under `suite/`, with the contract's `runtime.json` as build arguments
+   (`SOURCE_ROOT`, `REQUIREMENTS`). The image installs the suite's requirements, then the
+   service's, puts the source root on `PYTHONPATH`, fetches the test servers of
+   `temporalio.testing.WorkflowEnvironment` when the code uses Temporal (they are kept in
+   `/tmp`; the tests run without a network), and collects the suite: a test that does not
+   import against the code fails the stage. The result is `DeliveryProgress.component_tests`
+   (`image_id`, `path` under `<session-id>/component-tests/suite`, `added_tests`); a
+   failure sets `component_tests_error`, which the `tests` retry clears.
+   Nothing runs component tests yet (step 4 of `plans/component-contracts.md`), so once
+   they are written the delivery stops before the baseline, with `baseline_status:
+   skipped` and `baseline_error` saying so. A `tests` retry keeps the routing and writes
+   the tests again.
 3. **Baseline run.** The verification worker's `build_baseline` activity builds the service
    from the checkout, filtered exactly as the implementation author sees it, and publishes
    `<GENERATED_CODE_DIR>/<session-id>/baseline/image.json`. `VerificationWorkflow` then runs
@@ -704,7 +745,10 @@ after a check that could not complete.
 Before anything else, a delivery with a checkout, unless it is a documentation task,
 runs `snapshot_repository_tests` on the
 verification queue. It copies `contract-tests/` from the checkout to
-`<GENERATED_CODE_DIR>/<session-id>/repository-tests/suite`, with the trusted runner files.
+`<GENERATED_CODE_DIR>/<session-id>/repository-tests/suite`, with the trusted runner files,
+and, in a language with component tests, `component-tests/` to
+`repository-tests/components`, without them. A repository without such a directory is
+recorded as the language's template.
 The copy is made once: a retried delivery keeps the first one, whatever the checkout
 holds by then (a publication writes the new suite into the checkout before it pushes).
 

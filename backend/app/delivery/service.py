@@ -260,8 +260,9 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
               # The tests of a change are retried with the baseline run that judges them,
               # and that retry is also the way on from a verification that proved nothing.
               # So is a routing that failed or found a criterion no suite can observe.
-              'tests': (progress.tests_error or progress.baseline_error
-                        or progress.routing_error or proved and unverified),
+              'tests': (progress.tests_error or progress.component_tests_error
+                        or progress.baseline_error or progress.routing_error
+                        or proved and unverified),
               # A documentation task has one stage, which is also the way on from a check
               # of it that could not complete.
               'documentation': (progress.documentation_error
@@ -313,6 +314,8 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
     elif stage == 'tests':
         progress.tests = None
         progress.tests_error = None
+        progress.component_tests = None
+        progress.component_tests_error = None
         if change:
             progress.baseline = None
             progress.baseline_error = None

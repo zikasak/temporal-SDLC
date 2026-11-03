@@ -13,7 +13,8 @@ ROUTES = ('contract', 'component', 'unobservable')
 RouteSource = Literal['routing', 'tests']
 # `routed`: every criterion has a suite that observes it. `unobservable`: one has none,
 # and the delivery stopped before its tests were run. `unsupported`: a criterion can only
-# be proved by component tests, which no delivery writes yet, and the delivery stopped.
+# be proved by component tests, which deliveries started before they could write them do
+# not write, and the delivery stopped.
 RoutingStatus = Literal['not_applicable', 'waiting', 'running', 'routed', 'unobservable',
                         'unsupported', 'error']
 REASON_CHARS = 800
@@ -88,16 +89,27 @@ def read_routes(data: Any, requirement_ids: list[str],
     return result
 
 
-def judge_routes(routes: dict[str, RequirementRoute]) -> tuple[RoutingStatus, str | None]:
+# Why a change whose component tests were written stops before its baseline: step 4 of
+# plans/component-contracts.md, which runs them, is still to come.
+COMPONENT_TESTS_UNRUN = (
+    'The component tests of the acceptance criteria routed to seams of the code were written '
+    'against their component contract and built with the code, but deliveries cannot run '
+    'component tests yet, so nothing could show them failing without the fix and nothing was '
+    'changed. Rephrase those criteria as behaviour the service\'s HTTP API shows, in a fork '
+    'of the interview, if the change cannot wait.')
+
+
+def judge_routes(routes: dict[str, RequirementRoute],
+                 component_tests: bool = True) -> tuple[RoutingStatus, str | None]:
     """Whether every criterion has a suite that can prove it, and what to tell the user
-    when one has none."""
+    when one has none. `component_tests` is false for a delivery started before deliveries
+    wrote component tests, which a criterion routed to a seam stops."""
     unobservable = [(requirement, item) for requirement, item in routes.items()
                     if item['route'] == 'unobservable']
     component = [(requirement, item) for requirement, item in routes.items()
                  if item['route'] == 'component']
-    if not unobservable and component:
-        # Steps 3 and 4 of plans/component-contracts.md: until component tests are
-        # written and run, nothing could prove these criteria red to green.
+    if not unobservable and component and not component_tests:
+        # Kept for the histories of such deliveries, which have to replay as they ran.
         named = '; '.join(f'{requirement} at {item["seam"]["module"]}'
                           for requirement, item in component[:NAMED_CRITERIA])
         more = len(component) - NAMED_CRITERIA
@@ -115,7 +127,7 @@ def judge_routes(routes: dict[str, RequirementRoute]) -> tuple[RoutingStatus, st
     more = len(unobservable) - NAMED_CRITERIA
     by_tests = all(item['source'] == 'tests' for _, item in unobservable)
     return 'unobservable', (
-        ('The test author found that the contract tests cannot observe '
+        ('The test author found that its suite cannot observe '
          if by_tests else 'The contract tests cannot observe ')
         + f'{len(unobservable)} of the {len(routes)} acceptance criteria, so nothing was '
         f'changed: {named}{f"; {more} more" if more > 0 else ""}. Rephrase each of them as '

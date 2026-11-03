@@ -25,9 +25,15 @@ CHECKOUT_DIR = 'repository'
 MANIFEST = 'repository.json'
 # The independent contract tests' directory inside the repository.
 TESTS_DIR = 'contract-tests'
+# The component tests' directory inside the repository: criteria observed at seams of the
+# code rather than over HTTP.
+COMPONENT_TESTS_DIR = 'component-tests'
 # The session's copy of the repository's tests as its delivery found them, taken before
 # any author runs: what later stages compare the suite with.
 SNAPSHOT_DIR = 'repository-tests'
+# Where, inside it, the repository's component tests are recorded; its contract tests are
+# in `suite`.
+COMPONENT_SNAPSHOT = 'components'
 # The published contract the repository's later tasks start from.
 CONTRACTS_DIR = 'contracts'
 BRANCH_PREFIX = 'generated/'

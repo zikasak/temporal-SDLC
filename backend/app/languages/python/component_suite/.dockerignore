@@ -1,0 +1,6 @@
+repository/.git
+suite/reports
+suite/.venv
+suite/venv
+**/__pycache__
+**/.pytest_cache

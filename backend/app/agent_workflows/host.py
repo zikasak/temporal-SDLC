@@ -6,7 +6,7 @@ import re
 import shutil
 import tempfile
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,6 +46,10 @@ class StageSpec:
     # output, such as a test author's finding that nothing it could write can test a
     # criterion. None goes on to sanitize, validate and publish the output.
     declined_result: Callable[[Path], dict[str, Any] | None] | None = None
+    # Builds the image of the sanitized output (given with the build log's path) and
+    # returns its ID, in place of building the output as it is: for a runner that needs
+    # more than the output, such as the code its tests run in-process.
+    build_output: Callable[[Path, Path], Awaitable[str]] | None = None
 
 
 # The language's authoring instructions, placed beside the agent's project.
@@ -91,10 +95,14 @@ def copy_regular_files(source: Path, target: Path, *,
             copy_file(item, destination)
 
 
-async def build_image(context: Path, label: str, log_path: Path) -> str:
+async def build_image(context: Path, label: str, log_path: Path,
+                      build_args: dict[str, str] | None = None) -> str:
     """Build the image of a sanitized source tree and return its immutable ID."""
     iid = context.parent / 'image-id'
-    await docker_agents.docker('build', '--iidfile', str(iid), str(context), log_path=log_path)
+    arguments = [argument for key, value in (build_args or {}).items()
+                 for argument in ('--build-arg', f'{key}={value}')]
+    await docker_agents.docker('build', *arguments, '--iidfile', str(iid), str(context),
+                               log_path=log_path)
     image_id = (await run_sync(iid.read_text)).strip()
     if not re.fullmatch(r'sha256:[0-9a-f]{64}', image_id):
         raise RuntimeError(f'Docker returned an invalid {label} image ID')
@@ -175,7 +183,9 @@ async def _run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
                 build_log = artifact_dir / 'image-build.log'
                 logger.info('%s stage building %s image (session=%s, log=%s)',
                             stage.role, stage.image_label, session_id, build_log)
-                image = {'image_id': await build_image(clean, stage.image_label, build_log)}
+                image = {'image_id': await (
+                    stage.build_output(clean, build_log) if stage.build_output
+                    else build_image(clean, stage.image_label, build_log))}
             destination = artifact_dir / stage.output_subdir
             if await run_sync(destination.exists):
                 await run_sync(shutil.rmtree, destination)

@@ -18,12 +18,10 @@ from app.api_design.openapi import render_openapi
 from app.config import GENERATED_CODE_DIR
 from app.docker_agents import default_agent_image
 from app.github.checkout import SNAPSHOT_DIR
-from app.languages import Language, TestSuite
+from app.languages import ComponentSuite, Language, TestSuite
 from app.requirements.document import without_repeated_tables
 from app.routing.models import UNOBSERVABLE_FILE, read_routes
 
-# Supplied by every language's template; the runner never comes from the test author.
-RUNNER_FILES = ('Dockerfile', '.dockerignore', 'run-tests.sh')
 MAX_NAMED_TESTS = 5
 MAX_UNOBSERVABLE_BYTES = 256 * 1024
 
@@ -34,8 +32,12 @@ def copy_test_suite(suite: TestSuite, source: Path, target: Path) -> None:
     copy_regular_files(source, target, include=lambda relative: (
         relative in published or not published.isdisjoint(relative.parents)
     ))
-    # The runner always compiles tests, even if the agent changes its Dockerfile.
-    for name in RUNNER_FILES:
+    if isinstance(suite, ComponentSuite):
+        # Its runner is put around it, with the code it tests, only when it is built.
+        return
+    # The runner always compiles tests, even if the agent changes its Dockerfile; it is
+    # supplied by the language's template and never comes from the test author.
+    for name in suite.runner:
         shutil.copyfile(suite.template / name, target / name)
 
 
@@ -48,8 +50,10 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
     contracts = without_repeated_tables({
         'requirements': context.get('requirements', []),
         'requirements_document': context.get('requirements_document', ''),
-        # A change to an existing service adds tests for its brief to the existing suite.
+        # A change to an existing service adds tests for its brief to the existing suite,
+        # for the criteria routed to it when another suite proves some.
         **({'brief': context['brief']} if context.get('brief') else {}),
+        **({'routes': context['routes']} if context.get('routes') else {}),
         **({'architecture': context['architecture']} if context.get('architecture') else {}),
     })
     repair = context.get('repair')
@@ -209,8 +213,10 @@ async def generate_service_tests(session_id: str, context: dict[str, Any]) -> di
     context = {**context, 'keep': keep} if keep else {
         key: value for key, value in context.items() if key != 'keep'}
     # The first author of a change's tests may find a criterion of its brief that no test
-    # of the suite can observe, and say so instead of writing a suite.
-    requirement_ids = ([item['id'] for item in context['brief']['requirements']]
+    # of the suite can observe, and say so instead of writing a suite: one of the criteria
+    # routed to the suite, when the routing sent others elsewhere.
+    requirement_ids = ([item['id'] for item in context['brief']['requirements']
+                        if not context.get('routes') or item['id'] in context['routes']]
                        if change and not repair else None)
     result = await run_stage(stage(language, frozen, must_add=change and not repair,
                                    requirement_ids=requirement_ids),

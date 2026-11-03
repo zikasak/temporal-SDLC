@@ -22,11 +22,13 @@ from temporalio.exceptions import ApplicationError
 from app import docker_agents
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.host import build_image, publish_manifest, session_language
-from app.github.checkout import CHECKOUT_DIR, SNAPSHOT_DIR, TESTS_DIR
+from app.github.checkout import (
+    CHECKOUT_DIR, COMPONENT_SNAPSHOT, COMPONENT_TESTS_DIR, SNAPSHOT_DIR, TESTS_DIR,
+)
 from app.implementation.activities import copy_service
 from app.review.activities import record_baseline
 from app.test_generation.activities import copy_test_suite
-from app.languages import Language, TestReports, UnsupportedLanguage, get_language
+from app.languages import Language, TestReports, TestSuite, UnsupportedLanguage, get_language
 from app.config import GENERATED_CODE_DIR
 from app.verification.models import TestFailure, TestSkip, TrackedTest, VerificationResult
 from app.temporal.tracing import trace_activity
@@ -364,32 +366,44 @@ async def verify_documentation(session_id: str) -> VerificationResult:
             'error': None, 'path': ''}
 
 
+async def _snapshot(suite: TestSuite, source: Path, target: Path) -> None:
+    """Record the suite of the repository at `source` in `target`, once: the template's
+    published files when the repository has none."""
+    if await run_sync(target.is_dir):
+        return
+    await run_sync(target.parent.mkdir, parents=True, exist_ok=True)
+    async with async_context(tempfile.TemporaryDirectory, dir=target.parent) as temporary:
+        clean = Path(temporary) / target.name
+        await run_sync(copy_test_suite, suite,
+                       source if await run_sync(source.is_dir) else suite.template, clean)
+        await run_sync(os.replace, clean, target)
+
+
 @activity.defn
 @trace_activity('snapshot-repository-tests', feature='verification', input_parameter='language')
 async def snapshot_repository_tests(session_id: str, language: str) -> dict[str, int]:
     """Copy the repository's tests aside, as the checkout holds them before any author has
-    run. Taken once: a later call, such as a retried delivery's, keeps the first copy,
-    whatever the checkout holds by then."""
+    run: its contract tests, and its component tests in a language that has them. Taken
+    once: a later call, such as a retried delivery's, keeps the first copy, whatever the
+    checkout holds by then."""
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
         raise ApplicationError('Invalid session ID', non_retryable=True)
-    suite = session_language(language).test_suite
+    registered = session_language(language)
     session_dir = GENERATED_CODE_DIR / session_id
     checkout = session_dir / CHECKOUT_DIR
     if not await run_sync(checkout.is_dir):
         raise ApplicationError('The repository checkout is unavailable', non_retryable=True)
     snapshot = session_dir / SNAPSHOT_DIR
-    target = snapshot / 'suite'
-    if not await run_sync(target.is_dir):
-        await run_sync(snapshot.mkdir, parents=True, exist_ok=True)
-        async with async_context(tempfile.TemporaryDirectory, dir=snapshot) as temporary:
-            clean = Path(temporary) / 'suite'
-            if await run_sync((checkout / TESTS_DIR).is_dir):
-                await run_sync(copy_test_suite, suite, checkout / TESTS_DIR, clean)
-            else:
-                await run_sync(shutil.copytree, suite.template, clean)
-            await run_sync(os.replace, clean, target)
-        logger.info('Repository tests recorded (session=%s)', session_id)
-    return {'tests': len(await run_sync(suite.test_cases, target))}
+    suites = [(registered.test_suite, TESTS_DIR, 'tests', snapshot / 'suite')]
+    if registered.component_suite:
+        suites.append((registered.component_suite, COMPONENT_TESTS_DIR, 'component_tests',
+                       snapshot / COMPONENT_SNAPSHOT))
+    counts = {}
+    for suite, directory, key, target in suites:
+        await _snapshot(suite, checkout / directory, target)
+        counts[key] = len(await run_sync(suite.test_cases, target))
+    logger.info('Repository tests recorded (session=%s, %s)', session_id, counts)
+    return counts
 
 
 @activity.defn

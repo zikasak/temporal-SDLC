@@ -27,11 +27,12 @@ from app.delivery.workflows import DeliveryWorkflow
 from app.requirements import service as requirements_service
 from app.requirements.document import render_requirements_markdown
 from app.requirements.models import RequirementsState
+from app.routing.models import COMPONENT_TESTS_UNRUN
 from app.temporal import sessions
 from app.temporal.executions import ensure_search_attributes
 from app.temporal.workflows import ApiDesignWorkflow, RequirementsWorkflow
 from tests.pipeline import (
-    ADDED_TESTS, BASELINE_IMAGE, BROKEN_TEST, CODE, FakeCodegenWorkflow, FakeStages,
+    ADDED_COMPONENT_TESTS, ADDED_TESTS, SEAM, BASELINE_IMAGE, BROKEN_TEST, CODE, FakeCodegenWorkflow, FakeStages,
     finished, stage_workers,
 )
 
@@ -664,6 +665,47 @@ async def test_a_criterion_no_suite_can_observe_stops_the_bugfix_before_its_test
     assert worker.stages.count('routing') == 2
     assert state.routing_status == 'routed' and state.routing_error is None
     assert state.baseline_status == 'reproduced' and state.publication_status == 'completed'
+
+
+@pytest.mark.parametrize('outcome', ['written', 'declined', 'failed'])
+async def test_criteria_routed_to_a_seam_get_component_tests_written_from_their_stubs(
+        env, worker, outcome, repository_selection):
+    worker.routes = [{'FR-2': 'component'}]
+    worker.component_declined = ['FR-2'] if outcome == 'declined' else []
+    worker.fail_component_tests = outcome == 'failed'
+    handle, state = await fixed(env, repository_selection)
+    # The only criterion is the component tests': the contract tests' author does not run.
+    assert worker.stages == ['routing', 'component-tests']
+    context, = worker.component_contexts
+    assert context['routes'] == {'FR-2': {'route': 'component', 'reason': 'Route of FR-2.',
+                                          'source': 'routing', 'seam': SEAM}}
+    assert context['repository'] == repository_selection and context['brief']
+    # Nothing is run against the service yet, nothing changes it and nothing is pushed.
+    assert state.tests is None and state.baseline is None and state.implementation is None
+    assert state.baseline_status == 'skipped' and state.verification_status == 'skipped'
+    assert state.publication_status == 'skipped' and not worker.published
+    if outcome == 'written':
+        assert state.routing_status == 'routed' and state.routing_error is None
+        assert state.component_tests['added_tests'] == ADDED_COMPONENT_TESTS
+        assert state.baseline_error == COMPONENT_TESTS_UNRUN
+    elif outcome == 'declined':
+        assert state.routing_status == 'unobservable' and state.component_tests is None
+        assert state.routing['FR-2']['source'] == 'tests'
+        assert 'FR-2: Happens in no stubbed symbol.' in state.routing_error
+    else:
+        assert state.component_tests is None
+        assert 'component tests could not be generated' in state.component_tests_error
+
+    # Retrying the tests writes them again; a routing that found a suite for each
+    # criterion is kept.
+    worker.component_declined, worker.fail_component_tests = [], False
+    await requirements_service.retry_generation(handle.id, 'tests')
+    state = await delivered(env, handle.id)
+    assert worker.stages.count('routing') == (2 if outcome == 'declined' else 1)
+    assert worker.stages[-1] == 'component-tests'
+    assert state.component_tests_error is None
+    assert state.component_tests['added_tests'] == ADDED_COMPONENT_TESTS
+    assert state.baseline_error == COMPONENT_TESTS_UNRUN
 
 
 @pytest.mark.parametrize('outcome', ['skipped', 'error'])
