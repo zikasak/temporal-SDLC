@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 from app.languages import Implementation, Language, TestReports, TestSuite, register
+from app.languages.python.components import COMPONENT_CONTRACT
 
 PACKAGE_NAME = "service"
 
@@ -193,4 +194,5 @@ PYTHON = register(Language(
     ),
     # The shared agent image has Python 3.12 and pip.
     agent_dockerfile=Path(__file__).resolve().parents[2] / "agent_workflows" / "Dockerfile",
+    component_contract=COMPONENT_CONTRACT,
 ))

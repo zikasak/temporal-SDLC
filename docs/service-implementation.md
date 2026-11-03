@@ -69,7 +69,9 @@ The diagnosis worker has the same Docker and `GENERATED_CODE_DIR` needs as the c
 workers and reads the published service, test suite and verification artifacts.
 `TEMPORAL_DIAGNOSIS_TASK_QUEUE` defaults to `diagnosis`.
 The routing worker of a [bugfix](#changing-an-existing-service-bugfix) has the same needs
-and reads the session's checkout. `TEMPORAL_ROUTING_TASK_QUEUE` defaults to `routing`.
+and reads the session's checkout. When it checks a component contract it also builds an
+image that installs the repository's dependencies, so its Docker daemon needs outbound
+access then. `TEMPORAL_ROUTING_TASK_QUEUE` defaults to `routing`.
 The documentation worker needs Docker and `GENERATED_CODE_DIR` too, to run its author; it
 builds no image of the output. `TEMPORAL_DOCUMENTATION_TASK_QUEUE` defaults to
 `documentation`.
@@ -471,6 +473,7 @@ flowchart LR
     brief[Requirements session] --> routing[ObservabilityWorkflow]
     routing -- every criterion observable over HTTP --> tests[TestGenerationWorkflow]
     routing -- a criterion unobservable --> stop
+    routing -- a criterion observable only at a seam --> stop
     tests -- a criterion unobservable --> stop
     tests --> baseline[Baseline run]
     repository[Repository service image] --> baseline
@@ -494,7 +497,30 @@ flowchart LR
    and verification `skipped`: no test is written and nothing is pushed. A routing that
    failed sets `routing_status: error`. A routing with every criterion `contract`
    (`routed`) is kept for later retries of the tests; any other is done again.
-   The component route of `plans/component-contracts.md` comes later.
+   In a language with component contracts (Python so far: `component_contract` of its
+   `Language`), a requirement the contract tests cannot observe may be routed
+   `component` instead: observable at a *seam*, an interface the code already has, such
+   as a workflow's signals and queries. Its route names the seam,
+   `seam: {module, symbols}`, and the agent writes the component contract in
+   `components/`: `runtime.json` (`source_root`, the repository directory the modules
+   are imported from, and `requirements`, the pip requirements files that install what
+   they import) and one `.pyi` stub per module, holding only the seam's symbols with
+   their signatures and behaviour docstrings. The repository's published contract,
+   `contracts/components/`, is given to the agent to extend. The host
+   (`app/routing/components.py`) rejects a contract whose stubs hold anything but
+   declarations (every body only a docstring and `...`), that lacks a symbol a route
+   names, or that changes or removes a published file or a statement of a published
+   stub. Then `check_conformance` builds the trusted runner of the language
+   (`app/languages/python/component_contract/`) with the service's sources as the
+   baseline records them and the stubs, and runs it without a network: mypy's
+   `stubtest --ignore-missing-stub` must find every stubbed symbol in the code with the
+   stubbed signature (`Literal` type aliases, which stubtest cannot compare, are compared
+   by the runner's `literals.py`). A failed check fails the routing. A checked contract is
+   kept in `<GENERATED_CODE_DIR>/<session-id>/routing/components/` and named by the
+   result's `components`. Deliveries cannot write component tests yet (steps 3 and 4 of
+   `plans/component-contracts.md`), so a routing with a `component` route and no
+   `unobservable` one sets `routing_status: unsupported`, and the delivery stops as for
+   an unobservable criterion, with `routing_error` naming those criteria and their seams.
 2. **Regression tests.** The test author's workspace is the repository's `contract-tests/`
    as usual. It adds tests wherever they belong, in an existing class or a new one, and
    may not change or remove an existing test; the stage fails otherwise (see
@@ -554,7 +580,7 @@ model is unchanged. `DeliveryProgress` reports `routing_status` and `baseline_st
 session delivers), and `POST /api/requirements/sessions/{id}/generation/retry` retries a
 failed stage as for a design session. Retrying `tests` is also how a failed routing, one that found an
 unobservable criterion, a failed or unreproduced baseline, or a verification that ended with an error or could not complete,
-is retried: the tests are written again and held against the
+is retried (so is one that found a criterion only component tests can prove): the tests are written again and held against the
 baseline again, and the fix is written only if there is none yet. An API design cannot be
 started from such a session.
 

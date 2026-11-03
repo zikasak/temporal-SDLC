@@ -52,6 +52,41 @@ class TestSuite:
 
 
 @dataclass(frozen=True)
+class ComponentContract:
+    """How a criterion the HTTP contract tests cannot observe is described at a seam of
+    the service's code: stubs of existing symbols, with signatures, types and behaviour
+    docstrings but no implementation, published under `contracts/components/`."""
+    # What the routing agent is told about writing the stubs and checking them; formatted
+    # with `runtime` (the runtime file's name).
+    instructions: str
+    # File name suffix of a stub; any other file of the contract but RUNTIME_FILE is
+    # rejected.
+    stub_suffix: str
+    # The dotted module a stub at this path (relative to the contract) describes.
+    module: Callable[[Path], str]
+    # Checks one stub's source and returns the symbols it defines, by dotted name within
+    # its module (`Class` and `Class.method`). Raises ValueError for a body that is more
+    # than a signature, or anything else a stub may not hold.
+    read_stub: Callable[[str], set[str]]
+    # The top-level statements of a stub, comparable across versions of it, so a
+    # published stub can be told to be kept or extended rather than changed.
+    statements: Callable[[str], list[str]]
+    # Checks the runtime file's object against the repository it describes and returns
+    # it normalized. Raises ValueError for anything else.
+    read_runtime: Callable[[object, Path], dict]
+    # Trusted runner project (Dockerfile and script) of the conformance check: built with
+    # the repository under `repository/` and the contract under `components/`, it exits
+    # non-zero when a stub no longer matches the code.
+    conformance: Path
+    # Docker build arguments of the conformance image, from the normalized runtime file.
+    build_args: Callable[[dict], dict[str, str]]
+
+
+# The contract's file that says how to import the code the stubs describe.
+RUNTIME_FILE = "runtime.json"
+
+
+@dataclass(frozen=True)
 class Language:
     # The registry key, and what a session records as its language.
     name: str
@@ -70,6 +105,8 @@ class Language:
     agent_dockerfile: Path
     # Completes the generated project in place before it is published.
     post_process: Callable[[Path], None] = lambda project: None
+    # None when criteria cannot be routed to a component seam in the language yet.
+    component_contract: ComponentContract | None = None
 
 
 # Dependencies and build output of the other projects a repository may hold beside the

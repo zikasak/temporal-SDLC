@@ -203,6 +203,14 @@ Each step lands with its own tests (`backend/tests/`, stage fakes in
    does not get the routes yet (3.3).
 2. **Component contract.** The `component` route, stub output, and its validation (no
    bodies, `stubtest` against the checkout) for Python.
+   *Done:* `ComponentContract` in `app/languages/` (Python's in
+   `app/languages/python/components.py`, its runner in `component_contract/`),
+   `app/routing/components.py`, and `routing_status: unsupported`, which stops the
+   delivery until steps 3 and 4 land. Learned while checking it against
+   `app.delivery.workflows`: stubtest compares a stubbed class's `__init__` even when the
+   stub omits it, cannot compare `Literal` aliases (the runner does), and mypy prefers
+   modules of its working directory to the stubs (the check runs elsewhere). Stubs must
+   be self-contained: a type from an unstubbed module is stubbed too or written `Any`.
 3. **Component tests.** `ComponentSuite` for Python, the template runner, the second
    test-author run with `COMPONENT_PROMPT`, snapshot and freeze of `component-tests/`.
 4. **Verification.** `run_component_suite`, the component baseline, the conformance

@@ -20,9 +20,13 @@ type BaselineStatus = "not_applicable" | "waiting" | "running" | "reproduced" | 
   "skipped" | "error";
 // Which suite can prove each acceptance criterion of a change: `routed` when every one has
 // one, `unobservable` when one has none and the delivery stopped before its tests ran.
-type RoutingStatus = "not_applicable" | "waiting" | "running" | "routed" | "unobservable" | "error";
+type RoutingStatus = "not_applicable" | "waiting" | "running" | "routed" | "unobservable" | "unsupported" | "error";
+// The module and symbols of the code at which a `component` route observes its criterion.
+type Seam = { module: string; symbols: string[] };
 // `source`: who decided the route, the routing stage or the test author.
-type RequirementRoute = { route: "contract" | "unobservable"; reason: string; source: "routing" | "tests" };
+type RequirementRoute = {
+  route: "contract" | "component" | "unobservable"; reason: string; source: "routing" | "tests"; seam?: Seam;
+};
 // `tests` are the failing tests the diagnosis found broken: the only ones a repair may change.
 type RepairRound = { attempt: number; target: "implementation" | "tests"; tests: TestRef[]; summary: string };
 type VerificationResult = {
@@ -153,7 +157,7 @@ const baselineStatuses: BaselineStatus[] = [
   "not_applicable", "waiting", "running", "reproduced", "not_reproduced", "skipped", "error",
 ];
 const routingStatuses: RoutingStatus[] = [
-  "not_applicable", "waiting", "running", "routed", "unobservable", "error",
+  "not_applicable", "waiting", "running", "routed", "unobservable", "unsupported", "error",
 ];
 const publicationStatuses: PublicationStatus[] = [
   "not_applicable", "waiting", "running", "completed", "skipped", "error",
@@ -178,11 +182,18 @@ function repairRounds(value: unknown): RepairRound[] {
   }) as RepairRound);
 }
 
+function seam(value: unknown): Seam | undefined {
+  return isObject(value) && typeof value.module === "string"
+    ? { module: value.module, symbols: strings(value.symbols) } : undefined;
+}
+
 function routes(value: unknown): Record<string, RequirementRoute> | null {
   if (!isObject(value)) return null;
   return Object.fromEntries(Object.entries(value).filter(([, item]) => isObject(item) &&
-    (item.route === "contract" || item.route === "unobservable") && typeof item.reason === "string" &&
-    (item.source === "routing" || item.source === "tests")) as [string, RequirementRoute][]);
+    (item.route === "contract" || item.route === "unobservable" ||
+      item.route === "component" && seam(item.seam) !== undefined) && typeof item.reason === "string" &&
+    (item.source === "routing" || item.source === "tests"))
+    .map(([requirement, item]) => [requirement, { ...item as RequirementRoute, seam: seam((item as RequirementRoute).seam) }]));
 }
 
 function reviewRounds(value: unknown): ReviewRound[] {
@@ -432,13 +443,20 @@ function Routing({ progress, retrying, disabled, onRetry }: {
       {stage === "unobservable" && <p className="verification-outcome verification-failed" role="status">
         Some acceptance criteria cannot be proved by any test
       </p>}
+      {stage === "unsupported" && <p className="verification-outcome verification-failed" role="status">
+        Some acceptance criteria can only be proved by component tests, which deliveries cannot write yet
+      </p>}
       {stage === "error" && <p className="verification-outcome verification-error" role="status">
         The routing did not complete
       </p>}
       {entries.length > 0 && <ul className="verification-failures">
         {entries.map(([requirement, item]) => <li key={requirement}>
-          <strong>{requirement}: {item.route === "contract" ? "contract tests" : "cannot be observed"}</strong>
+          <strong>{requirement}: {item.route === "contract" ? "contract tests"
+            : item.route === "component" ? "component tests" : "cannot be observed"}</strong>
           <span>{item.reason}{item.source === "tests" ? " (found by the test author)" : ""}</span>
+          {item.seam && <span>Seam: <code>{item.seam.module}</code>
+            {item.seam.symbols.length > 0 && <> ({item.seam.symbols.map((symbol, index) =>
+              <span key={symbol}>{index > 0 && ", "}<code>{symbol}</code></span>)})</>}</span>}
         </li>)}
       </ul>}
       {progress.routing_error && <div className="generation-failure">
