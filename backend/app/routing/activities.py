@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import uuid
 from pathlib import Path
@@ -21,10 +22,14 @@ from app.agent_workflows.host import (
 from app.config import GENERATED_CODE_DIR
 from app.github.checkout import CHECKOUT_DIR
 from app.implementation.activities import EXCLUDED
-from app.languages import Language
+from app.languages import RUNTIME_FILE, Language
 from app.requirements.document import without_repeated_tables
+from app.review.activities import record_baseline
 from app.routing.agent import ROUTES
-from app.routing.models import read_routes
+from app.routing.components import (
+    COMPONENTS_DIR, PUBLISHED_DIR, check_conformance, check_seams, read_components,
+)
+from app.routing.models import ROUTES as ALL_ROUTES, read_routes
 from app.temporal.tracing import activity_metadata
 from app.tracing import trace_operation
 
@@ -52,14 +57,24 @@ def prepare_routing(language: Language, session_dir: Path, context: dict[str, An
     contracts = without_repeated_tables(
         {key: value for key, value in context.items() if key not in ('language', 'repository')})
     index, files = on_demand_contracts(contracts, len(json.dumps(contracts))) or (contracts, {})
-    write_language(workspace, language, label=language.label)
+    component = language.component_contract
+    if component:
+        # The published component contract, which the agent extends rather than replaces.
+        published = checkout / PUBLISHED_DIR
+        if published.is_dir():
+            copy_regular_files(published, workspace / 'routing' / COMPONENTS_DIR,
+                               include=lambda relative: True)
+    write_language(workspace, language, label=language.label, components=(
+        component.instructions.format(runtime=RUNTIME_FILE) if component else ''))
     if files:
         write_contracts(workspace, files)
     (workspace / 'input.json').write_text(json.dumps(index, ensure_ascii=False))
 
 
-def read_output(output: Path, requirement_ids: list[str]) -> dict[str, dict[str, str]]:
-    """The agent's output is untrusted: accept one bounded, complete routing."""
+def read_output(output: Path, requirement_ids: list[str],
+                language: Language) -> dict[str, dict[str, Any]]:
+    """The agent's output is untrusted: accept one bounded, complete routing, with the
+    `component` route only in a language that has component contracts."""
     file = output / ROUTES
     if file.is_symlink() or not file.is_file() or file.stat().st_size > MAX_ROUTES_BYTES:
         raise RuntimeError('Routing did not produce routes')
@@ -67,7 +82,31 @@ def read_output(output: Path, requirement_ids: list[str]) -> dict[str, dict[str,
         data = json.loads(file.read_text())
     except ValueError as exc:
         raise RuntimeError('The routes are not valid JSON') from exc
-    return read_routes(data, requirement_ids)
+    return read_routes(data, requirement_ids, ALL_ROUTES if language.component_contract else
+                       tuple(route for route in ALL_ROUTES if route != 'component'))
+
+
+async def publish_components(language: Language, session_dir: Path, output: Path,
+                             routes: dict[str, dict[str, Any]], work: Path,
+                             artifact_dir: Path) -> str | None:
+    """Validate the component contract the agent wrote for its `component` routes and check
+    it against the code the delivery started from, then keep it beside the routing. None
+    when no criterion was routed to a seam."""
+    contract = language.component_contract
+    target = artifact_dir / COMPONENTS_DIR
+    # An earlier routing's contract is never mistaken for this one's.
+    await run_sync(shutil.rmtree, target, ignore_errors=True)
+    if contract is None or not any(item['route'] == 'component' for item in routes.values()):
+        return None
+    repository = await run_sync(record_baseline, language, session_dir)
+    clean = work / COMPONENTS_DIR
+    read = await run_sync(read_components, contract, output / COMPONENTS_DIR, repository,
+                          session_dir / CHECKOUT_DIR / PUBLISHED_DIR, clean)
+    check_seams(routes, read['modules'])
+    await check_conformance(contract, repository, clean, list(read['modules']), work,
+                            artifact_dir)
+    await run_sync(shutil.move, clean, target)
+    return str(target)
 
 
 async def run_routing(session_id: str, context: dict[str, Any]) -> dict[str, Any]:
@@ -101,8 +140,12 @@ async def run_routing(session_id: str, context: dict[str, Any]) -> dict[str, Any
                         dockerfile=language.agent_dockerfile))
             except docker_agents.AgentPaused as exc:
                 return paused_result(session_id, exc)
-        routes = await run_sync(read_output, output, brief_ids(context))
-    result = {'session_id': session_id, 'routes': routes, 'path': str(artifact_dir)}
+        routes = await run_sync(read_output, output, brief_ids(context), language)
+        async with docker_agents.keep_activity_alive('Checking the component contract'):
+            components = await publish_components(language, session_dir, output, routes, work,
+                                                  artifact_dir)
+    result = {'session_id': session_id, 'routes': routes, 'path': str(artifact_dir),
+              **({'components': components} if components else {})}
     manifest = artifact_dir / f'{uuid.uuid4().hex}.json'
     await run_sync(
         manifest.write_text, json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')

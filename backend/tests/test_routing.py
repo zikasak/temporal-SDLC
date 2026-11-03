@@ -138,3 +138,160 @@ def test_the_test_author_may_name_criteria_of_the_brief_instead_of_writing_a_sui
         file.write_text(content)
         with pytest.raises(RuntimeError, match=error):
             read_unobservable(ids, tmp_path)
+
+
+# A Python service whose criterion FR-3 is observable only through its code.
+SERVICE = '''class Rooms:
+    def close(self, room: str, merged: bool) -> None:
+        self._closed = merged
+
+    def state(self, room: str) -> str:
+        return "closed"
+'''
+STUB = '''class Rooms:
+    def close(self, room: str, merged: bool) -> None:
+        """Closes the room, whether its pull request was merged or not."""
+        ...
+
+    def state(self, room: str) -> str: ...
+'''
+RUNTIME = {'source_root': 'src', 'requirements': ['requirements.txt']}
+COMPONENT_ROUTES = {'routes': [
+    ROUTES['routes'][0],
+    {'requirement_id': 'FR-3', 'route': 'component', 'reason': 'Close, then read the state.',
+     'seam': {'module': 'service.rooms', 'symbols': ['Rooms.close', 'Rooms.state']}},
+]}
+PYTHON_CONTEXT = {**CONTEXT, 'language': 'python'}
+
+
+@pytest.fixture
+def python_session(session):
+    for path, text in {'repository/src/service/rooms.py': SERVICE,
+                       'repository/requirements.txt': 'temporalio\n'}.items():
+        (session / path).parent.mkdir(parents=True, exist_ok=True)
+        (session / path).write_text(text)
+    return session
+
+
+def fake_component_docker(monkeypatch, components: dict[str, str], runs: list,
+                          routes=COMPONENT_ROUTES, conforms: bool = True):
+    """Stands in for the Docker CLI, the agent's filesystem and stubtest's verdict."""
+    async def docker(*args, **kwargs):
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': 0})
+        if args[0] == 'cp' and args[1].endswith(':/workspace/routing/.'):
+            output = Path(args[2])
+            (output / 'routes.json').write_text(json.dumps(routes))
+            for path, text in components.items():
+                (output / 'components' / path).parent.mkdir(parents=True, exist_ok=True)
+                (output / 'components' / path).write_text(text)
+        if args[0] == 'build' and '--iidfile' in args:
+            context = Path(args[-1])
+            runs.append({'build': args, 'files': sorted(
+                item.relative_to(context).as_posix() for item in context.rglob('*')
+                if item.is_file())})
+            Path(args[args.index('--iidfile') + 1]).write_text('sha256:' + 'a' * 64)
+        if args[0] == 'run':
+            runs.append({'run': args})
+            if not conforms:
+                raise RuntimeError('Docker run failed: error: service.rooms.Rooms.close is '
+                                   'inconsistent, stub parameter "merged" differs')
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+
+
+async def test_a_criterion_observable_at_a_seam_is_routed_there_with_its_checked_stubs(
+        python_session, monkeypatch):
+    runs: list = []
+    fake_component_docker(monkeypatch, {'runtime.json': json.dumps(RUNTIME),
+                                        'service/rooms.pyi': STUB}, runs)
+    result = await ActivityEnvironment().run(activities.route_requirements, 'session',
+                                             PYTHON_CONTEXT)
+    assert result['routes']['FR-3'] == {
+        'route': 'component', 'reason': 'Close, then read the state.',
+        'seam': {'module': 'service.rooms', 'symbols': ['Rooms.close', 'Rooms.state']}}
+    components = python_session / 'routing/components'
+    assert result['components'] == str(components)
+    assert (components / 'service/rooms.pyi').read_text() == STUB
+    build, run = runs
+    # The check sees the service's code, not its tests or contracts, and the stubs.
+    assert {'repository/src/service/rooms.py', 'repository/requirements.txt',
+            'components/service/rooms.pyi', 'Dockerfile', 'check.sh'} <= set(build['files'])
+    assert not any(name.startswith('repository/contract-tests') for name in build['files'])
+    assert 'SOURCE_ROOT=src' in build['build'] and 'REQUIREMENTS=requirements.txt' in build['build']
+    assert '--network=none' in run['run'] and run['run'][-1] == 'service.rooms'
+
+
+VALID = {'runtime.json': json.dumps(RUNTIME), 'service/rooms.pyi': STUB}
+
+
+@pytest.mark.parametrize('components, published, conforms, error', [
+    ({'service/rooms.pyi': STUB}, {}, True, 'no runtime.json'),
+    ({**VALID, 'runtime.json': json.dumps({**RUNTIME, 'source_root': '../elsewhere'})}, {},
+     True, 'not a path inside the repository'),
+    ({**VALID, 'runtime.json': json.dumps({**RUNTIME, 'requirements': ['missing.txt']})}, {},
+     True, 'missing.txt is not a file of the repository'),
+    ({**VALID, 'service/rooms.pyi': STUB.replace('        ...\n',
+                                                 '        self._closed = merged\n')},
+     {}, True, 'more than a docstring'),
+    ({**VALID, 'service/rooms.pyi': STUB + 'close = lambda room: None\n'}, {}, True,
+     'holds no code'),
+    ({**VALID, 'service/rooms.pyi': STUB.replace('def state', 'def status')}, {}, True,
+     'does not define: Rooms.state'),
+    (VALID, {'service/rooms.pyi': STUB.replace('str: ...', 'int: ...')}, True,
+     'published stub service/rooms.pyi was changed'),
+    (VALID, {'service/other.pyi': 'def other() -> None: ...\n'}, True, 'was removed'),
+    (VALID, {}, False, 'does not match the code: error: service.rooms.Rooms.close'),
+])
+async def test_a_component_contract_that_is_not_a_checked_description_of_the_code_routes_nothing(
+        python_session, monkeypatch, components, published, conforms, error):
+    for path, text in published.items():
+        file = python_session / 'repository/contracts/components' / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(text)
+    fake_component_docker(monkeypatch, components, [], conforms=conforms)
+    with pytest.raises(RuntimeError, match=error):
+        await ActivityEnvironment().run(activities.route_requirements, 'session',
+                                        PYTHON_CONTEXT)
+    assert not (python_session / 'routing/routes.json').exists()
+    assert not (python_session / 'routing/components').exists()
+
+
+async def test_the_agent_extends_the_published_contract_and_is_told_how(
+        python_session, monkeypatch):
+    published = 'def opened(room: str) -> bool: ...\n'
+    file = python_session / 'repository/contracts/components/service/rooms.pyi'
+    file.parent.mkdir(parents=True)
+    file.write_text(published)
+    fake_component_docker(monkeypatch, {**VALID, 'service/rooms.pyi': published + STUB}, [])
+    sent: dict = {}
+    fake = docker_agents.docker
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'cp' and args[1] == '-a':
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.update({item.name: archive.extractfile(item).read().decode()
+                             for item in archive.getmembers() if item.isfile()})
+            return ''
+        return await fake(*args, **kwargs)
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    result = await ActivityEnvironment().run(activities.route_requirements, 'session',
+                                             PYTHON_CONTEXT)
+    assert result['routes']['FR-3']['route'] == 'component'
+    assert sent['routing/components/service/rooms.pyi'] == published
+    assert 'Component contract (Python)' in json.loads(sent['language.json'])['components']
+
+
+def test_criteria_only_component_tests_can_prove_stop_the_delivery_until_they_exist():
+    routes = {'FR-1': {'route': 'contract', 'reason': 'GET /rooms.', 'source': 'routing'},
+              'FR-2': {'route': 'component', 'reason': 'Signal, then query.', 'source': 'routing',
+                       'seam': {'module': 'app.workflows', 'symbols': ['Flow.close']}}}
+    status, error = judge_routes(routes)
+    assert status == 'unsupported'
+    assert error.startswith('1 of the 2 acceptance criteria can only be observed through the '
+                            'code, not over HTTP (FR-2 at app.workflows)')
+    # A criterion no suite can observe is the stop the user has to act on first.
+    routes['FR-3'] = {'route': 'unobservable', 'reason': 'R.', 'source': 'routing'}
+    assert judge_routes(routes)[0] == 'unobservable'
