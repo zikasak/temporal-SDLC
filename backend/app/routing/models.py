@@ -24,6 +24,11 @@ MAX_SEAM_SYMBOLS = 50
 SYMBOL_CHARS = 200
 # The file in which the test author names criteria it cannot test, instead of a suite.
 UNOBSERVABLE_FILE = 'unobservable.json'
+# The type of the routing's own failures: why the routes or the component contract were
+# unusable, or what the routing lacked. Their messages carry no provider output, so the
+# user is shown them, while failures of the agent itself are not (NFR-2).
+ROUTING_ERROR = 'RoutingError'
+ROUTING_ERROR_CHARS = 800
 
 
 class Seam(TypedDict):

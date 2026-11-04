@@ -15,6 +15,7 @@ from app.config import (
     TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
 )
 from app.delivery.models import DeliveryProgress, DeliveryState, delivery_id
+from app.routing.models import ROUTING_ERROR
 from app.diagnosis.workflows import DiagnosisWorkflow
 from app.documentation.workflows import DocumentationWorkflow
 from app.implementation.workflows import ImplementationWorkflow
@@ -244,7 +245,12 @@ class FakeStages:
     async def route_requirements(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
         self.stages.append('routing')
         if self.fail_routing:
-            raise ApplicationError('no routes', non_retryable=True)
+            # A string is a reason of the routing's own; otherwise the agent failed.
+            raise ApplicationError(
+                *((self.fail_routing,) if isinstance(self.fail_routing, str)
+                  else ('Provider said: key sk-secret',)),
+                type=ROUTING_ERROR if isinstance(self.fail_routing, str) else None,
+                non_retryable=True)
         routes = self.routes[min(len(self.routed), len(self.routes) - 1)]
         self.routed.append(context)
         return {'session_id': session_id, 'path': '/routing', 'routes': {

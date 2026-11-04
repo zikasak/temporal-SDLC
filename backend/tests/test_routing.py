@@ -14,7 +14,7 @@ from app import docker_agents
 from app.api_design.models import empty_api
 from app.languages import get_language
 from app.routing import activities
-from app.routing.models import added_seams, judge_routes, read_seam
+from app.routing.models import ROUTING_ERROR, added_seams, judge_routes, read_seam
 from app.test_generation.activities import read_unobservable
 
 REQUIREMENT = {'category': 'functional', 'title': 'T', 'description': 'D', 'priority': 'must'}
@@ -44,6 +44,10 @@ def session(tmp_path, monkeypatch):
         (session_dir / path).parent.mkdir(parents=True, exist_ok=True)
         (session_dir / path).write_text(text)
     return session_dir
+
+
+# Captured at import, before the autouse fixture stands in for it.
+CHECK_OPENAI_CREDENTIALS = docker_agents.check_openai_credentials
 
 
 def fake_docker(monkeypatch, routes, sent: dict):
@@ -98,7 +102,7 @@ async def test_routing_reads_the_repository_and_returns_one_route_per_criterion(
 ])
 async def test_an_unusable_routing_routes_nothing(session, monkeypatch, routes, error):
     fake_docker(monkeypatch, routes, {})
-    with pytest.raises(RuntimeError, match=error):
+    with pytest.raises(ApplicationError, match=error):
         await ActivityEnvironment().run(activities.route_requirements, 'session', CONTEXT)
     assert not (session / 'routing/routes.json').exists()
 
@@ -110,6 +114,23 @@ async def test_routing_needs_the_checkout_and_a_brief(session, monkeypatch):
                                         {**CONTEXT, 'brief': {**BRIEF, 'requirements': []}})
     with pytest.raises(ApplicationError, match='checkout is unavailable'):
         await ActivityEnvironment().run(activities.route_requirements, 'other', CONTEXT)
+
+
+async def test_a_routing_model_without_credentials_says_how_to_fix_it(session, monkeypatch):
+    fake_docker(monkeypatch, ROUTES, {})
+    # The real credential check, not the fixture's stand-in.
+    monkeypatch.setattr(docker_agents, 'check_openai_credentials', CHECK_OPENAI_CREDENTIALS)
+    monkeypatch.setattr(docker_agents, 'OPENAI_API_KEY', '')
+
+    async def settings(role):
+        return docker_agents.ModelSettings(adapter='openai', model='gpt-test')
+
+    monkeypatch.setattr(docker_agents, 'get_workflow_settings', settings)
+    with pytest.raises(ApplicationError) as raised:
+        await ActivityEnvironment().run(activities.route_requirements, 'session', CONTEXT)
+    assert raised.value.type == ROUTING_ERROR and raised.value.non_retryable
+    assert 'OPENAI_API_KEY is not set' in raised.value.message
+    assert 'choose another model for the Routing stage in Settings' in raised.value.message
 
 
 def test_unobservable_criteria_are_named_with_their_reasons():
@@ -256,7 +277,7 @@ async def test_a_component_contract_that_is_not_a_checked_description_of_the_cod
         file.parent.mkdir(parents=True, exist_ok=True)
         file.write_text(text)
     fake_component_docker(monkeypatch, components, [], conforms=conforms)
-    with pytest.raises(RuntimeError, match=error):
+    with pytest.raises(ApplicationError, match=error):
         await ActivityEnvironment().run(activities.route_requirements, 'session',
                                         PYTHON_CONTEXT)
     assert not (python_session / 'routing/routes.json').exists()
@@ -375,7 +396,7 @@ async def test_a_java_seam_is_routed_with_its_stubs_checked_against_the_compiled
 async def test_a_java_component_contract_that_is_no_description_of_the_code_routes_nothing(
         java_session, monkeypatch, components, error):
     fake_component_docker(monkeypatch, components, [], routes=JAVA_ROUTES)
-    with pytest.raises(RuntimeError, match=re.escape(error)):
+    with pytest.raises(ApplicationError, match=re.escape(error)):
         await ActivityEnvironment().run(activities.route_requirements, 'session', CONTEXT)
     assert not (java_session / 'routing/components').exists()
 
@@ -437,7 +458,7 @@ async def test_a_seam_the_change_adds_names_symbols_its_stub_declares(
     routes['routes'][1]['seam']['added'] = added
     fake_component_docker(monkeypatch, {**VALID, 'service/rooms.pyi': ADDED_STUB}, [],
                           routes=routes)
-    with pytest.raises(RuntimeError, match=error):
+    with pytest.raises(ApplicationError, match=error):
         await ActivityEnvironment().run(activities.route_requirements, 'session',
                                         PYTHON_CONTEXT)
 

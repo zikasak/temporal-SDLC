@@ -637,6 +637,15 @@ async def test_nothing_is_fixed_unless_the_added_tests_fail_alone(env, worker, b
     assert state.verification['status'] == 'passed' and state.publication_status == 'completed'
 
 
+async def test_a_routing_that_fails_for_a_reason_of_its_own_tells_the_user_why(env, worker, repository_selection):
+    worker.fail_routing = 'The component contract does not match the code: Rooms.close'
+    handle, state = await fixed(env, repository_selection)
+    assert state.routing_status == 'error'
+    assert state.routing_error == (
+        'It could not be decided which tests can prove the acceptance criteria. '
+        'The component contract does not match the code: Rooms.close')
+
+
 @pytest.mark.parametrize('found_by', ['routing', 'tests', 'failure'])
 async def test_a_criterion_no_suite_can_observe_stops_the_bugfix_before_its_tests_run(env, worker, found_by, repository_selection):
     if found_by == 'routing':
@@ -655,6 +664,8 @@ async def test_a_criterion_no_suite_can_observe_stops_the_bugfix_before_its_test
     if found_by == 'failure':
         assert state.routing_status == 'error' and state.routing is None
         assert 'could not be decided' in state.routing_error
+        # An agent's or provider's error is never shown: it may carry credentials.
+        assert 'sk-secret' not in state.routing_error
     else:
         # The user is told which criterion and why, early and as a matter of the brief.
         assert state.routing_status == 'unobservable'

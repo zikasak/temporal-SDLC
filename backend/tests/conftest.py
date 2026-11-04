@@ -150,6 +150,8 @@ def saved_model_settings(monkeypatch):
         return settings[workflow_type]
 
     monkeypatch.setattr(docker_agents, 'get_workflow_settings', load)
+    # The stand-in model needs no credentials; their check is tested on its own.
+    monkeypatch.setattr(docker_agents, 'check_openai_credentials', lambda settings: None)
     return settings
 
 
