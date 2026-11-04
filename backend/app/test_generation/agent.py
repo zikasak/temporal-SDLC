@@ -143,9 +143,10 @@ The component contract is in /workspace/contracts/components: a stub of each mod
 the seams, at the module's path, with every symbol a test may use (its signature, types
 and a docstring stating its behaviour), and the collaborators the seam calls, such as
 activities, repositories and clients, as signatures only. Read it with read_contract and
-search_contracts (names such as components/app/module.pyi). The service's source, image
-and logs are unavailable. Derive all expected behaviour from the brief, the stubs'
-docstrings and the supplied requirements.
+search_contracts (names such as components/app/module.pyi, or
+components/com/example/Flows.java for the Java type com.example.Flows, whose seam module is
+that type). The service's source, image and logs are unavailable. Derive all expected
+behaviour from the brief, the stubs' docstrings and the supplied requirements.
 {instructions}
 Write tests that fail while the problem exists and pass once the expected behaviour is in
 place: one for each criterion of `routes`, asserting the expected behaviour through the

@@ -20,7 +20,7 @@ from app.config import GENERATED_CODE_DIR
 from app.docker_agents import default_agent_image
 from app.github.checkout import COMPONENT_SNAPSHOT, SNAPSHOT_DIR
 from app.implementation.activities import SEAM_DIR
-from app.languages import RUNTIME_FILE, ComponentSuite, Language
+from app.languages import RUNTIME_FILE, TOOLS_DIR, ComponentSuite, Language
 from app.requirements.document import without_repeated_tables
 from app.review.activities import record_baseline
 from app.routing.components import COMPONENTS_DIR, ROUTED_CONTRACT
@@ -89,6 +89,9 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
             copy_test_suite(suite, snapshot, workspace / 'tests')
         # Validated by the routing: regular files only.
         shutil.copytree(contract, workspace / WORKSPACE_CONTRACT)
+        for tool in suite.tools:
+            (workspace / TOOLS_DIR).mkdir(exist_ok=True)
+            copy_file(tool, workspace / TOOLS_DIR / tool.name)
         write_language(workspace, language, instructions=suite.instructions,
                        test_glob=suite.test_glob)
 

@@ -264,7 +264,8 @@ async def test_only_tests_found_broken_may_differ_from_what_they_were(tmp_path, 
     existing = tmp_path / 'session/repository/contract-tests' / source
     existing.parent.mkdir(parents=True)
     existing.write_text(java_tests(lists='get();'))
-    assert await record_repository_tests(tmp_path, monkeypatch) == {'tests': 1}
+    assert await record_repository_tests(tmp_path, monkeypatch) == {'tests': 1,
+                                                                    'component_tests': 0}
     brief = [{'id': 'FR-1', 'category': 'functional', 'title': 'No double booking',
               'description': 'A booked room is refused.', 'priority': 'must'}]
     context = {'requirements': [], 'api_design': empty_api(), 'language': 'java',

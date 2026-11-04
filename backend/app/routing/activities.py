@@ -17,12 +17,12 @@ from app import docker_agents
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import (
-    ANSWERS_KEY, copy_regular_files, paused_result, session_language, write_language,
+    ANSWERS_KEY, copy_file, copy_regular_files, paused_result, session_language, write_language,
 )
 from app.config import GENERATED_CODE_DIR
 from app.github.checkout import CHECKOUT_DIR
 from app.implementation.activities import EXCLUDED
-from app.languages import RUNTIME_FILE, Language
+from app.languages import RUNTIME_FILE, TOOLS_DIR, Language
 from app.requirements.document import without_repeated_tables
 from app.review.activities import record_baseline
 from app.routing.agent import ROUTES
@@ -64,6 +64,9 @@ def prepare_routing(language: Language, session_dir: Path, context: dict[str, An
         if published.is_dir():
             copy_regular_files(published, workspace / 'routing' / COMPONENTS_DIR,
                                include=lambda relative: True)
+        for tool in component.tools:
+            (workspace / TOOLS_DIR).mkdir(exist_ok=True)
+            copy_file(tool, workspace / TOOLS_DIR / tool.name)
     write_language(workspace, language, label=language.label, components=(
         component.instructions.format(runtime=RUNTIME_FILE) if component else ''))
     if files:

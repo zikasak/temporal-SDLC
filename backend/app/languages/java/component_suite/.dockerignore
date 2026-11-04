@@ -1,0 +1,3 @@
+repository/.git
+repository/**/target
+suite/target

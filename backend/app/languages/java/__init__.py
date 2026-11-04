@@ -1,13 +1,17 @@
 """Java: Spring API interfaces and models with a disabled JUnit stub per operation,
-and Maven/JUnit 5 contract tests."""
+Maven/JUnit 5 contract tests, and component tests against Java stubs of the code."""
 
 import re
 from pathlib import Path
 
 from app.languages import (
-    OTHER_PARTS_BUILD_DIRS, Implementation, Language, TestReports, TestSuite, register,
+    OTHER_PARTS_BUILD_DIRS, TOOLS_DIR, ComponentSuite, Implementation, Language, TestReports,
+    TestSuite, register,
 )
 from app.config import CODEGEN_BASE_PACKAGE
+from app.languages.java.components import (
+    COMPONENT_CONTRACT, DEPENDENCY_PLUGIN, STUBS_TOOL, runner_build_args,
+)
 
 SPRING_SERVER_PROPERTIES = {
     "interfaceOnly": "true",
@@ -28,6 +32,31 @@ TEST_SUITE_INSTRUCTIONS = """The suite is a Maven/JUnit 5 project.
 Use Java 21 java.net.http.HttpClient, JUnit assertions and Jackson for JSON as needed.
 Write test classes named *Test.java under src/test/java.
 Compile with mvn -B -DskipTests -Dmaven.test.skip=false test-compile and fix failures."""
+
+COMPONENT_SUITE_INSTRUCTIONS = """The suite is a Maven project of JUnit 5 tests. Keep
+JUnit Jupiter at the version pom.xml gives it: the runner runs the suite with JUnit's
+console launcher of that release. Write test classes named *Test.java under src/test/java,
+with test methods annotated @Test, @ParameterizedTest or another JUnit test annotation.
+Each test uses the stubbed types by their fully qualified names, as the code under test is
+on the class path when the suite runs, and only the members the stubs declare, with the
+signatures they declare. Write each fake of a collaborator in the suite itself,
+implementing or extending its stubbed type. When a seam is a Temporal workflow, add
+io.temporal:temporal-testing to pom.xml with test scope, start a
+`TestWorkflowEnvironment.newInstance()`, register the stubbed workflow implementation and
+your fakes of its activity interfaces with a worker of `newWorker(taskQueue)`, start the
+environment and drive the workflow through a stub of its stubbed interface: its signals,
+updates and queries. Its test server runs in-process, without a network; wait for an
+outcome with the workflow's result or a bounded wait, never a fixed sleep.
+List every library the tests use in pom.xml with test scope; never the service, whose
+classes and dependencies the runner puts on the class path ahead of the suite's own, so a
+library both list runs at the service's version.
+The service's code is not available here, so the suite cannot be run, but it compiles
+against the stubs. Check it from /workspace/tests: java {tools}/Stubs.java skeletons
+/workspace/contracts/components /tmp/skeletons writes each stub as compilable Java, then
+mvn -B -q {plugin}:build-classpath -Dmdep.outputFile=/tmp/classpath.txt
+-DincludeScope=test and javac -proc:none -d /tmp/check -cp "$(cat /tmp/classpath.txt)"
+$(find /tmp/skeletons src/test/java -name '*.java'). Fix every error; a library a stub
+imports (such as io.temporal) is one of the suite's test dependencies too."""
 
 TEST_GLOB = "src/test/java/**/*Test.java"
 PACKAGE = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)
@@ -185,4 +214,15 @@ JAVA = register(Language(
         required=("pom.xml",),
     ),
     agent_dockerfile=Path(__file__).resolve().parents[2] / "agent_workflows" / "Dockerfile",
+    component_contract=COMPONENT_CONTRACT,
+    component_suite=ComponentSuite(
+        template=Path(__file__).parent / "component_suite",
+        instructions=COMPONENT_SUITE_INSTRUCTIONS.replace("{plugin}", DEPENDENCY_PLUGIN)
+        .replace("{tools}", f"/workspace/{TOOLS_DIR}"),
+        published=("src/test", "pom.xml", "README.md"),
+        test_glob=TEST_GLOB, test_cases=_test_cases, case_id=_case_id,
+        required=("pom.xml",),
+        runner=("Dockerfile", ".dockerignore", "build.sh", "build-suite.sh", "run-tests.sh"),
+        build_args=runner_build_args, tools=(STUBS_TOOL,),
+    ),
 ))

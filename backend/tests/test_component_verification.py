@@ -1,6 +1,7 @@
 """Verification of a change with component tests: the conformance check of the changed
 code against its component contract, the runner built with that code, and the run of the
 component tests, in-process and without a network."""
+import dataclasses
 import io
 import json
 import os
@@ -14,6 +15,7 @@ from temporalio.testing import ActivityEnvironment
 
 from app import docker_agents
 from app.delivery.models import component_run, judge_baseline, unproven_green
+from app.languages import get_language
 from app.verification import activities
 
 RUNNER_IMAGE = 'sha256:' + '9' * 64
@@ -218,9 +220,15 @@ async def test_a_component_run_that_proves_nothing_is_an_error(session, docker, 
 @pytest.mark.parametrize('image, language, error', [
     ('sha256:' + '7' * 64, 'python', 'sources of the component test image are unavailable'),
     ('latest', 'python', 'Invalid component test image ID'),
-    (RUNNER_IMAGE, 'java', 'has no component tests'),
+    (RUNNER_IMAGE, 'plain', 'has no component tests'),
 ])
-async def test_only_a_runner_built_from_the_suite_is_run(session, docker, image, language, error):
+async def test_only_a_runner_built_from_the_suite_is_run(session, docker, monkeypatch, image,
+                                                         language, error):
+    # A language whose criteria cannot be routed to a seam.
+    plain = dataclasses.replace(get_language('java'), name='plain', component_contract=None,
+                                component_suite=None)
+    monkeypatch.setattr(activities, 'session_language', lambda name: (
+        plain if name == 'plain' else get_language(name)))
     with pytest.raises(ApplicationError, match=error):
         await ActivityEnvironment().run(activities.run_component_suite, 'session', image,
                                         language, [ADDED])

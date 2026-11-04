@@ -89,14 +89,15 @@ the input routes each of them to a seam of the code: `seam` names the dotted mod
 its symbols at which independently written component tests observe the criterion, and
 `reason` says how. Those tests drive the seam in-process, faking the collaborators it
 calls. The component contract in /workspace/contracts/components holds a stub of each
-module of the seams, at the module's path (such as components/app/module.pyi): the
-signature, types and behaviour docstring of every symbol the tests use, and the
-collaborators they fake, as signatures only. Read it with read_contract and
-search_contracts. The stubs are a contract like the API: keep every signature they declare
-exactly as it is, with the same names, parameters, types, return types and kinds of
-symbol, in the same modules. Make the criteria true behind those signatures, as their
-docstrings and the brief state. The outer worker checks the changed code against the stubs
-before it runs any test, and rejects a change that breaks one. Do not create, change or
+module of the seams, at the module's path (such as components/app/module.pyi, or
+components/com/example/Flows.java for the Java type com.example.Flows): the signature,
+types and behaviour docstring of every symbol the tests use, and the collaborators they
+fake, as signatures only. Read it with read_contract and search_contracts. The stubs are
+a contract like the API: keep every signature they declare exactly as it is, with the
+same names, parameters, types, return types and kinds of symbol, in the same modules.
+Make the criteria true behind those signatures, as their docstrings and the brief state.
+The outer worker checks the changed code against the stubs before it runs any test, and
+rejects a change that breaks one. Do not create, change or
 remove contracts/components or component-tests in the checkout, and do not look for the
 component tests: they stay unavailable, as the contract tests do. In a repair run the
 failing tests in `repair.test_failures` may be component tests as well as contract tests.
@@ -111,7 +112,8 @@ which independently written component tests will drive the code in-process, faki
 collaborators it calls. The code does not have that seam yet: you add it, and nothing else.
 {instructions}
 The component contract in /workspace/contracts/components holds a stub of each module of
-the seams, at the module's path (such as components/app/module.pyi): the signature, types
+the seams, at the module's path (such as components/app/module.pyi, or
+components/com/example/Flows.java for the Java type com.example.Flows): the signature, types
 and behaviour docstring of every symbol the tests use. Read it with read_contract and
 search_contracts. The `seam` entry of the input lists, by module, the stubbed symbols the
 code lacks. Add exactly those, in those modules, with exactly the signatures, types and

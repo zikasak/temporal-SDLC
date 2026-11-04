@@ -1,5 +1,6 @@
 """The author of a change's component tests, which never sees the code, and the trusted
 runner that builds its suite with the code."""
+import dataclasses
 import json
 import tarfile
 from pathlib import Path
@@ -214,13 +215,18 @@ async def test_the_author_may_name_only_its_own_criteria_unobservable(session, m
 
 
 @pytest.mark.parametrize('change, error', [
-    ({'language': 'java'}, 'has no component tests'),
+    ({'language': 'plain'}, 'has no component tests'),
     ({'brief': None}, "only for a change's criteria"),
     ({'routes': {'FR-2': {'route': 'contract', 'reason': 'GET.'}}}, 'No criterion is routed'),
     ({'routes': {'FR-3': {'route': 'component', 'reason': 'R.'}}}, 'names no seam'),
 ])
 async def test_component_tests_need_a_change_routed_to_a_seam(session, monkeypatch, change, error):
     fake_docker(monkeypatch, SUITE_FILES, {}, [])
+    # A language whose criteria cannot be routed to a seam.
+    plain = dataclasses.replace(get_language('java'), name='plain', component_contract=None,
+                                component_suite=None)
+    monkeypatch.setattr(components, 'session_language', lambda name: (
+        plain if name == 'plain' else get_language(name)))
     with pytest.raises(ApplicationError, match=error):
         await ActivityEnvironment().run(components.generate_component_tests, 'session',
                                         {**CONTEXT, **change})

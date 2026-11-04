@@ -1,6 +1,8 @@
 """Routing a change's criteria to the suite that can prove them, and the test author's
 finding that a criterion has none."""
+import dataclasses
 import json
+import re
 import tarfile
 from pathlib import Path
 
@@ -10,6 +12,7 @@ from temporalio.testing import ActivityEnvironment
 
 from app import docker_agents
 from app.api_design.models import empty_api
+from app.languages import get_language
 from app.routing import activities
 from app.routing.models import added_seams, judge_routes, read_seam
 from app.test_generation.activities import read_unobservable
@@ -87,8 +90,10 @@ async def test_routing_reads_the_repository_and_returns_one_route_per_criterion(
     ({'routes': [*ROUTES['routes'], ROUTES['routes'][0]]}, 'routed twice'),
     ({'routes': [*ROUTES['routes'], {**ROUTES['routes'][0], 'requirement_id': 'FR-9'}]},
      'does not have: FR-9'),
-    ({'routes': [ROUTES['routes'][0], {**ROUTES['routes'][1], 'route': 'component'}]},
+    ({'routes': [ROUTES['routes'][0], {**ROUTES['routes'][1], 'route': 'elsewhere'}]},
      'no valid route'),
+    ({'routes': [ROUTES['routes'][0], {**ROUTES['routes'][1], 'route': 'component'}]},
+     'names no seam module'),
     ({'routes': [ROUTES['routes'][0], {**ROUTES['routes'][1], 'reason': ' '}]}, 'no reason'),
 ])
 async def test_an_unusable_routing_routes_nothing(session, monkeypatch, routes, error):
@@ -282,6 +287,97 @@ async def test_the_agent_extends_the_published_contract_and_is_told_how(
     assert result['routes']['FR-3']['route'] == 'component'
     assert sent['routing/components/service/rooms.pyi'] == published
     assert 'Component contract (Python)' in json.loads(sent['language.json'])['components']
+
+
+def test_a_language_without_component_contracts_routes_to_no_seam(tmp_path):
+    language = dataclasses.replace(get_language('java'), component_contract=None)
+    (tmp_path / 'routes.json').write_text(json.dumps(COMPONENT_ROUTES))
+    with pytest.raises(RuntimeError, match='FR-3 has no valid route; the routes are '
+                                           'contract, unobservable'):
+        activities.read_output(tmp_path, ['FR-2', 'FR-3'], language)
+
+
+JAVA_STUB = """package com.example.rooms;
+
+import io.temporal.workflow.SignalMethod;
+import io.temporal.workflow.WorkflowInterface;
+
+/** A room's workflow. */
+@WorkflowInterface
+public interface RoomWorkflow {
+    /** Closes the room, whether its pull request was merged or not. */
+    @SignalMethod
+    void close(boolean merged);
+
+    String state();
+}
+"""
+JAVA_ROUTES = {'routes': [
+    ROUTES['routes'][0],
+    {'requirement_id': 'FR-3', 'route': 'component', 'reason': 'Signal, then query.',
+     'seam': {'module': 'com.example.rooms.RoomWorkflow',
+              'symbols': ['RoomWorkflow.close', 'RoomWorkflow.state']}},
+]}
+
+
+@pytest.fixture
+def java_session(session):
+    (session / 'repository/service/pom.xml').parent.mkdir(parents=True)
+    (session / 'repository/service/pom.xml').write_text('<project/>')
+    return session
+
+
+async def test_a_java_seam_is_routed_with_its_stubs_checked_against_the_compiled_code(
+        java_session, monkeypatch):
+    runs: list = []
+    fake_component_docker(monkeypatch, {
+        'runtime.json': json.dumps({'project': 'service'}),
+        'com/example/rooms/RoomWorkflow.java': JAVA_STUB}, runs, routes=JAVA_ROUTES)
+    sent: dict = {}
+    fake = docker_agents.docker
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'cp' and args[1] == '-a':
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.update({item.name: archive.extractfile(item).read().decode()
+                             for item in archive.getmembers() if item.isfile()})
+            return ''
+        return await fake(*args, **kwargs)
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    result = await ActivityEnvironment().run(activities.route_requirements, 'session', CONTEXT)
+    assert result['routes']['FR-3']['seam']['module'] == 'com.example.rooms.RoomWorkflow'
+    components = java_session / 'routing/components'
+    assert (components / 'com/example/rooms/RoomWorkflow.java').read_text() == JAVA_STUB
+    # The agent is told how to write Java stubs and gets the trusted tool to check them.
+    assert 'Component contract (Java)' in json.loads(sent['language.json'])['components']
+    assert sent['tools/Stubs.java'].startswith('// Trusted tool of Java component contracts')
+    build, run = runs
+    assert {'repository/service/pom.xml', 'components/com/example/rooms/RoomWorkflow.java',
+            'Dockerfile', 'build.sh', 'check.sh', 'Stubs.java'} <= set(build['files'])
+    assert 'PROJECT=service' in build['build']
+    assert '--network=none' in run['run'] and run['run'][-1] == 'com.example.rooms.RoomWorkflow'
+
+
+@pytest.mark.parametrize('components, error', [
+    ({'runtime.json': json.dumps({'project': '.'}),
+      'com/example/rooms/RoomWorkflow.java': JAVA_STUB}, 'project . is not a directory of the '
+                                                         'repository with a pom.xml'),
+    ({'runtime.json': json.dumps({'project': 'service'}),
+      'com/example/rooms/RoomWorkflow.java': JAVA_STUB.replace(
+          'void close(boolean merged);', 'void close(boolean merged) { }')},
+     'the body of close is more than `;`'),
+    ({'runtime.json': json.dumps({'project': 'service'}),
+      'com/example/other/RoomWorkflow.java': JAVA_STUB}, 'its package is com.example.rooms, '
+                                                         'but its path is that of '
+                                                         'com.example.other'),
+])
+async def test_a_java_component_contract_that_is_no_description_of_the_code_routes_nothing(
+        java_session, monkeypatch, components, error):
+    fake_component_docker(monkeypatch, components, [], routes=JAVA_ROUTES)
+    with pytest.raises(RuntimeError, match=re.escape(error)):
+        await ActivityEnvironment().run(activities.route_requirements, 'session', CONTEXT)
+    assert not (java_session / 'routing/components').exists()
 
 
 def test_criteria_component_tests_prove_are_routed():
