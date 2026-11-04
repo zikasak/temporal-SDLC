@@ -43,6 +43,9 @@ MAX_REPAIR_ROUNDS = 5
 MAX_RESTORE_ROUNDS = 2
 # Marks the workflow code that sends a suite rejected for such tests back to its author.
 RESTORE_KEPT_PATCH = 'restore-kept-tests'
+# Marks the workflow code that routes a change's criteria to the suites that can prove them
+# before any test is written; deliveries started before it wrote their tests at once.
+ROUTING_PATCH = 'routing'
 # Marks the workflow code that writes component tests for criteria routed to a seam, which
 # stopped the delivery at its routing before.
 COMPONENT_TESTS_PATCH = 'component-tests'
@@ -718,7 +721,8 @@ class DeliveryWorkflow:
         await self._generate_tests()
         # A failed author, or one that found a criterion its suite cannot observe, leaves
         # nothing to hold against the service, whatever the other author wrote.
-        if self.progress.component_tests_error or self.progress.routing_status != 'routed':
+        if self.progress.component_tests_error or self.progress.routing_status not in (
+                'routed', 'not_applicable'):
             self.progress.baseline_status = 'skipped'
             self.progress.verification_status = 'skipped'
             return
@@ -741,6 +745,10 @@ class DeliveryWorkflow:
         """Decide which suite can prove each criterion of the brief: true when every one
         has one. A routing that found one for each is kept for the retries of the tests."""
         if self.progress.routing_status == 'routed':
+            return True
+        if not workflow.patched(ROUTING_PATCH):
+            # Deliveries started before the routing wrote their tests without one.
+            self.progress.routing_status = 'not_applicable'
             return True
         self.progress.routing_status = 'running'
         self.progress.routing = None
