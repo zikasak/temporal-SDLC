@@ -510,7 +510,7 @@ flowchart LR
    and verification `skipped`: no test is written and nothing is pushed. A routing that
    failed sets `routing_status: error`. A routing with every criterion `contract`
    (`routed`) is kept for later retries of the tests; any other is done again.
-   In a language with component contracts (Python so far: `component_contract` of its
+   In a language with component contracts (Python and Java: `component_contract` of its
    `Language`), a requirement the contract tests cannot observe may be routed
    `component` instead: observable at a *seam*, an interface the code already has, such
    as a workflow's signals and queries. Its route names the seam,
@@ -528,7 +528,26 @@ flowchart LR
    baseline records them and the stubs, and runs it without a network: mypy's
    `stubtest --ignore-missing-stub` must find every stubbed symbol in the code with the
    stubbed signature (`Literal` type aliases, which stubtest cannot compare, are compared
-   by the runner's `literals.py`). A failed check fails the routing. A checked contract is
+   by the runner's `literals.py`). A failed check fails the routing.
+   In Java (`app/languages/java/components.py`) a stub is the source of one stubbed type at
+   its path (`com/example/flows/FlowWorkflow.java`), whose fully qualified name is the
+   seam's `module`, and its symbols are named from the type's simple name
+   (`FlowWorkflow.close`, a constructor `FlowWorkflowImpl.FlowWorkflowImpl`).
+   `runtime.json` holds `project`, the repository directory of the Maven project that
+   compiles the stubbed code. Every method and constructor ends in `;` instead of a body,
+   and the host refuses initializer blocks, enum constant bodies, lambdas, `new` and calls,
+   and a package that is not the stub's path. The trusted runner
+   (`app/languages/java/component_contract/`) compiles the project with Maven
+   (`build.sh`: its classes and the class paths of its dependencies), then `Stubs.java`
+   turns each stub into compilable Java (a body that throws, a field's default value),
+   compiles the stubs against the project's dependencies alone (so a stub that names a type
+   of the code it does not stub is an error), and compares every stubbed type with what
+   javac reads of the compiled classes: kind, modifiers, type parameters, superclass,
+   interfaces, record components, class-file annotations, and each member's modifiers,
+   parameter, return and thrown types, inherited methods included. Its errors read like
+   stubtest's, a missing symbol `… is not present at runtime`. The routing agent gets the
+   same tool in `/workspace/tools/` to check its contract before it finishes. A checked
+   contract is
    kept in `<GENERATED_CODE_DIR>/<session-id>/routing/components/` and named by the
    result's `components`. A routing with `component` routes and no `unobservable` one is
    `routed`, and their criteria get component tests (step 2a). Deliveries started before
@@ -591,8 +610,9 @@ flowchart LR
    change an existing component test and must add one, as the first contract-test author,
    and may decline criteria of its own routes in `unobservable.json` the same way.
    The language's `ComponentSuite` (Python: `app/languages/python/component_suite/`, a
-   pytest and pytest-asyncio project) decides what is published (never a runner file)
-   and the test identities. The suite is checked by building its trusted runner, not the
+   pytest and pytest-asyncio project; Java: `app/languages/java/component_suite/`, a
+   Maven/JUnit 5 project) decides what is published (never a runner file) and the test
+   identities. The suite is checked by building its trusted runner, not the
    author's files: the build context holds the template's `Dockerfile`, `.dockerignore`,
    `run-tests.sh` and `prepare.py`, the service's sources as the
    [baseline](#changing-an-existing-service-bugfix) records them under `repository/`, and
@@ -601,7 +621,16 @@ flowchart LR
    service's, puts the source root on `PYTHONPATH`, fetches the test servers of
    `temporalio.testing.WorkflowEnvironment` when the code uses Temporal (they are kept in
    `/tmp`; the tests run without a network), and collects the suite: a test that does not
-   import against the code fails the stage. The result is `DeliveryProgress.component_tests`
+   import against the code fails the stage. Java's runner builds the service's Maven
+   project with the contract's `PROJECT` (`build.sh`, the same as the conformance
+   check's), resolves the suite's own test dependencies and compiles the tests with
+   `javac` against the service's classes and dependencies, which come first on the class
+   path, so a library both list is the service's (`build-suite.sh`). It runs them with
+   JUnit's console launcher, whose legacy XML report lands in
+   `/tests/target/surefire-reports`, the directory the contract tests' Surefire reports
+   use; a Temporal workflow is tested with `temporal-testing`'s in-memory server. Its
+   author, who has no service to build against, gets `Stubs.java` in `/workspace/tools/`
+   and compiles its tests against the stubs' skeletons. The result is `DeliveryProgress.component_tests`
    (`image_id`, `path` under `<session-id>/component-tests/suite`, `added_tests`); a
    failure sets `component_tests_error`, which the `tests` retry clears.
    A `tests` retry keeps the routing and writes the tests again. Deliveries that wrote

@@ -78,7 +78,7 @@ def read_components(contract: ComponentContract, output: Path, repository: Path,
             raise RuntimeError(f'The stub {path} is too large')
         try:
             module = contract.module(Path(path))
-            symbols = contract.read_stub(file.read_text())
+            symbols = contract.read_stub(module, file.read_text())
         except (ValueError, UnicodeDecodeError) as exc:
             raise RuntimeError(f'The stub {path} is not a stub: {exc}') from exc
         if module in modules:

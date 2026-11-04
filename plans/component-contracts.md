@@ -270,6 +270,24 @@ Each step lands with its own tests (`backend/tests/`, stage fakes in
    `routing`, `seam`, `component-tests`, baseline, fix and verification.
 8. **Java** `ComponentSuite` and conformance check (compile the stubs against the
    service's classes, then compare signatures with `javap`).
+   *Done:* `app/languages/java/components.py` (stubs are `.java` sources of one type each,
+   every method and constructor ending in `;`; `runtime.json` names the Maven `project`),
+   its runner in `component_contract/`, and the Maven/JUnit 5 `ComponentSuite` in
+   `component_suite/`. The comparison is not `javap`: the trusted `Stubs.java` reads both
+   sides with javac (`javax.lang.model`), the stubs from their source and the code from
+   its class files, which compares generic signatures, inherited methods and class-file
+   annotations such as Temporal's without parsing `javap` output. To compile at all, a stub
+   gets a throwing body and a field a default value (`skeletons`); the stubs are compiled
+   against the code's dependencies alone, so, as in Python, they are self-contained: a
+   type of the code they name is stubbed too, and a stubbed concrete class declares the
+   abstract methods it implements. The tests run with JUnit's console launcher, compiled
+   by `javac` with the service's class path ahead of the suite's (Surefire would need the
+   service as a Maven artifact). The routing agent and the test author get `Stubs.java`
+   (`tools` of `ComponentContract` and `ComponentSuite`, in `/workspace/tools/`) to check
+   their work; `read_stub` now gets the stub's module, so a Java stub's package is checked
+   against its path. Checked here with JDK 21 and Maven against a Temporal sample service
+   (the suite red at baseline, green with the fix); the Docker images themselves are only
+   covered by the opt-in tests in `tests/test_component_contract_docker.py`.
 9. **Seam preparation** (3.8). Brought forward, because step 7 needs it.
    *Done:* a `component` route's `seam.added` names the stubbed symbols the code lacks
    (`added_seams` in `app/routing/models.py`). The routing skips `check_conformance` when
@@ -296,5 +314,6 @@ Each step lands with its own tests (`backend/tests/`, stage fakes in
   it adds a "change the seam" task kind sooner or later.
 - How large may a stub be before it leaks the design? A limit on symbols per seam, or
   leave that to the code review?
-- Should Temporal's test environment be part of the Python component template for every
-  project, or only added when a stub imports `temporalio`?
+- Java runs the service's dependency versions ahead of the suite's, but the author picks
+  `temporal-testing`'s version blind. Should the runner align it with the service's
+  `temporal-sdk`?

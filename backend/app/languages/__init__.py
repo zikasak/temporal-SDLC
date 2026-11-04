@@ -65,6 +65,8 @@ class ComponentSuite(TestSuite):
     # Docker build arguments of the runner image, from the component contract's
     # normalized runtime file.
     build_args: Callable[[dict], dict[str, str]] = lambda runtime: {}
+    # Trusted files the author checks the suite with, given to it in TOOLS_DIR.
+    tools: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -80,10 +82,10 @@ class ComponentContract:
     stub_suffix: str
     # The dotted module a stub at this path (relative to the contract) describes.
     module: Callable[[Path], str]
-    # Checks one stub's source and returns the symbols it defines, by dotted name within
-    # its module (`Class` and `Class.method`). Raises ValueError for a body that is more
-    # than a signature, or anything else a stub may not hold.
-    read_stub: Callable[[str], set[str]]
+    # Checks the source of the stub of a module and returns the symbols it defines, by
+    # dotted name within the module (`Class` and `Class.method`). Raises ValueError for a
+    # body that is more than a signature, or anything else a stub may not hold.
+    read_stub: Callable[[str, str], set[str]]
     # The top-level statements of a stub, comparable across versions of it, so a
     # published stub can be told to be kept or extended rather than changed.
     statements: Callable[[str], list[str]]
@@ -96,10 +98,14 @@ class ComponentContract:
     conformance: Path
     # Docker build arguments of the conformance image, from the normalized runtime file.
     build_args: Callable[[dict], dict[str, str]]
+    # Trusted files the routing agent checks the contract with, given to it in TOOLS_DIR.
+    tools: tuple[Path, ...] = ()
 
 
 # The contract's file that says how to import the code the stubs describe.
 RUNTIME_FILE = "runtime.json"
+# Where an agent's workspace holds the trusted tools of its language's component contract.
+TOOLS_DIR = "tools"
 
 
 @dataclass(frozen=True)

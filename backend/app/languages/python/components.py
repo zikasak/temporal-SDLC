@@ -87,7 +87,7 @@ def _declarations(body: list[ast.stmt], scope: str, symbols: set[str]) -> None:
         symbols.update(f"{scope}{name}" for name in names)
 
 
-def _read_stub(source: str) -> set[str]:
+def _read_stub(module: str, source: str) -> set[str]:
     try:
         tree = ast.parse(source, type_comments=True)
     except (SyntaxError, ValueError) as exc:
