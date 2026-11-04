@@ -999,6 +999,23 @@ async def test_a_history_from_before_component_repairs_replays_unrepaired(
     await Replayer(workflows=[DeliveryWorkflow]).replay_workflow(history)
 
 
+async def test_a_history_from_before_routing_replays_unrouted(
+        env, worker, monkeypatch, repository_selection):
+    patched = workflow.patched
+    with monkeypatch.context() as legacy:
+        legacy.setattr(workflow, 'patched',
+                       lambda name: False if name == 'routing' else patched(name))
+        handle, state = await fixed(env, repository_selection)
+        # Such a delivery wrote its tests at once, as it did then, and was still delivered.
+        assert worker.stages == ['tests', 'baseline', 'baseline-run', 'implementation',
+                                 'verification']
+        assert state.routing_status == 'not_applicable' and state.routing is None
+        assert state.baseline_status == 'reproduced'
+        assert state.verification_status == 'completed'
+        history = await env.client.get_workflow_handle(delivery_id(handle.id)).fetch_history()
+    await Replayer(workflows=[DeliveryWorkflow]).replay_workflow(history)
+
+
 async def test_component_tests_that_keep_failing_end_the_repairs(env, worker,
                                                                  repository_selection):
     worker.routes = [{'FR-2': 'component'}]
