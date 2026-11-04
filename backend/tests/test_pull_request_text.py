@@ -40,3 +40,15 @@ def test_the_proofs_and_findings_always_fit_and_long_lists_are_counted():
     # The summary is cut, never the proofs or the findings after it.
     assert 'Open review findings: 1' in body
     assert 'The docstring names a private helper.' in body
+
+
+def test_the_proofs_name_the_symbols_of_a_seam_the_change_added():
+    seam = {'module': 'app.delivery.workflows',
+            'symbols': ['DeliveryWorkflow.pull_request_closed', 'DeliveryWorkflow.get_state'],
+            'added': ['DeliveryWorkflow.pull_request_closed']}
+    _, body = describe('Fix the service', {'kind': 'bugfix', 'proofs': {
+        'component': [{'id': 'FR-1', 'title': 'Merged flows complete', 'seam': seam}]}},
+        PUBLICATION)
+    assert ('- FR-1: Merged flows complete (at `app.delivery.workflows`: '
+            '`DeliveryWorkflow.pull_request_closed`, `DeliveryWorkflow.get_state`; this change '
+            'adds `DeliveryWorkflow.pull_request_closed`)') in body.splitlines()

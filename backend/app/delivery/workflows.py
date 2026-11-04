@@ -26,7 +26,7 @@ with workflow.unsafe.imports_passed_through():
     from app.github.models import PullRequestMention
     from app.temporal.execution_fields import task_fields
     from app.requirements.models import CHANGE_KINDS
-    from app.routing.models import COMPONENT_TESTS_UNRUN, judge_routes
+    from app.routing.models import COMPONENT_TESTS_UNRUN, added_seams, judge_routes
     from app.review.models import (
         MAX_REVIEW_ROUNDS, ReviewFinding, ReviewRound, correctable, earlier_findings,
         for_suite, for_worker, review_request,
@@ -709,8 +709,9 @@ class DeliveryWorkflow:
         then the fix and the whole suite."""
         self.progress.verification_status = 'waiting'
         self.progress.baseline_status = 'waiting'
-        # No test is written for criteria no suite can observe.
-        if not await self._route():
+        # No test is written for criteria no suite can observe, nor before the seam they
+        # are observed at, when the code does not have it yet, is added.
+        if not await self._route() or not await self._prepare_seam():
             self.progress.baseline_status = 'skipped'
             self.progress.verification_status = 'skipped'
             return
@@ -765,6 +766,47 @@ class DeliveryWorkflow:
             self.progress.routing)
         workflow.logger.info('Routing: %s', self.progress.routing_status)
         return self.progress.routing_status == 'routed'
+
+    async def _prepare_seam(self) -> bool:
+        """Add the seam criteria routed to the component tests are observed at, when the
+        code does not have it yet: with no behaviour change, checked against the component
+        contract. True when the code has every seam the routing named. A seam added
+        already is kept for the retries of the tests."""
+        added = added_seams(self._component_routes())
+        if not added:
+            return True
+        if self.progress.seam_status == 'prepared':
+            return True
+        self.progress.seam_status = 'running'
+        self.progress.seam = None
+        self.progress.seam_error = None
+        try:
+            result = await workflow.execute_child_workflow(
+                'ImplementationWorkflow',
+                args=[self.spec.session_id, {**self._stage_context(None), 'seam': added}],
+                id=self._child_id('seam'),
+                task_queue=IMPLEMENTATION_TASK_QUEUE,
+                result_type=dict,
+            )
+        except ChildWorkflowError as exc:
+            workflow.logger.warning('Seam preparation failed: %s', exc.cause or exc)
+            self.progress.seam_error = ('The seam the acceptance criteria are observed at could '
+                                        'not be added to the code or built.')
+            self.progress.seam_status = 'error'
+            return False
+        if result.get('conformance_error'):
+            self.progress.seam_error = (
+                'The code with the seam the change added does not match its component '
+                f'contract, so no test was written: {result["conformance_error"]}')
+            self.progress.seam_status = 'error'
+            return False
+        self.progress.seam = result
+        self.progress.seam_status = 'prepared'
+        workflow.logger.info('Seam added: %s', sorted(added))
+        return True
+
+    def _seam_prepared(self) -> bool:
+        return self.progress.seam_status == 'prepared' and self.progress.seam is not None
 
     def _judge_routes(self, routing: dict[str, Any]) -> tuple[str, str | None]:
         component = any(item['route'] == 'component' for item in routing.values())
@@ -870,11 +912,14 @@ class DeliveryWorkflow:
             self.progress.baseline_status = 'error'
             return False
         self.progress.baseline_status, self.progress.baseline_error = judge_baseline(
-            self.progress.baseline, added, changed)
+            self.progress.baseline, added, changed, seam=self._seam_prepared())
         workflow.logger.info('Baseline run: %s', self.progress.baseline_status)
         return self.progress.baseline_status == 'reproduced'
 
     async def _build_baseline(self) -> dict[str, Any]:
+        if self._seam_prepared():
+            # The service with the seam the change added was built when it was added.
+            return {'image_id': self.progress.seam['image_id']}
         return await workflow.execute_activity(
             'build_baseline', args=[self.spec.session_id, self.spec.language],
             task_queue=VERIFICATION_TASK_QUEUE, result_type=dict,
@@ -966,7 +1011,7 @@ class DeliveryWorkflow:
         self.progress.baseline_status, self.progress.baseline_error = judge_baseline(
             self.progress.baseline, added, changed, component_run(
                 self.progress.component_baseline, components['added_tests'],
-                components['changed_tests']))
+                components['changed_tests']), seam=self._seam_prepared())
         workflow.logger.info('Baseline run: %s', self.progress.baseline_status)
         return self.progress.baseline_status == 'reproduced'
 
@@ -1646,6 +1691,10 @@ class DeliveryWorkflow:
             # The criteria proved at seams of the code: the fix keeps their stubs'
             # signatures, and the diagnosis and the review read their tests.
             context['component_routes'] = component
+        if self._seam_prepared():
+            # The seam was added first: the fix starts from the code with it, and the
+            # component tests are built with that code.
+            context['seam_prepared'] = True
         return context
 
     def _stage_context(self, repair: dict[str, Any] | None) -> dict[str, Any]:

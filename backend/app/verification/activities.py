@@ -29,9 +29,9 @@ from app.implementation.activities import copy_service
 from app.review.activities import record_baseline
 from app.test_generation.activities import copy_test_suite
 from app.languages import (
-    ComponentContract, Language, TestReports, TestSuite, UnsupportedLanguage, get_language,
+    Language, TestReports, TestSuite, UnsupportedLanguage, get_language,
 )
-from app.routing.components import check_conformance
+from app.routing.components import check_conformance, stub_modules
 from app.test_generation.components import ARTIFACT_DIR as COMPONENT_TESTS_ARTIFACT
 from app.test_generation.components import ROUTED_CONTRACT, build_runner
 from app.config import GENERATED_CODE_DIR
@@ -476,13 +476,6 @@ COMPONENT_RUNNER_DIR = 'component-verification'
 STOPPED_EXIT_CODES = {124, 125, 137, 143}
 
 
-def _stub_modules(contract: ComponentContract, components: Path) -> list[str]:
-    """The modules the component contract kept by the routing has stubs of."""
-    return sorted(contract.module(path.relative_to(components))
-                  for path in components.rglob(f'*{contract.stub_suffix}')
-                  if path.is_file() and not path.is_symlink())
-
-
 @activity.defn
 @trace_activity('build-component-runner', feature='verification', input_parameter='language')
 async def build_component_runner(session_id: str, language: str) -> dict[str, str]:
@@ -504,7 +497,7 @@ async def build_component_runner(session_id: str, language: str) -> dict[str, st
                        (components, 'component contract')):
         if not await run_sync(path.is_dir):
             raise ApplicationError(f'The {what} is unavailable', non_retryable=True)
-    modules = await run_sync(_stub_modules, contract, components)
+    modules = await run_sync(stub_modules, contract, components)
     artifact_dir = session_dir / COMPONENT_RUNNER_DIR
     await run_sync(artifact_dir.mkdir, parents=True, exist_ok=True)
     async with docker_agents.keep_activity_alive('Building the component tests with the change'):

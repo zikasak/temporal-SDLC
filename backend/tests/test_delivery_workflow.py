@@ -34,7 +34,7 @@ from app.temporal.executions import ensure_search_attributes
 from app.temporal.workflows import ApiDesignWorkflow, RequirementsWorkflow
 from tests.pipeline import (
     ADDED_COMPONENT_TESTS, ADDED_TESTS, BASELINE_IMAGE, BROKEN_TEST, CHANGED_COMPONENT_IMAGE,
-    CODE, COMPONENT_IMAGE, SEAM, FakeCodegenWorkflow, FakeStages,
+    ADDED_SEAM, CODE, COMPONENT_IMAGE, SEAM, SEAM_IMAGE, FakeCodegenWorkflow, FakeStages,
     finished, stage_workers,
 )
 
@@ -761,6 +761,92 @@ async def test_a_bugfix_proved_at_a_seam_runs_its_component_tests_red_then_green
     change, = worker.pull_request_changes
     assert change['proofs'] == {'component': [
         {'id': 'FR-2', 'title': 'Rooms double-book', 'seam': SEAM}]}
+
+
+async def test_a_seam_the_code_lacks_is_added_first_and_the_bug_reproduced_through_it(
+        env, worker, repository_selection):
+    worker.routes = [{'FR-2': 'component-added'}]
+    handle, state = await fixed(env, repository_selection)
+    # The seam is added before any test is written, and its service is the baseline's:
+    # no other baseline is built.
+    assert worker.stages == ['routing', 'seam', 'component-tests', 'component-baseline',
+                             'implementation', 'component-runner', 'component-verification']
+    assert state.seam_status == 'prepared' and state.seam_error is None
+    assert state.seam['image_id'] == SEAM_IMAGE
+    # Its author is told which symbols to add, and knows the criteria and their stubs.
+    seam, = worker.seam_contexts
+    assert seam['seam'] == {'service.rooms': ['Rooms.merged']}
+    assert seam['component_routes']['FR-2']['seam'] == ADDED_SEAM
+    assert seam['brief'] and seam['repository'] == repository_selection
+    assert 'seam_prepared' not in seam
+    # The component tests are built with the code with the seam, and the fix starts from it.
+    assert worker.component_contexts[0]['seam_prepared'] is True
+    implementation, = worker.implementation_contexts
+    assert implementation['seam_prepared'] is True
+    # The repository's own contract tests pass against the code with the seam, proving it
+    # changed nothing they check, and then with the fix.
+    assert worker.existing_runs == [(SNAPSHOT_DIR, []), (SNAPSHOT_DIR, [])]
+    assert worker.existing_services == [SEAM_IMAGE, ORIGINAL[0]]
+    assert state.baseline_status == 'reproduced' and state.baseline_error is None
+    assert state.verification_status == 'completed'
+    assert state.publication_status == 'completed'
+    # The pull request names the symbols the change added.
+    change, = worker.pull_request_changes
+    assert change['proofs'] == {'component': [
+        {'id': 'FR-2', 'title': 'Rooms double-book', 'seam': ADDED_SEAM}]}
+
+
+@pytest.mark.parametrize('outcome', ['failed', 'nonconforming'])
+async def test_a_seam_that_cannot_be_added_stops_the_change_before_its_tests(
+        env, worker, outcome, repository_selection):
+    worker.routes = [{'FR-2': 'component-added'}]
+    worker.fail_seam = outcome == 'failed'
+    worker.seam_conformance_error = (
+        'The component contract does not match the code: service.rooms.Rooms.merged is '
+        'not present at runtime') if outcome == 'nonconforming' else None
+    handle, state = await fixed(env, repository_selection)
+    # No test is written, nothing runs and nothing is pushed.
+    assert worker.stages == ['routing', 'seam']
+    assert state.seam_status == 'error' and state.seam is None
+    if outcome == 'failed':
+        assert 'could not be added to the code or built' in state.seam_error
+    else:
+        assert 'does not match its component contract' in state.seam_error
+        assert 'Rooms.merged is not present at runtime' in state.seam_error
+    assert state.routing_status == 'routed'
+    assert state.component_tests is None and state.implementation is None
+    assert state.baseline_status == 'skipped' and state.verification_status == 'skipped'
+    assert state.publication_status == 'skipped' and not worker.published
+
+    # Retrying the tests adds the seam again, keeping the routing.
+    worker.fail_seam, worker.seam_conformance_error = False, None
+    await requirements_service.retry_generation(handle.id, 'tests')
+    state = await delivered(env, handle.id)
+    assert worker.stages.count('routing') == 1 and worker.stages.count('seam') == 2
+    assert state.seam_status == 'prepared' and state.seam_error is None
+    assert state.baseline_status == 'reproduced'
+    assert state.publication_status == 'completed'
+
+
+async def test_a_baseline_through_an_added_seam_that_proves_nothing_adds_the_seam_again(
+        env, worker, repository_selection):
+    worker.routes = [{'FR-2': 'component-added'}]
+    worker.component_added = [*ADDED_COMPONENT_TESTS, 'tests.test_rooms#test_merged_is_kept']
+    worker.component_baseline_results = ['not_reproduced', 'reproduced']
+    handle, state = await fixed(env, repository_selection)
+    assert state.baseline_status == 'not_reproduced'
+    # Said of the code with the seam, which may itself be what made the test pass.
+    assert 'against the code with only the seam the change added' in state.baseline_error
+    assert 'adding the seam already changed what the tests observe' in state.baseline_error
+    assert state.implementation is None and not worker.published
+
+    # Retrying the tests adds the seam again, since the seam itself may be at fault.
+    await requirements_service.retry_generation(handle.id, 'tests')
+    state = await delivered(env, handle.id)
+    assert worker.stages.count('seam') == 2 and worker.stages.count('routing') == 1
+    assert state.seam_status == 'prepared'
+    assert state.baseline_status == 'reproduced'
+    assert state.publication_status == 'completed'
 
 
 async def test_a_bugfix_proved_by_both_suites_runs_each_at_the_baseline_and_with_the_fix(

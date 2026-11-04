@@ -21,8 +21,11 @@ type BaselineStatus = "not_applicable" | "waiting" | "running" | "reproduced" | 
 // Which suite can prove each acceptance criterion of a change: `routed` when every one has
 // one, `unobservable` when one has none and the delivery stopped before its tests ran.
 type RoutingStatus = "not_applicable" | "waiting" | "running" | "routed" | "unobservable" | "unsupported" | "error";
-// The module and symbols of the code at which a `component` route observes its criterion.
-type Seam = { module: string; symbols: string[] };
+// The module and symbols of the code at which a `component` route observes its criterion;
+// `added` are those the code does not have yet, which the change adds first.
+type Seam = { module: string; symbols: string[]; added: string[] };
+// `prepared`: the code has the seam the change adds first, matching its component contract.
+type SeamStatus = "not_applicable" | "waiting" | "running" | "prepared" | "error";
 // `source`: who decided the route, the routing stage or the test author.
 type RequirementRoute = {
   route: "contract" | "component" | "unobservable"; reason: string; source: "routing" | "tests"; seam?: Seam;
@@ -85,6 +88,9 @@ export type DeliveryProgress = {
   // By requirement ID.
   routing: Record<string, RequirementRoute> | null;
   routing_error: string | null;
+  // The seam the change adds, with no behaviour change, before its tests are written.
+  seam_status: SeamStatus;
+  seam_error: string | null;
   baseline_status: BaselineStatus;
   baseline: VerificationResult | null;
   // The component tests' run against the code as the repository holds it.
@@ -170,6 +176,7 @@ const baselineStatuses: BaselineStatus[] = [
 const routingStatuses: RoutingStatus[] = [
   "not_applicable", "waiting", "running", "routed", "unobservable", "unsupported", "error",
 ];
+const seamStatuses: SeamStatus[] = ["not_applicable", "waiting", "running", "prepared", "error"];
 const publicationStatuses: PublicationStatus[] = [
   "not_applicable", "waiting", "running", "completed", "skipped", "error",
 ];
@@ -196,7 +203,7 @@ function repairRounds(value: unknown): RepairRound[] {
 
 function seam(value: unknown): Seam | undefined {
   return isObject(value) && typeof value.module === "string"
-    ? { module: value.module, symbols: strings(value.symbols) } : undefined;
+    ? { module: value.module, symbols: strings(value.symbols), added: strings(value.added) } : undefined;
 }
 
 function routes(value: unknown): Record<string, RequirementRoute> | null {
@@ -291,6 +298,9 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
       ? value.routing_status as RoutingStatus : "not_applicable",
     routing: routes(value.routing),
     routing_error: text(value.routing_error),
+    seam_status: seamStatuses.includes(value.seam_status as SeamStatus)
+      ? value.seam_status as SeamStatus : "not_applicable",
+    seam_error: text(value.seam_error),
     baseline_status: baselineStatuses.includes(value.baseline_status as BaselineStatus)
       ? value.baseline_status as BaselineStatus : "not_applicable",
     baseline: verificationRecord(value.baseline),
@@ -392,6 +402,10 @@ export function retriedProgress(progress: DeliveryProgress, stage: GenerationSta
       ? { code_error: null, implementation: null, implementation_error: null }
       : stage === "tests" ? { tests: null, tests_error: null, component_tests: null, component_tests_error: null }
       : stage === "documentation" ? { documentation: null, documentation_error: null } : {}),
+    // A seam that was not added, or whose baseline proved nothing, is added again.
+    ...(stage === "tests" && change && (progress.seam_status === "error" ||
+      progress.routing_status !== "routed" || ["not_reproduced", "error"].includes(progress.baseline_status))
+      ? { seam_status: "not_applicable" as const, seam_error: null } : {}),
     ...(stage === "tests" && change
       ? { baseline: null, component_baseline: null, baseline_error: null, baseline_status: "waiting" as const, routing_error: null } : {}),
     // The criteria are routed again unless every one had a suite that observes it.
@@ -500,8 +514,24 @@ function Routing({ progress, retrying, disabled, onRetry }: {
           {item.seam && <span>Seam: <code>{item.seam.module}</code>
             {item.seam.symbols.length > 0 && <> ({item.seam.symbols.map((symbol, index) =>
               <span key={symbol}>{index > 0 && ", "}<code>{symbol}</code></span>)})</>}</span>}
+          {item.seam && item.seam.added.length > 0 && <span>
+            Added by the change first: {item.seam.added.map((symbol, index) =>
+              <span key={symbol}>{index > 0 && ", "}<code>{symbol}</code></span>)}</span>}
         </li>)}
       </ul>}
+      {progress.seam_status === "running" && <p role="status">
+        Adding the seam the acceptance criteria are observed at, without changing behaviour…
+      </p>}
+      {progress.seam_status === "prepared" && <p className="verification-outcome verification-passed" role="status">
+        The seam was added and matches its component contract; the baseline runs against the code with it
+      </p>}
+      {progress.seam_error && <div className="generation-failure">
+        <p role="alert">{progress.seam_error}</p>
+        <button type="button" className="generate-button" disabled={disabled}
+          onClick={() => onRetry("tests")}>
+          {retrying === "tests" ? "Adding the seam again…" : "Add the seam again"}
+        </button>
+      </div>}
       {progress.routing_error && <div className="generation-failure">
         <p role="alert">{progress.routing_error}</p>
         <button type="button" className="generate-button" disabled={disabled}
@@ -531,11 +561,15 @@ function Baseline({ progress, retrying, disabled, onRetry }: {
           : progress.tests_error ? "Waiting for regression tests." : "Writing regression tests for the brief…"}
       </p>}
       {stage === "running" && <p role="status">
-        Running the regression tests against the service as the repository holds it…
+        {progress.seam_status === "prepared"
+          ? "Running the regression tests against the code with only the seam added…"
+          : "Running the regression tests against the service as the repository holds it…"}
       </p>}
       {stage === "skipped" && <p>
         {progress.routing_error
           ? "The baseline was skipped because the acceptance criteria could not all be routed to tests."
+          : progress.seam_error
+          ? "The baseline was skipped because the seam the criteria are observed at could not be added."
           : progress.baseline_error
           ? "The baseline was skipped."
           : "The baseline was skipped because the regression tests were not written."}

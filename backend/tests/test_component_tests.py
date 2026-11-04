@@ -151,6 +151,32 @@ async def test_the_author_sees_the_stubs_not_the_code_and_the_runner_builds_them
     assert not (published / 'Dockerfile').exists()
 
 
+async def test_a_change_that_added_its_seam_builds_the_runner_with_the_code_with_it(
+        session, monkeypatch):
+    prepared = session / 'seam/service/src/service/rooms.py'
+    prepared.parent.mkdir(parents=True)
+    prepared.write_text('PRIVATE SERVICE SOURCE WITH THE SEAM')
+    (session / 'seam/service/requirements.txt').write_text('temporalio\n')
+    sent: dict = {}
+    builds: list = []
+    fake_docker(monkeypatch, SUITE_FILES, sent, builds)
+    await ActivityEnvironment().run(components.generate_component_tests, 'session',
+                                    {**CONTEXT, 'seam_prepared': True})
+    build, = builds
+    assert build['files']['repository/src/service/rooms.py'] == (
+        'PRIVATE SERVICE SOURCE WITH THE SEAM')
+    # The author still sees no code, with the seam or without it.
+    assert not any('PRIVATE' in text for text in sent.values())
+    assert 'seam_prepared' not in json.loads(sent['input.json'])
+
+    # Without the code with the seam no runner can show anything through it.
+    import shutil
+    shutil.rmtree(session / 'seam')
+    with pytest.raises(ApplicationError, match='code with the seam'):
+        await ActivityEnvironment().run(components.generate_component_tests, 'session',
+                                        {**CONTEXT, 'seam_prepared': True})
+
+
 @pytest.mark.parametrize('written, error', [
     ({**SUITE_FILES, 'tests/test_rooms.py': EXISTING.replace('"open"', '"closed"') + ADDED},
      'changed or removed tests it may not touch'),

@@ -28,6 +28,9 @@ MENTION_HANDLED = 'This comment was already handled.'
 # How the tests a change added fared against the service as the repository holds it.
 # `reproduced`: they all fail and the existing tests pass, so the change has something to
 # turn green. `not_reproduced`: one of them does not fail, so nothing may be fixed.
+# `prepared`: the code has the seam the change adds before it reproduces anything, and
+# conforms to the component contract with it.
+SeamStatus = Literal['not_applicable', 'waiting', 'running', 'prepared', 'error']
 BaselineStatus = Literal['not_applicable', 'waiting', 'running', 'reproduced', 'not_reproduced',
                          'skipped', 'error']
 
@@ -119,6 +122,14 @@ class DeliveryProgress:
     routing: dict[str, RequirementRoute] | None = None
     routing_error: str | None = None
     routing_status: RoutingStatus = 'not_applicable'
+    # The seam a change adds first, with no behaviour change, when a criterion routed to
+    # the component tests is observed at symbols the code does not have yet: the stage
+    # result, whose `path` and `image_id` are the code with the seam. The baseline runs
+    # against it, which proves the seam changed nothing the existing tests check, and the
+    # fix starts from it.
+    seam: dict[str, Any] | None = None
+    seam_error: str | None = None
+    seam_status: SeamStatus = 'not_applicable'
     # The run of a change's tests against the service as the repository holds it.
     baseline: VerificationResult | None = None
     baseline_error: str | None = None
@@ -197,18 +208,28 @@ def component_run(result: VerificationResult, added: list[str],
                     observable='behaviour a seam of the code shows')
 
 
+# What the baseline runs against: the repository's code, or that code with the seam the
+# change added first.
+REPOSITORY_CODE = 'the service as the repository holds it'
+SEAM_CODE = 'the code with only the seam the change added'
+
+
 def judge_baseline(result: VerificationResult | None, added: list[str], changed: list[str],
-                   component: SuiteRun | None = None) -> tuple[BaselineStatus, str | None]:
+                   component: SuiteRun | None = None,
+                   seam: bool = False) -> tuple[BaselineStatus, str | None]:
     """What a baseline run proves, and what to tell the user when it proves too little.
 
     `added` are the tests the change added. `changed` are repository tests a repair
     corrected because the change made them wrong; those may fail or pass here. A change
     with component tests is judged on both suites' runs: `component`, and `result`, which
-    is None when it has no contract tests to run at all."""
+    is None when it has no contract tests to run at all. `seam` is true when the runs were
+    against the code with the seam the change added first, which has to change nothing
+    the existing tests check."""
     runs = [*([contract_run(result, added, changed)] if result is not None else []),
             *([component] if component else [])]
+    code = SEAM_CODE if seam else REPOSITORY_CODE
     for run in runs:
-        error = _baseline_error(run, prefix=bool(component))
+        error = _baseline_error(run, prefix=bool(component), code=code)
         if error:
             return 'error', error
     added_all = [(run, case) for run in runs for case in run.added]
@@ -216,16 +237,19 @@ def judge_baseline(result: VerificationResult | None, added: list[str], changed:
                if run.result['tracked'][case]['failed'] < run.result['tracked'][case]['tests']]
     if passing or not added_all:
         return 'not_reproduced', (
-            (f'Added tests that do not fail against the service as the repository holds it: '
+            (f'Added tests that do not fail against {code}: '
              f'{", ".join(passing[:NAMED_TESTS])} ({len(passing)} of {len(added_all)}).'
              if passing else 'No added test is left in the suite.')
-            + ' The problem was not reproduced, so nothing was changed.')
+            + ' The problem was not reproduced, so nothing was changed.'
+            + (' Either the problem is not where the brief puts it, or adding the seam '
+               'already changed what the tests observe; retrying the tests adds the seam '
+               'again.' if seam and passing else ''))
     return 'reproduced', None
 
 
-def _baseline_error(run: SuiteRun, prefix: bool) -> str | None:
+def _baseline_error(run: SuiteRun, prefix: bool, code: str = REPOSITORY_CODE) -> str | None:
     """Why one suite's baseline run proves nothing. `prefix` names the suite, for a change
-    that has two."""
+    that has two, and `code` what the run was against."""
     result, tracked = run.result, run.result['tracked']
     named = f'{run.name[0].upper()}{run.name[1:]}: ' if prefix else ''
     if result['status'] == 'error' or tracked is None:
@@ -249,9 +273,10 @@ def _baseline_error(run: SuiteRun, prefix: bool) -> str | None:
     existing = result['failures'] + result['errors'] - sum(
         tracked[case]['failed'] for case in {*run.added, *run.changed})
     if existing:
-        return (f'{named}Existing tests failing against the service as the repository holds '
-                f'it: {existing}. The added tests prove nothing until the existing '
-                'suite passes there.')
+        return (f'{named}Existing tests failing against {code}: {existing}. The added tests '
+                'prove nothing until the existing suite passes there.'
+                + (' Adding the seam was to change nothing they check; retrying the tests '
+                   'adds it again.' if code == SEAM_CODE else ''))
     return None
 
 

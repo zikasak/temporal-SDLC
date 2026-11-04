@@ -112,11 +112,18 @@ def check_seams(routes: dict[str, dict[str, Any]], modules: dict[str, set[str]])
         if seam['module'] not in modules:
             raise RuntimeError(f'The seam of requirement {requirement} names a module the '
                                f'component contract has no stub of: {seam["module"]}')
-        missing = [symbol for symbol in seam['symbols']
+        missing = [symbol for symbol in [*seam['symbols'], *seam.get('added', [])]
                    if symbol not in modules[seam['module']]]
         if missing:
             raise RuntimeError(f'The seam of requirement {requirement} names symbols its stub '
                                f'does not define: {", ".join(missing)[:400]}')
+
+
+def stub_modules(contract: ComponentContract, components: Path) -> list[str]:
+    """The modules a checked component contract has stubs of."""
+    return sorted(contract.module(path.relative_to(components))
+                  for path in components.rglob(f'*{contract.stub_suffix}')
+                  if path.is_file() and not path.is_symlink())
 
 
 def _context(contract: ComponentContract, repository: Path, components: Path,

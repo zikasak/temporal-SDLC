@@ -102,6 +102,39 @@ component tests: they stay unavailable, as the contract tests do. In a repair ru
 failing tests in `repair.test_failures` may be component tests as well as contract tests.
 """
 
+SEAM_PROMPT = """Prepare a change to the existing service in /workspace/service, a checkout
+of the project's Git repository named by the `repository` entry of the input, without
+making the change yet. The `brief` entry of the input describes it: the problem, the
+expected behaviour and the acceptance criteria. Some of those criteria cannot be observed
+over HTTP, so the `component_routes` entry routes each of them to a seam of the code, at
+which independently written component tests will drive the code in-process, faking the
+collaborators it calls. The code does not have that seam yet: you add it, and nothing else.
+{instructions}
+The component contract in /workspace/contracts/components holds a stub of each module of
+the seams, at the module's path (such as components/app/module.pyi): the signature, types
+and behaviour docstring of every symbol the tests use. Read it with read_contract and
+search_contracts. The `seam` entry of the input lists, by module, the stubbed symbols the
+code lacks. Add exactly those, in those modules, with exactly the signatures, types and
+kinds of symbol the stubs declare. Every other symbol the stubs declare already exists and
+stays exactly as it is.
+The symbols you add get no behaviour of their own yet: each does the least its signature
+allows and changes nothing the code does today, such as an update or signal that is
+accepted and ignored, a query that returns state the code already keeps, or a method that
+leaves everything as it was. Their docstrings describe the behaviour the fix will give
+them later; do not implement it, not even partly. The component tests have to fail against
+the code with the seam before the fix is written, and every existing test has to pass
+against it unchanged; the fix is written in a later run, from the code as you leave it.
+Read the code around each symbol before adding it. Locate code with list_files and
+search_files and read only the relevant line ranges with read_file, and add the symbols
+with edit_file. Do not change, rename or remove anything else, and do not create, change
+or remove contracts/components or component-tests. Use shell for builds.
+Do not generate, read, or execute tests.
+Build the service without running tests. Fix build failures. Keep the Dockerfile at the
+project root as it is. You have no Docker daemon; the outer worker builds the Dockerfile
+and checks the code with the seam against the stubs.
+Only finish once every listed symbol is added and the build succeeds.
+"""
+
 
 REPAIR_PROMPT = """
 This is a repair run. /workspace/service already holds your previous implementation. It
@@ -185,6 +218,9 @@ def base_prompt(inputs: dict, instructions: str) -> str:
         return ONBOARDING_PROMPT.format(instructions=instructions)
     # A change to an existing service is told about its checkout by its own prompt.
     if inputs.get('brief'):
+        if inputs.get('seam'):
+            # Only the seam is added: nothing of the brief is fixed, no other part changes.
+            return SEAM_PROMPT.format(instructions=instructions)
         return (CHANGE_PROMPT.format(instructions=instructions)
                 + (COMPONENT_PROMPT if inputs.get('component_routes') else '')
                 + parts_prompt(inputs))
