@@ -1,5 +1,5 @@
-"""Opt-in check of the component contracts' conformance runners and the Java component
-test runner with real Docker.
+"""Opt-in check of the component contracts' conformance runners and the Java and
+TypeScript component test runners with real Docker.
 
 Run: RUN_DOCKER_VERIFICATION_TESTS=1 python -m pytest tests/test_component_contract_docker.py -q
 Requires Docker and outbound access to fetch the base images, mypy, Maven artifacts and npm
@@ -18,6 +18,7 @@ from app import docker_agents
 from app.agent_workflows.host import build_image
 from app.languages import get_language, get_part_language
 from app.routing.components import check_conformance
+from app.test_generation.activities import copy_test_suite
 from app.test_generation.components import runner_context
 from tests.test_typescript_components import GITHUB_STUB
 
@@ -228,3 +229,53 @@ async def test_typescript_stubs_conform_to_the_web_client_they_describe(tmp_path
     else:
         with pytest.raises(RuntimeError, match=re.escape(error)):
             await check
+
+
+TYPESCRIPT_SUITE = get_part_language('typescript').component_suite
+
+
+async def run_typescript_suite(tmp_path, repository: Path, suite: Path) -> tuple[dict, str]:
+    context = tmp_path / f'context-{uuid.uuid4().hex}'
+    runner_context(TYPESCRIPT_SUITE, repository, suite, context)
+    image = await build_image(context, 'component test runner', tmp_path / 'build.log',
+                              build_args=TYPESCRIPT.build_args({'project': 'frontend'}))
+    name = f'component-tests-{uuid.uuid4().hex}'
+    reports = tmp_path / f'reports-{uuid.uuid4().hex}'
+    try:
+        await docker_agents.docker('create', '--name', name, '--network=none', image, timeout=30)
+        await docker_agents.docker('start', name, timeout=30)
+        await docker_agents.docker('wait', name, timeout=750)
+        state = json.loads(await docker_agents.docker('inspect', '--format', '{{json .State}}',
+                                                      name, timeout=30))
+        await docker_agents.docker('cp', f'{name}:/tests/reports', str(reports), timeout=30)
+    finally:
+        await docker_agents.docker('rm', '-f', name, timeout=30)
+        await docker_agents.docker('image', 'rm', '-f', image, timeout=60)
+    return state, (reports / 'junit.xml').read_text()
+
+
+async def test_typescript_component_tests_prove_tr_6_red_then_green_without_a_network(tmp_path):
+    """TR-6 of the flow-closing bugfix, against this repository's web client: failing as
+    the code is, as the GitHub App manifest has no pull_request event, and passing once it
+    has."""
+    from tests.test_typescript_suite import MANIFEST_TEST
+    repository = tmp_path / 'repository'
+    shutil.copytree(FRONTEND, repository / 'frontend',
+                    ignore=shutil.ignore_patterns('node_modules', 'dist'))
+    suite = tmp_path / 'suite'
+    copy_test_suite(TYPESCRIPT_SUITE, TYPESCRIPT_SUITE.template, suite)
+    (suite / 'tests').mkdir()
+    (suite / 'tests/manifest.test.ts').write_text(MANIFEST_TEST)
+    name = 'name="the GitHub App manifest &gt; subscribes the app to pull_request events"'
+
+    state, report = await run_typescript_suite(tmp_path, repository, suite)
+    assert state['ExitCode'] == 1
+    assert name in report and '<failure' in report
+
+    github = repository / 'frontend/src/github.ts'
+    events = '["issue_comment", "pull_request_review_comment"]'
+    github.write_text(github.read_text().replace(
+        events, '["issue_comment", "pull_request_review_comment", "pull_request"]'))
+    state, report = await run_typescript_suite(tmp_path, repository, suite)
+    assert state['ExitCode'] == 0
+    assert name in report and '<failure' not in report

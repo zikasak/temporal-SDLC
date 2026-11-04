@@ -1,0 +1,5 @@
+repository/.git
+repository/**/node_modules
+suite/node_modules
+suite/reports
+suite/.part
