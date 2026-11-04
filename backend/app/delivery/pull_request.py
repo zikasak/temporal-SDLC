@@ -87,8 +87,8 @@ LISTED_CRITERIA = 50
 
 def _proofs(change: dict[str, Any]) -> list[str]:
     """Which suite proves each criterion of a routed change (`change['proofs']`: by suite,
-    the criteria with their ID, title and, at a seam, its module and symbols), as a part
-    of the description."""
+    the criteria with their ID, title and, at a seam, its module, symbols and those of them
+    the change added), as a part of the description."""
     proofs = change.get('proofs') or {}
     lines: list[str] = []
     for suite, heading in SUITES.items():
@@ -104,8 +104,11 @@ def _proofs(change: dict[str, Any]) -> list[str]:
             if seam.get('module'):
                 symbols = ', '.join(f'`{_line(symbol, 100)}`'
                                     for symbol in list(seam.get('symbols') or [])[:10])
+                added = ', '.join(f'`{_line(symbol, 100)}`'
+                                  for symbol in list(seam.get('added') or [])[:10])
                 line += f" (at `{_line(seam['module'], 200)}`" + (
-                    f": {symbols})" if symbols else ")")
+                    f": {symbols}" if symbols else "") + (
+                    f"; this change adds {added}" if added else "") + ")"
             lines.append(line)
         if len(criteria) > LISTED_CRITERIA:
             lines.append(f'- and {len(criteria) - LISTED_CRITERIA} more')

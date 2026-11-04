@@ -396,3 +396,79 @@ async def test_a_change_proved_at_seams_gets_the_stubs_it_has_to_keep(tmp_path, 
     shutil.rmtree(session / 'routing/components')
     with pytest.raises(ApplicationError, match='component contract of the routing'):
         await ActivityEnvironment().run(activities.implement_service, 'session', context)
+
+
+@pytest.mark.parametrize('conforms', [True, False])
+async def test_a_seam_the_code_lacks_is_added_alone_and_checked_against_its_stubs(
+        tmp_path, monkeypatch, conforms):
+    monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
+    session = tmp_path / 'session'
+    runtime = json.dumps({'source_root': '.', 'requirements': []})
+    for name, text in {'repository/app/rooms.py': 'code', 'repository/Dockerfile': 'FROM scratch',
+                       'routing/components/app/rooms.pyi': 'routed stub',
+                       'routing/components/runtime.json': runtime}.items():
+        (session / name).parent.mkdir(parents=True, exist_ok=True)
+        (session / name).write_text(text)
+    routes = {'FR-2': {'route': 'component', 'reason': 'R.',
+                       'seam': {'module': 'app.rooms', 'symbols': ['merged'],
+                                'added': ['merged']}}}
+    brief = {'requirements': [], 'requirements_document': 'Close merged rooms.'}
+    context = {'requirements': [], 'language': 'python', 'component_routes': routes,
+               'brief': brief, 'seam': {'app.rooms': ['merged']},
+               'repository': {'full_name': 'octocat/project', 'branch': 'main'}}
+    sent, runs = {}, []
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': 0})
+        if args[0] == 'cp' and args[1] == '-a':
+            import tarfile
+            sent.clear()
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.update({item.name: archive.extractfile(item).read().decode()
+                             for item in archive.getmembers() if item.isfile()})
+        if args[0] == 'cp' and args[1].endswith(':/workspace/service/.'):
+            (Path(args[2]) / 'Dockerfile').write_text('FROM scratch')
+            (Path(args[2]) / 'app').mkdir()
+            (Path(args[2]) / 'app/rooms.py').write_text('code with the seam')
+        if args[0] == 'build' and '--iidfile' in args:
+            runs.append(('build', Path(args[-1])))
+            if (Path(args[-1]) / 'repository').is_dir():
+                runs.append(('checked', (Path(args[-1]) / 'repository/app/rooms.py').read_text()))
+            Path(args[args.index('--iidfile') + 1]).write_text('sha256:' + 'c' * 64)
+        if args[0] == 'run':
+            runs.append(('run', args[-1]))
+            if not conforms:
+                raise RuntimeError('Docker run failed: error: app.rooms.merged is not present '
+                                   'at runtime')
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    result = await ActivityEnvironment().run(activities.implement_service, 'session', context)
+    inputs = json.loads(sent['input.json'])
+    assert inputs['seam'] == {'app.rooms': ['merged']}
+    # The author starts from the repository's code, with the stubs beside it.
+    assert sent['service/app/rooms.py'] == 'code'
+    assert sent['contracts/components/app/rooms.pyi'] == 'routed stub'
+    # It is told to add the seam alone, not to fix anything.
+    prompt = agent.base_prompt(inputs, '')
+    assert prompt.startswith(agent.SEAM_PROMPT.splitlines()[0])
+    assert agent.COMPONENT_PROMPT not in prompt and agent.CHANGE_PROMPT.splitlines()[0] not in prompt
+    # The code with the seam is published apart from the fix, built, then checked against
+    # the whole component contract.
+    assert (session / 'seam/service/app/rooms.py').read_text() == 'code with the seam'
+    assert ('checked', 'code with the seam') in runs and ('run', 'app.rooms') in runs
+    if not conforms:
+        assert result == {'session_id': 'session', 'conformance_error': (
+            'The component contract does not match the code: error: app.rooms.merged is not '
+            'present at runtime')}
+        return
+    assert result['image_id'] == 'sha256:' + 'c' * 64
+    assert result['path'] == str(session / 'seam/service')
+
+    # The fix then starts from the code with the seam, not from the repository's.
+    fix = {key: value for key, value in context.items() if key != 'seam'}
+    await ActivityEnvironment().run(activities.implement_service, 'session',
+                                    {**fix, 'seam_prepared': True})
+    assert sent['service/app/rooms.py'] == 'code with the seam'
+    assert agent.COMPONENT_PROMPT in agent.base_prompt(json.loads(sent['input.json']), '')

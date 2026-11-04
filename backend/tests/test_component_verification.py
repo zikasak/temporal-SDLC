@@ -251,6 +251,28 @@ def test_the_baseline_of_a_change_with_component_tests_is_judged_on_both_suites(
     assert 'the component tests cannot observe' in error
 
 
+def test_a_baseline_against_the_code_with_an_added_seam_says_so():
+    red = result('failed', {ADDED: {'tests': 1, 'failed': 1}}, failures=1)
+    green = result('passed', {ADDED: {'tests': 1, 'failed': 0}})
+    contract = result('passed', {})
+    assert judge_baseline(contract, [], [], component_run(red, [ADDED]), seam=True) == (
+        'reproduced', None)
+    # An existing test the seam broke, or an added test it already makes pass, is said of
+    # the code with the seam, which retrying the tests adds again.
+    status, error = judge_baseline(result('failed', {}, failures=1), [], [],
+                                   component_run(red, [ADDED]), seam=True)
+    assert status == 'error' and error.startswith(
+        'Contract tests: Existing tests failing against the code with only the seam the '
+        'change added: 1.')
+    assert 'retrying the tests adds it again' in error
+    status, error = judge_baseline(contract, [], [], component_run(green, [ADDED]), seam=True)
+    assert status == 'not_reproduced' and 'against the code with only the seam' in error
+    assert 'adding the seam already changed what the tests observe' in error
+    # Without a seam nothing of it is said.
+    status, error = judge_baseline(contract, [], [], component_run(green, [ADDED]))
+    assert 'seam' not in error and 'as the repository holds it' in error
+
+
 def test_a_green_run_of_either_suite_with_a_test_that_did_not_run_proves_nothing():
     passed = result('passed', {})
     assert unproven_green(passed, passed) is None and unproven_green(None, passed) is None

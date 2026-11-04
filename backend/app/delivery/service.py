@@ -260,10 +260,11 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
     failed = {'server': progress.code_error or progress.implementation_error,
               # The tests of a change are retried with the baseline run that judges them,
               # and that retry is also the way on from a verification that proved nothing.
-              # So is a routing that failed or found a criterion no suite can observe.
+              # So is a routing that failed or found a criterion no suite can observe, and
+              # a seam that could not be added to the code.
               'tests': (progress.tests_error or progress.component_tests_error
                         or progress.baseline_error or progress.routing_error
-                        or proved and unverified),
+                        or progress.seam_error or proved and unverified),
               # A documentation task has one stage, which is also the way on from a check
               # of it that could not complete.
               'documentation': (progress.documentation_error
@@ -324,6 +325,14 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
         progress.component_tests = None
         progress.component_tests_error = None
         if change:
+            # A seam the change added is added again when the criteria are routed again,
+            # or when the baseline against the code with it proved nothing: it may itself
+            # have changed what the tests observe. A seam that was not added is retried.
+            if (progress.seam_status == 'error' or progress.routing_status != 'routed'
+                    or progress.baseline_status in ('not_reproduced', 'error')):
+                progress.seam = None
+                progress.seam_error = None
+                progress.seam_status = 'not_applicable'
             progress.baseline = None
             progress.baseline_error = None
             progress.component_baseline = None

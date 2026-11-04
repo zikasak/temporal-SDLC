@@ -29,7 +29,7 @@ from app.routing.agent import ROUTES
 from app.routing.components import (
     COMPONENTS_DIR, PUBLISHED_DIR, check_conformance, check_seams, read_components,
 )
-from app.routing.models import ROUTES as ALL_ROUTES, read_routes
+from app.routing.models import ROUTES as ALL_ROUTES, added_seams, read_routes
 from app.temporal.tracing import activity_metadata
 from app.tracing import trace_operation
 
@@ -103,8 +103,14 @@ async def publish_components(language: Language, session_dir: Path, output: Path
     read = await run_sync(read_components, contract, output / COMPONENTS_DIR, repository,
                           session_dir / CHECKOUT_DIR / PUBLISHED_DIR, clean)
     check_seams(routes, read['modules'])
-    await check_conformance(contract, repository, clean, list(read['modules']), work,
-                            artifact_dir)
+    if added_seams(routes):
+        # Symbols the change adds first cannot match the code yet: the whole contract is
+        # checked against the code once they are added, before anything runs through them.
+        logger.info('The component contract names symbols the change adds; its check waits '
+                    'for them (modules=%s)', sorted(added_seams(routes)))
+    else:
+        await check_conformance(contract, repository, clean, list(read['modules']), work,
+                                artifact_dir)
     await run_sync(shutil.move, clean, target)
     return str(target)
 

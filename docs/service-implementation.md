@@ -478,6 +478,9 @@ flowchart LR
     brief[Requirements session] --> routing[ObservabilityWorkflow]
     routing -- every criterion observable over HTTP --> tests[TestGenerationWorkflow]
     routing -- criteria observable only at a seam --> components[ComponentTestGenerationWorkflow]
+    routing -- at a seam the code lacks --> seam[ImplementationWorkflow adds the seam]
+    seam -- conforms to its stubs --> components
+    seam -- anything else --> stop
     routing -- a criterion unobservable --> stop
     tests -- a criterion unobservable --> stop
     components -- a criterion unobservable --> stop
@@ -531,6 +534,34 @@ flowchart LR
    `routed`, and their criteria get component tests (step 2a). Deliveries started before
    component tests were written (marked by the `component-tests` workflow patch) still set
    `routing_status: unsupported` for it and stop there, so their histories replay.
+   When no existing interface can observe a criterion, the agent may name a seam the
+   change adds first: its route's `seam.added` lists the stubbed symbols the code does not
+   have yet (such as a workflow's update through which an outside event reaches it), each
+   of which the module's stub must define. Such symbols cannot match the code yet, so a
+   routing with any `added` skips `check_conformance`; the whole contract is checked once
+   they are added (step 1a). `added_seams` in `app/routing/models.py` collects them by
+   module.
+1a. **Seam.** When a route has `added` symbols, the delivery adds them before any test is
+   written (`_prepare_seam` in `DeliveryWorkflow`): `ImplementationWorkflow` runs with
+   `seam` (the symbols by module) in its context, and `implement_service` hands it to
+   `prepare_seam` (`app/implementation/activities.py`). Its author works in the checkout
+   with the routing's stubs, like the fix's, but its prompt (`SEAM_PROMPT` in
+   `app/implementation/agent.py`) asks for those symbols alone, with the stubbed
+   signatures and no behaviour of their own, and forbids making any criterion true. Its
+   output is published and built under `<session-id>/seam/`, then `check_conformance`
+   runs against it with the whole component contract. The result is
+   `DeliveryProgress.seam` (`image_id`, `path`) with `seam_status: prepared`; a failure,
+   or code that does not match the stubs (`conformance_error`), sets `seam_status: error`
+   and `seam_error` and stops the delivery with the baseline and verification `skipped`.
+   From then on `seam_prepared` is in the stages' context: the component tests' runner
+   is built with the code with the seam, the baseline runs against the image built with
+   it (no `build_baseline`), and the fix starts from it. The existing tests passing at
+   that baseline prove the seam changed nothing they check, and the added tests failing
+   prove the problem through it. A `tests` retry keeps a prepared seam, except after a
+   baseline that was `not_reproduced` or `error`, or a routing that is done again: the
+   seam may itself be at fault, so it is added again. The code review and the push
+   compare with the repository as recorded, so the seam is part of the change, and the
+   pull request names the symbols each seam added.
 2. **Regression tests.** The test author's workspace is the repository's `contract-tests/`
    as usual. It adds tests wherever they belong, in an existing class or a new one, and
    may not change or remove an existing test; the stage fails otherwise (see
@@ -579,7 +610,8 @@ flowchart LR
    so.
 3. **Baseline run.** The verification worker's `build_baseline` activity builds the service
    from the checkout, filtered exactly as the implementation author sees it, and publishes
-   `<GENERATED_CODE_DIR>/<session-id>/baseline/image.json`. `VerificationWorkflow` then runs
+   `<GENERATED_CODE_DIR>/<session-id>/baseline/image.json` (a change that added a seam
+   uses the image built with it instead, step 1a). `VerificationWorkflow` then runs
    the new suite against that image and reports each added and changed test on its own
    (`tracked`). `judge_baseline` (`app/delivery/models.py`) turns the result into
    `baseline_status`:
@@ -606,8 +638,9 @@ flowchart LR
    `judge_baseline` holds both runs to the same rules, naming the suite whose run broke
    one (a component test that skips itself is reported as a criterion its seam cannot
    observe). A component run that could not complete runs once more.
-4. **The fix.** The implementation author's workspace is the checkout alone, without
-   generated code, and its prompt asks for targeted edits for the brief. A change with
+4. **The fix.** The implementation author's workspace is the checkout alone (or the
+   code with the seam the change added, step 1a), without generated code, and its prompt
+   asks for targeted edits for the brief. A change with
    component tests also gives it `component_routes` (the criteria routed to seams, with
    their seams) and the routing's checked stubs in `/workspace/contracts/components/`,
    read through the contract tools, with the rule to keep every stubbed signature

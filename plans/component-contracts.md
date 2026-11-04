@@ -48,7 +48,9 @@ observe it, so tests are coupled to internals only where nothing else works.
 For the flow-closing bug the seam is natural: Temporal workflows already have
 contract-shaped interfaces. The stubs would be the delivery and session workflows'
 signal or update that delivers "pull request closed (merged or not)", their `get_state`
-queries and the fork entry points. The tests drive them in Temporal's in-process test
+queries and the fork entry points. (Checked on 2026-11-03: that signal or update does not
+exist yet. `DeliveryWorkflow` has no entry point for it, and the GitHub App does not
+subscribe to `pull_request` events, so this case needs a seam added first, 3.8.) The tests drive them in Temporal's in-process test
 environment (`temporalio.testing.WorkflowEnvironment`) with activities the test author
 fakes from their stubbed signatures. No GitHub, LLM or Temporal server is needed.
 
@@ -78,9 +80,9 @@ pull request; no existing interface of the code shows it"). The user can rephras
 criteria through the interview. This is the early, honest failure that was missing.
 
 The routing agent may only pick a seam that **already exists** in the code as the
-repository holds it. Otherwise the baseline would go red because of an `ImportError`,
-which looks like a reproduced bug and proves nothing. A missing seam is `unobservable`
-in the first version (see 3.8 for later).
+repository holds it, or one the change adds first and names as such (3.8). Otherwise the
+baseline would go red because of an `ImportError`, which looks like a reproduced bug and
+proves nothing.
 
 ### 3.2 The component contract
 
@@ -180,13 +182,12 @@ baseline covers both suites.
 - `contract-tests/README.md` gets nothing new. `component-tests/README.md` (written by
   the author, as today) states the seam and what is faked.
 
-### 3.8 Later: preparing a seam
+### 3.8 Preparing a seam
 
 When no seam exists, a first sub-change could add one with no behaviour change: the
 implementation author adds the stubbed interface, verified by both suites' existing
 tests passing unchanged. Only then is the bug reproduced through it. This is a second
-red → green cycle and is left out of the first version. The routing stage reports
-`unobservable` instead.
+red → green cycle. Step 9 does it.
 
 ## 4. Steps
 
@@ -264,9 +265,27 @@ Each step lands with its own tests (`backend/tests/`, stage fakes in
    agents and Docker. It is the acceptance case for the whole plan: routes go to
    `component`, the stubs are the workflows' signal or update and queries, the component
    tests fail at baseline and pass after the fix.
+   *Blocked on step 9, now done:* the "pull request closed" entry point does not exist
+   (section 2), so the routes have to name it in `seam.added`. Expect the stages
+   `routing`, `seam`, `component-tests`, baseline, fix and verification.
 8. **Java** `ComponentSuite` and conformance check (compile the stubs against the
    service's classes, then compare signatures with `javap`).
-9. **Seam preparation** (3.8), if step 7 shows it is needed often.
+9. **Seam preparation** (3.8). Brought forward, because step 7 needs it.
+   *Done:* a `component` route's `seam.added` names the stubbed symbols the code lacks
+   (`added_seams` in `app/routing/models.py`). The routing skips `check_conformance` when
+   there are any. `_prepare_seam` in `DeliveryWorkflow` runs `ImplementationWorkflow` with
+   `seam` in its context: `prepare_seam` in `app/implementation/activities.py`, with
+   `SEAM_PROMPT`, publishes `<session-id>/seam/` and checks the whole component contract
+   against it. `DeliveryProgress.seam`, `seam_status` and `seam_error`. With the seam
+   prepared, the stages get `seam_prepared`: the component runner is built with that code,
+   the baseline runs against its image, and the fix starts from it. There is no separate
+   run proving the seam changed no behaviour. The baseline does that: its existing tests
+   pass against the code with the seam. `judge_baseline(seam=True)` words its errors that
+   way, and a `tests` retry after a failed baseline adds the seam again. No workflow patch:
+   only routes with `added` reach the new code, and no earlier history has any. Not done:
+   an automatic repair round when the seam does not conform (the user retries the tests),
+   and a check at routing that the stubs' existing symbols conform before the seam is
+   added (stubtest reports the added ones as missing, so the whole check waits).
 
 ## 5. Open questions
 

@@ -34,7 +34,8 @@ published stub, but never change or remove one of its statements.
 - Check the contract before you finish, from /workspace/routing:
   pip install --user {mypy} and the requirements files, then
   PYTHONPATH=repository/<source_root> MYPYPATH=components python -m mypy.stubtest
-  --ignore-missing-stub <every stubbed module>. It must report no error."""
+  --ignore-missing-stub <every stubbed module>. It must report no error but, for each
+  symbol a seam lists in `added`, that it is not present at runtime."""
 
 
 def _module(path: Path) -> str:

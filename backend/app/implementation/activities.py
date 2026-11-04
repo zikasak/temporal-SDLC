@@ -2,6 +2,7 @@
 import dataclasses
 import json
 import re
+import tempfile
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,8 @@ from typing import Any
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from app.asyncio_utils import run_sync
+from app import docker_agents
+from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import (
     StageInputs, StageSpec, copy_regular_files, run_stage, session_language, write_language,
@@ -20,10 +22,15 @@ from app.docker_agents import default_agent_image
 from app.github.checkout import CHECKOUT_DIR, COMPONENT_TESTS_DIR, CONTRACTS_DIR, TESTS_DIR
 from app.languages import Language
 from app.requirements.document import without_repeated_tables
-from app.routing.components import COMPONENTS_DIR, ROUTED_CONTRACT
+from app.routing.components import (
+    COMPONENTS_DIR, ROUTED_CONTRACT, check_conformance, stub_modules,
+)
 
 
 EXCLUDED = {'.git', '.openapi-generator', '__pycache__', '.agent-output'}
+# Where the code with the seam a change adds before it reproduces anything is published,
+# in the session's artifacts: what its baseline runs against and its fix starts from.
+SEAM_DIR = 'seam'
 # What a repository holds before a project of its own: a readme, a licence, Git settings.
 BARE_REPOSITORY = re.compile(r'(readme|licen[cs]e|copying)(\..*)?|\.git.*|\.github', re.I)
 
@@ -68,8 +75,10 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
     change = bool(context.get('brief')) or bool(context.get('onboarding'))
     if change and not checkout:
         raise ApplicationError('The repository checkout is unavailable', non_retryable=True)
-    # A repair continues from the published implementation, not the generated skeleton.
+    # A repair continues from the published implementation, not the generated skeleton,
+    # and a change whose seam was added first from the code with that seam.
     source = (session_dir / 'implementation/service' if repair
+              else session_dir / SEAM_DIR / 'service' if change and context.get('seam_prepared')
               else checkout if change else session_dir / 'server')
     if not source.is_dir():
         raise ApplicationError('Generated server code is unavailable', non_retryable=True)
@@ -123,9 +132,9 @@ def validate_output(clean: Path) -> None:
         raise RuntimeError('Implementation did not produce a Dockerfile')
 
 
-def stage(language: Language) -> StageSpec:
+def stage(language: Language, artifact_subdir: str = 'implementation') -> StageSpec:
     return StageSpec(
-        role='implementation', artifact_subdir='implementation', workspace_name='service',
+        role='implementation', artifact_subdir=artifact_subdir, workspace_name='service',
         output_subdir='service', heartbeat='Implementing/building service',
         image_label='service',
         image_build=dataclasses.replace(default_agent_image('implementation', 'service'),
@@ -173,9 +182,41 @@ def existing_code_changed(language: Language, checkout: Path, published: Path) -
     return _service_files(language, checkout) != _service_files(language, published)
 
 
+async def prepare_seam(language: Language, session_id: str,
+                       context: dict[str, Any]) -> dict[str, Any]:
+    """Add the seam a change's criteria are observed at, which the code does not have yet
+    (`seam`: the symbols to add, by module), with no behaviour change, and check the code
+    with it against the whole component contract. Returns the stage result, its `path`
+    the code with the seam, or the `conformance_error` that says how it misses the
+    contract."""
+    if not context.get('brief') or not context.get('component_routes'):
+        raise ApplicationError('Only a change with criteria routed to a seam adds one',
+                               non_retryable=True)
+    contract = language.component_contract
+    if contract is None:
+        raise ApplicationError(f'{language.label} has no component contracts', non_retryable=True)
+    result = await run_stage(stage(language, SEAM_DIR), session_id, context, GENERATED_CODE_DIR)
+    if 'questions' in result:
+        return result
+    session_dir = GENERATED_CODE_DIR / session_id
+    components = session_dir / ROUTED_CONTRACT
+    modules = await run_sync(stub_modules, contract, components)
+    async with docker_agents.keep_activity_alive('Checking the seam against its contract'):
+        async with async_context(tempfile.TemporaryDirectory,
+                                 dir=session_dir / SEAM_DIR) as temporary:
+            try:
+                await check_conformance(contract, Path(result['path']), components, modules,
+                                        Path(temporary), session_dir / SEAM_DIR)
+            except RuntimeError as exc:
+                return {'session_id': session_id, 'conformance_error': str(exc)}
+    return result
+
+
 @activity.defn
 async def implement_service(session_id: str, context: dict[str, Any]) -> dict[str, Any]:
     language = session_language(context.get('language'))
+    if context.get('seam'):
+        return await prepare_seam(language, session_id, context)
     if not context.get('onboarding'):
         return await run_stage(stage(language), session_id, context, GENERATED_CODE_DIR)
     session_dir = GENERATED_CODE_DIR / session_id

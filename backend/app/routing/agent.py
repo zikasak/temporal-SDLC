@@ -67,10 +67,22 @@ is written by an author who never sees the code, only stubs of the seam you writ
 seams already have contract-shaped interfaces: a workflow's signals, updates and queries,
 which an in-process workflow test environment can drive with faked activities; a service
 class whose collaborators are passed in. A requirement is `component` when it is not
-`contract` and such a seam exists; name it and write its stubs. Never invent a seam: every
-stubbed symbol must already exist with the stubbed signature, or the check fails. Prefer
-`contract` whenever HTTP can observe the requirement, and choose `unobservable` only when
-no seam exists either.
+`contract` and such a seam exists; name it and write its stubs. Never invent a seam that
+is not needed: a stubbed symbol must already exist with the stubbed signature, or the
+check fails, unless you list it in the seam's `added`.
+
+Only when no existing interface can observe the requirement, the change may add the
+narrowest one that can, before anything is fixed: an entry point the code lacks, such as
+a workflow's signal, update or query, or a method of an existing class, through which the
+outside event the requirement is about reaches the code or its outcome is read. List
+those symbols in `added` and stub them like the others, with the signature the code will
+have. They are first added with no behaviour of their own and the existing tests run
+unchanged against the code with them, so name only symbols that can exist without
+changing what the code does today: never change, rename or remove an existing symbol, and
+put the expected behaviour in their docstrings, not in their existence. Everything else
+the stubs name must already exist. Prefer `contract` whenever HTTP can observe the
+requirement, an existing seam over an added one, and choose `unobservable` only when no
+seam exists or could be added this way.
 
 {instructions}
 """
@@ -85,11 +97,13 @@ def prompt(language: dict) -> str:
         label=language['label'], writes=' and the component contract in components/',
         component=COMPONENT_PROMPT.format(instructions=language['components']),
         routes='"contract", "component" or "unobservable"',
-        seam=',\n  "seam": {"module": "…", "symbols": ["…"]} for `component` only',
+        seam=(',\n  "seam": {"module": "…", "symbols": ["…"], "added": ["…"]} for `component` '
+              'only, `added` only for symbols the code does not have yet'),
         component_reason=(' For `component`, `reason` says how a test drives the seam to '
                           'observe the behaviour, and `seam` names the dotted module of its '
                           'stub and the symbols of it the test uses, by dotted name within '
-                          'the module (`Class` or `Class.method`).'))
+                          'the module (`Class` or `Class.method`). `added` lists those '
+                          'of its stub\'s symbols that the change adds first, if any.'))
 
 
 def validate_completion(root: Path) -> None:

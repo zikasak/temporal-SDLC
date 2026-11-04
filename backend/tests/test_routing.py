@@ -11,7 +11,7 @@ from temporalio.testing import ActivityEnvironment
 from app import docker_agents
 from app.api_design.models import empty_api
 from app.routing import activities
-from app.routing.models import judge_routes
+from app.routing.models import added_seams, judge_routes, read_seam
 from app.test_generation.activities import read_unobservable
 
 REQUIREMENT = {'category': 'functional', 'title': 'T', 'description': 'D', 'priority': 'must'}
@@ -298,3 +298,63 @@ def test_criteria_component_tests_prove_are_routed():
     routes['FR-3'] = {'route': 'unobservable', 'reason': 'R.', 'source': 'routing'}
     assert judge_routes(routes)[0] == 'unobservable'
     assert judge_routes(routes, component_tests=False)[0] == 'unobservable'
+
+
+# A seam the code does not have yet: `merged`, which the change adds first.
+ADDED_STUB = STUB + '''
+    def merged(self, room: str) -> None:
+        """The room's pull request was merged."""
+        ...
+'''
+ADDED_ROUTES = {'routes': [
+    ROUTES['routes'][0],
+    {'requirement_id': 'FR-3', 'route': 'component', 'reason': 'Merge, then read the state.',
+     'seam': {'module': 'service.rooms', 'symbols': ['Rooms.merged', 'Rooms.state'],
+              'added': ['Rooms.merged']}},
+]}
+
+
+async def test_a_seam_the_change_adds_first_is_routed_with_its_stubs_unchecked_until_added(
+        python_session, monkeypatch):
+    runs: list = []
+    fake_component_docker(monkeypatch, {**VALID, 'service/rooms.pyi': ADDED_STUB}, runs,
+                          routes=ADDED_ROUTES, conforms=False)
+    result = await ActivityEnvironment().run(activities.route_requirements, 'session',
+                                             PYTHON_CONTEXT)
+    assert result['routes']['FR-3']['seam'] == {
+        'module': 'service.rooms', 'symbols': ['Rooms.merged', 'Rooms.state'],
+        'added': ['Rooms.merged']}
+    assert added_seams(result['routes']) == {'service.rooms': ['Rooms.merged']}
+    # The stubs are read and kept, but no code has the added symbols yet to check them by.
+    assert (python_session / 'routing/components/service/rooms.pyi').read_text() == ADDED_STUB
+    assert runs == []
+
+
+@pytest.mark.parametrize('added, error', [
+    (['Rooms.reopened'], 'does not define: Rooms.reopened'),
+    ('Rooms.merged', 'names the symbols it adds other than as a list'),
+    ([''], 'names the symbols it adds other than as a list'),
+])
+async def test_a_seam_the_change_adds_names_symbols_its_stub_declares(
+        python_session, monkeypatch, added, error):
+    routes = json.loads(json.dumps(ADDED_ROUTES))
+    routes['routes'][1]['seam']['added'] = added
+    fake_component_docker(monkeypatch, {**VALID, 'service/rooms.pyi': ADDED_STUB}, [],
+                          routes=routes)
+    with pytest.raises(RuntimeError, match=error):
+        await ActivityEnvironment().run(activities.route_requirements, 'session',
+                                        PYTHON_CONTEXT)
+
+
+def test_the_seams_a_change_adds_are_collected_by_module():
+    seam = {'module': 'app.workflows', 'symbols': ['Flow.close', 'Flow.state']}
+    routes = {'FR-1': {'route': 'contract', 'reason': 'R.'},
+              'FR-2': {'route': 'component', 'reason': 'R.', 'seam': seam},
+              'FR-3': {'route': 'component', 'reason': 'R.',
+                       'seam': {**seam, 'added': ['Flow.close']}},
+              'FR-4': {'route': 'component', 'reason': 'R.',
+                       'seam': {**seam, 'added': ['Flow.close', 'Flow.state']}}}
+    assert added_seams(routes) == {'app.workflows': ['Flow.close', 'Flow.state']}
+    assert added_seams({'FR-2': routes['FR-2']}) == {}
+    # An empty list adds nothing, and is not kept.
+    assert 'added' not in read_seam('FR-2', {**seam, 'added': []})

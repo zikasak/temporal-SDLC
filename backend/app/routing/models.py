@@ -3,7 +3,8 @@ written: a criterion no suite can observe stops the delivery while that is still
 from typing import Any, Literal, NotRequired, TypedDict
 
 # `contract`: observable over HTTP against the service as verification builds and runs
-# it. `component`: observable only at a seam of the code, an interface it already has,
+# it. `component`: observable only at a seam of the code, an interface it already has or
+# one the change adds first without changing behaviour (the seam's `added` symbols),
 # described by the stubs of the component contract. `unobservable`: no suite of the
 # delivery can observe it.
 Route = Literal['contract', 'component', 'unobservable']
@@ -30,6 +31,10 @@ class Seam(TypedDict):
     # the module (`Class` or `Class.method`), at which the criterion is observed.
     module: str
     symbols: list[str]
+    # Symbols of the module's stub the code does not have yet: the change adds them, with
+    # no behaviour change, before the criterion is shown failing through them. Absent
+    # when the seam exists as the repository holds it.
+    added: NotRequired[list[str]]
 
 
 class RequirementRoute(TypedDict):
@@ -52,8 +57,31 @@ def read_seam(requirement: str, seam: Any) -> Seam:
                        for item in symbols)):
         raise RuntimeError(f'The seam of requirement {requirement} names no symbols, or more '
                            f'than {MAX_SEAM_SYMBOLS}')
-    return {'module': seam['module'].strip()[:SYMBOL_CHARS],
-            'symbols': list(dict.fromkeys(item.strip() for item in symbols))}
+    read: Seam = {'module': seam['module'].strip()[:SYMBOL_CHARS],
+                  'symbols': list(dict.fromkeys(item.strip() for item in symbols))}
+    added = seam.get('added')
+    if added is None or added == []:
+        return read
+    if (not isinstance(added, list) or len(added) > MAX_SEAM_SYMBOLS
+            or not all(isinstance(item, str) and 0 < len(item.strip()) <= SYMBOL_CHARS
+                       for item in added)):
+        raise RuntimeError(f'The seam of requirement {requirement} names the symbols it adds '
+                           f'other than as a list of at most {MAX_SEAM_SYMBOLS} names')
+    read['added'] = list(dict.fromkeys(item.strip() for item in added))
+    return read
+
+
+def added_seams(routes: dict[str, Any]) -> dict[str, list[str]]:
+    """The symbols a change adds before it reproduces anything, by module: those of
+    every `component` route whose seam the code does not have yet."""
+    added: dict[str, list[str]] = {}
+    for route in routes.values():
+        seam = route.get('seam') if route.get('route') == 'component' else None
+        for symbol in (seam or {}).get('added') or []:
+            symbols = added.setdefault(seam['module'], [])
+            if symbol not in symbols:
+                symbols.append(symbol)
+    return added
 
 
 def read_routes(data: Any, requirement_ids: list[str],

@@ -35,6 +35,11 @@ ADDED_COMPONENT_TESTS = ["tests.test_rooms#test_a_merged_room_is_closed"]
 COMPONENT_IMAGE = "sha256:" + "9" * 64
 CHANGED_COMPONENT_IMAGE = "sha256:" + "8" * 64
 SEAM = {"module": "service.rooms", "symbols": ["Rooms.close"]}
+# A seam the code does not have yet, which the change adds first, and the service built
+# with it.
+ADDED_SEAM = {"module": "service.rooms", "symbols": ["Rooms.close", "Rooms.merged"],
+              "added": ["Rooms.merged"]}
+SEAM_IMAGE = "sha256:" + "7" * 64
 BROKEN_TEST = {"class_name": "RoomsTest", "name": "lists"}
 
 
@@ -151,6 +156,13 @@ class FakeStages:
         self.component_runs: list[tuple[str, list[str]]] = []
         # The tests the component tests' author adds.
         self.component_added = ADDED_COMPONENT_TESTS
+        # The context of each run that adds a seam, whether it fails, and why the code
+        # with the seam does not conform to the component contract, if it does not.
+        self.seam_contexts: list[dict[str, Any]] = []
+        self.fail_seam = False
+        self.seam_conformance_error: str | None = None
+        # The service image of each run of the repository's own contract tests.
+        self.existing_services: list[str] = []
 
     @activity.defn(name="checkout_repository")
     async def checkout_repository(self, session_id: str, repository: dict[str, Any]) -> dict[str, Any]:
@@ -206,6 +218,15 @@ class FakeStages:
 
     @activity.defn(name="implement_service")
     async def implement_service(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
+        if 'seam' in context:
+            self.stages.append('seam')
+            self.seam_contexts.append(context)
+            if self.fail_seam:
+                raise ApplicationError('build failed', non_retryable=True)
+            if self.seam_conformance_error:
+                return {'session_id': session_id,
+                        'conformance_error': self.seam_conformance_error}
+            return {'session_id': session_id, 'image_id': SEAM_IMAGE, 'path': '/seam/service'}
         self.stages.append('implementation')
         self.implementation_contexts.append(context)
         if self.implementation_questions and 'answers' not in context:
@@ -227,9 +248,12 @@ class FakeStages:
         routes = self.routes[min(len(self.routed), len(self.routes) - 1)]
         self.routed.append(context)
         return {'session_id': session_id, 'path': '/routing', 'routes': {
-            item['id']: {'route': routes.get(item['id'], 'contract'),
+            item['id']: {'route': ('component' if routes.get(item['id']) == 'component-added'
+                                   else routes.get(item['id'], 'contract')),
                          'reason': f'Route of {item["id"]}.',
-                         **({'seam': SEAM} if routes.get(item['id']) == 'component' else {})}
+                         **({'seam': SEAM} if routes.get(item['id']) == 'component'
+                            else {'seam': ADDED_SEAM}
+                            if routes.get(item['id']) == 'component-added' else {})}
             for item in context['brief']['requirements']}}
 
     @activity.defn(name='generate_component_tests')
@@ -371,6 +395,7 @@ class FakeStages:
         if test_image == REPOSITORY_TESTS_IMAGE:
             # The repository's own tests, of which the changed service fails some.
             self.existing_runs.append((suite_dir, tracked_tests))
+            self.existing_services.append(service_image)
             passing = self.still_passing + (
                 self.passing_after_correction if service_image == "sha256:" + "c" * 64 else [])
             failed = [case for case in tracked_tests
@@ -381,7 +406,7 @@ class FakeStages:
                     'tracked': {case: {'tests': int(case not in self.not_run),
                                        'failed': int(case in failed)}
                                 for case in tracked_tests}}
-        if service_image == BASELINE_IMAGE:
+        if service_image in (BASELINE_IMAGE, SEAM_IMAGE):
             self.stages.append('baseline-run')
             return {**details, **self._baseline(service_image, test_image, tracked_tests)}
         self.stages.append('verification')

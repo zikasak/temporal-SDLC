@@ -19,6 +19,7 @@ from app.asyncio_utils import run_sync
 from app.config import GENERATED_CODE_DIR
 from app.docker_agents import default_agent_image
 from app.github.checkout import COMPONENT_SNAPSHOT, SNAPSHOT_DIR
+from app.implementation.activities import SEAM_DIR
 from app.languages import RUNTIME_FILE, ComponentSuite, Language
 from app.requirements.document import without_repeated_tables
 from app.review.activities import record_baseline
@@ -125,10 +126,11 @@ async def build_runner(language: Language, session_dir: Path, tests: Path,
 
 
 def stage(language: Language, session_dir: Path, frozen: dict[str, str],
-          requirement_ids: list[str] | None) -> StageSpec:
+          requirement_ids: list[str] | None, repository: Path | None = None) -> StageSpec:
     """`frozen` holds the tests, by identity, whose source the author must leave as it is,
     and `requirement_ids` the criteria it may name as unobservable instead; None for a
-    repair, which may not. Only the first run must add a test."""
+    repair, which may not. Only the first run must add a test. `repository` is the code
+    the runner is built with, by default as the delivery started from it."""
     suite = language.component_suite
     return StageSpec(
         role='test_generation', artifact_subdir=ARTIFACT_DIR, workspace_name='tests',
@@ -141,7 +143,7 @@ def stage(language: Language, session_dir: Path, frozen: dict[str, str],
         validate_output=partial(validate_output, suite, frozen, requirement_ids is not None),
         declined_result=(partial(read_unobservable, requirement_ids)
                          if requirement_ids is not None else None),
-        build_output=partial(build_runner, language, session_dir),
+        build_output=partial(build_runner, language, session_dir, repository=repository),
     )
 
 
@@ -191,8 +193,13 @@ async def generate_component_tests(session_id: str, context: dict[str, Any]) -> 
     repair = context.get('repair')
     frozen = await run_sync(frozen_tests, suite, repository,
                             session_dir / ARTIFACT_DIR / 'suite', repair)
+    # A change that added its seam first is run against the code with the seam.
+    prepared = session_dir / SEAM_DIR / 'service' if context.get('seam_prepared') else None
+    if prepared and not await run_sync(prepared.is_dir):
+        raise ApplicationError('The code with the seam the change added is unavailable',
+                               non_retryable=True)
     result = await run_stage(stage(language, session_dir, frozen,
-                                   None if repair else list(routes)),
+                                   None if repair else list(routes), prepared),
                              session_id, context, GENERATED_CODE_DIR)
     if 'questions' in result or 'unobservable' in result:
         return result
