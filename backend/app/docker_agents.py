@@ -25,7 +25,7 @@ from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.runtime import ANSWERS_FILENAME, PAUSE_EXIT, STATE_FILENAME
 from app.config import OPENAI_API_KEY, OPENAI_BASE_URL, PI_CREDENTIALS_DIR, PI_CREDENTIALS_SHARED
 from app.llm.questions import Question, normalize_questions
-from app.settings.models import ModelSettings, SETTINGS_FILENAME
+from app.settings.models import ModelSettings, SETTINGS_FILENAME, WORKFLOW_LABELS
 from app.settings.storage import get_workflow_settings
 from app.tracing import container_trace_environment
 
@@ -59,6 +59,11 @@ PI_API_KEYS = {'openai': 'OPENAI_API_KEY', 'anthropic': 'ANTHROPIC_API_KEY'}
 # Where a stage keeps the workspace of an agent that paused for the user's answers.
 PAUSED_DIR = 'paused'
 MAX_STATE_BYTES = 16 * 1024 * 1024
+
+
+class AgentCredentialsError(RuntimeError):
+    """The model the stage's settings select has no credentials on this worker. Its message
+    names what to set, never a secret, so it may be shown to the user."""
 
 
 class AgentPaused(Exception):
@@ -314,9 +319,10 @@ def pi_container_args(settings: ModelSettings) -> list[str]:
         # Forward the variable name so its value never enters Docker arguments.
         return ['-e', credential]
     if not (PI_CREDENTIALS_DIR / 'auth.json').is_file():
-        raise RuntimeError(f'Pi credentials not found: {PI_CREDENTIALS_DIR / "auth.json"}. '
-                           'Sign in with pi, set PI_CREDENTIALS_DIR, or configure the '
-                           'selected provider API key (OPENAI_API_KEY or ANTHROPIC_API_KEY).')
+        raise AgentCredentialsError(
+            f'Pi credentials not found: {PI_CREDENTIALS_DIR / "auth.json"}. '
+            'Sign in with pi, set PI_CREDENTIALS_DIR, or configure the '
+            'selected provider API key (OPENAI_API_KEY or ANTHROPIC_API_KEY).')
     if PI_CREDENTIALS_SHARED:
         # Coolify mounts this dedicated volume in the worker and daemon at the
         # same path. Sharing the directory (rather than a single auth.json bind)
@@ -347,8 +353,8 @@ def claude_container_args(settings: ModelSettings) -> list[str]:
         return []
     credentials = [key for key in CLAUDE_CREDENTIALS if os.getenv(key)]
     if not credentials:
-        raise RuntimeError('Claude credentials not found: set ANTHROPIC_API_KEY, or '
-                           'CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`.')
+        raise AgentCredentialsError('Claude credentials not found: set ANTHROPIC_API_KEY, or '
+                                    'CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`.')
     # Secrets are forwarded by name, so their values stay out of the docker arguments.
     args = [argument for key in credentials for argument in ('-e', key)]
     # Agent containers serve only the stages after the API design, whose turns follow
@@ -359,6 +365,15 @@ def claude_container_args(settings: ModelSettings) -> list[str]:
     if os.getenv('ANTHROPIC_BASE_URL'):
         args += ['-e', f'ANTHROPIC_BASE_URL={_container_url(os.environ["ANTHROPIC_BASE_URL"])}']
     return args
+
+
+def check_openai_credentials(settings: ModelSettings) -> None:
+    """The OpenAI-compatible adapter cannot even start without an API key, local servers
+    included, so a stage set to it fails here, saying why, rather than in its container."""
+    if settings.adapter == 'openai' and not OPENAI_API_KEY:
+        raise AgentCredentialsError(
+            f'The selected model ({settings.model}) uses the OpenAI-compatible adapter, but '
+            'OPENAI_API_KEY is not set on the worker (any value works for a local server).')
 
 
 @asynccontextmanager
@@ -401,7 +416,15 @@ async def run_agent(role: str, session_id: str, workspace: Path,
     settings = await get_workflow_settings(role)
     # The snapshot travels as input alongside the workspace, never as host selector env vars.
     await run_sync((workspace / SETTINGS_FILENAME).write_text, settings.model_dump_json())
-    adapter_args = [*(await run_sync(pi_container_args, settings)), *claude_container_args(settings)]
+    try:
+        check_openai_credentials(settings)
+        adapter_args = [*(await run_sync(pi_container_args, settings)),
+                        *claude_container_args(settings)]
+    except AgentCredentialsError as exc:
+        label_text = WORKFLOW_LABELS.get(role, role.replace('_', ' ').capitalize())
+        raise AgentCredentialsError(
+            f'{exc} Set it, or choose another model for the {label_text} stage in '
+            'Settings, then try again.') from exc
     trace_environment = container_trace_environment(session_id, role)
     # A self-hosted loopback Langfuse endpoint also needs Docker's host alias.
     if 'LANGFUSE_BASE_URL' in trace_environment:

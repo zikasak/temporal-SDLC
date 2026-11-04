@@ -26,7 +26,9 @@ with workflow.unsafe.imports_passed_through():
     from app.github.models import PullRequestMention
     from app.temporal.execution_fields import task_fields
     from app.requirements.models import CHANGE_KINDS
-    from app.routing.models import COMPONENT_TESTS_UNRUN, added_seams, judge_routes
+    from app.routing.models import (
+        COMPONENT_TESTS_UNRUN, ROUTING_ERROR, ROUTING_ERROR_CHARS, added_seams, judge_routes,
+    )
     from app.review.models import (
         MAX_REVIEW_ROUNDS, ReviewFinding, ReviewRound, correctable, earlier_findings,
         for_suite, for_worker, review_request,
@@ -107,6 +109,18 @@ def restore_finding(kept: list[str],
         'contract still supports has to stay exactly as the repository holds it: put '
         'each one back as the `restore` entry gives it.'),
         'target': 'tests', 'reason': reason}
+
+
+def routing_failure(exc: BaseException) -> str:
+    """The reason the routing gave for failing, when it is one of its own; only those are
+    shown, as an agent's or provider's error may carry credentials (NFR-2)."""
+    cause: BaseException | None = exc
+    while cause is not None:
+        if isinstance(cause, ApplicationError) and cause.type == ROUTING_ERROR:
+            return str(cause.message or '')[:ROUTING_ERROR_CHARS]
+        cause = cause.cause if isinstance(cause, (ActivityError, ChildWorkflowError,
+                                                  ApplicationError)) else None
+    return ''
 
 
 @workflow.defn
@@ -763,8 +777,10 @@ class DeliveryWorkflow:
             )
         except ChildWorkflowError as exc:
             workflow.logger.warning('Routing failed: %s', exc.cause or exc)
+            reason = routing_failure(exc)
             self.progress.routing_error = ('It could not be decided which tests can prove the '
-                                           'acceptance criteria.')
+                                           'acceptance criteria.' + (f' {reason}' if reason
+                                                                     else ''))
             self.progress.routing_status = 'error'
             return False
         self.progress.routing = {

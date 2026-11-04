@@ -29,7 +29,9 @@ from app.routing.agent import ROUTES
 from app.routing.components import (
     COMPONENTS_DIR, PUBLISHED_DIR, check_conformance, check_seams, read_components,
 )
-from app.routing.models import ROUTES as ALL_ROUTES, added_seams, read_routes
+from app.routing.models import (
+    ROUTES as ALL_ROUTES, ROUTING_ERROR, added_seams, read_routes,
+)
 from app.temporal.tracing import activity_metadata
 from app.tracing import trace_operation
 
@@ -48,9 +50,11 @@ def prepare_routing(language: Language, session_dir: Path, context: dict[str, An
     output, and the contracts with the brief."""
     checkout = session_dir / CHECKOUT_DIR
     if not checkout.is_dir():
-        raise ApplicationError('The repository checkout is unavailable', non_retryable=True)
+        raise ApplicationError('The repository checkout is unavailable', type=ROUTING_ERROR,
+                               non_retryable=True)
     if not brief_ids(context):
-        raise ApplicationError('The change has no requirements to route', non_retryable=True)
+        raise ApplicationError('The change has no requirements to route', type=ROUTING_ERROR,
+                               non_retryable=True)
     excluded = EXCLUDED | set(language.build_dirs)
     copy_regular_files(checkout, workspace / 'routing' / 'repository', include=lambda relative: (
         not any(part.lower() in excluded for part in relative.parts)))
@@ -149,10 +153,18 @@ async def run_routing(session_id: str, context: dict[str, Any]) -> dict[str, Any
                         dockerfile=language.agent_dockerfile))
             except docker_agents.AgentPaused as exc:
                 return paused_result(session_id, exc)
-        routes = await run_sync(read_output, output, brief_ids(context), language)
-        async with docker_agents.keep_activity_alive('Checking the component contract'):
-            components = await publish_components(language, session_dir, output, routes, work,
-                                                  artifact_dir)
+            except docker_agents.AgentCredentialsError as exc:
+                # Routing again cannot help until the settings or the worker change.
+                raise ApplicationError(str(exc), type=ROUTING_ERROR,
+                                       non_retryable=True) from exc
+        try:
+            routes = await run_sync(read_output, output, brief_ids(context), language)
+            async with docker_agents.keep_activity_alive('Checking the component contract'):
+                components = await publish_components(language, session_dir, output, routes,
+                                                      work, artifact_dir)
+        except RuntimeError as exc:
+            # The same routing fails the same way again: the user is told why.
+            raise ApplicationError(str(exc), type=ROUTING_ERROR, non_retryable=True) from exc
     result = {'session_id': session_id, 'routes': routes, 'path': str(artifact_dir),
               **({'components': components} if components else {})}
     manifest = artifact_dir / f'{uuid.uuid4().hex}.json'
