@@ -2,21 +2,24 @@
 test runner with real Docker.
 
 Run: RUN_DOCKER_VERIFICATION_TESTS=1 python -m pytest tests/test_component_contract_docker.py -q
-Requires Docker and outbound access to fetch the base images, mypy and Maven artifacts.
+Requires Docker and outbound access to fetch the base images, mypy, Maven artifacts and npm
+packages.
 """
 import json
 import os
 import re
 import shutil
 import uuid
+from pathlib import Path
 
 import pytest
 
 from app import docker_agents
 from app.agent_workflows.host import build_image
-from app.languages import get_language
+from app.languages import get_language, get_part_language
 from app.routing.components import check_conformance
 from app.test_generation.components import runner_context
+from tests.test_typescript_components import GITHUB_STUB
 
 CONTRACT = get_language('python').component_contract
 
@@ -194,3 +197,34 @@ async def test_java_component_tests_run_in_process_without_a_network(tmp_path):
     assert state['ExitCode'] == 1
     report = (tmp_path / 'reports/TEST-junit-jupiter.xml').read_text()
     assert 'name="aClosedPullRequestCompletesTheFlow()"' in report and '<failure' in report
+
+
+FRONTEND = Path(__file__).resolve().parents[2] / 'frontend'
+TYPESCRIPT = get_part_language('typescript').component_contract
+
+
+@pytest.mark.parametrize('stub, error', [
+    (GITHUB_STUB, None),
+    (GITHUB_STUB.replace('organization: string', 'organization: number'),
+     "src/github: createGitHubApp: the stub's type is not assignable to the code's"),
+    (GITHUB_STUB + 'export declare function reopen(): void;\n',
+     'src/github: reopen is not exported by the code'),
+])
+async def test_typescript_stubs_conform_to_the_web_client_they_describe(tmp_path, stub, error):
+    """This repository's web client, installed from its lock file and checked offline."""
+    repository = tmp_path / 'repository'
+    shutil.copytree(FRONTEND, repository / 'frontend',
+                    ignore=shutil.ignore_patterns('node_modules', 'dist'))
+    components = tmp_path / 'components'
+    (components / 'src').mkdir(parents=True)
+    (components / 'runtime.json').write_text(json.dumps({'project': 'frontend'}))
+    (components / 'src/github.d.ts').write_text(stub)
+    work = tmp_path / 'work'
+    work.mkdir()
+    check = check_conformance(TYPESCRIPT, repository, components, ['src/github'], work,
+                              tmp_path / 'logs')
+    if error is None:
+        await check
+    else:
+        with pytest.raises(RuntimeError, match=re.escape(error)):
+            await check
