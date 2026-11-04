@@ -50,6 +50,9 @@ class TestSuite:
     case_id: Callable[[str, str], str]
     # Files a complete suite always has.
     required: tuple[str, ...] = ()
+    # What of a suite project `test_cases` cannot track, such as a test whose name is
+    # computed, each said as the author is told it: a suite with any is rejected.
+    untracked_tests: Callable[[Path], list[str]] = lambda project: []
     # Files of the template that are the trusted runner (its Dockerfile, .dockerignore and
     # scripts): the author can never replace them.
     runner: tuple[str, ...] = ('Dockerfile', '.dockerignore', 'run-tests.sh')
@@ -148,9 +151,9 @@ class PartLanguage:
     # Directory names holding build output or installed dependencies of such a part.
     build_dirs: tuple[str, ...]
     component_contract: ComponentContract
-    # None until the part's component tests can be written (plans/part-component-contracts.md,
-    # step 2): its routes then stop the delivery as unobservable.
-    component_suite: ComponentSuite | None = None
+    # Its runner is built with the part's sources under `repository/` and the contract's
+    # build arguments, like a service language's.
+    component_suite: ComponentSuite
 
 
 # Dependencies and build output of the other projects a repository may hold beside the

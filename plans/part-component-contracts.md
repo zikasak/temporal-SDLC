@@ -237,6 +237,31 @@ Each step lands with its own tests (`backend/tests/`, stage fakes in
    checked by building the runner against this repository's `frontend/` with a sample
    suite for TR-6, red against the code as it is (no `pull_request` event) and green
    once the event is added.
+   *Done.* Notes for later steps:
+   - The template pins `vitest` 5.1.0, `jsdom` and `typescript` 5.9.3, not
+     `@testing-library/react`. The trusted `vitest.config.mjs` resolves a test file's
+     import of a package the part depends on (such as `react` or the JSX runtime) from
+     the part, so tests and code share one React. A library the suite installs is not
+     resolved this way, because vitest leaves `node_modules` to Node. A library that
+     imports React itself, such as `@testing-library/react`, would therefore bring a
+     second copy. Rendering components waits for a case that needs it.
+   - The report path is the `REPORT` environment variable of the config (default
+     `/tests/reports/junit.xml`), so the composite runner (step 3) sets it per part
+     rather than changing the command.
+   - `vitest list` leaves out skipped and todo tests, but the JUnit report includes them,
+     named as `test_cases` names them. The opt-in Node tests compare both. A file that
+     fails to load is reported as one case named after the file, so its tests show up
+     as missing.
+   - Tests that cannot be tracked (computed names, `each`/`for`, a file the tokenizer
+     cannot read) are named by the new `TestSuite.untracked_tests`, which
+     `validate_output` enforces. The tokenizer reads regular expressions and, in `.tsx`
+     files, elements of JSX as single tokens.
+   - `PartLanguage.component_suite` is now required. The suite is not given to an author
+     or built by a delivery yet: `defer_part_routes` still applies until step 3.
+   - `tests/test_typescript_suite.py` runs the template's vitest against this
+     repository's `frontend/` when `RUN_NODE_CONTRACT_TESTS=1`.
+     `tests/test_component_contract_docker.py` builds the runner image and runs TR-6 red,
+     then green, when `RUN_DOCKER_VERIFICATION_TESTS=1`.
 3. **The composite suite.** `component_suite(...)`, the author's workspace with parts, the
    composite runner, per-part conformance in `build_component_runner` and `prepare_seam`,
    snapshot and freeze of each part's `component-tests/`, the prefix in diagnosis and

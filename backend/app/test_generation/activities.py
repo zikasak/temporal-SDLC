@@ -106,6 +106,10 @@ def validate_output(suite: TestSuite, frozen: dict[str, str] | None, must_add: b
     if (not all((clean / name).is_file() for name in suite.required)
             or not any(clean.glob(suite.test_glob))):
         raise RuntimeError('Test generation did not produce a test suite')
+    untracked = suite.untracked_tests(clean)
+    if untracked:
+        raise RuntimeError('Test generation wrote tests that cannot be tracked: '
+                           + '; '.join(untracked[:MAX_NAMED_TESTS]))
     if frozen is None:
         return
     cases = suite.test_cases(clean)

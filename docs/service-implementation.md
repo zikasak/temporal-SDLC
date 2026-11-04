@@ -593,7 +593,24 @@ flowchart LR
    aliases have mutually assignable types, that each declared member of a class (its
    constructor included) is mutually assignable with the code's, and that enums have the
    same members and values. The routing agent gets `check.mjs` in `/workspace/tools/`.
-   Deliveries cannot write component tests of parts yet (steps 2 and 3 of that plan). Until
+   A TypeScript part's component suite (`app/languages/typescript/suite.py`, template in
+   `component_suite/`) is a vitest project: `tests/**/*.test.ts` or `.test.tsx`, with
+   `vitest`, `jsdom` and `typescript` pinned in its `package.json` and lock file, and a
+   `tsconfig.json` whose `@part/*` path lets the author type-check against the stubs
+   linked as `.part`. Its trusted runner, on `node:24-slim`, installs the part (build
+   argument `PROJECT`) and the suite with `npm ci --ignore-scripts`, collects the suite
+   with `vitest list` and runs `vitest run` without a network, using its own
+   `vitest.config.mjs`. In that config `@part/` resolves to the part's directory and every
+   test runs in jsdom. A test file's import of a package the part depends on, such as
+   React, resolves from the part, so tests and code share one copy. The JUnit report goes
+   to `REPORT`, by default `/tests/reports/junit.xml`. A test's identity is
+   `tests/a.test.ts#Outer > inner > test`: the file, then the names of the describe blocks
+   and of the test, as vitest's report gives them. The host reads it from the test file's
+   tokens, reading a regular expression or an element of JSX as one token. A test or
+   describe block named by anything but a string literal, or written with `each`/`for`,
+   cannot be tracked. `TestSuite.untracked_tests` names such tests, and `validate_output`
+   rejects a suite that has any.
+   Deliveries cannot write component tests of parts yet (step 3 of that plan). Until
    they can, `defer_part_routes` turns every route to a seam of another part into
    `unobservable`, with a reason that names the part and seam, after the part's contract
    has been checked and kept. The delivery then stops as it does for any unobservable
