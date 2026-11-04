@@ -11,8 +11,10 @@ ROOT = Path('/workspace/routing')
 # Present only when the contracts were too large to embed in input.json.
 CONTRACTS = Path('/workspace/contracts')
 ROUTES = 'routes.json'
-# The component contract, beside routes.json.
+# The component contract of the service, beside routes.json, and those of the other parts
+# under PARTS/<part>/COMPONENTS.
 COMPONENTS = 'components'
+PARTS = 'parts'
 
 # What the session's language calls itself and its tests, written by the host.
 LANGUAGE = Path('/workspace/language.json')
@@ -84,26 +86,53 @@ the stubs name must already exist. Prefer `contract` whenever HTTP can observe t
 requirement, an existing seam over an added one, and choose `unobservable` only when no
 seam exists or could be added this way.
 
-{instructions}
+{parts}{instructions}
+"""
+
+PARTS_PROMPT = """
+The repository holds other parts beside the service, which the `parts` entry of the input
+lists by name, directory and language (the service is the part named `service`). A
+requirement about the behaviour of another part, such as what a web client shows, decides
+or sends, is `component` at a seam of that part when an in-process test of the part's own
+code can show it: an exported function or class that a test can call with the inputs the
+requirement is about and whose result or effect it can observe, such as the function a
+page uses to decide what it lists, or the one that builds what the client sends, with the
+browser APIs it touches faked (the test runs in jsdom). Name that part in the seam's
+`part` and write its contract as its language's instructions below say; a seam of the
+service names no part. Such a part is code of the repository, not an outside system. Still
+prefer `contract` whenever the service's HTTP API shows the behaviour, and a seam of the
+service when the service decides it. A seam the part lacks may be added as for the
+service: an existing function or type exported as it is, with no behaviour change. The
+`reason` of such a route says what the seam shows and what it does not, such as which items
+a page lists but not how they are drawn.
+
 """
 
 
 def prompt(language: dict) -> str:
-    """The prompt, with the component route where the language has component contracts."""
-    if not language.get('components'):
+    """The prompt, with the component route where the service's language or another part's
+    has component contracts."""
+    parts = language.get('part_components') or {}
+    instructions = '\n\n'.join([*([language['components']] if language.get('components')
+                                   else []), *parts.values()])
+    if not instructions:
         return PROMPT.format(label=language['label'], component='', component_reason='', writes='',
                              routes='"contract" or "unobservable"', seam='')
     return PROMPT.format(
         label=language['label'], writes=' and the component contract in components/',
-        component=COMPONENT_PROMPT.format(instructions=language['components']),
+        component=COMPONENT_PROMPT.format(instructions=instructions,
+                                          parts=PARTS_PROMPT if parts else ''),
         routes='"contract", "component" or "unobservable"',
-        seam=(',\n  "seam": {"module": "…", "symbols": ["…"], "added": ["…"]} for `component` '
-              'only, `added` only for symbols the code does not have yet'),
+        seam=(',\n  "seam": {' + ('"part": "…", ' if parts else '')
+              + '"module": "…", "symbols": ["…"], "added": ["…"]} for `component` only, '
+              + ('`part` only for a seam of a part other than the service, ' if parts else '')
+              + '`added` only for symbols the code does not have yet'),
         component_reason=(' For `component`, `reason` says how a test drives the seam to '
-                          'observe the behaviour, and `seam` names the dotted module of its '
-                          'stub and the symbols of it the test uses, by dotted name within '
-                          'the module (`Class` or `Class.method`). `added` lists those '
-                          'of its stub\'s symbols that the change adds first, if any.'))
+                          'observe the behaviour, and `seam` names the module of its stub, '
+                          'as its contract\'s instructions name modules, and the symbols of '
+                          'it the test uses, by dotted name within the module (`Class` or '
+                          '`Class.method`). `added` lists those of its stub\'s symbols that '
+                          'the change adds first, if any.'))
 
 
 def validate_completion(root: Path) -> None:
@@ -113,11 +142,18 @@ def validate_completion(root: Path) -> None:
         raise RuntimeError('Agent finished without a readable routes.json') from exc
     if not isinstance(routes, dict) or not isinstance(routes.get('routes'), list):
         raise RuntimeError('routes.json does not hold a list of routes')
-    if (any(isinstance(item, dict) and item.get('route') == 'component'
-            for item in routes['routes'])
-            and not any(item.is_file() and item.name != 'runtime.json'
-                        for item in (root / COMPONENTS).rglob('*'))):
-        raise RuntimeError('A requirement is routed to a seam, but components/ holds no stub')
+    for item in routes['routes']:
+        if not isinstance(item, dict) or item.get('route') != 'component':
+            continue
+        seam = item.get('seam')
+        part = seam.get('part') if isinstance(seam, dict) else None
+        if part is not None and (not isinstance(part, str) or '..' in part.split('/')):
+            raise RuntimeError(f'A seam names an invalid part: {str(part)[:80]}')
+        components = Path(PARTS, part, COMPONENTS) if part else Path(COMPONENTS)
+        if not any(file.is_file() and file.name != 'runtime.json'
+                   for file in (root / components).rglob('*')):
+            raise RuntimeError(f'A requirement is routed to a seam, but {components}/ holds '
+                               'no stub')
 
 
 async def main() -> None:

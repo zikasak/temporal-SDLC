@@ -218,6 +218,21 @@ Each step lands with its own tests (`backend/tests/`, stage fakes in
    of that part are not written yet, so no workflow code changes and the delivery stops as
    it does today, but with the right reason. Check the reader against the stubs of
    `createGitHubApp` and `sessionAttention` (as `added`) of this repository.
+   *Done.* Notes for later steps:
+   - `added_seams` still keys by module alone, and `routes.json` has no `parts` yet. Both
+     are only needed once part routes reach the delivery, so they move to step 3, together
+     with dropping `defer_part_routes`.
+   - `check.mjs` copies each stub beside its module as a `.ts` file, not a `.d.ts` one.
+     That way the part's `skipLibCheck` cannot skip it, relative imports resolve as the
+     module's do, and types without `export` stay local to the stub. Interfaces and type
+     aliases are compared whole. Classes are compared member by member, so a class stub
+     may hold only the seam's members. JSDoc is part of a stub's statements, as Java's
+     Javadoc and Python's docstrings are, so changing a published stub's documentation
+     counts as changing it.
+   - The routing agent installs a part in `/tmp`, because its workspace under
+     `/workspace/routing` is copied back as its output.
+   - `tests/test_typescript_components.py` runs `check.mjs` against this repository's
+     `frontend/` when `RUN_NODE_CONTRACT_TESTS=1`.
 2. **The TypeScript component suite.** Template, runner, `test_cases` and `case_id`,
    checked by building the runner against this repository's `frontend/` with a sample
    suite for TR-6, red against the code as it is (no `pull_request` event) and green

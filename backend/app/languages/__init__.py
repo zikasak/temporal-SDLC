@@ -1,7 +1,8 @@
-"""Registry of the languages a service can be generated, tested and verified in.
+"""Registry of the languages a service can be generated, tested and verified in, and of
+the languages of the other parts of a repository that component contracts can describe.
 
-To add one, create a package here that calls `register` with its `Language` and
-import it at the bottom of this file.
+To add one, create a package here that calls `register` with its `Language` (or
+`register_part` with its `PartLanguage`) and import it at the bottom of this file.
 """
 
 from collections.abc import Callable
@@ -133,6 +134,25 @@ class Language:
     component_suite: ComponentSuite | None = None
 
 
+@dataclass(frozen=True)
+class PartLanguage:
+    """The language of a part of a repository other than the service, such as a web
+    client beside it, whose behaviour criteria may be observed at seams of its own code.
+    A service language is not a part language: the service keeps its `Language`."""
+    # The registry key, and what a part's routes record as its language.
+    name: str
+    # What the routing agent and the user are shown, such as "TypeScript".
+    label: str
+    # Whether the project in this directory of a checkout is one of the language's.
+    detect: Callable[[Path], bool]
+    # Directory names holding build output or installed dependencies of such a part.
+    build_dirs: tuple[str, ...]
+    component_contract: ComponentContract
+    # None until the part's component tests can be written (plans/part-component-contracts.md,
+    # step 2): its routes then stop the delivery as unobservable.
+    component_suite: ComponentSuite | None = None
+
+
 # Dependencies and build output of the other projects a repository may hold beside the
 # service, such as a web frontend: never sources, whatever the service's language.
 OTHER_PARTS_BUILD_DIRS = ("node_modules", "dist", "__pycache__", ".venv", "venv")
@@ -143,12 +163,31 @@ class UnsupportedLanguage(ValueError):
 
 
 _LANGUAGES: dict[str, Language] = {}
+_PART_LANGUAGES: dict[str, PartLanguage] = {}
 
 
 def register(language: Language) -> Language:
     if language.name in _LANGUAGES:
         raise ValueError(f"Language {language.name} is already registered.")
     _LANGUAGES[language.name] = language
+    return language
+
+
+def register_part(language: PartLanguage) -> PartLanguage:
+    if language.name in _PART_LANGUAGES:
+        raise ValueError(f"Part language {language.name} is already registered.")
+    _PART_LANGUAGES[language.name] = language
+    return language
+
+
+def part_languages() -> list[PartLanguage]:
+    return list(_PART_LANGUAGES.values())
+
+
+def get_part_language(name: str) -> PartLanguage:
+    language = _PART_LANGUAGES.get(name)
+    if language is None:
+        raise UnsupportedLanguage(f"Unsupported part language {name!r}.")
     return language
 
 
@@ -170,4 +209,4 @@ def get_language(name: str | None) -> Language:
     return language
 
 
-from app.languages import java, python  # noqa: E402,F401
+from app.languages import java, python, typescript  # noqa: E402,F401

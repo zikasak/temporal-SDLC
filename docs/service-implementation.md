@@ -560,6 +560,45 @@ flowchart LR
    routing with any `added` skips `check_conformance`; the whole contract is checked once
    they are added (step 1a). `added_seams` in `app/routing/models.py` collects them by
    module.
+   A repository may hold other **parts** beside the service, such as a web client
+   (`plans/part-component-contracts.md`). `component_parts` (`app/routing/parts.py`)
+   finds them: the service (part `service`, root `.`) and every project
+   `repository_parts` finds that a registered `PartLanguage` (`app/languages/`) detects,
+   named by its directory (`frontend`), leaving out projects inside another part or inside
+   the service's sources. TypeScript is the only part language so far: a `package.json`
+   that depends on `typescript` beside a `tsconfig.json`. When there are other parts, the
+   routing input lists them as `parts` (name, root, language label), `language.json` gives
+   each part language's contract instructions as `part_components`, and the prompt says a
+   criterion about such a part is `component` at a seam of its own code when an in-process
+   test can show it, with HTTP and the service's seams still preferred. The seam of such a
+   route names its part, `seam: {part, module, symbols, added?}`; `read_routes` rejects a
+   part the input did not name, and a seam without `part` is the service's. A part `P`'s
+   contract is written in `parts/P/components/`, its published one is
+   `contracts/parts/P/components/`, and the checked one is kept in
+   `routing/parts/P/components/` (the service's stay where they were). `publish_components`
+   reads and checks each part's contract with that part's `ComponentContract`, and
+   `runtime.json`'s `project` must be the part's directory. A TypeScript stub
+   (`app/languages/typescript/components.py`) is a `.d.ts` file at the module's path within
+   the part (`src/github.d.ts`; the seam's `module` is `src/github`). It holds only
+   `import type`, exported function, constant, class, interface, type and enum
+   declarations with JSDoc, and types without `export` that describe shapes the exports
+   use. Its symbols are its exports and the members of exported classes, interfaces and
+   enums (`Rooms.close`, `Rooms.constructor`). The host refuses bodies, initializers other
+   than literals, default exports, re-exports and code. The trusted runner
+   (`app/languages/typescript/component_contract/`, on `node:24-slim`) installs the part
+   with `npm ci --ignore-scripts`, then `check.mjs` copies each stub beside its module and
+   compiles it with the part's own TypeScript and `tsconfig.json`, so a declaration with a
+   body is an error. It checks that every export of the stub is exported by the module
+   (`… is not exported by the code`), that functions, constants, interfaces and type
+   aliases have mutually assignable types, that each declared member of a class (its
+   constructor included) is mutually assignable with the code's, and that enums have the
+   same members and values. The routing agent gets `check.mjs` in `/workspace/tools/`.
+   Deliveries cannot write component tests of parts yet (steps 2 and 3 of that plan). Until
+   they can, `defer_part_routes` turns every route to a seam of another part into
+   `unobservable`, with a reason that names the part and seam, after the part's contract
+   has been checked and kept. The delivery then stops as it does for any unobservable
+   criterion. `is_service_file` leaves out `component-tests/` at any depth, so the
+   component tests of each part are never treated as sources.
 1a. **Seam.** When a route has `added` symbols, the delivery adds them before any test is
    written (`_prepare_seam` in `DeliveryWorkflow`): `ImplementationWorkflow` runs with
    `seam` (the symbols by module) in its context, and `implement_service` hands it to

@@ -15,6 +15,7 @@ from app.api_design.models import empty_api
 from app.languages import get_language
 from app.routing import activities
 from app.routing.models import ROUTING_ERROR, added_seams, judge_routes, read_seam
+from app.routing.parts import SERVICE_PART, ComponentPart
 from app.test_generation.activities import read_unobservable
 
 REQUIREMENT = {'category': 'functional', 'title': 'T', 'description': 'D', 'priority': 'must'}
@@ -315,7 +316,8 @@ def test_a_language_without_component_contracts_routes_to_no_seam(tmp_path):
     (tmp_path / 'routes.json').write_text(json.dumps(COMPONENT_ROUTES))
     with pytest.raises(RuntimeError, match='FR-3 has no valid route; the routes are '
                                            'contract, unobservable'):
-        activities.read_output(tmp_path, ['FR-2', 'FR-3'], language)
+        activities.read_output(tmp_path, ['FR-2', 'FR-3'], language,
+                               [ComponentPart(SERVICE_PART, '.', language)])
 
 
 JAVA_STUB = """package com.example.rooms;
@@ -475,3 +477,178 @@ def test_the_seams_a_change_adds_are_collected_by_module():
     assert added_seams({'FR-2': routes['FR-2']}) == {}
     # An empty list adds nothing, and is not kept.
     assert 'added' not in read_seam('FR-2', {**seam, 'added': []})
+
+
+# A web client beside the Python service: criteria about it are observed at its own code.
+FRONTEND = {
+    'repository/frontend/package.json': json.dumps({'devDependencies': {'typescript': '^5'}}),
+    'repository/frontend/package-lock.json': '{}',
+    'repository/frontend/tsconfig.json': '{}',
+    'repository/frontend/src/github.ts': 'export function createGitHubApp() {}',
+    'repository/frontend/node_modules/typescript/package.json': '{}',
+}
+GITHUB_STUB = ('/** Subscribes the app to pull_request events. */\n'
+               'export declare function createGitHubApp(name: string, organization: string): '
+               'void;\n')
+PART_CONTRACT = {'parts/frontend/components/runtime.json': json.dumps({'project': 'frontend'}),
+                 'parts/frontend/components/src/github.d.ts': GITHUB_STUB}
+PART_SEAM = {'part': 'frontend', 'module': 'src/github', 'symbols': ['createGitHubApp']}
+PART_ROUTES = {'routes': [
+    ROUTES['routes'][0],
+    {'requirement_id': 'FR-3', 'route': 'component', 'reason': 'Read the posted manifest.',
+     'seam': PART_SEAM},
+]}
+
+
+@pytest.fixture
+def frontend_session(python_session):
+    for path, text in FRONTEND.items():
+        (python_session / path).parent.mkdir(parents=True, exist_ok=True)
+        (python_session / path).write_text(text)
+    return python_session
+
+
+def fake_part_docker(monkeypatch, components, runs, sent, routes=PART_ROUTES):
+    fake_component_docker(monkeypatch, {}, runs, routes=routes)
+    fake = docker_agents.docker
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'cp' and args[1] == '-a':
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.update({item.name: archive.extractfile(item).read().decode()
+                             for item in archive.getmembers() if item.isfile()})
+            return ''
+        result = await fake(*args, **kwargs)
+        if args[0] == 'cp' and args[1].endswith(':/workspace/routing/.'):
+            for path, text in components.items():
+                (Path(args[2]) / path).parent.mkdir(parents=True, exist_ok=True)
+                (Path(args[2]) / path).write_text(text)
+        return result
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+
+
+async def test_a_criterion_of_another_part_is_routed_to_its_seam_but_stops_the_delivery_for_now(
+        frontend_session, monkeypatch):
+    published = 'export declare function takeAppReturn(): null;\n'
+    file = frontend_session / 'repository/contracts/parts/frontend/components/src/app.d.ts'
+    file.parent.mkdir(parents=True)
+    file.write_text(published)
+    runs: list = []
+    sent: dict = {}
+    fake_part_docker(monkeypatch, {**PART_CONTRACT,
+                                   'parts/frontend/components/src/app.d.ts': published},
+                     runs, sent)
+    result = await ActivityEnvironment().run(activities.route_requirements, 'session',
+                                             PYTHON_CONTEXT)
+    # The router is told of the part, how to write its contract and how to check it, and
+    # gets the part's published contract, but not its installed dependencies.
+    assert json.loads(sent['input.json'])['parts'] == [
+        {'name': 'service', 'root': '.', 'language': 'Python (FastAPI)'},
+        {'name': 'frontend', 'root': 'frontend', 'language': 'TypeScript'}]
+    language = json.loads(sent['language.json'])
+    assert 'Component contract (Python)' in language['components']
+    assert language['part_components']['typescript'].startswith(
+        'Component contract (TypeScript) of a part')
+    assert sent['tools/check.mjs'].startswith('// Trusted tool of TypeScript component')
+    assert sent['routing/parts/frontend/components/src/app.d.ts'] == published
+    assert 'routing/repository/frontend/src/github.ts' in sent
+    assert not any('node_modules' in name for name in sent)
+    # The part's contract is checked against its code and kept beside the routing.
+    build, run = runs
+    assert {'Dockerfile', 'check.mjs', 'check.sh', 'components/runtime.json',
+            'components/src/github.d.ts', 'repository/frontend/src/github.ts',
+            'repository/frontend/package-lock.json'} <= set(build['files'])
+    assert 'PROJECT=frontend' in build['build']
+    assert '--network=none' in run['run'] and run['run'][-1] == 'src/github'
+    kept = frontend_session / 'routing/parts/frontend/components'
+    assert (kept / 'src/github.d.ts').read_text() == GITHUB_STUB
+    # Its component tests cannot be written yet: the criterion stops the delivery, saying
+    # where it can be observed.
+    route = result['routes']['FR-3']
+    assert route == {'route': 'unobservable', 'reason': (
+        'Only a component test of the part frontend (TypeScript) can observe it, at '
+        'src/github (createGitHubApp), and deliveries cannot write component tests of parts '
+        'other than the service yet. Read the posted manifest.')}
+    assert 'components' not in result
+    assert judge_routes({key: {**value, 'source': 'routing'}
+                         for key, value in result['routes'].items()})[0] == 'unobservable'
+
+
+async def test_a_seam_a_part_adds_first_is_kept_unchecked(frontend_session, monkeypatch):
+    runs: list = []
+    routes = json.loads(json.dumps(PART_ROUTES))
+    routes['routes'][1]['seam'] = {'part': 'frontend', 'module': 'src/Flows',
+                                   'symbols': ['sessionAttention'],
+                                   'added': ['sessionAttention']}
+    stub = ('export declare function sessionAttention(flow: unknown, body: unknown): '
+            'string[];\n')
+    fake_part_docker(monkeypatch, {
+        'parts/frontend/components/runtime.json': json.dumps({'project': 'frontend'}),
+        'parts/frontend/components/src/Flows.d.ts': stub}, runs, {}, routes=routes)
+    result = await ActivityEnvironment().run(activities.route_requirements, 'session',
+                                             PYTHON_CONTEXT)
+    assert runs == []
+    assert (frontend_session / 'routing/parts/frontend/components/src/Flows.d.ts'
+            ).read_text() == stub
+    assert result['routes']['FR-3']['route'] == 'unobservable'
+
+
+@pytest.mark.parametrize('seam, components, error', [
+    ({**PART_SEAM, 'part': 'backend'}, PART_CONTRACT,
+     'names a part the repository does not have: backend; its other parts are frontend'),
+    (PART_SEAM, {**PART_CONTRACT, 'parts/frontend/components/runtime.json': json.dumps(
+        {'project': '.'})}, 'part frontend is unusable: The component contract\'s '
+                            'runtime.json is unusable: project . is not a TypeScript project'),
+    (PART_SEAM, {**PART_CONTRACT, 'parts/frontend/components/src/github.d.ts':
+                 'export declare function createGitHubApp(): void { }\n'},
+     'part frontend is unusable: The stub src/github.d.ts is not a stub'),
+    ({**PART_SEAM, 'symbols': ['takeAppReturn']}, PART_CONTRACT,
+     'names symbols its stub does not define: takeAppReturn'),
+    # A seam of the part with its stubs where the service's belong.
+    (PART_SEAM, {'components/runtime.json': json.dumps({'project': 'frontend'}),
+                 'components/src/github.d.ts': GITHUB_STUB},
+     'part frontend is unusable: The component contract has no runtime.json'),
+])
+async def test_a_part_seam_needs_a_checked_contract_of_that_part(
+        frontend_session, monkeypatch, seam, components, error):
+    routes = json.loads(json.dumps(PART_ROUTES))
+    routes['routes'][1]['seam'] = seam
+    fake_part_docker(monkeypatch, components, [], {}, routes=routes)
+    with pytest.raises(ApplicationError, match=re.escape(error)):
+        await ActivityEnvironment().run(activities.route_requirements, 'session',
+                                        PYTHON_CONTEXT)
+    assert not (frontend_session / 'routing/parts').exists()
+
+
+async def test_a_repository_without_other_parts_is_routed_as_before(python_session, monkeypatch):
+    sent: dict = {}
+    fake_part_docker(monkeypatch, PART_CONTRACT, [], sent)
+    with pytest.raises(ApplicationError, match='names a part the repository does not have: '
+                                               'frontend; its other parts are none'):
+        await ActivityEnvironment().run(activities.route_requirements, 'session',
+                                        PYTHON_CONTEXT)
+    assert 'parts' not in json.loads(sent['input.json'])
+    assert 'part_components' not in json.loads(sent['language.json'])
+
+
+def test_the_router_is_told_of_the_other_parts_only_when_the_repository_has_them(tmp_path):
+    from app.routing import agent
+    service = {'label': 'Python (FastAPI)', 'components': 'Component contract (Python).'}
+    assert '"part"' not in agent.prompt(service)
+    assert 'other parts beside the service' not in agent.prompt(service)
+    with_parts = agent.prompt({**service, 'part_components': {
+        'typescript': 'Component contract (TypeScript) of a part.'}})
+    assert 'other parts beside the service' in with_parts
+    assert 'Component contract (Python).' in with_parts
+    assert 'Component contract (TypeScript) of a part.' in with_parts
+    assert '"seam": {"part": "…", "module"' in with_parts
+    # A part's seam needs stubs of that part.
+    (tmp_path / 'routes.json').write_text(json.dumps(PART_ROUTES))
+    (tmp_path / 'components').mkdir()
+    (tmp_path / 'components/app.pyi').write_text('x: int\n')
+    with pytest.raises(RuntimeError, match='parts/frontend/components/ holds no stub'):
+        agent.validate_completion(tmp_path)
+    (tmp_path / 'parts/frontend/components/src').mkdir(parents=True)
+    (tmp_path / 'parts/frontend/components/src/github.d.ts').write_text(GITHUB_STUB)
+    agent.validate_completion(tmp_path)

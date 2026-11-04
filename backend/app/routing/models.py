@@ -32,8 +32,12 @@ ROUTING_ERROR_CHARS = 800
 
 
 class Seam(TypedDict):
-    # The dotted module the stubs describe, and the symbols of it, by dotted name within
-    # the module (`Class` or `Class.method`), at which the criterion is observed.
+    # The part of the repository the seam is in, by its directory, such as `frontend`;
+    # absent for the service.
+    part: NotRequired[str]
+    # The module the stubs describe (dotted for the service's languages, a path within
+    # the part for a TypeScript part), and the symbols of it, by dotted name within the
+    # module (`Class` or `Class.method`), at which the criterion is observed.
     module: str
     symbols: list[str]
     # Symbols of the module's stub the code does not have yet: the change adds them, with
@@ -51,11 +55,18 @@ class RequirementRoute(TypedDict):
     seam: NotRequired[Seam]
 
 
-def read_seam(requirement: str, seam: Any) -> Seam:
-    """A `component` route's untrusted seam: a module and the symbols of it it names."""
+def read_seam(requirement: str, seam: Any, parts: tuple[str, ...] = ()) -> Seam:
+    """A `component` route's untrusted seam: the part it is in, one of `parts` (the
+    repository's parts other than the service) or none for the service, and a module and
+    the symbols of it it names."""
     if not isinstance(seam, dict) or not isinstance(seam.get('module'), str):
         raise RuntimeError(f'The component route of requirement {requirement} names no seam '
                            'module')
+    part = seam.get('part')
+    if part is not None and (not isinstance(part, str) or part.strip() not in parts):
+        named = ', '.join(parts) or 'none but the service'
+        raise RuntimeError(f'The seam of requirement {requirement} names a part the repository '
+                           f'does not have: {str(part)[:80]}; its other parts are {named}')
     symbols = seam.get('symbols')
     if (not isinstance(symbols, list) or not symbols or len(symbols) > MAX_SEAM_SYMBOLS
             or not all(isinstance(item, str) and 0 < len(item.strip()) <= SYMBOL_CHARS
@@ -64,6 +75,8 @@ def read_seam(requirement: str, seam: Any) -> Seam:
                            f'than {MAX_SEAM_SYMBOLS}')
     read: Seam = {'module': seam['module'].strip()[:SYMBOL_CHARS],
                   'symbols': list(dict.fromkeys(item.strip() for item in symbols))}
+    if part is not None:
+        read = {'part': part.strip(), **read}
     added = seam.get('added')
     if added is None or added == []:
         return read
@@ -89,11 +102,11 @@ def added_seams(routes: dict[str, Any]) -> dict[str, list[str]]:
     return added
 
 
-def read_routes(data: Any, requirement_ids: list[str],
-                routes: tuple[str, ...] = ROUTES) -> dict[str, dict[str, Any]]:
+def read_routes(data: Any, requirement_ids: list[str], routes: tuple[str, ...] = ROUTES,
+                parts: tuple[str, ...] = ()) -> dict[str, dict[str, Any]]:
     """An agent's untrusted routing as {requirement ID: {route, reason, seam?}}: one entry
     with a reason for each of `requirement_ids`, no other, each with one of `routes`, and
-    a `component` route with the seam it names."""
+    a `component` route with the seam it names, in the service or one of `parts`."""
     items = data.get('routes') if isinstance(data, dict) else None
     if not isinstance(items, list):
         raise RuntimeError('The routing is not a list of routes')
@@ -115,11 +128,33 @@ def read_routes(data: Any, requirement_ids: list[str],
             raise RuntimeError(f'The route of requirement {requirement} gives no reason')
         result[requirement] = {'route': item['route'], 'reason': reason[:REASON_CHARS]}
         if item['route'] == 'component':
-            result[requirement]['seam'] = read_seam(requirement, item.get('seam'))
+            result[requirement]['seam'] = read_seam(requirement, item.get('seam'), parts)
     missing = [requirement for requirement in requirement_ids if requirement not in result]
     if missing:
         raise RuntimeError(f'Requirements without a route: {", ".join(missing)}')
     return result
+
+
+def defer_part_routes(routes: dict[str, dict[str, Any]],
+                      labels: dict[str, str]) -> dict[str, dict[str, Any]]:
+    """The routes with every `component` route at a seam of a part other than the service
+    made `unobservable`: deliveries cannot write component tests of such parts yet
+    (plans/part-component-contracts.md, step 3). `labels` gives each part's language."""
+    deferred: dict[str, dict[str, Any]] = {}
+    for requirement, route in routes.items():
+        part = (route.get('seam') or {}).get('part') if route['route'] == 'component' else None
+        if part is None:
+            deferred[requirement] = route
+            continue
+        seam = route['seam']
+        reason = (f'Only a component test of the part {part} ({labels.get(part, "unknown")}) '
+                  f'can observe it, at {seam["module"]} ({", ".join(seam["symbols"])}), and '
+                  'deliveries cannot write component tests of parts other than the service '
+                  f'yet. {route["reason"]}')
+        deferred[requirement] = {**{key: value for key, value in route.items()
+                                    if key != 'seam'},
+                                 'route': 'unobservable', 'reason': reason[:REASON_CHARS]}
+    return deferred
 
 
 # Why a change whose component tests were written stops before its baseline: step 4 of

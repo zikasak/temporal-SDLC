@@ -37,9 +37,11 @@ BARE_REPOSITORY = re.compile(r'(readme|licen[cs]e|copying)(\..*)?|\.git.*|\.gith
 
 def is_service_file(language: Language, relative: Path) -> bool:
     """Source files only: never tests, build metadata, agent logs or the repository's
-    contract and component tests and published contract."""
+    contract tests, published contracts (of every part, under contracts/) and component
+    tests, the service's at the root and each other part's inside it."""
     excluded = EXCLUDED | set(language.implementation.test_dirs) | set(language.build_dirs)
-    return (relative.parts[0] not in (TESTS_DIR, COMPONENT_TESTS_DIR, CONTRACTS_DIR)
+    return (relative.parts[0] not in (TESTS_DIR, CONTRACTS_DIR)
+            and COMPONENT_TESTS_DIR not in relative.parts
             and not any(part.lower() in excluded for part in relative.parts))
 
 
