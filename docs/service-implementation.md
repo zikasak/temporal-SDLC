@@ -664,7 +664,13 @@ flowchart LR
    suite has) and each part's stubs with `contracts/parts/P/components/`.
    `publish_repository` pushes part `P`'s tests to `P/component-tests/`, only what the
    part's suite publishes, and its stubs to `contracts/parts/P/components/`, reading the
-   parts from the routing, so no workflow patch is needed.
+   parts from the routing, so no workflow patch is needed. The pull request's proofs name
+   a seam of another part with its part (`frontend: src/github`), and the component
+   suite's heading then says where each part's tests and stubs are. A component run of a
+   composite suite counts its tests by part as `parts` (`{service: {tests, passed,
+   failures, errors, skipped}, frontend: {…}}`, by `CompositeSuite.part_of`), and the
+   delivery page shows each part's counts and failures under its name, and names the part
+   in the routing line of a criterion routed to it.
 1a. **Seam.** When a route has `added` symbols, the delivery adds them before any test is
    written (`_prepare_seam` in `DeliveryWorkflow`): `ImplementationWorkflow` runs with
    `seam` (the symbols by module) in its context, and `implement_service` hands it to

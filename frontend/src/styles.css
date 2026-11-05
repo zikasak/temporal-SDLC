@@ -817,6 +817,10 @@ h2 {
   font-variant-numeric: tabular-nums;
 }
 
+.part-run h5 {
+  margin: 12px 0 4px;
+}
+
 .verification-outcome {
   font-weight: 650;
 }

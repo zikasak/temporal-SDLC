@@ -41,6 +41,15 @@ class TrackedTest(TypedDict):
     failed: int
 
 
+class PartCounts(TypedDict):
+    """The outcomes of a component run's tests of one part of the repository."""
+    tests: int
+    passed: int
+    failures: int
+    errors: int
+    skipped: int
+
+
 class VerificationResult(TypedDict):
     session_id: str
     # `not_implemented`: this kind of task has no check yet, so nothing was run.
@@ -63,6 +72,9 @@ class VerificationResult(TypedDict):
     # Tests in the suite's sources that the run has no report of (the first few), when
     # the caller named tests: whatever kept them from running, they proved nothing.
     missing_tests: list[str] | None
+    # A component run of a suite of more than the service: the outcomes by part, the
+    # service's as `service`. Absent otherwise, and from results recorded before it existed.
+    parts: NotRequired[dict[str, PartCounts]]
     service_log: str
     runner_log: str
     error: str | None

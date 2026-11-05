@@ -50,6 +50,15 @@ class CompositeSuite(ComponentSuite):
     runners (app/test_generation/components.py)."""
     members: tuple[SuiteMember, ...] = field(default=())
 
+    def part_of(self, class_name: str) -> str:
+        """The member a report entry of `class_name` belongs to, by its name."""
+        for member in sorted((member for member in self.members if not member.service),
+                             key=lambda member: len(member.prefix), reverse=True):
+            if class_name.startswith(member.prefix):
+                return member.name
+        service = next((member for member in self.members if member.service), None)
+        return service.name if service else self.members[0].name
+
     def has_tests(self, project: Path) -> bool:
         # Every part of the suite proves criteria of its own.
         return all(member.suite.has_tests(project / member.directory)

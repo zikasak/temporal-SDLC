@@ -31,7 +31,7 @@ from app.test_generation.activities import copy_test_suite
 from app.languages import (
     Language, TestReports, TestSuite, UnsupportedLanguage, get_language,
 )
-from app.languages.composite import PARTS_DIR as SUITE_PARTS_DIR
+from app.languages.composite import PARTS_DIR as SUITE_PARTS_DIR, CompositeSuite
 from app.routing.parts import check_parts, component_parts
 from app.test_generation.components import ARTIFACT_DIR as COMPONENT_TESTS_ARTIFACT
 from app.test_generation.components import build_runner, delivery_suite
@@ -106,11 +106,15 @@ def _extract_reports(archive: bytes, destination: Path, reports: TestReports) ->
 def summarize_reports(directory: Path, reports: TestReports,
                       tracked: dict[str, TrackedTest] | None = None,
                       case_id: Callable[[str, str], str] | None = None,
-                      suite_tests: set[str] | None = None) -> dict:
+                      suite_tests: set[str] | None = None,
+                      part_of: Callable[[str], str] | None = None) -> dict:
     """Count JUnit XML testcase outcomes, not redundant nested suite summary attributes.
     The outcomes of the tests in `tracked`, keyed by `case_id`, are recorded in it, and
-    the tests of `suite_tests` without any report entry are returned as missing."""
+    the tests of `suite_tests` without any report entry are returned as missing. With
+    `part_of`, which names the part of the repository a report entry's class name belongs
+    to, the outcomes are counted by part as well, as `parts`."""
     totals = dict(tests=0, passed=0, failures=0, errors=0, skipped=0)
+    parts: dict[str, dict[str, int]] = {}
     reported: set[str] = set()
     failures: list[TestFailure] = []
     skips: list[TestSkip] = []
@@ -140,6 +144,12 @@ def summarize_reports(directory: Path, reports: TestReports,
                    else 'failures' if outcome.tag == 'failure' else 'errors')
             totals['tests'] += 1
             totals[key] += 1
+            if part_of:
+                counts = parts.setdefault(part_of(case.get('classname', '')),
+                                          dict(tests=0, passed=0, failures=0, errors=0,
+                                               skipped=0))
+                counts['tests'] += 1
+                counts[key] += 1
             identity = case_id(case.get('classname', ''), case.get('name', '')) if case_id else ''
             reported.add(identity)
             watched = tracked and tracked.get(identity)
@@ -164,7 +174,8 @@ def summarize_reports(directory: Path, reports: TestReports,
         raise RuntimeError('No tests were executed')
     missing = None if suite_tests is None else sorted(suite_tests - reported)[:MAX_MISSING_TESTS]
     return {**totals, 'missing_tests': missing, 'test_failures': failures, 'test_skips': skips,
-            'details_truncated': totals['failures'] + totals['errors'] > len(failures)}
+            'details_truncated': totals['failures'] + totals['errors'] > len(failures),
+            **({'parts': parts} if part_of else {})}
 
 
 def published_suite_tests(artifact_dir: Path, test_image: str, language: Language) -> set[str]:
@@ -628,7 +639,9 @@ async def run_component_suite(session_id: str, runner_image: str, language: str,
                         await collect_reports(runner, run_dir / 'reports', stack.test_reports)
                         result.update(await run_sync(
                             summarize_reports, run_dir / 'reports', stack.test_reports,
-                            tracked, suite.case_id, suite_tests))
+                            tracked, suite.case_id, suite_tests,
+                            # A suite of more than the service counts each part's tests.
+                            suite.part_of if isinstance(suite, CompositeSuite) else None))
                     except Exception as exc:
                         result['error'] = (result['error']
                                            or f'Could not read test reports: {str(exc)[-1000:]}')
