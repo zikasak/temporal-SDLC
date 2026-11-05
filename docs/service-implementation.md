@@ -642,14 +642,16 @@ flowchart LR
    criterion, on the first part's runner, with `CMD []`. It copies each other part's
    `/repository`, `/tests` and `/runner` to `/parts/<index>/`, plus the files the part's
    command runs with (`ComponentSuite.part_runtime`, Node for TypeScript) when based on
-   the service's runner. Its `run-tests.sh` runs a generated `run-parts.sh` under one
-   600-second timeout. That script runs the service's command in `/tests`, then each
-   part's `ComponentSuite.part_command`, and exits as the worst of them did: a stopped
-   run, then any other error, then failed tests. Each part writes its report into the
-   service language's report directory, under a name its pattern matches
-   (`junit-part-0-frontend.xml` for Python, `TEST--part-0-frontend.xml` for Java), with
-   `CLASSNAME_PREFIX` (read by the trusted `vitest.config.mjs`) starting its class names
-   with `P:`. The tags are removed after the build.
+   the service's runner, and starts the first of them once (`node --version`) so a base
+   without the libraries it needs fails the build, naming the part. Its `run-tests.sh`
+   runs a generated `run-parts.sh` under one 600-second timeout. That script runs the
+   service's command in `/tests`, then each part's `ComponentSuite.part_command`, and
+   exits as the worst of them did: a stopped run, then any other error, then failed
+   tests. Each part writes its report into the service language's report directory,
+   under a name its pattern matches (`junit-part-0-frontend.xml` for Python,
+   `TEST--part-0-frontend.xml` for Java), with `CLASSNAME_PREFIX` (read by the trusted
+   `vitest.config.mjs`) starting its class names with `P:`. The tags are removed after
+   the build.
    `build_component_runner` and `prepare_seam` check the contract of every routed part
    against the code (`check_parts` in `app/routing/parts.py`); a part's
    `conformance_error` starts with `Part P:`. `added_seams` keys another part's seam by

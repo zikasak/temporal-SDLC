@@ -223,6 +223,13 @@ def composite_files(language: Language, members: list[tuple[ComponentPart, Suite
         if service:
             for path in member.suite.part_runtime:
                 lines.append(f'COPY --from={images[member.name]} {path} {path}')
+            if member.suite.part_runtime:
+                # The service's runner holds what the part's runtime loads, such as
+                # Node's libstdc++, or the build says so.
+                lines.append(f'RUN {shlex.quote(member.suite.part_runtime[0])} --version '
+                             f'> /dev/null || {{ echo "The runtime of part {part.name} does '
+                             'not start on the service\'s component test runner" >&2; '
+                             'exit 1; }')
         command = member.suite.part_command(root, part.root,
                                             f'{reports}/{part_report(language, index, part)}',
                                             member.prefix)
@@ -311,7 +318,11 @@ async def build_runner(language: Language, session_dir: Path, tests: Path,
         await run_sync(context.mkdir, parents=True)
         for name, text in composite_files(language, members, images).items():
             await run_sync((context / name).write_text, text, encoding='utf-8')
-        return await build_image(context, 'component test runner', log_path)
+        try:
+            return await build_image(context, 'component test runner', log_path)
+        except RuntimeError as exc:
+            raise RuntimeError('The runner of the component tests of every part could not '
+                               f'be built: {exc}') from exc
     finally:
         await _remove_tags(tags)
 

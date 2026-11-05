@@ -84,7 +84,8 @@ class ComponentSuite(TestSuite):
     part_command: Callable[[str, str, str, str], str] | None = None
     # A part language's suite only: files of its runner image that its command runs with,
     # such as its interpreter, which the composite runner copies to the same paths when it
-    # is built on the service's runner.
+    # is built on the service's runner. The first is run with `--version` when that image
+    # is built, so a base without the libraries it needs fails the build, not the tests.
     part_runtime: tuple[str, ...] = ()
 
 

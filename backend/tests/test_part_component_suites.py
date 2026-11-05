@@ -377,6 +377,9 @@ async def test_the_service_and_the_web_client_share_the_service_runners_image(
     # client runs with Node from its own runner.
     assert dockerfile.splitlines()[1] == f'FROM {first}'
     assert f'COPY --from={second} /usr/local/bin/node /usr/local/bin/node' in dockerfile
+    # Node starts on the service's runner, with its libraries, or the build fails.
+    assert ('RUN /usr/local/bin/node --version > /dev/null || { echo "The runtime of part '
+            'frontend does not start') in dockerfile
     assert 'CMD' not in dockerfile
     assert '(cd /tests && "$@"); record $?' in files['run-parts.sh']
     assert sorted(result['added_tests']) == [ADDED,
