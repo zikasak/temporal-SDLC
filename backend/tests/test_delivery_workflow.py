@@ -829,11 +829,14 @@ async def test_a_seam_that_cannot_be_added_stops_the_change_before_its_tests(
     assert state.baseline_status == 'skipped' and state.verification_status == 'skipped'
     assert state.publication_status == 'skipped' and not worker.published
 
-    # Retrying the tests adds the seam again, keeping the routing.
+    # Retrying the tests adds the seam again. A seam that could not be added keeps the
+    # routing; one that does not match its contract is retried from a new routing, since
+    # the same contract would fail the same way when it is what is wrong.
     worker.fail_seam, worker.seam_conformance_error = False, None
     await requirements_service.retry_generation(handle.id, 'tests')
     state = await delivered(env, handle.id)
-    assert worker.stages.count('routing') == 1 and worker.stages.count('seam') == 2
+    assert worker.stages.count('routing') == (1 if outcome == 'failed' else 2)
+    assert worker.stages.count('seam') == 2
     assert state.seam_status == 'prepared' and state.seam_error is None
     assert state.baseline_status == 'reproduced'
     assert state.publication_status == 'completed'

@@ -127,8 +127,11 @@ def _proofs(change: dict[str, Any]) -> list[str]:
             if seam.get('module'):
                 symbols = ', '.join(f'`{_line(symbol, 100)}`'
                                     for symbol in list(seam.get('symbols') or [])[:10])
-                added = ', '.join(f'`{_line(symbol, 100)}`'
-                                  for symbol in list(seam.get('added') or [])[:10])
+                added = ', '.join(f'`{_line(symbol, 100)}`' for symbol in [
+                    *(seam.get('added') or []),
+                    *[f'{module}.{symbol}'
+                      for module, symbols in (seam.get('added_elsewhere') or {}).items()
+                      for symbol in symbols]][:10])
                 part = f"{_line(seam['part'], 100)}: " if seam.get('part') else ''
                 line += f" (at `{part}{_line(seam['module'], 200)}`" + (
                     f": {symbols}" if symbols else "") + (

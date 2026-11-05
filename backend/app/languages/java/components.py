@@ -52,7 +52,8 @@ published stub, but never change or remove one of its declarations.
   -Dmdep.outputFile=/tmp/dependencies.txt -DincludeScope=compile, then
   java {tools}/Stubs.java check /workspace/routing/components target/classes
   /tmp/dependencies.txt <every stubbed type's fully qualified name>. It must report no
-  error but, for each symbol a seam lists in `added`, that it is not present at runtime."""
+  error but, for each symbol a seam lists in `added` or `added_elsewhere`, that it is not
+  present at runtime."""
 
 # Characters a stub may hold outside comments, strings and character literals.
 TOKEN = re.compile(r"""

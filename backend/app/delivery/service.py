@@ -19,6 +19,7 @@ from app.delivery import mentions as mention_history
 from app.github.errors import GitHubError
 from app.github.models import PullRequestMention
 from app.requirements.models import CHANGE_KINDS
+from app.routing.models import SEAM_MISMATCH
 from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import task_fields
 from app.temporal.sessions import SessionBusy, SessionEnded, is_running, start_update
@@ -328,6 +329,10 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
             # A seam the change added is added again when the criteria are routed again,
             # or when the baseline against the code with it proved nothing: it may itself
             # have changed what the tests observe. A seam that was not added is retried.
+            # A seam that does not match its contract is retried from a new routing: the
+            # same contract would fail the same way when that is what is wrong.
+            mismatch = (progress.seam_status == 'error'
+                        and (progress.seam_error or '').startswith(SEAM_MISMATCH))
             if (progress.seam_status == 'error' or progress.routing_status != 'routed'
                     or progress.baseline_status in ('not_reproduced', 'error')):
                 progress.seam = None
@@ -339,7 +344,7 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
             progress.baseline_status = 'waiting'
             # Criteria were routed again unless every one had a suite that observes it.
             progress.routing_error = None
-            if progress.routing_status != 'routed':
+            if progress.routing_status != 'routed' or mismatch:
                 progress.routing = None
                 progress.routing_status = 'waiting'
     await _restart(finished, session_id)

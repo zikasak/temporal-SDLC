@@ -139,8 +139,10 @@ its own toolchain too.
 The symbols you add get no behaviour of their own yet: each does the least its signature
 allows and changes nothing the code does today, such as an update or signal that is
 accepted and ignored, a query that returns state the code already keeps, or a method that
-leaves everything as it was. Their docstrings describe the behaviour the fix will give
-them later; do not implement it, not even partly. The component tests have to fail against
+leaves everything as it was. A collaborator among them, such as an activity or a
+constant in another module, is declared as its stub has it and nothing calls or reads it
+yet. Their docstrings describe the behaviour the fix will give them later; do not
+implement it, not even partly. The component tests have to fail against
 the code with the seam before the fix is written, and every existing test has to pass
 against it unchanged; the fix is written in a later run, from the code as you leave it.
 Read the code around each symbol before adding it. Locate code with list_files and

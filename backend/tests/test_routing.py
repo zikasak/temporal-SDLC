@@ -466,6 +466,56 @@ async def test_a_seam_the_change_adds_names_symbols_its_stub_declares(
                                         PYTHON_CONTEXT)
 
 
+# A collaborator the seam's tests fake that the code lacks too, in another module.
+ACTIVITIES_STUB = '''
+async def pull_request_state(session_id: str) -> str:
+    """Whether the session's pull request is open, merged or closed."""
+    ...
+'''
+ELSEWHERE_ROUTES = {'routes': [
+    ROUTES['routes'][0],
+    {'requirement_id': 'FR-3', 'route': 'component', 'reason': 'Poll, then read the state.',
+     'seam': {**ADDED_ROUTES['routes'][1]['seam'],
+              'added_elsewhere': {'service.activities': ['pull_request_state']}}},
+]}
+
+
+async def test_a_seam_adds_the_collaborators_it_names_in_other_modules(
+        python_session, monkeypatch):
+    runs: list = []
+    fake_component_docker(monkeypatch, {**VALID, 'service/rooms.pyi': ADDED_STUB,
+                                        'service/activities.pyi': ACTIVITIES_STUB}, runs,
+                          routes=ELSEWHERE_ROUTES, conforms=False)
+    result = await ActivityEnvironment().run(activities.route_requirements, 'session',
+                                             PYTHON_CONTEXT)
+    assert result['routes']['FR-3']['seam']['added_elsewhere'] == {
+        'service.activities': ['pull_request_state']}
+    # The seam stage is asked to add them with the seam's own.
+    assert added_seams(result['routes']) == {'service.rooms': ['Rooms.merged'],
+                                             'service.activities': ['pull_request_state']}
+    assert runs == []
+
+
+@pytest.mark.parametrize('elsewhere, error', [
+    ({'service.activities': ['pull_request_closed']},
+     'adds symbols to service.activities its stub does not define: pull_request_closed'),
+    ({'service.models': ['INTERVAL']}, 'module the component contract has no stub of'),
+    ({'service.rooms': ['Rooms.merged']}, 'they belong in `added`'),
+    (['pull_request_state'], 'other than as an object of modules'),
+    ({'service.activities': 'pull_request_state'}, 'other than as an object of modules'),
+])
+async def test_a_seam_adds_to_other_modules_only_symbols_their_stubs_declare(
+        python_session, monkeypatch, elsewhere, error):
+    routes = json.loads(json.dumps(ELSEWHERE_ROUTES))
+    routes['routes'][1]['seam']['added_elsewhere'] = elsewhere
+    fake_component_docker(monkeypatch, {**VALID, 'service/rooms.pyi': ADDED_STUB,
+                                        'service/activities.pyi': ACTIVITIES_STUB}, [],
+                          routes=routes)
+    with pytest.raises(ApplicationError, match=error):
+        await ActivityEnvironment().run(activities.route_requirements, 'session',
+                                        PYTHON_CONTEXT)
+
+
 def test_the_seams_a_change_adds_are_collected_by_module():
     seam = {'module': 'app.workflows', 'symbols': ['Flow.close', 'Flow.state']}
     routes = {'FR-1': {'route': 'contract', 'reason': 'R.'},
@@ -478,6 +528,18 @@ def test_the_seams_a_change_adds_are_collected_by_module():
     assert added_seams({'FR-2': routes['FR-2']}) == {}
     # An empty list adds nothing, and is not kept.
     assert 'added' not in read_seam('FR-2', {**seam, 'added': []})
+    assert 'added_elsewhere' not in read_seam('FR-2', {**seam, 'added_elsewhere': {}})
+    # Symbols added to other modules are collected under theirs, a part's after the part.
+    routes['FR-5'] = {'route': 'component', 'reason': 'R.', 'seam': {
+        **seam, 'added_elsewhere': {'app.activities': ['state', 'state'], 'app.models': ['X']}}}
+    routes['FR-6'] = {'route': 'component', 'reason': 'R.', 'seam': {
+        'part': 'frontend', 'module': 'src/Flows', 'symbols': ['Flow'],
+        'added_elsewhere': {'src/api': ['fetchFlow']}}}
+    assert read_seam('FR-5', routes['FR-5']['seam'])['added_elsewhere'] == {
+        'app.activities': ['state'], 'app.models': ['X']}
+    assert added_seams(routes) == {'app.workflows': ['Flow.close', 'Flow.state'],
+                                   'app.activities': ['state'], 'app.models': ['X'],
+                                   'frontend/src/api': ['fetchFlow']}
 
 
 # A web client beside the Python service: criteria about it are observed at its own code.

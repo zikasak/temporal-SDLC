@@ -210,7 +210,11 @@ function seam(value: unknown): Seam | undefined {
   return isObject(value) && typeof value.module === "string"
     ? {
       ...(typeof value.part === "string" && value.part ? { part: value.part } : {}),
-      module: value.module, symbols: strings(value.symbols), added: strings(value.added),
+      module: value.module, symbols: strings(value.symbols),
+      // Symbols added to other modules of the part are named after their module.
+      added: [...strings(value.added), ...(isObject(value.added_elsewhere)
+        ? Object.entries(value.added_elsewhere).flatMap(([module, symbols]) =>
+          strings(symbols).map((symbol) => `${module}.${symbol}`)) : [])],
     } : undefined;
 }
 

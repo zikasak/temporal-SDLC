@@ -27,7 +27,8 @@ with workflow.unsafe.imports_passed_through():
     from app.temporal.execution_fields import task_fields
     from app.requirements.models import CHANGE_KINDS
     from app.routing.models import (
-        COMPONENT_TESTS_UNRUN, ROUTING_ERROR, ROUTING_ERROR_CHARS, added_seams, judge_routes,
+        COMPONENT_TESTS_UNRUN, ROUTING_ERROR, ROUTING_ERROR_CHARS, SEAM_MISMATCH, added_seams,
+        judge_routes,
     )
     from app.review.models import (
         MAX_REVIEW_ROUNDS, ReviewFinding, ReviewRound, correctable, earlier_findings,
@@ -819,9 +820,7 @@ class DeliveryWorkflow:
             self.progress.seam_status = 'error'
             return False
         if result.get('conformance_error'):
-            self.progress.seam_error = (
-                'The code with the seam the change added does not match its component '
-                f'contract, so no test was written: {result["conformance_error"]}')
+            self.progress.seam_error = f'{SEAM_MISMATCH} {result["conformance_error"]}'
             self.progress.seam_status = 'error'
             return False
         self.progress.seam = result
