@@ -246,3 +246,29 @@ def test_the_diagnosis_is_told_about_the_component_tests(tmp_path):
         agent.validate_completion(True, tmp_path)
     (tmp_path / 'verdict.json').write_text(json.dumps({**VERDICT, 'suite': 'component'}))
     agent.validate_completion(True, tmp_path)
+
+
+async def test_a_broken_test_of_the_web_client_is_named_after_its_part(
+        component_session, monkeypatch):
+    broken = {'class_name': 'frontend:tests/manifest.test.ts',
+              'name': 'the GitHub App manifest > subscribes the app to pull_request events'}
+    for path, text in {
+            'routing/routes.json': json.dumps({'routes': {}, 'parts': [
+                {'name': 'service', 'root': '.', 'language': 'python'},
+                {'name': 'frontend', 'root': 'frontend', 'language': 'typescript'}]}),
+            'routing/components/runtime.json': '{}',
+            'routing/parts/frontend/components/src/github.d.ts': 'PART STUB',
+            'component-tests/suite/parts/frontend/tests/manifest.test.ts': 'PART TEST'}.items():
+        (component_session / path).parent.mkdir(parents=True, exist_ok=True)
+        (component_session / path).write_text(text)
+    sent: dict = {}
+    fake_docker(monkeypatch, {**VERDICT, 'suite': 'component', 'tests': [broken]}, sent)
+    context = component_context(component_session, contract='passed')
+    context['component_verification']['test_failures'].append(
+        {**broken, 'kind': 'failure', 'message': 'expected pull_request'})
+    result = await ActivityEnvironment().run(activities.diagnose_failure, 'session', context)
+    assert result['tests'] == [broken]
+    # The part's stubs and tests are where the diagnosis prompt says.
+    assert sent['review/component-contract/parts/frontend/src/github.d.ts'] == 'PART STUB'
+    assert sent['review/component-tests/parts/frontend/tests/manifest.test.ts'] == 'PART TEST'
+    assert sent['review/component-contract/app/rooms.pyi'] == 'STUB'

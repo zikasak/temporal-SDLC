@@ -57,6 +57,10 @@ class TestSuite:
     # scripts): the author can never replace them.
     runner: tuple[str, ...] = ('Dockerfile', '.dockerignore', 'run-tests.sh')
 
+    def has_tests(self, project: Path) -> bool:
+        """Whether the project holds a test file, as a complete suite does."""
+        return any(project.glob(self.test_glob))
+
 
 @dataclass(frozen=True)
 class ComponentSuite(TestSuite):
@@ -71,6 +75,17 @@ class ComponentSuite(TestSuite):
     build_args: Callable[[dict], dict[str, str]] = lambda runtime: {}
     # Trusted files the author checks the suite with, given to it in TOOLS_DIR.
     tools: tuple[Path, ...] = ()
+    # A part language's suite only: the shell command that runs it inside the runner of
+    # a delivery's composite suite (app/languages/composite.py), where the part's runner
+    # image's /repository, /tests and /runner are under `root`. It runs in the suite's
+    # directory, tests the project at `project` within the repository, writes its JUnit
+    # report to `report` and starts every class name of it with `prefix`. Every argument
+    # comes from the host and is shell-quoted by it.
+    part_command: Callable[[str, str, str, str], str] | None = None
+    # A part language's suite only: files of its runner image that its command runs with,
+    # such as its interpreter, which the composite runner copies to the same paths when it
+    # is built on the service's runner.
+    part_runtime: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

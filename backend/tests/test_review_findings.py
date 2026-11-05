@@ -86,6 +86,46 @@ def test_a_change_with_component_tests_has_its_tests_and_stubs_reviewed(tmp_path
     assert findings[0]['path'] == 'contracts/components/app/rooms.pyi'
 
 
+def test_a_change_with_component_tests_of_its_web_client_has_that_parts_reviewed(tmp_path):
+    from app.languages import get_language
+    from app.review import activities as review
+
+    language = get_language('python')
+    session = tmp_path / 'session'
+    files = {
+        'checkout/frontend/src/github.ts': 'export function createGitHubApp() {}\n',
+        'checkout/contracts/parts/frontend/components/src/github.d.ts': 'old stub\n',
+        # Recorded before any author ran: the web client's tests, and the service's own,
+        # which this change has no criterion of.
+        'repository-tests/components/parts/frontend/tests/a.test.ts': 'test("a")\n',
+        'repository-tests/components/parts/frontend/package.json': '{}',
+        'repository-tests/components/tests/test_rooms.py': 'def test_open(): pass\n',
+        'implementation/service/frontend/src/github.ts': 'export function createGitHubApp() {1}\n',
+        'component-tests/suite/parts/frontend/tests/a.test.ts': 'test("a")\ntest("b")\n',
+        'component-tests/suite/parts/frontend/package.json': '{}',
+        'routing/routes.json': json.dumps({'routes': {}, 'parts': [
+            {'name': 'frontend', 'root': 'frontend', 'language': 'typescript'}]}),
+        'routing/parts/frontend/components/src/github.d.ts': 'old stub\nnew stub\n',
+        'routing/parts/frontend/components/runtime.json': '{"project": "frontend"}',
+    }
+    for path, text in files.items():
+        (session / path).parent.mkdir(parents=True, exist_ok=True)
+        (session / path).write_text(text)
+    context = {'component_routes': {'TR-6': {'route': 'component'}}, 'contract_tests': False}
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    changes, _ = review.prepare_review(language, session, context, workspace)
+    # The service's component tests, which the suite has no project of, are not reported
+    # as removed.
+    assert changes == {
+        'service': ['service/frontend/src/github.ts'],
+        'component-tests': ['component-tests/parts/frontend/tests/a.test.ts'],
+        'contracts/parts/frontend/components': [
+            'contracts/parts/frontend/components/runtime.json',
+            'contracts/parts/frontend/components/src/github.d.ts']}
+    assert (workspace / 'review/contracts/parts/frontend/components/src/github.d.ts').is_file()
+
+
 def _written(tmp_path, items):
     output = tmp_path / 'findings-output'
     output.mkdir(exist_ok=True)

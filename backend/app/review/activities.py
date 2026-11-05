@@ -27,8 +27,8 @@ from app.github.checkout import (
 from app.implementation.activities import checkout_parts, copy_service
 from app.languages import Language
 from app.requirements.document import without_repeated_tables
-from app.routing.components import PUBLISHED_DIR as PUBLISHED_STUBS
-from app.routing.components import ROUTED_CONTRACT
+from app.routing.parts import component_suite, read_routed_parts
+from app.test_generation.activities import copy_test_suite
 from app.review.agent import FINDINGS
 from app.review.models import (
     MAX_FINDINGS, PATH_CHARS, PREVIOUS_SUMMARY_CHARS, REASON_CHARS, REVIEW_TARGETS,
@@ -144,8 +144,15 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
     suite = session_dir / 'tests/suite'
     trees = [service, *([suite] if contract else [])]
     if component:
-        tests, stubs = session_dir / COMPONENT_TESTS_ARTIFACT / 'suite', session_dir / ROUTED_CONTRACT
-        trees += [tests, stubs]
+        try:
+            routed = read_routed_parts(language, session_dir)
+            component_tests = component_suite(language, routed)
+        except ValueError as exc:
+            raise ApplicationError(str(exc), non_retryable=True) from exc
+        tests = session_dir / COMPONENT_TESTS_ARTIFACT / 'suite'
+        # The stubs the routing checked of each part, and where the repository has them.
+        stubs = [(item.routed_contract(session_dir), item.published_dir()) for item in routed]
+        trees += [tests, *(kept for kept, _ in stubs)]
     if not all(item.is_dir() for item in trees):
         raise ApplicationError('The verified sources are unavailable', non_retryable=True)
     service_before = record_baseline(language, session_dir)
@@ -162,15 +169,22 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
     if component:
         everything = lambda relative: True  # noqa: E731
         copy_regular_files(tests, review / COMPONENT_TESTS_DIR, include=everything)
-        # Recorded before any author ran, as the template's files when the repository had
-        # no component tests.
-        diffs.update(changed_files(session_dir / SNAPSHOT_DIR / COMPONENT_SNAPSHOT,
-                                   review / COMPONENT_TESTS_DIR, COMPONENT_TESTS_DIR))
-        copy_regular_files(stubs, review / PUBLISHED_STUBS, include=everything)
-        # The stubs the repository published, which the routing reused or extended.
-        diffs.update(changed_files(session_dir / CHECKOUT_DIR / PUBLISHED_STUBS,
-                                   review / PUBLISHED_STUBS, PUBLISHED_STUBS.as_posix()))
-        sides += [COMPONENT_TESTS_DIR, PUBLISHED_STUBS.as_posix()]
+        with tempfile.TemporaryDirectory() as temporary:
+            # Recorded before any author ran, as the template's files when the repository
+            # had no component tests: of the parts the suite has a project for alone.
+            before = Path(temporary) / 'before'
+            recorded = session_dir / SNAPSHOT_DIR / COMPONENT_SNAPSHOT
+            if recorded.is_dir():
+                copy_test_suite(component_tests, recorded, before)
+            diffs.update(changed_files(before, review / COMPONENT_TESTS_DIR,
+                                       COMPONENT_TESTS_DIR))
+        sides.append(COMPONENT_TESTS_DIR)
+        for kept, published in stubs:
+            copy_regular_files(kept, review / published, include=everything)
+            # The stubs the repository published, which the routing reused or extended.
+            diffs.update(changed_files(session_dir / CHECKOUT_DIR / published,
+                                       review / published, published.as_posix()))
+            sides.append(published.as_posix())
     parts = review_parts(diffs)
     if part >= max(len(parts), 1):
         raise ApplicationError(f'The changes have no review part {part}', non_retryable=True)

@@ -1,6 +1,7 @@
 // Trusted configuration of the runner: the suite's tests, run in jsdom, import the part's
 // code as `@part/<path within the part>`. PART is the part's directory, REPORT where the
-// JUnit report is written. It imports nothing but Node's own modules, so it loads from
+// JUnit report is written, and CLASSNAME_PREFIX, when set, what starts every class name of
+// it, so that a runner of several parts' tests can tell whose a test is. It imports nothing but Node's own modules, so it loads from
 // outside the suite.
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -9,6 +10,7 @@ if (!process.env.PART) {
   throw new Error('PART names the directory of the part under test');
 }
 const part = resolve(process.env.PART);
+const prefix = process.env.CLASSNAME_PREFIX || '';
 const manifest = JSON.parse(readFileSync(join(part, 'package.json'), 'utf8'));
 // The packages the part depends on: a test importing one of them, such as react, gets
 // the part's own copy, so that the tests and the code share one.
@@ -42,7 +44,9 @@ export default {
     include: ['tests/**/*.test.{ts,tsx}'],
     environment: 'jsdom',
     watch: false,
-    reporters: ['default', 'junit'],
+    reporters: ['default', prefix
+      ? ['junit', { classnameTemplate: (names) => `${prefix}${names.filename}` }]
+      : 'junit'],
     outputFile: { junit: process.env.REPORT || 'reports/junit.xml' },
   },
 };

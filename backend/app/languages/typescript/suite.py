@@ -2,6 +2,7 @@
 code, and the identity of their tests, read on the host from the test files' tokens."""
 
 import re
+import shlex
 from pathlib import Path
 
 from app.languages import ComponentSuite
@@ -373,6 +374,16 @@ def _case_id(class_name: str, name: str) -> str:
     return f"{class_name}#{name}"
 
 
+def _part_command(root: str, project: str, report: str, prefix: str) -> str:
+    """The runner image's command, with its environment, where the composite runner
+    keeps the image's trees under `root`."""
+    quote = shlex.quote
+    return (f'cd {quote(root + "/tests")} && NO_COLOR=1 '
+            f'PART={quote(root + "/repository/" + project)} REPORT={quote(report)} '
+            f'CLASSNAME_PREFIX={quote(prefix)} node_modules/.bin/vitest run '
+            f'--config {quote(root + "/runner/vitest.config.mjs")}')
+
+
 COMPONENT_SUITE = ComponentSuite(
     template=TEMPLATE,
     instructions=INSTRUCTIONS,
@@ -382,4 +393,7 @@ COMPONENT_SUITE = ComponentSuite(
     required=("package.json", "package-lock.json"),
     runner=("Dockerfile", ".dockerignore", "run-tests.sh", "vitest.config.mjs"),
     build_args=runner_build_args,
+    part_command=_part_command,
+    # Node, from the official image the runner is built on.
+    part_runtime=("/usr/local/bin/node",),
 )

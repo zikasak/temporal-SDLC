@@ -28,9 +28,11 @@ from app.review.activities import record_baseline
 from app.routing.agent import ROUTES
 from app.routing.components import check_conformance, check_seams, read_components
 from app.routing.models import (
-    ROUTES as ALL_ROUTES, ROUTING_ERROR, added_seams, defer_part_routes, read_routes,
+    ROUTES as ALL_ROUTES, ROUTING_ERROR, added_seams, read_routes,
 )
-from app.routing.parts import PARTS_DIR, SERVICE_PART, ComponentPart, component_parts
+from app.routing.parts import (
+    PARTS_DIR, PARTS_KEY, SERVICE_PART, ComponentPart, component_parts,
+)
 from app.temporal.tracing import activity_metadata
 from app.tracing import trace_operation
 
@@ -230,12 +232,10 @@ async def run_routing(session_id: str, context: dict[str, Any]) -> dict[str, Any
         except RuntimeError as exc:
             # The same routing fails the same way again: the user is told why.
             raise ApplicationError(str(exc), type=ROUTING_ERROR, non_retryable=True) from exc
-    # Component tests of parts other than the service cannot be written yet: their routes
-    # stop the delivery as unobservable, with their contracts checked and kept
-    # (plans/part-component-contracts.md, step 1).
-    routes = defer_part_routes(routes, {part.name: part.language.label for part in parts})
     components = artifact_dir / COMPONENTS_DIR
+    # The parts with routes, which the stages after the routing read from this file.
     result = {'session_id': session_id, 'routes': routes, 'path': str(artifact_dir),
+              PARTS_KEY: [part.record() for part in parts if part.name in routed],
               **({'components': str(components)} if SERVICE_PART in routed else {})}
     manifest = artifact_dir / f'{uuid.uuid4().hex}.json'
     await run_sync(

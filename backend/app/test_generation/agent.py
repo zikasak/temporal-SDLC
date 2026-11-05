@@ -176,6 +176,16 @@ builds the suite with the service's code and collects it, and runs it later. Onl
 when the regression tests are complete and checked.
 """
 
+COMPONENT_PARTS_PROMPT = """
+The seams are in more than one part of the repository, or in a part other than the
+service, such as a web client beside it, and the `parts` entry of the input lists them.
+A seam of a part other than the service names it (`part`, its directory), and its module
+is a path within the part. The suite has a project of its own for each part, as the
+instructions above lay out: the tests of a criterion go in the project of its seam's part,
+from that part's stubs in /workspace/contracts/parts/<part>/components. The names of a
+part's tests in `repair` and in the runs start with the part's name and a colon.
+"""
+
 COMPONENT_UNOBSERVABLE_PROMPT = """
 A criterion of `routes` may turn out not to be observable through the stubbed symbols
 after all: the behaviour it is about happens outside every symbol the stubs declare, or
@@ -271,7 +281,9 @@ def repair_prompt(inputs: dict) -> str:
     return (REVIEW_PROMPT if repair.get('review') else REPAIR_PROMPT) + keep
 
 
-def validate_completion(test_glob: str, root: Path) -> None:
+def validate_completion(test_glob: str, root: Path, test_globs: list[str] | None = None) -> None:
+    """The author finished with a test file, in every project of a suite of several parts
+    (`test_globs`), or named criteria it cannot test."""
     unobservable = root / UNOBSERVABLE
     if unobservable.is_file():
         try:
@@ -281,8 +293,10 @@ def validate_completion(test_glob: str, root: Path) -> None:
         if not isinstance(items, list) or not items:
             raise RuntimeError(f'{UNOBSERVABLE} names no criterion')
         return
-    if not any(root.glob(test_glob)):
-        raise RuntimeError('Agent finished without test files')
+    for glob in test_globs or [test_glob]:
+        if not any(root.glob(glob)):
+            raise RuntimeError('Agent finished without test files'
+                               + (f' matching {glob}' if test_globs else ''))
 
 
 def prompt(inputs: dict, language: dict) -> str:
@@ -291,6 +305,7 @@ def prompt(inputs: dict, language: dict) -> str:
         # A change's criteria observed at seams; only its first author may decline one.
         repair = inputs.get('repair')
         return (COMPONENT_PROMPT.format(instructions=instructions)
+                + (COMPONENT_PARTS_PROMPT if inputs.get('parts') else '')
                 + (COMPONENT_UNOBSERVABLE_PROMPT if not repair
                    else COMPONENT_REVIEW_PROMPT if repair.get('review')
                    else COMPONENT_REPAIR_PROMPT))
@@ -317,7 +332,8 @@ async def main() -> None:
                           *(['OpenAPI contract:\n' + (await run_sync(OPENAPI.read_text))]
                             if await run_sync(OPENAPI.is_file) else [])],
         max_turns_env='TEST_GENERATION_MAX_TURNS',
-        validate_completion=partial(validate_completion, language['test_glob']),
+        validate_completion=partial(validate_completion, language['test_glob'],
+                                    test_globs=language.get('test_globs')),
         completion_message='Test generation completed',
         exhaustion_message='Test generation exceeded the tool-turn limit',
         contracts=CONTRACTS if await run_sync(CONTRACTS.is_dir) else None,

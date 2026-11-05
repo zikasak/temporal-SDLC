@@ -279,3 +279,69 @@ async def test_typescript_component_tests_prove_tr_6_red_then_green_without_a_ne
     state, report = await run_typescript_suite(tmp_path, repository, suite)
     assert state['ExitCode'] == 0
     assert name in report and '<failure' not in report
+
+
+async def run_composite_suite(tmp_path, repository: Path, suite: Path) -> tuple[dict, str]:
+    """The web client's tests in the runner of a suite of several parts, as a change whose
+    criteria are all the web client's builds it: on the part's own runner image."""
+    from app.languages.composite import composite_suite, SuiteMember
+    from app.routing.parts import ComponentPart
+    from app.test_generation.components import composite_files
+
+    language = get_language('python')
+    part = ComponentPart('frontend', 'frontend', get_part_language('typescript'))
+    member, = composite_suite([SuiteMember('frontend', TYPESCRIPT_SUITE,
+                                           label='TypeScript')]).members
+    context = tmp_path / f'context-{uuid.uuid4().hex}'
+    runner_context(TYPESCRIPT_SUITE, repository, suite, context)
+    part_image = await build_image(context, 'component test runner', tmp_path / 'build.log',
+                                   build_args=TYPESCRIPT.build_args({'project': 'frontend'}))
+    tag = f'temporal-component-part:{uuid.uuid4().hex}-0'
+    await docker_agents.docker('tag', part_image, tag, timeout=60)
+    composite = tmp_path / f'composite-{uuid.uuid4().hex}' / 'context'
+    composite.mkdir(parents=True)
+    for name, text in composite_files(language, [(part, member)], {'frontend': tag}).items():
+        (composite / name).write_text(text)
+    name = f'component-tests-{uuid.uuid4().hex}'
+    reports = tmp_path / f'reports-{uuid.uuid4().hex}'
+    image = None
+    try:
+        image = await build_image(composite, 'component test runner',
+                                  tmp_path / 'composite-build.log')
+        await docker_agents.docker('create', '--name', name, '--network=none', image, timeout=30)
+        await docker_agents.docker('start', name, timeout=30)
+        await docker_agents.docker('wait', name, timeout=750)
+        state = json.loads(await docker_agents.docker('inspect', '--format', '{{json .State}}',
+                                                      name, timeout=30))
+        await docker_agents.docker('cp', f'{name}:{language.test_reports.directory}',
+                                   str(reports), timeout=30)
+    finally:
+        await docker_agents.docker('rm', '-f', name, timeout=30)
+        for item in (image, tag, part_image):
+            if item:
+                await docker_agents.docker('image', 'rm', '-f', item, timeout=60)
+    return state, (reports / 'junit-part-0-frontend.xml').read_text()
+
+
+async def test_the_composite_runner_proves_tr_6_red_then_green_named_after_the_part(tmp_path):
+    from tests.test_typescript_suite import MANIFEST_TEST
+    repository = tmp_path / 'repository'
+    shutil.copytree(FRONTEND, repository / 'frontend',
+                    ignore=shutil.ignore_patterns('node_modules', 'dist'))
+    suite = tmp_path / 'suite'
+    copy_test_suite(TYPESCRIPT_SUITE, TYPESCRIPT_SUITE.template, suite)
+    (suite / 'tests').mkdir()
+    (suite / 'tests/manifest.test.ts').write_text(MANIFEST_TEST)
+    classname = 'classname="frontend:tests/manifest.test.ts"'
+
+    state, report = await run_composite_suite(tmp_path, repository, suite)
+    assert state['ExitCode'] == 1
+    assert classname in report and '<failure' in report
+
+    github = repository / 'frontend/src/github.ts'
+    events = '["issue_comment", "pull_request_review_comment"]'
+    github.write_text(github.read_text().replace(
+        events, '["issue_comment", "pull_request_review_comment", "pull_request"]'))
+    state, report = await run_composite_suite(tmp_path, repository, suite)
+    assert state['ExitCode'] == 0
+    assert classname in report and '<failure' not in report

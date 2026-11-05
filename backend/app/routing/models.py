@@ -89,14 +89,23 @@ def read_seam(requirement: str, seam: Any, parts: tuple[str, ...] = ()) -> Seam:
     return read
 
 
+def seam_key(seam: Seam) -> str:
+    """How a seam's module is named among those of every part: the service's by itself,
+    as before other parts could be routed, and another part's after the part, as the path
+    of the module in the repository (`frontend/src/Flows`)."""
+    part = seam.get('part')
+    return seam['module'] if part is None else f'{part}/{seam["module"]}'
+
+
 def added_seams(routes: dict[str, Any]) -> dict[str, list[str]]:
-    """The symbols a change adds before it reproduces anything, by module: those of
-    every `component` route whose seam the code does not have yet."""
+    """The symbols a change adds before it reproduces anything, by part and module (as
+    `seam_key` names them): those of every `component` route whose seam the code does not
+    have yet."""
     added: dict[str, list[str]] = {}
     for route in routes.values():
         seam = route.get('seam') if route.get('route') == 'component' else None
         for symbol in (seam or {}).get('added') or []:
-            symbols = added.setdefault(seam['module'], [])
+            symbols = added.setdefault(seam_key(seam), [])
             if symbol not in symbols:
                 symbols.append(symbol)
     return added
@@ -133,28 +142,6 @@ def read_routes(data: Any, requirement_ids: list[str], routes: tuple[str, ...] =
     if missing:
         raise RuntimeError(f'Requirements without a route: {", ".join(missing)}')
     return result
-
-
-def defer_part_routes(routes: dict[str, dict[str, Any]],
-                      labels: dict[str, str]) -> dict[str, dict[str, Any]]:
-    """The routes with every `component` route at a seam of a part other than the service
-    made `unobservable`: deliveries cannot write component tests of such parts yet
-    (plans/part-component-contracts.md, step 3). `labels` gives each part's language."""
-    deferred: dict[str, dict[str, Any]] = {}
-    for requirement, route in routes.items():
-        part = (route.get('seam') or {}).get('part') if route['route'] == 'component' else None
-        if part is None:
-            deferred[requirement] = route
-            continue
-        seam = route['seam']
-        reason = (f'Only a component test of the part {part} ({labels.get(part, "unknown")}) '
-                  f'can observe it, at {seam["module"]} ({", ".join(seam["symbols"])}), and '
-                  'deliveries cannot write component tests of parts other than the service '
-                  f'yet. {route["reason"]}')
-        deferred[requirement] = {**{key: value for key, value in route.items()
-                                    if key != 'seam'},
-                                 'route': 'unobservable', 'reason': reason[:REASON_CHARS]}
-    return deferred
 
 
 # Why a change whose component tests were written stops before its baseline: step 4 of
