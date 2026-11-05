@@ -500,6 +500,28 @@ async def test_the_run_reports_each_parts_tests_by_their_names(changed, tmp_path
     assert result['tracked'] == {ADDED: {'tests': 1, 'failed': 1}}
     # The test the report has no entry of is missing, named after its part.
     assert result['missing_tests'] == ['frontend:tests/existing.test.ts#creates an app']
+    # The run counts its tests by part, for the delivery page.
+    assert result['parts'] == {'frontend': {'tests': 1, 'passed': 0, 'failures': 1,
+                                            'errors': 0, 'skipped': 0}}
+
+
+def test_a_runs_outcomes_are_counted_by_part(tmp_path):
+    (tmp_path / 'junit.xml').write_text(
+        '<testsuite>'
+        '<testcase classname="tests.test_rooms" name="test_a_merged_room_is_closed"/>'
+        '<testcase classname="tests.test_rooms" name="test_skipped"><skipped/></testcase>'
+        '<testcase classname="frontend:tests/manifest.test.ts" name="subscribes">'
+        '<failure message="expected"/></testcase></testsuite>')
+    suite = composite(SERVICE, FRONTEND)
+    summary = verification.summarize_reports(tmp_path, Reports(str(tmp_path), 'junit*.xml'),
+                                             case_id=suite.case_id, part_of=suite.part_of)
+    assert summary['parts'] == {
+        'service': {'tests': 2, 'passed': 1, 'failures': 0, 'errors': 0, 'skipped': 1},
+        'frontend': {'tests': 1, 'passed': 0, 'failures': 1, 'errors': 0, 'skipped': 0},
+    }
+    # A run of the service's suite alone is not counted by part.
+    assert 'parts' not in verification.summarize_reports(
+        tmp_path, Reports(str(tmp_path), 'junit*.xml'))
 
 
 # ---- the composite runner's script against the web client, without Docker ----

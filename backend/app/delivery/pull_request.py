@@ -81,21 +81,44 @@ SUITES = {
     'component': ('Component tests (`component-tests/`), in-process at seams of the code '
                   'whose stubs are in `contracts/components/`'),
 }
+# The component suite's heading when criteria are proved at seams of other parts of the
+# repository than the service, such as its web client: each part's tests and stubs.
+PART_COMPONENTS = ('Component tests, in-process at seams of the code: {places}')
+# Parts named in the heading; the rest are counted.
+LISTED_PARTS = 10
 # Criteria listed per suite; the rest are counted.
 LISTED_CRITERIA = 50
 
 
+def _heading(suite: str, criteria: list[dict[str, Any]]) -> str:
+    """The heading of a suite's criteria. The component suite's names where each part's
+    tests and stubs are when a criterion is proved at a seam of another part."""
+    parts = list(dict.fromkeys(str((item.get('seam') or {}).get('part') or '')
+                               for item in criteria))
+    if suite != 'component' or parts == ['']:
+        return SUITES[suite]
+    places = [('the service\'s in `component-tests/`, with stubs in `contracts/components/`'
+               if not part else
+               f"part `{_line(part, 100)}`'s in `{_line(part, 100)}/component-tests/`, with "
+               f"stubs in `contracts/parts/{_line(part, 100)}/components/`")
+              for part in sorted(parts, key=lambda part: (part != '', part))[:LISTED_PARTS]]
+    if len(parts) > LISTED_PARTS:
+        places.append(f'and {len(parts) - LISTED_PARTS} more parts')
+    return PART_COMPONENTS.format(places='; '.join(places))
+
+
 def _proofs(change: dict[str, Any]) -> list[str]:
     """Which suite proves each criterion of a routed change (`change['proofs']`: by suite,
-    the criteria with their ID, title and, at a seam, its module, symbols and those of them
-    the change added), as a part of the description."""
+    the criteria with their ID, title and, at a seam, its part when it is not the
+    service's, module, symbols and those of them the change added), as a part of the
+    description."""
     proofs = change.get('proofs') or {}
     lines: list[str] = []
-    for suite, heading in SUITES.items():
+    for suite in SUITES:
         criteria = list(proofs.get(suite) or [])
         if not criteria:
             continue
-        lines += ['', f'{heading}:', '']
+        lines += ['', f'{_heading(suite, criteria)}:', '']
         for item in criteria[:LISTED_CRITERIA]:
             line = f"- {_line(item.get('id') or '', 40)}"
             if item.get('title'):
@@ -106,7 +129,8 @@ def _proofs(change: dict[str, Any]) -> list[str]:
                                     for symbol in list(seam.get('symbols') or [])[:10])
                 added = ', '.join(f'`{_line(symbol, 100)}`'
                                   for symbol in list(seam.get('added') or [])[:10])
-                line += f" (at `{_line(seam['module'], 200)}`" + (
+                part = f"{_line(seam['part'], 100)}: " if seam.get('part') else ''
+                line += f" (at `{part}{_line(seam['module'], 200)}`" + (
                     f": {symbols}" if symbols else "") + (
                     f"; this change adds {added}" if added else "") + ")"
             lines.append(line)

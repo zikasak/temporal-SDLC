@@ -295,6 +295,18 @@ Each step lands with its own tests (`backend/tests/`, stage fakes in
      `test_component_contract_docker.py` builds and runs the composite image red, then
      green, with `RUN_DOCKER_VERIFICATION_TESTS=1`.
 4. **Publication and UI** (3.7).
+   *Done.* Notes for later steps:
+   - The push needed nothing new (step 3). The proofs name a seam of another part as
+     `frontend: src/github`, and when any proof is at another part's seam the component
+     suite's heading names each part's `P/component-tests/` and
+     `contracts/parts/P/components/` instead of the service's alone.
+   - A component run of a composite suite carries `parts`, its counts by part
+     (`CompositeSuite.part_of` names the part of a report entry by its class name). Runs
+     of the service's suite alone, and runs recorded before, have none, and the page
+     shows them as before.
+   - The delivery page shows each part's counts and failures under its name (the failures
+     without the `P:` prefix), and the routing line says `component tests of part P` with
+     the seam as `P: module`.
 5. **End to end.** Run the flow-closing bugfix again, with FR-115 and TR-6 as written:
    both routed to `component` in part `frontend` (FR-115 with `sessionAttention` in
    `added`), red at baseline, green with the fix, pushed with `frontend/component-tests/`.

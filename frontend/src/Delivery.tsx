@@ -22,8 +22,9 @@ type BaselineStatus = "not_applicable" | "waiting" | "running" | "reproduced" | 
 // one, `unobservable` when one has none and the delivery stopped before its tests ran.
 type RoutingStatus = "not_applicable" | "waiting" | "running" | "routed" | "unobservable" | "unsupported" | "error";
 // The module and symbols of the code at which a `component` route observes its criterion;
-// `added` are those the code does not have yet, which the change adds first.
-type Seam = { module: string; symbols: string[]; added: string[] };
+// `added` are those the code does not have yet, which the change adds first. `part` names
+// the part of the repository the seam is in, such as `frontend`; absent for the service.
+type Seam = { part?: string; module: string; symbols: string[]; added: string[] };
 // `prepared`: the code has the seam the change adds first, matching its component contract.
 type SeamStatus = "not_applicable" | "waiting" | "running" | "prepared" | "error";
 // `source`: who decided the route, the routing stage or the test author.
@@ -36,6 +37,7 @@ type RepairRound = {
   attempt: number; target: "implementation" | "tests"; tests: TestRef[]; summary: string;
   suite?: "contract" | "component";
 };
+type PartCounts = { tests: number; passed: number; failures: number; errors: number; skipped: number };
 type VerificationResult = {
   // `not_implemented`: this kind of task has no check yet, so nothing was run.
   status: "passed" | "failed" | "error" | "not_implemented";
@@ -47,6 +49,9 @@ type VerificationResult = {
   duration_seconds: number;
   test_failures: { class_name: string; name: string; kind: string; message: string }[];
   details_truncated: boolean;
+  // A component run of the tests of more than the service: the outcomes by part, the
+  // service's as `service`.
+  parts?: Record<string, PartCounts>;
   service_log: string;
   runner_log: string;
   error: string | null;
@@ -203,7 +208,10 @@ function repairRounds(value: unknown): RepairRound[] {
 
 function seam(value: unknown): Seam | undefined {
   return isObject(value) && typeof value.module === "string"
-    ? { module: value.module, symbols: strings(value.symbols), added: strings(value.added) } : undefined;
+    ? {
+      ...(typeof value.part === "string" && value.part ? { part: value.part } : {}),
+      module: value.module, symbols: strings(value.symbols), added: strings(value.added),
+    } : undefined;
 }
 
 function routes(value: unknown): Record<string, RequirementRoute> | null {
@@ -242,7 +250,12 @@ function verificationRecord(value: unknown): VerificationResult | null {
     typeof value.service_log !== "string" || typeof value.runner_log !== "string" ||
     !(value.error === null || typeof value.error === "string")
   ) throw new Error("The backend returned invalid verification results.");
-  return value as VerificationResult;
+  const parts = isObject(value.parts) ? Object.fromEntries(Object.entries(value.parts).filter(
+    ([, counts]) => isObject(counts) && ["tests", "passed", "failures", "errors", "skipped"].every(
+      (key) => typeof counts[key] === "number" && Number.isFinite(counts[key]) && counts[key] >= 0)))
+    : {};
+  const { parts: _, ...record } = value;
+  return { ...record, ...(Object.keys(parts).length > 0 ? { parts } : {}) } as VerificationResult;
 }
 
 function testSuite(value: unknown): TestSuite | null {
@@ -428,6 +441,44 @@ export function retriedProgress(progress: DeliveryProgress, stage: GenerationSta
   };
 }
 
+type TestFailure = VerificationResult["test_failures"][number];
+
+function Failures({ failures }: { failures: TestFailure[] }) {
+  return failures.length > 0 ? <ul className="verification-failures">
+    {failures.map((item, index) => <li key={index}>
+      <strong>{item.class_name}{item.class_name && "."}{item.name}</strong>
+      <span>{item.kind === "error" ? "Test error" : "Assertion failed"}</span>
+      <pre>{item.message || "No failure message was reported."}</pre>
+    </li>)}
+  </ul> : null;
+}
+
+/** The part of the repository a component test failure belongs to: a test of part P is
+ * reported with class names starting `P:`, the service's without a prefix. */
+function failurePart(item: TestFailure, parts: string[]): string {
+  return parts.filter((part) => part !== "service" && item.class_name.startsWith(`${part}:`))
+    .sort((a, b) => b.length - a.length)[0] ?? "service";
+}
+
+/** A component run's tests of each part of the repository, with that part's failures. */
+function PartRuns({ result }: { result: VerificationResult }) {
+  const parts = Object.keys(result.parts ?? {})
+    .sort((a, b) => Number(a !== "service") - Number(b !== "service") || a.localeCompare(b));
+  return <>{parts.map((part) => {
+    const counts = result.parts![part];
+    const failures = result.test_failures.filter((item) => failurePart(item, parts) === part)
+      .map((item) => part === "service" ? item
+        : { ...item, class_name: item.class_name.slice(part.length + 1) });
+    return <div key={part} className="part-run">
+      <h5>{part === "service" ? "Service" : <>Part <code>{part}</code></>}</h5>
+      <p className="verification-counts">
+        {counts.tests} tests · {counts.passed} passed · {counts.failures} failed · {counts.errors} errors · {counts.skipped} skipped
+      </p>
+      <Failures failures={failures} />
+    </div>;
+  })}</>;
+}
+
 function TestRun({ result, children }: { result: VerificationResult; children?: ReactNode }) {
   return <>
     <p className="verification-counts">
@@ -435,13 +486,7 @@ function TestRun({ result, children }: { result: VerificationResult; children?: 
       {" · "}{result.duration_seconds.toFixed(1)}s
     </p>
     {result.error && <p role="alert">{result.error}</p>}
-    {result.test_failures.length > 0 && <ul className="verification-failures">
-      {result.test_failures.map((item, index) => <li key={index}>
-        <strong>{item.class_name}{item.class_name && "."}{item.name}</strong>
-        <span>{item.kind === "error" ? "Test error" : "Assertion failed"}</span>
-        <pre>{item.message || "No failure message was reported."}</pre>
-      </li>)}
-    </ul>}
+    {result.parts ? <PartRuns result={result} /> : <Failures failures={result.test_failures} />}
     {children}
     {result.details_truncated && <p>Showing the first {result.test_failures.length} failures. Full reports are saved with the verification artifacts.</p>}
     {(result.service_log || result.runner_log) && <details className="verification-logs">
@@ -509,9 +554,10 @@ function Routing({ progress, retrying, disabled, onRetry }: {
       {entries.length > 0 && <ul className="verification-failures">
         {entries.map(([requirement, item]) => <li key={requirement}>
           <strong>{requirement}: {item.route === "contract" ? "contract tests"
-            : item.route === "component" ? "component tests" : "cannot be observed"}</strong>
+            : item.route === "component" ? (item.seam?.part ? `component tests of part ${item.seam.part}` : "component tests")
+            : "cannot be observed"}</strong>
           <span>{item.reason}{item.source === "tests" ? " (found by the test author)" : ""}</span>
-          {item.seam && <span>Seam: <code>{item.seam.module}</code>
+          {item.seam && <span>Seam: <code>{item.seam.part ? `${item.seam.part}: ` : ""}{item.seam.module}</code>
             {item.seam.symbols.length > 0 && <> ({item.seam.symbols.map((symbol, index) =>
               <span key={symbol}>{index > 0 && ", "}<code>{symbol}</code></span>)})</>}</span>}
           {item.seam && item.seam.added.length > 0 && <span>

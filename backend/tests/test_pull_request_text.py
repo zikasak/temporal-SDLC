@@ -52,3 +52,33 @@ def test_the_proofs_name_the_symbols_of_a_seam_the_change_added():
     assert ('- FR-1: Merged flows complete (at `app.delivery.workflows`: '
             '`DeliveryWorkflow.pull_request_closed`, `DeliveryWorkflow.get_state`; this change '
             'adds `DeliveryWorkflow.pull_request_closed`)') in body.splitlines()
+
+
+def test_the_proofs_name_the_part_of_a_seam_outside_the_service():
+    part_seam = {'part': 'frontend', 'module': 'src/Flows', 'symbols': ['sessionAttention'],
+                 'added': ['sessionAttention']}
+    _, body = describe('Fix the service', {'kind': 'bugfix', 'proofs': {'component': [
+        {'id': 'FR-5', 'title': 'Closed flows stay closed', 'seam': SEAM},
+        {'id': 'FR-115', 'title': 'Closed flows are not waiting', 'seam': part_seam},
+    ]}}, PUBLICATION)
+    lines = body.splitlines()
+    assert ('- FR-115: Closed flows are not waiting (at `frontend: src/Flows`: '
+            '`sessionAttention`; this change adds `sessionAttention`)') in lines
+    # The service's seam is named as before.
+    assert ('- FR-5: Closed flows stay closed (at `app.delivery.workflows`: '
+            '`DeliveryWorkflow.close`)') in lines
+    # The heading says where each part's tests and stubs are, the service's first.
+    assert ("Component tests, in-process at seams of the code: the service's in "
+            "`component-tests/`, with stubs in `contracts/components/`; part `frontend`'s in "
+            "`frontend/component-tests/`, with stubs in `contracts/parts/frontend/components/`:"
+            ) in lines
+
+
+def test_the_proofs_of_another_part_alone_name_only_its_tests():
+    seam = {'part': 'frontend', 'module': 'src/github', 'symbols': ['createGitHubApp']}
+    _, body = describe('Fix the service', {'kind': 'bugfix', 'proofs': {'component': [
+        {'id': 'TR-6', 'title': 'The app hears of closed pull requests', 'seam': seam}]}},
+        PUBLICATION)
+    assert ("Component tests, in-process at seams of the code: part `frontend`'s in "
+            "`frontend/component-tests/`, with stubs in `contracts/parts/frontend/components/`:"
+            ) in body.splitlines()
