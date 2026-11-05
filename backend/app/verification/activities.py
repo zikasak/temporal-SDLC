@@ -31,9 +31,10 @@ from app.test_generation.activities import copy_test_suite
 from app.languages import (
     Language, TestReports, TestSuite, UnsupportedLanguage, get_language,
 )
-from app.routing.components import check_conformance, stub_modules
+from app.languages.composite import PARTS_DIR as SUITE_PARTS_DIR
+from app.routing.parts import check_parts, component_parts
 from app.test_generation.components import ARTIFACT_DIR as COMPONENT_TESTS_ARTIFACT
-from app.test_generation.components import ROUTED_CONTRACT, build_runner
+from app.test_generation.components import build_runner, delivery_suite
 from app.config import GENERATED_CODE_DIR
 from app.verification.models import (
     COMPONENT_RUNS_DIR, TestFailure, TestSkip, TrackedTest, VerificationResult,
@@ -390,9 +391,11 @@ async def _snapshot(suite: TestSuite, source: Path, target: Path) -> None:
 @trace_activity('snapshot-repository-tests', feature='verification', input_parameter='language')
 async def snapshot_repository_tests(session_id: str, language: str) -> dict[str, int]:
     """Copy the repository's tests aside, as the checkout holds them before any author has
-    run: its contract tests, and its component tests in a language that has them. Taken
-    once: a later call, such as a retried delivery's, keeps the first copy, whatever the
-    checkout holds by then."""
+    run: its contract tests, its component tests in a language that has them, and those
+    of each other part with a part language, under parts/P of the component tests'
+    record, the layout of a suite of several parts. Each is taken once: a later call,
+    such as a retried delivery's, keeps the first copy, whatever the checkout holds by
+    then."""
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
         raise ApplicationError('Invalid session ID', non_retryable=True)
     registered = session_language(language)
@@ -401,14 +404,23 @@ async def snapshot_repository_tests(session_id: str, language: str) -> dict[str,
     if not await run_sync(checkout.is_dir):
         raise ApplicationError('The repository checkout is unavailable', non_retryable=True)
     snapshot = session_dir / SNAPSHOT_DIR
-    suites = [(registered.test_suite, TESTS_DIR, 'tests', snapshot / 'suite')]
+    # Each suite with where the checkout holds it, its count's key, its record and whether
+    # it is counted only when it has tests, so a repository with no other part's tests is
+    # recorded as before.
+    suites = [(registered.test_suite, TESTS_DIR, 'tests', snapshot / 'suite', False)]
     if registered.component_suite:
         suites.append((registered.component_suite, COMPONENT_TESTS_DIR, 'component_tests',
-                       snapshot / COMPONENT_SNAPSHOT))
+                       snapshot / COMPONENT_SNAPSHOT, False))
+    for part in (await run_sync(component_parts, registered, checkout))[1:]:
+        suites.append((part.suite, part.tests_dir().as_posix(),
+                       f'component_tests_of_{part.name}',
+                       snapshot / COMPONENT_SNAPSHOT / SUITE_PARTS_DIR / part.name, True))
     counts = {}
-    for suite, directory, key, target in suites:
+    for suite, directory, key, target, optional in suites:
         await _snapshot(suite, checkout / directory, target)
-        counts[key] = len(await run_sync(suite.test_cases, target))
+        cases = len(await run_sync(suite.test_cases, target))
+        if cases or not optional:
+            counts[key] = cases
     logger.info('Repository tests recorded (session=%s, %s)', session_id, counts)
     return counts
 
@@ -486,30 +498,25 @@ async def build_component_runner(session_id: str, language: str) -> dict[str, st
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
         raise ApplicationError('Invalid session ID', non_retryable=True)
     stack = session_language(language)
-    contract, suite = stack.component_contract, stack.component_suite
-    if contract is None or suite is None:
-        raise ApplicationError(f'{stack.label} has no component tests', non_retryable=True)
     session_dir = GENERATED_CODE_DIR / session_id
+    parts, _ = await run_sync(delivery_suite, stack, session_dir)
     service = session_dir / 'implementation' / 'service'
     tests = session_dir / COMPONENT_TESTS_ARTIFACT / 'suite'
-    components = session_dir / ROUTED_CONTRACT
     for path, what in ((service, 'changed code'), (tests, 'component tests'),
-                       (components, 'component contract')):
+                       *((part.routed_contract(session_dir), 'component contract')
+                         for part in parts)):
         if not await run_sync(path.is_dir):
             raise ApplicationError(f'The {what} is unavailable', non_retryable=True)
-    modules = await run_sync(stub_modules, contract, components)
     artifact_dir = session_dir / COMPONENT_RUNNER_DIR
     await run_sync(artifact_dir.mkdir, parents=True, exist_ok=True)
     async with docker_agents.keep_activity_alive('Building the component tests with the change'):
         async with async_context(tempfile.TemporaryDirectory, dir=artifact_dir) as temporary:
             work = Path(temporary)
-            try:
-                await check_conformance(contract, service, components, modules, work,
-                                        artifact_dir)
-            except RuntimeError as exc:
+            error = await check_parts(parts, session_dir, service, work, artifact_dir)
+            if error:
                 logger.info('Changed code breaks the component contract (session=%s)',
                             session_id)
-                return {'session_id': session_id, 'conformance_error': str(exc)}
+                return {'session_id': session_id, 'conformance_error': error}
             await run_sync(shutil.copytree, tests, work / 'suite')
             try:
                 image_id = await build_runner(stack, session_dir, work / 'suite',
@@ -563,10 +570,8 @@ async def run_component_suite(session_id: str, runner_image: str, language: str,
     if len(tracked_tests) > MAX_TRACKED_TESTS:
         raise ApplicationError('Too many tests to track', non_retryable=True)
     stack = session_language(language)
-    suite = stack.component_suite
-    if suite is None:
-        raise ApplicationError(f'{stack.label} has no component tests', non_retryable=True)
     session_dir = GENERATED_CODE_DIR / session_id
+    _, suite = await run_sync(delivery_suite, stack, session_dir)
     suite_tests = await run_sync(_component_suite_tests, session_dir, runner_image, suite)
     tracked: dict[str, TrackedTest] = {item: {'tests': 0, 'failed': 0} for item in tracked_tests}
     token = uuid.uuid4().hex

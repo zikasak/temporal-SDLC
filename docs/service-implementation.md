@@ -559,7 +559,7 @@ flowchart LR
    of which the module's stub must define. Such symbols cannot match the code yet, so a
    routing with any `added` skips `check_conformance`; the whole contract is checked once
    they are added (step 1a). `added_seams` in `app/routing/models.py` collects them by
-   module.
+   part and module (`seam_key`).
    A repository may hold other **parts** beside the service, such as a web client
    (`plans/part-component-contracts.md`). `component_parts` (`app/routing/parts.py`)
    finds them: the service (part `service`, root `.`) and every project
@@ -610,12 +610,59 @@ flowchart LR
    describe block named by anything but a string literal, or written with `each`/`for`,
    cannot be tracked. `TestSuite.untracked_tests` names such tests, and `validate_output`
    rejects a suite that has any.
-   Deliveries cannot write component tests of parts yet (step 3 of that plan). Until
-   they can, `defer_part_routes` turns every route to a seam of another part into
-   `unobservable`, with a reason that names the part and seam, after the part's contract
-   has been checked and kept. The delivery then stops as it does for any unobservable
-   criterion. `is_service_file` leaves out `component-tests/` at any depth, so the
-   component tests of each part are never treated as sources.
+   The routing's result and `routing/routes.json` name the parts with `component` routes
+   as `parts` (`[{name, root, language}]`, the language by its registry name); every
+   stage after the routing reads them with `read_routed_parts`, so no workflow argument
+   changes, and a routing recorded before parts could be routed names none, which means
+   the service alone. `component_suite(language, parts)` gives those parts' suite: the
+   service's own `ComponentSuite` when it is the only one, and otherwise a
+   `CompositeSuite` (`app/languages/composite.py`) with one project per part: the
+   service's at its root, as before, and part `P`'s under `parts/P/`. Its published
+   files, required files, test cases and untracked tests are those of each part's suite
+   in its project, and a test of part `P` is identified as `P:` and its identity in `P`'s
+   suite (`frontend:tests/manifest.test.ts#the GitHub App manifest > …`). `case_id` tells
+   a report entry of `P` by its class name, which the runner starts with `P:` too, and
+   `has_tests` wants a test file in every project. `is_service_file` leaves out
+   `component-tests/` at any depth, so the component tests of each part are never treated
+   as sources.
+   `snapshot_repository_tests` records each other part's `P/component-tests/` (or its
+   template) under `repository-tests/components/parts/P/`, the suite's layout; its count
+   is `component_tests_of_P`, given only when the part has tests. The component tests'
+   author gets every routed part's template and repository tests in its project, its
+   stubs in `/workspace/contracts/parts/P/components/` (the service's stay in
+   `/workspace/contracts/components/`), the composed instructions, `parts` in its input
+   and `test_globs` in `language.json`, and its prompt says where each part's tests go. The
+   repository's tests of every routed part are frozen as the service's are.
+   `build_runner` (`app/test_generation/components.py`) builds a composite suite's runner
+   in two steps. First it builds each part's own runner, as the part's suite would be
+   built alone, with only that part's published files under `suite/`; a part that does
+   not build fails the build, naming the part. Then it tags those images and builds one
+   image from a generated Dockerfile (`composite_files`). That image is based on the
+   service's runner, whose `ENTRYPOINT` and `CMD` it keeps, or, without a service
+   criterion, on the first part's runner, with `CMD []`. It copies each other part's
+   `/repository`, `/tests` and `/runner` to `/parts/<index>/`, plus the files the part's
+   command runs with (`ComponentSuite.part_runtime`, Node for TypeScript) when based on
+   the service's runner. Its `run-tests.sh` runs a generated `run-parts.sh` under one
+   600-second timeout. That script runs the service's command in `/tests`, then each
+   part's `ComponentSuite.part_command`, and exits as the worst of them did: a stopped
+   run, then any other error, then failed tests. Each part writes its report into the
+   service language's report directory, under a name its pattern matches
+   (`junit-part-0-frontend.xml` for Python, `TEST--part-0-frontend.xml` for Java), with
+   `CLASSNAME_PREFIX` (read by the trusted `vitest.config.mjs`) starting its class names
+   with `P:`. The tags are removed after the build.
+   `build_component_runner` and `prepare_seam` check the contract of every routed part
+   against the code (`check_parts` in `app/routing/parts.py`); a part's
+   `conformance_error` starts with `Part P:`. `added_seams` keys another part's seam by
+   `P/module` (`frontend/src/Flows`) and the service's by its module, and `SEAM_PROMPT`
+   says that an added symbol of a TypeScript part is an `export` added to an existing
+   declaration, or a new exported function, with no behaviour change. The fix's author
+   gets every routed part's stubs. The diagnosis gets part `P`'s stubs in
+   `component-contract/parts/P/` and reads broken tests with the composite `case_id`. The
+   code review compares each project with the repository's record (only the projects the
+   suite has) and each part's stubs with `contracts/parts/P/components/`.
+   `publish_repository` pushes part `P`'s tests to `P/component-tests/`, only what the
+   part's suite publishes, and its stubs to `contracts/parts/P/components/`, reading the
+   parts from the routing, so no workflow patch is needed.
 1a. **Seam.** When a route has `added` symbols, the delivery adds them before any test is
    written (`_prepare_seam` in `DeliveryWorkflow`): `ImplementationWorkflow` runs with
    `seam` (the symbols by module) in its context, and `implement_service` hands it to

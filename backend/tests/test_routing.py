@@ -74,7 +74,8 @@ async def test_routing_reads_the_repository_and_returns_one_route_per_criterion(
     result = await ActivityEnvironment().run(activities.route_requirements, 'session', CONTEXT)
     assert result == {'session_id': 'session', 'path': str(session / 'routing'), 'routes': {
         'FR-2': {'route': 'contract', 'reason': 'POST /rooms, then GET.'},
-        'FR-3': {'route': 'unobservable', 'reason': 'Needs a merged pull request.'}}}
+        'FR-3': {'route': 'unobservable', 'reason': 'Needs a merged pull request.'}},
+        'parts': []}
     assert json.loads((session / 'routing/routes.json').read_text()) == result
     payload = json.loads(sent.pop('input.json'))
     assert payload['brief'] == BRIEF and payload['api_design']
@@ -528,8 +529,7 @@ def fake_part_docker(monkeypatch, components, runs, sent, routes=PART_ROUTES):
     monkeypatch.setattr(docker_agents, 'docker', docker)
 
 
-async def test_a_criterion_of_another_part_is_routed_to_its_seam_but_stops_the_delivery_for_now(
-        frontend_session, monkeypatch):
+async def test_a_criterion_of_another_part_is_routed_to_its_seam(frontend_session, monkeypatch):
     published = 'export declare function takeAppReturn(): null;\n'
     file = frontend_session / 'repository/contracts/parts/frontend/components/src/app.d.ts'
     file.parent.mkdir(parents=True)
@@ -563,16 +563,17 @@ async def test_a_criterion_of_another_part_is_routed_to_its_seam_but_stops_the_d
     assert '--network=none' in run['run'] and run['run'][-1] == 'src/github'
     kept = frontend_session / 'routing/parts/frontend/components'
     assert (kept / 'src/github.d.ts').read_text() == GITHUB_STUB
-    # Its component tests cannot be written yet: the criterion stops the delivery, saying
-    # where it can be observed.
-    route = result['routes']['FR-3']
-    assert route == {'route': 'unobservable', 'reason': (
-        'Only a component test of the part frontend (TypeScript) can observe it, at '
-        'src/github (createGitHubApp), and deliveries cannot write component tests of parts '
-        'other than the service yet. Read the posted manifest.')}
+    # The criterion is routed to the part's seam, and the routing names the part, which
+    # the stages after it read from its routes.
+    assert result['routes']['FR-3'] == {
+        'route': 'component', 'reason': 'Read the posted manifest.',
+        'seam': {'part': 'frontend', 'module': 'src/github', 'symbols': ['createGitHubApp']}}
+    assert result['parts'] == [{'name': 'frontend', 'root': 'frontend',
+                                'language': 'typescript'}]
     assert 'components' not in result
+    assert json.loads((frontend_session / 'routing/routes.json').read_text()) == result
     assert judge_routes({key: {**value, 'source': 'routing'}
-                         for key, value in result['routes'].items()})[0] == 'unobservable'
+                         for key, value in result['routes'].items()})[0] == 'routed'
 
 
 async def test_a_seam_a_part_adds_first_is_kept_unchecked(frontend_session, monkeypatch):
@@ -591,7 +592,9 @@ async def test_a_seam_a_part_adds_first_is_kept_unchecked(frontend_session, monk
     assert runs == []
     assert (frontend_session / 'routing/parts/frontend/components/src/Flows.d.ts'
             ).read_text() == stub
-    assert result['routes']['FR-3']['route'] == 'unobservable'
+    assert result['routes']['FR-3']['route'] == 'component'
+    # The seam is added first, named after its part.
+    assert added_seams(result['routes']) == {'frontend/src/Flows': ['sessionAttention']}
 
 
 @pytest.mark.parametrize('seam, components, error', [

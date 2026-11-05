@@ -85,6 +85,10 @@ also contains, read-only for your purposes:
   symbol the component tests may use
 - component-verification/ their run, when it failed: reports/{report_pattern} and
   runner_log.log
+A seam may be in another part of the repository than the service, such as a web client
+beside it, whose code is in service/ under the part's directory: then the tests of part P
+are in component-tests/parts/P/, its stubs in component-contract/parts/P/, and the names of
+its tests, in the input and the reports, start with "P:".
 The `component_verification` entry of the input lists their failing tests, and the
 `verification` entry those of the contract tests, when the change has contract tests; the
 `status` of each says whether that run failed. The brief and the stubs' docstrings are the

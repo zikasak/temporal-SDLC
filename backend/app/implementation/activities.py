@@ -22,9 +22,7 @@ from app.docker_agents import default_agent_image
 from app.github.checkout import CHECKOUT_DIR, COMPONENT_TESTS_DIR, CONTRACTS_DIR, TESTS_DIR
 from app.languages import Language
 from app.requirements.document import without_repeated_tables
-from app.routing.components import (
-    COMPONENTS_DIR, ROUTED_CONTRACT, check_conformance, stub_modules,
-)
+from app.routing.parts import check_parts, read_routed_parts
 
 
 EXCLUDED = {'.git', '.openapi-generator', '__pycache__', '.agent-output'}
@@ -98,11 +96,10 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
     context = without_repeated_tables(context)
     index, files = on_demand_contracts(context, len(json.dumps(context))) or (context, {})
     contract_paths = language.implementation.contract_paths
-    # A change with criteria routed to seams of the code keeps their stubs' signatures.
-    stubs = session_dir / ROUTED_CONTRACT if context.get('component_routes') else None
-    if stubs and not stubs.is_dir():
-        raise ApplicationError('The component contract of the routing is unavailable',
-                               non_retryable=True)
+    # A change with criteria routed to seams of the code keeps their stubs' signatures,
+    # in each part with such criteria.
+    stubs = (_routed_contracts(language, session_dir) if context.get('component_routes')
+             else [])
 
     def populate(workspace: Path) -> None:
         project = workspace / 'service'
@@ -121,12 +118,26 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
                        instructions=language.implementation.instructions)
         if files:
             write_contracts(workspace, files)
-        if stubs:
+        for contract, where in stubs:
             # Read-only beside the checkout, as the contracts are; never published from here.
-            copy_regular_files(stubs, workspace / 'contracts' / COMPONENTS_DIR,
-                               include=lambda relative: True)
+            copy_regular_files(contract, workspace / where, include=lambda relative: True)
 
     return StageInputs(context=index, populate=populate)
+
+
+def _routed_contracts(language: Language, session_dir: Path) -> list[tuple[Path, Path]]:
+    """The component contract the routing checked of each part with routes, and where an
+    author's workspace holds it."""
+    try:
+        parts = read_routed_parts(language, session_dir)
+    except ValueError as exc:
+        raise ApplicationError(str(exc), non_retryable=True) from exc
+    contracts = [(part.routed_contract(session_dir), Path(part.workspace_contract()))
+                 for part in parts]
+    if not contracts or not all(contract.is_dir() for contract, _ in contracts):
+        raise ApplicationError('The component contract of the routing is unavailable',
+                               non_retryable=True)
+    return contracts
 
 
 def validate_output(clean: Path) -> None:
@@ -187,30 +198,34 @@ def existing_code_changed(language: Language, checkout: Path, published: Path) -
 async def prepare_seam(language: Language, session_id: str,
                        context: dict[str, Any]) -> dict[str, Any]:
     """Add the seam a change's criteria are observed at, which the code does not have yet
-    (`seam`: the symbols to add, by module), with no behaviour change, and check the code
-    with it against the whole component contract. Returns the stage result, its `path`
+    (`seam`: the symbols to add, by part and module), with no behaviour change, and check
+    the code with it against the whole component contract of every part with routes. Returns the stage result, its `path`
     the code with the seam, or the `conformance_error` that says how it misses the
     contract."""
     if not context.get('brief') or not context.get('component_routes'):
         raise ApplicationError('Only a change with criteria routed to a seam adds one',
                                non_retryable=True)
-    contract = language.component_contract
-    if contract is None:
-        raise ApplicationError(f'{language.label} has no component contracts', non_retryable=True)
+    session_dir = GENERATED_CODE_DIR / session_id
+    try:
+        parts = await run_sync(read_routed_parts, language, session_dir)
+    except ValueError as exc:
+        raise ApplicationError(str(exc), non_retryable=True) from exc
+    for part in parts:
+        if part.contract is None:
+            raise ApplicationError(f'{part.language.label} has no component contracts',
+                                   non_retryable=True)
     result = await run_stage(stage(language, SEAM_DIR), session_id, context, GENERATED_CODE_DIR)
     if 'questions' in result:
         return result
-    session_dir = GENERATED_CODE_DIR / session_id
-    components = session_dir / ROUTED_CONTRACT
-    modules = await run_sync(stub_modules, contract, components)
     async with docker_agents.keep_activity_alive('Checking the seam against its contract'):
         async with async_context(tempfile.TemporaryDirectory,
                                  dir=session_dir / SEAM_DIR) as temporary:
-            try:
-                await check_conformance(contract, Path(result['path']), components, modules,
-                                        Path(temporary), session_dir / SEAM_DIR)
-            except RuntimeError as exc:
-                return {'session_id': session_id, 'conformance_error': str(exc)}
+            # Every part's contract, not only those the seam is in: the seam changes
+            # nothing else.
+            error = await check_parts(parts, session_dir, Path(result['path']),
+                                      Path(temporary), session_dir / SEAM_DIR)
+    if error:
+        return {'session_id': session_id, 'conformance_error': error}
     return result
 
 

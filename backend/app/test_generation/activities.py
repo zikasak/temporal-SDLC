@@ -104,7 +104,7 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
 def validate_output(suite: TestSuite, frozen: dict[str, str] | None, must_add: bool,
                     clean: Path) -> None:
     if (not all((clean / name).is_file() for name in suite.required)
-            or not any(clean.glob(suite.test_glob))):
+            or not suite.has_tests(clean)):
         raise RuntimeError('Test generation did not produce a test suite')
     untracked = suite.untracked_tests(clean)
     if untracked:

@@ -472,3 +472,71 @@ async def test_a_seam_the_code_lacks_is_added_alone_and_checked_against_its_stub
                                     {**fix, 'seam_prepared': True})
     assert sent['service/app/rooms.py'] == 'code with the seam'
     assert agent.COMPONENT_PROMPT in agent.base_prompt(json.loads(sent['input.json']), '')
+
+
+@pytest.mark.parametrize('conforms', [True, False])
+async def test_a_seam_of_the_web_client_is_added_and_checked_against_that_parts_stubs(
+        tmp_path, monkeypatch, conforms):
+    monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
+    session = tmp_path / 'session'
+    stub = 'export declare function sessionAttention(flow: unknown): string[];\n'
+    for name, text in {
+            'repository/app/rooms.py': 'code', 'repository/Dockerfile': 'FROM scratch',
+            'repository/frontend/src/Flows.tsx': 'function sessionAttention() {}',
+            'routing/routes.json': json.dumps({'routes': {}, 'parts': [
+                {'name': 'frontend', 'root': 'frontend', 'language': 'typescript'}]}),
+            'routing/parts/frontend/components/src/Flows.d.ts': stub,
+            'routing/parts/frontend/components/runtime.json': '{"project": "frontend"}'}.items():
+        (session / name).parent.mkdir(parents=True, exist_ok=True)
+        (session / name).write_text(text)
+    seam = {'part': 'frontend', 'module': 'src/Flows', 'symbols': ['sessionAttention'],
+            'added': ['sessionAttention']}
+    context = {'requirements': [], 'language': 'python',
+               'component_routes': {'FR-115': {'route': 'component', 'reason': 'R.',
+                                               'seam': seam}},
+               'brief': {'requirements': [], 'requirements_document': 'Mark closed flows.'},
+               'seam': {'frontend/src/Flows': ['sessionAttention']},
+               'repository': {'full_name': 'octocat/project', 'branch': 'main'}}
+    sent, runs = {}, []
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': 0})
+        if args[0] == 'cp' and args[1] == '-a':
+            import tarfile
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.update({item.name: archive.extractfile(item).read().decode()
+                             for item in archive.getmembers() if item.isfile()})
+        if args[0] == 'cp' and args[1].endswith(':/workspace/service/.'):
+            (Path(args[2]) / 'Dockerfile').write_text('FROM scratch')
+            (Path(args[2]) / 'frontend/src').mkdir(parents=True)
+            (Path(args[2]) / 'frontend/src/Flows.tsx').write_text(
+                'export function sessionAttention() {}')
+        if args[0] == 'build' and '--iidfile' in args:
+            context = Path(args[-1])
+            if (context / 'check.mjs').is_file():
+                runs.append(('checked', (context / 'repository/frontend/src/Flows.tsx').read_text(),
+                             (context / 'components/src/Flows.d.ts').read_text()))
+            Path(args[args.index('--iidfile') + 1]).write_text('sha256:' + 'c' * 64)
+        if args[0] == 'run':
+            runs.append(('run', args[-1]))
+            if not conforms:
+                raise RuntimeError('Docker run failed: src/Flows: sessionAttention is not '
+                                   'exported by the code')
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    result = await ActivityEnvironment().run(activities.implement_service, 'session', context)
+    # The author gets the part's stubs where its prompt says, and is told of part seams.
+    assert sent['contracts/parts/frontend/components/src/Flows.d.ts'] == stub
+    assert not any(name.startswith('contracts/components') for name in sent)
+    assert 'contracts/parts/<part>/components' in agent.SEAM_PROMPT
+    # The code with the seam is checked against the part's contract.
+    assert ('checked', 'export function sessionAttention() {}', stub) in runs
+    assert ('run', 'src/Flows') in runs
+    if conforms:
+        assert result['path'] == str(session / 'seam/service')
+    else:
+        assert result == {'session_id': 'session', 'conformance_error': (
+            'Part frontend: The component contract does not match the code: src/Flows: '
+            'sessionAttention is not exported by the code')}

@@ -58,8 +58,8 @@ from app.requirements.document import DOCUMENT_FILENAME, render_requirements_mar
 from app.requirements.models import Requirement
 from app.requirements.prompt import document_messages, interview_messages
 from app.review.models import COMMIT_FINDINGS, ReviewFinding, commit_findings
-from app.routing.components import PUBLISHED_DIR as PUBLISHED_STUBS
-from app.routing.components import ROUTED_CONTRACT
+from app.languages.composite import suite_members
+from app.routing.parts import component_suite, read_routed_parts
 from app.verification.models import COMPONENT_TESTS_ARTIFACT
 from app.tools import ToolContext, build_tools
 from app.tools import api_design as api_design_tools
@@ -81,7 +81,9 @@ CODE_CHANGED_NOTE = ("The existing code was changed: the user confirmed that fai
 # Added to the commit of a change with criteria proved at seams of the code.
 COMPONENTS_NOTE = ("Criteria the contract tests cannot observe are proved by the component "
                    "tests in component-tests/, at the seams whose stubs are in "
-                   "contracts/components/.")
+                   "contracts/components/, and, for another part P of the repository, "
+                   "by those in P/component-tests/ with the stubs in "
+                   "contracts/parts/P/components/.")
 # Added to the commit of sources that were pushed without a check of them.
 UNVERIFIED_NOTE = "Not verified: no check exists for this kind of change yet."
 # Added to the commit of sources whose tests pass but whose code review left findings.
@@ -231,7 +233,9 @@ async def publish_repository(
 
     A change with criteria proved at seams of the code passes `components`: its component
     tests replace the repository's `component-tests/`, and the component contract its
-    routing checked replaces `contracts/components/`. Its contract tests replace the
+    routing checked replaces `contracts/components/`; those of another part P with routes,
+    read from the routing, replace `P/component-tests/` and `contracts/parts/P/components/`.
+    Its contract tests replace the
     repository's only when an author of the change wrote them (`contract_tests`); otherwise
     the repository's suite, which the change was verified to keep passing, stays."""
     registered = session_language(contract['language'])
@@ -241,14 +245,25 @@ async def publish_repository(
     suite = target.parent / 'tests/suite'
     contract_tests = components is None or bool(components.get('contract_tests'))
     sources = [target, service, *([suite] if contract_tests else [])]
-    component_suite = registered.component_suite
+    # Each part with routes: its component tests, where the suite has them and where the
+    # repository keeps them, and its stubs, as the routing kept and the repository
+    # publishes them.
+    pushed: list[tuple[Path, Path, frozenset[Path], Path, Path]] = []
     if components is not None:
-        if component_suite is None:
-            raise ApplicationError(f"{registered.label} has no component tests to push.",
-                                   non_retryable=True)
         tests = target.parent / COMPONENT_TESTS_ARTIFACT / 'suite'
-        stubs = target.parent / ROUTED_CONTRACT
-        sources += [tests, stubs]
+        try:
+            parts = await run_sync(read_routed_parts, registered, target.parent)
+            components_suite = component_suite(registered, parts)
+        except ValueError as exc:
+            raise ApplicationError(f"The component tests cannot be pushed: {exc}",
+                                   non_retryable=True) from exc
+        by_name = {part.name: part for part in parts}
+        for member in suite_members(components_suite):
+            part = by_name[member.name]
+            pushed.append((tests / member.directory, target / part.tests_dir(),
+                           frozenset(Path(item) for item in member.suite.published),
+                           part.routed_contract(target.parent), target / part.published_dir()))
+        sources += [tests, *(stubs for *_, stubs, _ in pushed)]
     if not await run_sync(all, (item.is_dir() for item in sources)):
         raise ApplicationError("The verified sources or the repository checkout are unavailable.",
                                non_retryable=True)
@@ -259,17 +274,15 @@ async def publish_repository(
             repository_checkout.replace_files(suite, target / repository_checkout.TESTS_DIR,
                                               lambda relative: True)
         write_contract(target, contract)
-        if components is not None:
-            # Only what the suite publishes: any other file the repository keeps beside it
-            # was never shown to the author, as with the service's files.
-            published = {Path(item) for item in component_suite.published}
+        for own, destination, published, stubs, stubs_destination in pushed:
+            # Only what the part's suite publishes: any other file the repository keeps
+            # beside it was never shown to the author, as with the service's files.
             repository_checkout.replace_files(
-                tests, target / repository_checkout.COMPONENT_TESTS_DIR,
-                lambda relative: relative in published
+                own, destination,
+                lambda relative, published=published: relative in published
                 or not published.isdisjoint(relative.parents))
             # The routing kept every published stub and only extended them.
-            repository_checkout.replace_files(stubs, target / PUBLISHED_STUBS,
-                                              lambda relative: True)
+            repository_checkout.replace_files(stubs, stubs_destination, lambda relative: True)
 
     subject = COMMIT_SUBJECTS.get(kind, COMMIT_SUBJECT)
     details = COMPONENTS_NOTE if components is not None else ""

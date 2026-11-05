@@ -101,6 +101,15 @@ rejects a change that breaks one. Do not create, change or
 remove contracts/components or component-tests in the checkout, and do not look for the
 component tests: they stay unavailable, as the contract tests do. In a repair run the
 failing tests in `repair.test_failures` may be component tests as well as contract tests.
+""" + """
+A seam may be in another part of the repository than the service, such as a web client
+beside it: its `seam` then names the part (`part`, its directory) and the module as a path
+within the part (such as src/Flows for a TypeScript part's src/Flows.tsx). That part's
+stubs are in /workspace/contracts/parts/<part>/components, at the module's path (such as
+src/Flows.d.ts), and the same holds for them: keep every declaration they make exactly as
+it is, and do not create, change or remove contracts/parts or any component-tests
+directory of a part. The component test names of such a part start with the part's name
+and a colon.
 """
 
 SEAM_PROMPT = """Prepare a change to the existing service in /workspace/service, a checkout
@@ -119,6 +128,14 @@ search_contracts. The `seam` entry of the input lists, by module, the stubbed sy
 code lacks. Add exactly those, in those modules, with exactly the signatures, types and
 kinds of symbol the stubs declare. Every other symbol the stubs declare already exists and
 stays exactly as it is.
+A seam may be in another part of the repository than the service, such as a web client
+beside it: the `seam` entry then names its module after the part's directory, as the
+module's path in the repository (frontend/src/Flows for src/Flows within the part
+frontend), and the part's stubs are in /workspace/contracts/parts/<part>/components, at the
+module's path within the part (src/Flows.d.ts). An added symbol of a TypeScript part is an
+`export` added to a declaration the module already has, or a new exported function that
+does the least its declared type allows, with no behaviour change; build that part with
+its own toolchain too.
 The symbols you add get no behaviour of their own yet: each does the least its signature
 allows and changes nothing the code does today, such as an update or signal that is
 accepted and ignored, a query that returns state the code already keeps, or a method that
@@ -129,7 +146,8 @@ against it unchanged; the fix is written in a later run, from the code as you le
 Read the code around each symbol before adding it. Locate code with list_files and
 search_files and read only the relevant line ranges with read_file, and add the symbols
 with edit_file. Do not change, rename or remove anything else, and do not create, change
-or remove contracts/components or component-tests. Use shell for builds.
+or remove contracts/components, contracts/parts or any component-tests directory. Use
+shell for builds.
 Do not generate, read, or execute tests.
 Build the service without running tests. Fix build failures. Keep the Dockerfile at the
 project root as it is. You have no Docker daemon; the outer worker builds the Dockerfile

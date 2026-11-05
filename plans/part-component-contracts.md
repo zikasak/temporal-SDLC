@@ -266,6 +266,34 @@ Each step lands with its own tests (`backend/tests/`, stage fakes in
    composite runner, per-part conformance in `build_component_runner` and `prepare_seam`,
    snapshot and freeze of each part's `component-tests/`, the prefix in diagnosis and
    repair. Drop the step-1 downgrade.
+   *Done.* Notes for later steps:
+   - The suite holds only the parts **with routes**, not also those whose repository
+     suite exists (3.5): a part without routes has no checked contract, so its runner
+     could not be built from the routing's `runtime.json`, and a delivery with service
+     routes alone never ran the service's repository component tests either. The tests of
+     such a part are not run and not pushed, so they stay as they are.
+   - The composite runner is not one multi-stage Dockerfile around the parts' own
+     Dockerfiles: their `COPY` paths are all relative to one context. Instead each part's
+     runner image is built on its own, as for a suite of that part alone, tagged, and a
+     generated Dockerfile copies the parts' `/repository`, `/tests` and `/runner` trees to
+     `/parts/<index>/` on top of the service's runner (or of the first part's). Its
+     command is the service runner's, inherited, so no language has to repeat its `CMD`.
+     `ComponentSuite.part_command` and `part_runtime` say how a part language's tests run
+     there.
+   - Identities are `P:` and the part's own, and vitest's JUnit class names get the same
+     prefix through `CLASSNAME_PREFIX` in the trusted `vitest.config.mjs`.
+   - `added_seams` keys another part's seam as `P/module`; the seam agent reads it.
+   - `publish_repository` already pushes `P/component-tests/` and
+     `contracts/parts/P/components/`, reading the parts from the routing, with no patch.
+     Step 4 keeps the proofs and the delivery page.
+   - The review's paths of a part are `component-tests/parts/P/…`, which `for_suite`
+     sends to the component author as it is; they are not mapped to `P/component-tests/`.
+   - `tests/test_part_component_suites.py` covers the suite, the author, the composite
+     runner's files and exit status, conformance per part and the run. With
+     `RUN_NODE_CONTRACT_TESTS=1` it runs the generated `run-parts.sh` with this
+     repository's web client and real vitest (TR-6 red, its report named after the part).
+     `test_component_contract_docker.py` builds and runs the composite image red, then
+     green, with `RUN_DOCKER_VERIFICATION_TESTS=1`.
 4. **Publication and UI** (3.7).
 5. **End to end.** Run the flow-closing bugfix again, with FR-115 and TR-6 as written:
    both routed to `component` in part `frontend` (FR-115 with `sessionAttention` in

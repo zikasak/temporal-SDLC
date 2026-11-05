@@ -28,7 +28,8 @@ from app.github.checkout import SNAPSHOT_DIR
 from app.implementation.activities import copy_service
 from app.languages import Language
 from app.requirements.document import without_repeated_tables
-from app.routing.components import ROUTED_CONTRACT
+from app.routing.parts import PARTS_DIR
+from app.test_generation.components import delivery_suite
 from app.verification.models import (
     COMPONENT_RUNS_DIR, COMPONENT_TESTS_ARTIFACT, VERIFICATION_RUNS_DIR, TestRef,
 )
@@ -97,11 +98,16 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
                                review / 'verification',
                                include=lambda relative: relative.name != 'result.json')
     if component is not None:
-        tests, stubs = session_dir / COMPONENT_TESTS_ARTIFACT / 'suite', session_dir / ROUTED_CONTRACT
-        if not tests.is_dir() or not stubs.is_dir():
+        tests = session_dir / COMPONENT_TESTS_ARTIFACT / 'suite'
+        parts, _ = delivery_suite(language, session_dir)
+        stubs = [(part.routed_contract(session_dir), review / COMPONENT_CONTRACT
+                  if part.is_service else review / COMPONENT_CONTRACT / PARTS_DIR / part.name)
+                 for part in parts]
+        if not tests.is_dir() or not all(contract.is_dir() for contract, _ in stubs):
             raise ApplicationError('The component tests are unavailable', non_retryable=True)
         copy_regular_files(tests, review / COMPONENT_TESTS, include=lambda relative: True)
-        copy_regular_files(stubs, review / COMPONENT_CONTRACT, include=lambda relative: True)
+        for contract, target in stubs:
+            copy_regular_files(contract, target, include=lambda relative: True)
         runs['component_verification'] = _summary(component, True)
         if component.get('status') == 'failed':
             copy_regular_files(_run_dir(session_dir, COMPONENT_RUNS_DIR, component),
@@ -223,10 +229,12 @@ async def run_diagnosis(session_id: str, context: dict[str, Any]) -> dict[str, A
             except docker_agents.AgentPaused as exc:
                 return paused_result(session_id, exc)
         component = context.get('component_verification')
+        # A component test of a part other than the service is named after its part.
+        component_case_id = ((await run_sync(delivery_suite, language, session_dir))[1].case_id
+                             if component is not None else None)
         verdict = await run_sync(
             read_verdict, output, context.get('verification'), language.test_suite.case_id,
-            component, language.component_suite.case_id if language.component_suite else None,
-            context.get('contract_suite') == SNAPSHOT_DIR)
+            component, component_case_id, context.get('contract_suite') == SNAPSHOT_DIR)
         result: Diagnosis = {'session_id': session_id, **verdict,
                              'path': str(artifact_dir)}
     manifest = artifact_dir / f'{uuid.uuid4().hex}.json'

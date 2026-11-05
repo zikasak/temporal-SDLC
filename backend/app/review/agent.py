@@ -135,8 +135,12 @@ pass with the changed code; the fix was checked to keep every stubbed signature.
 - component-tests/ the component test sources after the delivery
 - contracts/components/ the stubs: the signature, types and behaviour docstring of every
   symbol the component tests use, and of the collaborators they fake
+A seam may be in another part of the repository than the service, such as a web client
+beside it (its `seam` names the `part`): that part's tests are in component-tests/parts/P/
+and its stubs in contracts/parts/P/components/.
 Their changes are in changes.diff and `changes` too; the path of a finding about one of
-them starts with component-tests/ or contracts/components/. When `contract_tests` is false
+them starts with component-tests/, contracts/components/ or contracts/parts/. When
+`contract_tests` is false
 the change has no contract tests of its own, and tests/ is absent.
 Review the component tests as you review contract tests, and also report a component test
 that fakes, patches or subclasses the seam itself rather than its collaborators, or uses

@@ -1,5 +1,6 @@
 """Checkout and publication against a real Git remote on disk; only GitHub is replaced."""
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -213,6 +214,50 @@ async def test_a_change_with_component_tests_pushes_them_with_its_component_cont
     with pytest.raises(ApplicationError, match="unavailable"):
         await environment.run(activities.publish_repository, SESSION, repository_selection,
                               contract, "bugfix", None, {"contract_tests": False})
+
+
+async def test_a_change_with_component_tests_of_its_web_client_pushes_them_in_the_part(
+        tmp_path, remote, repository_selection):
+    environment = ActivityEnvironment()
+    await environment.run(activities.checkout_repository, SESSION, repository_selection)
+    session = tmp_path / "generated" / SESSION
+    working_copy = session / "repository"
+    for name, text in {"frontend/component-tests/tests/old.test.ts": "old part test",
+                       "frontend/component-tests/notes.txt": "kept beside the suite",
+                       "component-tests/tests/test_old.py": "the service's own"}.items():
+        (working_copy / name).parent.mkdir(parents=True, exist_ok=True)
+        (working_copy / name).write_text(text)
+    for name, text in {
+            "implementation/service/app/rooms.py": "fixed",
+            "implementation/service/frontend/src/github.ts": "fixed client",
+            "component-tests/suite/parts/frontend/tests/manifest.test.ts": "part test",
+            "component-tests/suite/parts/frontend/package.json": "{}",
+            "component-tests/suite/parts/frontend/package-lock.json": "{}",
+            "routing/routes.json": json.dumps({"routes": {}, "parts": [
+                {"name": "frontend", "root": "frontend", "language": "typescript"}]}),
+            "routing/parts/frontend/components/runtime.json": '{"project": "frontend"}',
+            "routing/parts/frontend/components/src/github.d.ts": "stub"}.items():
+        (session / name).parent.mkdir(parents=True, exist_ok=True)
+        (session / name).write_text(text)
+    contract = {**CONTRACT, "language": "python"}
+
+    published = await environment.run(activities.publish_repository, SESSION,
+                                      repository_selection, contract, "bugfix", None,
+                                      {"contract_tests": False})
+    files = set(git("ls-tree", "-r", "--name-only", published["branch"], cwd=remote).splitlines())
+    # The part's suite replaces what it publishes of the part's component tests.
+    assert {"frontend/component-tests/tests/manifest.test.ts",
+            "frontend/component-tests/package.json", "frontend/component-tests/notes.txt",
+            "frontend/src/github.ts",
+            "contracts/parts/frontend/components/runtime.json",
+            "contracts/parts/frontend/components/src/github.d.ts"} <= files
+    assert "frontend/component-tests/tests/old.test.ts" not in files
+    # The service had no criterion of its own: its component tests stay as they were.
+    assert "component-tests/tests/test_old.py" in files
+    assert not any(name.startswith(("component-tests/parts", "contracts/components"))
+                   for name in files)
+    message = git("log", "-1", "--format=%B", published["branch"], cwd=remote)
+    assert "P/component-tests/" in message
 
 
 def test_writing_the_contract_keeps_the_component_contract(tmp_path):
