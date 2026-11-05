@@ -113,8 +113,18 @@ def test_a_stub_declares_exports_with_members_of_classes_interfaces_and_enums():
            '( b : string ) => void }' in CONTRACT.statements(DECLARATIONS)
 
 
+def test_a_parameter_may_be_a_binding_pattern_as_tsc_declares_a_component():
+    stub = ('/** The status of a flow. */\n'
+            'export declare function Status({ status }: { status: string }): void;\n'
+            'export declare class A {\n  m(a: string, { b }: { b: number }): void;\n}\n')
+    assert CONTRACT.read_stub('src/Flows', stub) == {'Status', 'A', 'A.m'}
+
+
 @pytest.mark.parametrize('source, error', [
     ('export declare function f(): void { return; }', 'holds no body'),
+    ('export declare function f({ a = run() }: { a: string }): void;',
+     'no initializer or assignment'),
+    ('export declare function f({ a }: { a: string }) { }', 'function f has a body'),
     ('export declare function f() { }', 'function f has a body'),
     ('export declare class A { m(): void { } }', 'holds no body'),
     ('export declare class A { m() { x() } }', 'the body of m is more than a signature'),

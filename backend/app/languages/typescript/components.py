@@ -209,12 +209,15 @@ class _Stub:
     # ---- types ----
 
     def scan(self, words: list[str], *, comma: bool = False, newline: bool = True,
-             stop: tuple[str, ...] = (), defaults: bool = False) -> str | None:
+             stop: tuple[str, ...] = (), defaults: bool = False,
+             group: bool = False) -> str | None:
         """A type, or the rest of a signature, up to the `;` (or `,` with `comma`) that
         ends it, which is taken, or the `}` closing the enclosing body or a word of `stop`,
         which is not. A new line after a complete type ends it too, as in TypeScript. No
         code: no keyword only code holds, no assignment, no body; `=` only for the default
-        of a type parameter (`defaults` for a group of them). Returns what ended it."""
+        of a type parameter (`defaults` for a group of them). Inside a bracketed `group`, a
+        leading `{` is an object type or a parameter's binding pattern, not a body. Returns
+        what ended it."""
         closing: list[str] = []
         previous: _Token | None = None
         while True:
@@ -246,7 +249,8 @@ class _Stub:
             if value == "=" and (closing[-1] != ">" if closing else not defaults):
                 raise ValueError(f"line {token.line}: a stub holds no initializer or "
                                  "assignment")
-            if value == "{" and (_ends_operand(previous) or previous is None and not words):
+            if value == "{" and (_ends_operand(previous)
+                                 or previous is None and not words and not group):
                 raise ValueError(f"line {token.line}: a stub holds no body")
             if value in OPENING:
                 closing.append(OPENING[value])
@@ -270,7 +274,7 @@ class _Stub:
         words.append(self.take().value)
         inner: list[str] = []
         ended = self.scan(inner, newline=False, stop=(OPENING[opening],),
-                          defaults=opening == "<")
+                          defaults=opening == "<", group=True)
         if ended != OPENING[opening]:
             raise ValueError(f"line {self.line()}: unbalanced {opening!r}")
         words += inner
