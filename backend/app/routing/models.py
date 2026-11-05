@@ -24,6 +24,11 @@ MAX_SEAM_SYMBOLS = 50
 SYMBOL_CHARS = 200
 # The file in which the test author names criteria it cannot test, instead of a suite.
 UNOBSERVABLE_FILE = 'unobservable.json'
+# How a seam's error begins when the code with the seam added does not match the component
+# contract the routing wrote. The contract may be what is wrong, such as a stub of a symbol
+# the code lacks that no seam adds, so its retry routes the criteria again.
+SEAM_MISMATCH = ('The code with the seam the change added does not match its component '
+                 'contract, so no test was written:')
 # The type of the routing's own failures: why the routes or the component contract were
 # unusable, or what the routing lacked. Their messages carry no provider output, so the
 # user is shown them, while failures of the agent itself are not (NFR-2).
@@ -44,6 +49,10 @@ class Seam(TypedDict):
     # no behaviour change, before the criterion is shown failing through them. Absent
     # when the seam exists as the repository holds it.
     added: NotRequired[list[str]]
+    # Symbols the change adds first, as `added`, to other modules of the seam's part by
+    # module (named as `module` is): the collaborators the seam's stub names that the
+    # code lacks too, such as an activity the tests fake or a constant they read.
+    added_elsewhere: NotRequired[dict[str, list[str]]]
 
 
 class RequirementRoute(TypedDict):
@@ -78,15 +87,48 @@ def read_seam(requirement: str, seam: Any, parts: tuple[str, ...] = ()) -> Seam:
     if part is not None:
         read = {'part': part.strip(), **read}
     added = seam.get('added')
-    if added is None or added == []:
+    if added is not None and added != []:
+        if not _names(added):
+            raise RuntimeError(f'The seam of requirement {requirement} names the symbols it '
+                               f'adds other than as a list of at most {MAX_SEAM_SYMBOLS} names')
+        read['added'] = list(dict.fromkeys(item.strip() for item in added))
+    elsewhere = seam.get('added_elsewhere')
+    if elsewhere is None or elsewhere == {}:
         return read
-    if (not isinstance(added, list) or len(added) > MAX_SEAM_SYMBOLS
-            or not all(isinstance(item, str) and 0 < len(item.strip()) <= SYMBOL_CHARS
-                       for item in added)):
+    if (not isinstance(elsewhere, dict) or len(elsewhere) > MAX_SEAM_SYMBOLS
+            or not all(isinstance(module, str) and 0 < len(module.strip()) <= SYMBOL_CHARS
+                       and _names(symbols) for module, symbols in elsewhere.items())):
         raise RuntimeError(f'The seam of requirement {requirement} names the symbols it adds '
-                           f'other than as a list of at most {MAX_SEAM_SYMBOLS} names')
-    read['added'] = list(dict.fromkeys(item.strip() for item in added))
+                           'to other modules other than as an object of modules, each with a '
+                           f'list of at most {MAX_SEAM_SYMBOLS} names')
+    others: dict[str, list[str]] = {}
+    for module, symbols in elsewhere.items():
+        named = others.setdefault(module.strip(), [])
+        named += [item for item in dict.fromkeys(item.strip() for item in symbols)
+                  if item not in named]
+    if read['module'] in others:
+        raise RuntimeError(f'The seam of requirement {requirement} names symbols of its own '
+                           'module in `added_elsewhere`; they belong in `added`')
+    if sum(len(symbols) for symbols in others.values()) > MAX_SEAM_SYMBOLS:
+        raise RuntimeError(f'The seam of requirement {requirement} adds more than '
+                           f'{MAX_SEAM_SYMBOLS} symbols to other modules')
+    read['added_elsewhere'] = others
     return read
+
+
+def _names(value: Any) -> bool:
+    return (isinstance(value, list) and 0 < len(value) <= MAX_SEAM_SYMBOLS
+            and all(isinstance(item, str) and 0 < len(item.strip()) <= SYMBOL_CHARS
+                    for item in value))
+
+
+def seam_additions(seam: Seam) -> dict[str, list[str]]:
+    """The symbols a seam adds first, by module of its part: those of its own module and
+    of the other modules it names."""
+    additions = {seam['module']: list(seam['added'])} if seam.get('added') else {}
+    for module, symbols in (seam.get('added_elsewhere') or {}).items():
+        additions.setdefault(module, []).extend(symbols)
+    return additions
 
 
 def seam_key(seam: Seam) -> str:
@@ -100,14 +142,18 @@ def seam_key(seam: Seam) -> str:
 def added_seams(routes: dict[str, Any]) -> dict[str, list[str]]:
     """The symbols a change adds before it reproduces anything, by part and module (as
     `seam_key` names them): those of every `component` route whose seam the code does not
-    have yet."""
+    have yet, in its own module or the others it names."""
     added: dict[str, list[str]] = {}
     for route in routes.values():
         seam = route.get('seam') if route.get('route') == 'component' else None
-        for symbol in (seam or {}).get('added') or []:
-            symbols = added.setdefault(seam_key(seam), [])
-            if symbol not in symbols:
-                symbols.append(symbol)
+        if seam is None:
+            continue
+        for module, additions in seam_additions(seam).items():
+            key = seam_key({**seam, 'module': module})
+            symbols = added.setdefault(key, [])
+            for symbol in additions:
+                if symbol not in symbols:
+                    symbols.append(symbol)
     return added
 
 

@@ -104,7 +104,8 @@ def read_components(contract: ComponentContract, output: Path, repository: Path,
 
 
 def check_seams(routes: dict[str, dict[str, Any]], modules: dict[str, set[str]]) -> None:
-    """Every symbol a `component` route names is stubbed in the module it names."""
+    """Every symbol a `component` route names, or adds to another module, is stubbed in
+    the module it names."""
     for requirement, route in routes.items():
         seam = route.get('seam')
         if route['route'] != 'component' or seam is None:
@@ -117,6 +118,15 @@ def check_seams(routes: dict[str, dict[str, Any]], modules: dict[str, set[str]])
         if missing:
             raise RuntimeError(f'The seam of requirement {requirement} names symbols its stub '
                                f'does not define: {", ".join(missing)[:400]}')
+        for module, symbols in (seam.get('added_elsewhere') or {}).items():
+            if module not in modules:
+                raise RuntimeError(f'The seam of requirement {requirement} adds symbols to a '
+                                   f'module the component contract has no stub of: {module}')
+            missing = [symbol for symbol in symbols if symbol not in modules[module]]
+            if missing:
+                raise RuntimeError(f'The seam of requirement {requirement} adds symbols to '
+                                   f'{module} its stub does not define: '
+                                   f'{", ".join(missing)[:400]}')
 
 
 def stub_modules(contract: ComponentContract, components: Path) -> list[str]:

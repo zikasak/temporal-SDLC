@@ -45,8 +45,9 @@ remove one of its declarations.
   (cp -r /workspace/routing/repository/<part> /tmp/part), run npm ci --ignore-scripts
   in /tmp/part, then, from /workspace/routing, node {tools}/check.mjs /tmp/part
   parts/<part>/components <every stubbed module>.
-  It must report no error but, for each symbol a seam lists in `added`, that it is not
-  exported by the code (or is not a member of the code's class)."""
+  It must report no error but, for each symbol a seam lists in `added` or
+  `added_elsewhere`, that it is not exported by the code (or is not a member of the
+  code's class)."""
 
 TOKEN = re.compile(r"""
     (?P<space>\s+)

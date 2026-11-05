@@ -81,10 +81,15 @@ those symbols in `added` and stub them like the others, with the signature the c
 have. They are first added with no behaviour of their own and the existing tests run
 unchanged against the code with them, so name only symbols that can exist without
 changing what the code does today: never change, rename or remove an existing symbol, and
-put the expected behaviour in their docstrings, not in their existence. Everything else
-the stubs name must already exist. Prefer `contract` whenever HTTP can observe the
-requirement, an existing seam over an added one, and choose `unobservable` only when no
-seam exists or could be added this way.
+put the expected behaviour in their docstrings, not in their existence. When the tests
+need a collaborator of the seam that the code lacks too, in another module of the same
+part, such as a new activity the seam will call and the tests fake, or a constant they
+read, stub it in its module and list it in the seam's `added_elsewhere` under that module;
+it is added first the same way. Everything else the stubs name must already exist: a
+symbol of a stub that the code lacks and no `added` or `added_elsewhere` lists fails the
+check of the code with the seam, and no test is written. Prefer `contract` whenever HTTP
+can observe the requirement, an existing seam over an added one, and choose
+`unobservable` only when no seam exists or could be added this way.
 
 {parts}{instructions}
 """
@@ -124,15 +129,17 @@ def prompt(language: dict) -> str:
                                           parts=PARTS_PROMPT if parts else ''),
         routes='"contract", "component" or "unobservable"',
         seam=(',\n  "seam": {' + ('"part": "…", ' if parts else '')
-              + '"module": "…", "symbols": ["…"], "added": ["…"]} for `component` only, '
+              + '"module": "…", "symbols": ["…"], "added": ["…"], '
+              + '"added_elsewhere": {"<module>": ["…"]}} for `component` only, '
               + ('`part` only for a seam of a part other than the service, ' if parts else '')
-              + '`added` only for symbols the code does not have yet'),
+              + '`added` and `added_elsewhere` only for symbols the code does not have yet'),
         component_reason=(' For `component`, `reason` says how a test drives the seam to '
                           'observe the behaviour, and `seam` names the module of its stub, '
                           'as its contract\'s instructions name modules, and the symbols of '
                           'it the test uses, by dotted name within the module (`Class` or '
                           '`Class.method`). `added` lists those of its stub\'s symbols that '
-                          'the change adds first, if any.'))
+                          'the change adds first, if any, and `added_elsewhere` those it adds '
+                          'first to other stubbed modules of the same part, by module.'))
 
 
 def validate_completion(root: Path) -> None:
