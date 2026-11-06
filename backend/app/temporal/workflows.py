@@ -46,6 +46,11 @@ MAX_MESSAGE_CHARS = 10000
 OPEN_STATUSES = ("interviewing", "turn_running")
 INTERVIEW_TOO_LONG = "This interview is too long to continue. Generate the document."
 DISCUSSION_TOO_LONG = "This discussion is too long to continue. Generate the OpenAPI."
+# Patches whose old code paths are gone; histories recorded with their markers replay
+# through workflow.deprecate_patch, called where workflow.patched was.
+TASK_TREE = "task-tree"
+AUTO_API_DESIGN = "auto-api-design"
+ARCHITECTURE_STAGE = "architecture-stage"
 
 
 def pending_questions(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -99,6 +104,7 @@ async def _check_out(state: RequirementsState | ApiDesignState, resume_status: s
     """Check out the repository of a `preparing` session; False when it cannot go on."""
     if state.status != "preparing":
         return True
+    workflow.deprecate_patch("repository-checkout")
     try:
         state.checkout = await workflow.execute_activity(
             checkout_repository,
@@ -138,6 +144,7 @@ class _Delivering:
                 # Stage failures are results of the delivery; only an aborted one ends here.
                 workflow.logger.warning("Delivery did not finish: %s", exc.cause or exc)
                 stopped = True
+            workflow.deprecate_patch(TASK_TREE)
             if stopped and self._redelivery is None:
                 try:
                     await workflow.wait_condition(lambda: self._redelivery is not None,
@@ -254,8 +261,11 @@ class RequirementsWorkflow(_Delivering):
         if self.state.status == "completed" and self.state.kind in DIRECT_KINDS:
             await self._deliver()
         elif self.state.status == "completed":
+            workflow.deprecate_patch(TASK_TREE)
             if self._finalized and self.state.repository:
+                workflow.deprecate_patch(AUTO_API_DESIGN)
                 if self.state.kind in ARCHITECTURE_KINDS:
+                    workflow.deprecate_patch(ARCHITECTURE_STAGE)
                     await self._start_first_architecture()
                 else:
                     await self._start_first_design()
@@ -670,7 +680,10 @@ class ApiDesignWorkflow(_Delivering):
             async with self._turn_lock:
                 # A change has no questions to fall back on, so its opening stays
                 # failed until it is retried.
-                if not await self._turn() and not self.state.change_document:
+                turned = await self._turn()
+                if not turned and self.state.change_document:
+                    workflow.deprecate_patch("retryable-change-opening")
+                if not turned and not self.state.change_document:
                     self.state.messages.append(opening_fallback())
                     self.state.error = None
         elif ready and self.state.messages[-1]["role"] == "user":

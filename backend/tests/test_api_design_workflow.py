@@ -11,7 +11,7 @@ from temporalio import activity
 from temporalio.client import WorkflowUpdateFailedError, WorkflowUpdateStage
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Worker
+from temporalio.worker import Replayer, Worker
 
 from app.api.routes.api_design import router
 from app.api_design import service
@@ -26,7 +26,9 @@ from app.requirements.models import RequirementsState
 from app.temporal import sessions
 from app.temporal.executions import ensure_search_attributes
 from app.temporal.workflows import ApiDesignWorkflow
-from tests.pipeline import CODE, FakeCodegenWorkflow, FakeStages, finished, stage_workers
+from tests.pipeline import (
+    CODE, FakeCodegenWorkflow, FakeStages, finished, legacy_patch_markers, patch_ids, stage_workers,
+)
 
 TASK_QUEUE = "api-design-test"
 DOCUMENT = {"document_id": "0" * 32, "filename": "openapi.yaml",
@@ -263,6 +265,24 @@ async def test_repository_is_checked_out_first_and_pushed_once_verified(server, 
     assert len(live.verified_images) == 1 and len(live.checkouts) == 1
     with pytest.raises(sessions.SessionBusy):
         await service.retry_generation(handle.id, "repository")
+
+
+async def test_histories_recorded_with_the_removed_patches_still_replay(
+        server, live, live_connected, monkeypatch, repository_selection):
+    """Sessions recorded while the patches were in use hold their markers, such as the
+    one of the repository checkout."""
+    with legacy_patch_markers(monkeypatch):
+        handle = await start(server, repository_selection)
+        await wait_for_status(handle, "interviewing")
+        await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
+        await handle.execute_update(ApiDesignWorkflow.finalize)
+        state = await delivered(server, handle)
+        assert state.publication_status == "completed" and live.checkouts
+        history = await handle.fetch_history()
+        delivery_history = await delivery(server, handle).fetch_history()
+    assert "repository-checkout" in patch_ids(history)
+    await Replayer(workflows=[ApiDesignWorkflow]).replay_workflow(history)
+    await Replayer(workflows=[DeliveryWorkflow]).replay_workflow(delivery_history)
 
 
 async def test_session_fails_without_a_model_turn_when_checkout_fails(env, worker, repository_selection):
