@@ -87,11 +87,29 @@ part, such as a new activity the seam will call and the tests fake, or a constan
 read, stub it in its module and list it in the seam's `added_elsewhere` under that module;
 it is added first the same way. Everything else the stubs name must already exist: a
 symbol of a stub that the code lacks and no `added` or `added_elsewhere` lists fails the
-check of the code with the seam, and no test is written. Prefer `contract` whenever HTTP
+check of the code with the seam, and no test is written.
+
+The test author can fake only what the stubs name, and declines a criterion whose
+behaviour reaches anything else. Follow every path the requirement's behaviour takes from
+the seam, and name each collaborator on it, including those the code reaches by a name
+rather than a symbol: child workflows and activities it runs by their registered name,
+workflows it starts or signals through a client, and messages, signals and updates it
+receives. For each, the stub of the seam states its name, task queue, arguments and
+result, or the shape of the payload, in the docstring of the symbol that runs it or
+receives it, and stubs the module constants that hold those names, so a test can
+register fakes under them and send what the code receives. A requirement that needs a
+whole other workflow of the code to run, rather than a fake of it, is observed at that
+workflow's own seam, or is `unobservable` when none is narrow enough. Prefer `contract` whenever HTTP
 can observe the requirement, an existing seam over an added one, and choose
 `unobservable` only when no seam exists or could be added this way.
 
 {parts}{instructions}
+
+When the input has a `declined` entry, the criteria it lists were routed before, to the
+`seam` it names or else to the contract tests, and the test author found them
+unobservable there for the `reason` it gives, having seen only the stubs or the API. Read each reason as what the stubs lacked: route the
+criterion again with stubs that give the author what it names, at that seam or at a
+better one, and route it `unobservable` only when no stub could.
 """
 
 PARTS_PROMPT = """

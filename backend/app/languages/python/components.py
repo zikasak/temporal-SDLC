@@ -30,7 +30,11 @@ published stub, but never change or remove one of its statements.
   brief or the existing contract asks for, never how the code achieves it. Every function
   body is only a docstring and `...`; no other code, no lambda, no comprehension, no `if`.
   Collaborators the seam calls (activities, repositories, clients) appear as signatures
-  only, so a test author can fake them.
+  only, so a test author can fake them. Those it reaches by a name, such as the child
+  workflows and activities a Temporal workflow runs by their registered name, are stated
+  in the docstring of the method that runs them: the name, task queue, arguments and
+  result shape, with the module constants that hold the names and queues stubbed as
+  `NAME: Final = "…"`, so a test can register fakes under them.
 - Check the contract before you finish, from /workspace/routing:
   pip install --user {mypy} and the requirements files, then
   PYTHONPATH=repository/<source_root> MYPYPATH=components python -m mypy.stubtest

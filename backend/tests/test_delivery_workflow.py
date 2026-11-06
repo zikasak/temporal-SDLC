@@ -757,6 +757,9 @@ async def test_criteria_routed_to_a_seam_get_component_tests_written_from_their_
         assert state.routing_status == 'unobservable' and state.component_tests is None
         assert state.routing['FR-2']['source'] == 'tests'
         assert 'FR-2: Happens in no stubbed symbol.' in state.routing_error
+        # The seam it was declined at is kept, and the user is pointed at the retry.
+        assert state.routing['FR-2']['seam'] == SEAM
+        assert 'Retry the tests to route them again' in state.routing_error
     elif outcome == 'failed':
         assert state.component_tests is None
         assert 'component tests could not be generated' in state.component_tests_error
@@ -769,6 +772,12 @@ async def test_criteria_routed_to_a_seam_get_component_tests_written_from_their_
     await requirements_service.retry_generation(handle.id, 'tests')
     state = await delivered(env, handle.id)
     assert worker.stages.count('routing') == (2 if outcome == 'declined' else 1)
+    if outcome == 'declined':
+        # The new routing is told what the author lacked, and only that one.
+        assert 'declined' not in worker.routed[0]
+        assert worker.routed[1]['declined'] == {'FR-2': {
+            'route': 'unobservable', 'reason': 'Happens in no stubbed symbol.',
+            'source': 'tests', 'seam': SEAM}}
     assert state.component_tests_error is None
     assert state.component_tests['added_tests'] == ADDED_COMPONENT_TESTS
     assert state.baseline_status == 'reproduced'

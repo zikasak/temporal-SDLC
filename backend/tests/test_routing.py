@@ -147,6 +147,16 @@ def test_unobservable_criteria_are_named_with_their_reasons():
     assert judge_routes({'FR-1': routes['FR-1']}) == ('routed', None)
 
 
+def test_criteria_declined_at_a_seam_are_offered_a_new_routing():
+    seam = {'module': 'app.flows', 'symbols': ['Flow.run']}
+    status, error = judge_routes({'FR-1': {'route': 'unobservable', 'reason': 'No stub.',
+                                           'source': 'tests', 'seam': seam}})
+    assert status == 'unobservable'
+    assert error.startswith('The test author found that its suite cannot observe 1 of the 1')
+    assert 'Retry the tests to route them again' in error
+    assert "HTTP API or a seam of its code shows" in error
+
+
 def test_the_test_author_may_name_criteria_of_the_brief_instead_of_writing_a_suite(tmp_path):
     ids = ['FR-2', 'FR-3']
     # A suite without the file is published as usual.
