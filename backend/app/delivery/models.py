@@ -1,4 +1,5 @@
 """What the delivery pipeline is asked to build and how far it has come."""
+import re
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Literal, TypedDict
@@ -224,12 +225,17 @@ def judge_baseline(result: VerificationResult | None, added: list[str], changed:
     with component tests is judged on both suites' runs: `component`, and `result`, which
     is None when it has no contract tests to run at all. `seam` is true when the runs were
     against the code with the seam the change added first, which has to change nothing
-    the existing tests check."""
+    the existing tests check. A run whose tests the runner stopped at its time limit
+    proves nothing either."""
     runs = [*([contract_run(result, added, changed)] if result is not None else []),
             *([component] if component else [])]
     code = SEAM_CODE if seam else REPOSITORY_CODE
     for run in runs:
         error = _baseline_error(run, prefix=bool(component), code=code)
+        if error:
+            return 'error', error
+    for run in runs:
+        error = _hung_tests(run, prefix=bool(component))
         if error:
             return 'error', error
     added_all = [(run, case) for run in runs for case in run.added]
@@ -282,6 +288,27 @@ def _baseline_error(run: SuiteRun, prefix: bool, code: str = REPOSITORY_CODE) ->
     return None
 
 
+# How the Python runner's per-test limit (pytest-timeout, in its Dockerfile) reports a
+# test it stopped.
+RUNNER_TIMEOUT = re.compile(r'\s*Failed: Timeout >\d')
+
+
+def _hung_tests(run: SuiteRun, prefix: bool) -> str | None:
+    """Why a baseline run whose tests the runner had to stop proves nothing. Such a test
+    waited without a bound of its own for what the code does not do yet: it fails here
+    without saying what was missing, costs the run its whole per-test limit, and enough
+    of them leave the run no time to finish."""
+    hung = [f'{item["class_name"]}#{item["name"]}' for item in run.result.get('test_failures') or []
+            if RUNNER_TIMEOUT.match(item['message'])]
+    if not hung:
+        return None
+    named = f'{run.name[0].upper()}{run.name[1:]}: ' if prefix else ''
+    return (f'{named}Tests the runner stopped at its per-test time limit in the baseline '
+            f'run: {", ".join(hung[:NAMED_TESTS])} ({len(hung)}). A test that waits for '
+            'what the change is to do has to give up after a few seconds and fail saying '
+            'what did not happen; write the tests again with such a bound.')
+
+
 SKIP_REASON_CHARS = 300
 
 
@@ -318,26 +345,6 @@ def unproven_green(result: VerificationResult | None,
             return (f'{named}Tests of the suite that did not run against the changed service: '
                     f'{", ".join(run["missing_tests"][:NAMED_TESTS])}.')
     return None
-
-
-# Why a change proved by component tests stopped when they did not pass with the change, in
-# histories from before such changes were diagnosed and repaired.
-COMPONENT_CHANGE_UNREPAIRED = (
-    'Deliveries cannot yet diagnose or repair a change with component tests, so the change '
-    'was not repaired and nothing was pushed. Retrying the tests writes them again and '
-    'verifies them against the same fix.')
-# Why one that passed was not pushed all the same, in histories from before such changes
-# were reviewed.
-COMPONENT_CHANGE_UNPUBLISHED = (
-    'The change was verified: its tests failed without the fix and pass with it, its '
-    'component tests included. Deliveries cannot yet review or push a change with component '
-    'tests, so nothing was pushed.')
-# Why one that passed and was reviewed was not pushed, in histories from before such
-# changes were pushed; a `repository` retry pushes it now.
-COMPONENT_CHANGE_UNPUSHED = (
-    'The change was verified and reviewed: its tests failed without the fix and pass with it, '
-    'its component tests included. Deliveries cannot yet push a change with component tests, '
-    'so nothing was pushed.')
 
 
 def kept_tests(result: VerificationResult, touched: list[str]) -> list[str]:

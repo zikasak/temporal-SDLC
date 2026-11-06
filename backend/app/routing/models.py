@@ -13,11 +13,9 @@ ROUTES = ('contract', 'component', 'unobservable')
 # routed to the contract tests unobservable after all.
 RouteSource = Literal['routing', 'tests']
 # `routed`: every criterion has a suite that observes it. `unobservable`: one has none,
-# and the delivery stopped before its tests were run. `unsupported`: a criterion can only
-# be proved by component tests, which deliveries started before they could write them do
-# not write, and the delivery stopped.
+# and the delivery stopped before its tests were run.
 RoutingStatus = Literal['not_applicable', 'waiting', 'running', 'routed', 'unobservable',
-                        'unsupported', 'error']
+                        'error']
 REASON_CHARS = 800
 NAMED_CRITERIA = 5
 MAX_SEAM_SYMBOLS = 50
@@ -194,37 +192,11 @@ def read_routes(data: Any, requirement_ids: list[str], routes: tuple[str, ...] =
     return result
 
 
-# Why a change whose component tests were written stops before its baseline: step 4 of
-# plans/component-contracts.md, which runs them, is still to come.
-COMPONENT_TESTS_UNRUN = (
-    'The component tests of the acceptance criteria routed to seams of the code were written '
-    'against their component contract and built with the code, but deliveries cannot run '
-    'component tests yet, so nothing could show them failing without the fix and nothing was '
-    'changed. Rephrase those criteria as behaviour the service\'s HTTP API shows, in a fork '
-    'of the interview, if the change cannot wait.')
-
-
-def judge_routes(routes: dict[str, RequirementRoute],
-                 component_tests: bool = True) -> tuple[RoutingStatus, str | None]:
+def judge_routes(routes: dict[str, RequirementRoute]) -> tuple[RoutingStatus, str | None]:
     """Whether every criterion has a suite that can prove it, and what to tell the user
-    when one has none. `component_tests` is false for a delivery started before deliveries
-    wrote component tests, which a criterion routed to a seam stops."""
+    when one has none."""
     unobservable = [(requirement, item) for requirement, item in routes.items()
                     if item['route'] == 'unobservable']
-    component = [(requirement, item) for requirement, item in routes.items()
-                 if item['route'] == 'component']
-    if not unobservable and component and not component_tests:
-        # Kept for the histories of such deliveries, which have to replay as they ran.
-        named = '; '.join(f'{requirement} at {item["seam"]["module"]}'
-                          for requirement, item in component[:NAMED_CRITERIA])
-        more = len(component) - NAMED_CRITERIA
-        return 'unsupported', (
-            f'{len(component)} of the {len(routes)} acceptance criteria can only be observed '
-            f'through the code, not over HTTP ({named}{f"; {more} more" if more > 0 else ""}), '
-            'and deliveries cannot write component tests yet, so nothing was changed. Their '
-            'component contract was checked against the code and is kept with the routing. '
-            "Rephrase them as behaviour the service's HTTP API shows, in a fork of the "
-            'interview, if the change cannot wait.')
     if not unobservable:
         return 'routed', None
     named = '; '.join(f'{requirement}: {item["reason"]}'

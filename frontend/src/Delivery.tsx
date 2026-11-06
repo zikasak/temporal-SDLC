@@ -20,7 +20,7 @@ type BaselineStatus = "not_applicable" | "waiting" | "running" | "reproduced" | 
   "skipped" | "error";
 // Which suite can prove each acceptance criterion of a change: `routed` when every one has
 // one, `unobservable` when one has none and the delivery stopped before its tests ran.
-type RoutingStatus = "not_applicable" | "waiting" | "running" | "routed" | "unobservable" | "unsupported" | "error";
+type RoutingStatus = "not_applicable" | "waiting" | "running" | "routed" | "unobservable" | "error";
 // The module and symbols of the code at which a `component` route observes its criterion;
 // `added` are those the code does not have yet, which the change adds first. `part` names
 // the part of the repository the seam is in, such as `frontend`; absent for the service.
@@ -179,7 +179,7 @@ const baselineStatuses: BaselineStatus[] = [
   "not_applicable", "waiting", "running", "reproduced", "not_reproduced", "skipped", "error",
 ];
 const routingStatuses: RoutingStatus[] = [
-  "not_applicable", "waiting", "running", "routed", "unobservable", "unsupported", "error",
+  "not_applicable", "waiting", "running", "routed", "unobservable", "error",
 ];
 const seamStatuses: SeamStatus[] = ["not_applicable", "waiting", "running", "prepared", "error"];
 const publicationStatuses: PublicationStatus[] = [
@@ -548,9 +548,6 @@ function Routing({ progress, retrying, disabled, onRetry }: {
       </p>}
       {stage === "unobservable" && <p className="verification-outcome verification-failed" role="status">
         Some acceptance criteria cannot be proved by any test
-      </p>}
-      {stage === "unsupported" && <p className="verification-outcome verification-failed" role="status">
-        Some acceptance criteria can only be proved by component tests, which this delivery does not write
       </p>}
       {stage === "error" && <p className="verification-outcome verification-error" role="status">
         The routing did not complete

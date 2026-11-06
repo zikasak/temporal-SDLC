@@ -7,17 +7,17 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from temporalio import activity, workflow
+from temporalio import activity
 from temporalio.client import WorkflowUpdateFailedError, WorkflowUpdateStage
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Replayer, Worker
+from temporalio.worker import Worker
 
 from app.api.routes.api_design import router
 from app.api_design import service
 from app.api_design.models import ApiDesignState, empty_api
 from app.api_design.source import design_state
-from app.api_design.prompt import CHANGE_OPENING_FALLBACK, OPENING_FALLBACK, OPENING_QUESTIONS
+from app.api_design.prompt import OPENING_FALLBACK, OPENING_QUESTIONS
 from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, delivery_id
 from app.delivery.workflows import DeliveryWorkflow
@@ -265,23 +265,6 @@ async def test_repository_is_checked_out_first_and_pushed_once_verified(server, 
         await service.retry_generation(handle.id, "repository")
 
 
-async def test_pre_checkout_history_replays_without_checkout_or_push(server, live, monkeypatch, repository_selection):
-    """A session that selected a repository before checkouts existed keeps its history."""
-    patched = workflow.patched
-    with monkeypatch.context() as legacy:
-        legacy.setattr(workflow, 'patched', lambda name: False if name == 'repository-checkout' else patched(name))
-        handle = await start(server, repository_selection)
-        await wait_for_status(handle, "interviewing")
-        await handle.execute_update(ApiDesignWorkflow.send_message, "/rooms")
-        await handle.execute_update(ApiDesignWorkflow.finalize)
-        state = await delivered(server, handle)
-        assert state.verification['status'] == 'passed' and state.publication_status == 'not_applicable'
-        assert not live.checkouts and not live.published
-        assert 'repository' not in state.implementation['context']
-        history = await handle.fetch_history()
-    await Replayer(workflows=[ApiDesignWorkflow]).replay_workflow(history)
-
-
 async def test_session_fails_without_a_model_turn_when_checkout_fails(env, worker, repository_selection):
     worker.fail_checkout = True
     handle = await start(env, repository_selection)
@@ -471,20 +454,6 @@ async def test_failed_change_opening_is_retried_not_disguised_as_a_question(env,
     with pytest.raises(WorkflowUpdateFailedError):
         await handle.execute_update(ApiDesignWorkflow.retry_message)
     await handle.terminate()
-
-
-async def test_failed_change_opening_replays_with_its_fallback_from_older_histories(env, worker, connected, change, monkeypatch):
-    patched = workflow.patched
-    with monkeypatch.context() as legacy:
-        legacy.setattr(workflow, 'patched', lambda name: False if name == 'retryable-change-opening' else patched(name))
-        worker.fail_draft = True
-        handle = await start_from(env, change, "# Change")
-        state = await wait_for_status(handle, "interviewing")
-        assert state.messages == [{"role": "assistant", "content": CHANGE_OPENING_FALLBACK}]
-        assert state.error is None
-        await handle.terminate()
-        history = await handle.fetch_history()
-    await Replayer(workflows=[ApiDesignWorkflow]).replay_workflow(history)
 
 
 async def test_session_with_a_failed_opening_expires_without_a_document(env, worker, connected, change):

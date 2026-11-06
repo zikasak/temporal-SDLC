@@ -8,12 +8,12 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from temporalio import activity, workflow
+from temporalio import activity
 from temporalio.client import WorkflowExecutionStatus, WorkflowUpdateFailedError
 from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Replayer, Worker
+from temporalio.worker import Worker
 
 from app.api.routes.requirements import router
 from app.api_design import service as api_design_service
@@ -21,7 +21,7 @@ from app.api_design.models import empty_api
 from app.architecture.workflows import ArchitectureWorkflow
 from app.delivery import service as delivery_service
 from app.delivery.models import (
-    COMPONENT_CHANGE_UNPUBLISHED, COMPONENT_CHANGE_UNPUSHED, STOPPED, DeliveryProgress, DeliveryState, TaskSpec,
+    STOPPED, DeliveryProgress, DeliveryState, TaskSpec,
     delivery_id,
 )
 from app.github.checkout import SNAPSHOT_DIR
@@ -919,6 +919,8 @@ async def test_a_repository_without_contract_tests_is_proved_by_its_component_te
                          'tests cannot observe'),
     ('error', 'error', 'Component tests: The baseline run could not complete: The '
                        'component tests timed out or were terminated.'),
+    ('hung', 'error', 'Component tests: Tests the runner stopped at its per-test time limit '
+                      f'in the baseline run: {ADDED_COMPONENT_TESTS[0]} (1)'),
 ])
 async def test_nothing_is_fixed_unless_the_component_tests_fail_without_the_fix(
         env, worker, baseline, status, error, repository_selection):
@@ -1002,39 +1004,6 @@ async def test_a_change_with_component_tests_is_diagnosed_and_repaired_on_both_s
     assert state.publication_status == 'completed' and worker.published_components
 
 
-async def test_a_history_from_before_component_repairs_replays_unrepaired(
-        env, worker, monkeypatch, repository_selection):
-    worker.routes = [{'FR-2': 'component'}]
-    worker.component_results = ['failed']
-    patched = workflow.patched
-    with monkeypatch.context() as legacy:
-        legacy.setattr(workflow, 'patched',
-                       lambda name: False if name == 'component-repairs' else patched(name))
-        handle, state = await fixed(env, repository_selection)
-        # Such a delivery ended with its verification, as it did then.
-        assert 'cannot yet diagnose or repair' in state.verification_error
-        assert worker.diagnosed == [] and worker.repairs == [] and worker.reviewed == []
-        history = await env.client.get_workflow_handle(delivery_id(handle.id)).fetch_history()
-    await Replayer(workflows=[DeliveryWorkflow]).replay_workflow(history)
-
-
-async def test_a_history_from_before_routing_replays_unrouted(
-        env, worker, monkeypatch, repository_selection):
-    patched = workflow.patched
-    with monkeypatch.context() as legacy:
-        legacy.setattr(workflow, 'patched',
-                       lambda name: False if name == 'routing' else patched(name))
-        handle, state = await fixed(env, repository_selection)
-        # Such a delivery wrote its tests at once, as it did then, and was still delivered.
-        assert worker.stages == ['tests', 'baseline', 'baseline-run', 'implementation',
-                                 'verification']
-        assert state.routing_status == 'not_applicable' and state.routing is None
-        assert state.baseline_status == 'reproduced'
-        assert state.verification_status == 'completed'
-        history = await env.client.get_workflow_handle(delivery_id(handle.id)).fetch_history()
-    await Replayer(workflows=[DeliveryWorkflow]).replay_workflow(history)
-
-
 async def test_component_tests_that_keep_failing_end_the_repairs(env, worker,
                                                                  repository_selection):
     worker.routes = [{'FR-2': 'component'}]
@@ -1098,36 +1067,6 @@ async def test_instructions_about_a_pushed_component_change_go_to_every_author(
     assert state.verification_status == 'completed' and not state.open_findings
     assert len(worker.published) == 2 and worker.published_findings == []
     assert worker.published_components == {'contract_tests': True}
-
-
-@pytest.mark.parametrize('reviewed', [True, False])
-async def test_a_history_from_before_component_pushes_replays_unpushed(
-        env, worker, monkeypatch, reviewed, repository_selection):
-    worker.routes = [{'FR-2': 'component'}]
-    patched = workflow.patched
-    legacy = {'component-pushes', *([] if reviewed else ['component-repairs'])}
-    with monkeypatch.context() as context:
-        context.setattr(workflow, 'patched',
-                        lambda name: False if name in legacy else patched(name))
-        handle, state = await fixed(env, repository_selection)
-        # Such a delivery said where its push would be that it could not push yet.
-        assert not worker.published and state.publication_status == 'skipped'
-        assert state.publication_error == (
-            COMPONENT_CHANGE_UNPUSHED if reviewed else COMPONENT_CHANGE_UNPUBLISHED)
-        assert len(worker.reviewed) == (1 if reviewed else 0)
-        history = await env.client.get_workflow_handle(delivery_id(handle.id)).fetch_history()
-    await Replayer(workflows=[DeliveryWorkflow]).replay_workflow(history)
-    if not reviewed:
-        # A push now would skip the code review it never had.
-        with pytest.raises(sessions.SessionBusy, match='before changes with component'):
-            await requirements_service.retry_generation(handle.id, 'repository')
-        return
-    # One that was reviewed is pushed by retrying the push, as it was verified.
-    await requirements_service.retry_generation(handle.id, 'repository')
-    state = await delivered(env, handle.id)
-    assert worker.published_components == {'contract_tests': False}
-    assert state.publication_status == 'completed' and state.publication_error is None
-    assert worker.stages.count('implementation') == 1 and len(worker.reviewed) == 1
 
 
 async def test_a_fix_that_breaks_its_component_contract_is_written_again(

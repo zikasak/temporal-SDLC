@@ -46,13 +46,6 @@ MAX_MESSAGE_CHARS = 10000
 OPEN_STATUSES = ("interviewing", "turn_running")
 INTERVIEW_TOO_LONG = "This interview is too long to continue. Generate the document."
 DISCUSSION_TOO_LONG = "This discussion is too long to continue. Generate the OpenAPI."
-# Requirements → API design → delivery is one Temporal workflow tree whose root stays open
-# as long as any part of the task does; histories from before that replay without it.
-TASK_TREE = "task-tree"
-# A requirements session the user finalizes starts its API design itself.
-AUTO_API_DESIGN = "auto-api-design"
-# ...through the architecture session it starts first, which hands the design back.
-ARCHITECTURE_STAGE = "architecture-stage"
 
 
 def pending_questions(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -106,21 +99,19 @@ async def _check_out(state: RequirementsState | ApiDesignState, resume_status: s
     """Check out the repository of a `preparing` session; False when it cannot go on."""
     if state.status != "preparing":
         return True
-    # Histories from before checkouts existed replay without one.
-    if workflow.patched("repository-checkout"):
-        try:
-            state.checkout = await workflow.execute_activity(
-                checkout_repository,
-                args=[workflow.info().workflow_id, state.repository],
-                start_to_close_timeout=timedelta(minutes=10),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-        except ActivityError as exc:
-            workflow.logger.warning("Repository checkout failed: %s", exc.cause or exc)
-            state.status = "failed"
-            state.error = ("The repository could not be checked out. Check the GitHub "
-                           "connection and start a new session.")
-            return False
+    try:
+        state.checkout = await workflow.execute_activity(
+            checkout_repository,
+            args=[workflow.info().workflow_id, state.repository],
+            start_to_close_timeout=timedelta(minutes=10),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+    except ActivityError as exc:
+        workflow.logger.warning("Repository checkout failed: %s", exc.cause or exc)
+        state.status = "failed"
+        state.error = ("The repository could not be checked out. Check the GitHub "
+                       "connection and start a new session.")
+        return False
     state.status = resume_status
     return True
 
@@ -147,8 +138,6 @@ class _Delivering:
                 # Stage failures are results of the delivery; only an aborted one ends here.
                 workflow.logger.warning("Delivery did not finish: %s", exc.cause or exc)
                 stopped = True
-            if not workflow.patched(TASK_TREE):
-                return
             if stopped and self._redelivery is None:
                 try:
                     await workflow.wait_condition(lambda: self._redelivery is not None,
@@ -264,10 +253,9 @@ class RequirementsWorkflow(_Delivering):
         await workflow.wait_condition(workflow.all_handlers_finished)
         if self.state.status == "completed" and self.state.kind in DIRECT_KINDS:
             await self._deliver()
-        elif self.state.status == "completed" and workflow.patched(TASK_TREE):
-            if self._finalized and self.state.repository and workflow.patched(AUTO_API_DESIGN):
-                if (self.state.kind in ARCHITECTURE_KINDS
-                        and workflow.patched(ARCHITECTURE_STAGE)):
+        elif self.state.status == "completed":
+            if self._finalized and self.state.repository:
+                if self.state.kind in ARCHITECTURE_KINDS:
                     await self._start_first_architecture()
                 else:
                     await self._start_first_design()
@@ -681,12 +669,9 @@ class ApiDesignWorkflow(_Delivering):
         if ready and not self.state.messages:
             async with self._turn_lock:
                 # A change has no questions to fall back on, so its opening stays
-                # failed until it is retried; older histories replay the fallback.
-                if not await self._turn() and not (
-                        self.state.change_document
-                        and workflow.patched("retryable-change-opening")):
-                    self.state.messages.append(
-                        opening_fallback(bool(self.state.change_document)))
+                # failed until it is retried.
+                if not await self._turn() and not self.state.change_document:
+                    self.state.messages.append(opening_fallback())
                     self.state.error = None
         elif ready and self.state.messages[-1]["role"] == "user":
             async with self._turn_lock:
