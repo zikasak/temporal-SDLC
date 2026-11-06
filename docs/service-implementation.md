@@ -760,11 +760,15 @@ flowchart LR
    - `error`: an existing test fails, any test is skipped (reported as a routing failure:
      a test that skips itself was written for a criterion the contract tests cannot
      observe), a test in the suite's sources
-     has no report (`missing_tests`: the build configuration left it out, for example), or
-     the run could not complete.
+     has no report (`missing_tests`: the build configuration left it out, for example),
+     the runner stopped a test at its per-test time limit (`Failed: Timeout`), or the run
+     could not complete.
 
-   Anything but `reproduced` ends the delivery with `baseline_error`, verification
-   `skipped` and nothing pushed.
+   Tests the runner stopped at its per-test time limit go back to their suite's author
+   first (`bound_request`: the hung tests as `broken_tests`, the only ones it may change,
+   with instructions to bound their waits), and the baseline runs again, for at most
+   `MAX_BOUND_ROUNDS` rounds. Anything but `reproduced` after that ends the delivery with
+   `baseline_error`, verification `skipped` and nothing pushed.
 
    A change with component tests runs both suites. Its contract tests are its author's
    suite, or, when no criterion was routed `contract`, the repository's own suite as

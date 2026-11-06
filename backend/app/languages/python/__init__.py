@@ -40,7 +40,13 @@ servers are fetched when the suite is built and work without a network.
 Each test is stopped after 30 seconds and the whole suite after ten minutes, and every test
 you add first runs against the code without the change, where it waits out each of its
 bounds: keep a wait for something that may never happen to a few seconds, and prefer the
-time-skipping environment, whose timers do not take real time.
+time-skipping environment, whose timers do not take real time. A test that outlasts the
+limit proves nothing and is sent back to you. So wrap every await on the workflow that the
+code without the change may never answer, such as `handle.result()`, a loop polling a
+query or `handle.describe()` until its status changes, or an `asyncio.Event` or queue a
+fake fills, in `asyncio.wait_for(..., timeout=5)` or a loop with a deadline, and turn the
+timeout into an assertion failure that says what did not happen. A fake of an activity
+answers at once and never waits for something a test may not provide.
 List any further dependency of the tests in requirements.txt; never list the service or
 its own dependencies, which the runner installs from the service's requirements.
 The service's code is not available here, so the suite cannot be collected or run. Check
