@@ -343,6 +343,11 @@ def test_each_author_is_told_its_own_task():
     assert repaired.endswith(agent.COMPONENT_REPAIR_PROMPT)
     assert reviewed.endswith(agent.COMPONENT_REVIEW_PROMPT)
     assert all(agent.UNOBSERVABLE not in text for text in (repaired, reviewed))
+    # Added tests the baseline showed not failing without the change are rewritten.
+    rewritten = agent.prompt({**inputs, 'repair': {'attempt': 1, 'reproduce': True}}, language)
+    assert rewritten.endswith(agent.COMPONENT_REPRODUCE_PROMPT)
+    assert agent.REPRODUCE_PROMPT in agent.prompt(
+        {'brief': BRIEF, 'routes': {}, 'repair': {'attempt': 1, 'reproduce': True}}, language)
 
 
 def test_the_component_suite_template_publishes_no_runner(tmp_path):

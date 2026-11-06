@@ -18,7 +18,8 @@ with workflow.unsafe.imports_passed_through():
         MENTION_HANDLED,
         OUTCOME_OWED, STOPPED, TASK_IDLE_TIMEOUT, AgentQuestions, DeliveryProgress,
         DeliveryState, bound_request, component_run, hung_tests, is_mention, judge_baseline,
-        judge_kept, kept_tests, mention_key, open_review_findings, restorable_tests, unproven_green,
+        judge_kept, kept_tests, mention_key, open_review_findings, reproduce_request,
+        restorable_tests, unproven_green, unreproducing_tests,
     )
     from app.diagnosis.models import repair_request
     from app.github.checkout import SNAPSHOT_DIR
@@ -49,6 +50,12 @@ MAX_BOUND_ROUNDS = 2
 # Marks the workflow code that sends such tests back to their authors; deliveries
 # recorded before it stopped at that baseline.
 BOUND_HUNG_PATCH = 'bound-hung-tests'
+# Rounds in which the authors of a bugfix's regression tests correct those the baseline
+# run showed written wrong, such as tests that pass without the fix, each run again.
+MAX_REPRODUCE_ROUNDS = 1
+# Marks the workflow code that sends such tests back; deliveries recorded before it
+# stopped at that baseline.
+REPRODUCE_PATCH = 'reproduce-baseline-tests'
 # Patches whose old code paths are gone; histories recorded with their markers replay
 # through workflow.deprecate_patch, called where workflow.patched was.
 RESTORE_KEPT_PATCH = 'restore-kept-tests'
@@ -931,29 +938,46 @@ class DeliveryWorkflow:
         return self.progress.baseline_status == 'reproduced'
 
     async def _reproduce_bounded(self) -> bool:
-        """The baseline run, and while the runner stopped tests of it at its per-test time
-        limit, at most MAX_BOUND_ROUNDS rounds in which the authors of those tests bound
-        their waits, changing them alone, and the baseline runs again. Such a test proves
-        nothing: it waited for what the code does not do yet without saying what."""
-        for attempt in range(1, MAX_BOUND_ROUNDS + 1):
+        """The baseline run, with rounds in which the authors of a change's tests correct
+        those the run showed written wrong, changing them alone, and the baseline runs
+        again. While the runner stopped tests at its per-test time limit, at most
+        MAX_BOUND_ROUNDS rounds bound their waits: such a test waited for what the code
+        does not do yet without saying what. Then, when added tests passed without the
+        fix or did not run, at most MAX_REPRODUCE_ROUNDS rounds rewrite them: such a test
+        does not reproduce the problem. A baseline that fails for anything else, such as
+        failing existing tests, proves nothing the authors can correct."""
+        bounds = reproductions = 0
+        while True:
             if await self._reproduce():
                 return True
             hung = self._hung_suites()
-            if not hung or not workflow.patched(BOUND_HUNG_PATCH):
-                return False
-            workflow.logger.info('Bound round %d: %s', attempt, ', '.join(
-                f'{suite} {len(tests)}' for suite, tests in hung.items()))
+            if hung:
+                if bounds == MAX_BOUND_ROUNDS or not workflow.patched(BOUND_HUNG_PATCH):
+                    return False
+                bounds += 1
+                workflow.logger.info('Bound round %d: %s', bounds, ', '.join(
+                    f'{suite} {len(tests)}' for suite, tests in hung.items()))
+                requests = {suite: bound_request(tests, bounds)
+                            for suite, tests in hung.items()}
+            else:
+                wrong = self._unreproducing_suites()
+                if (not wrong or reproductions == MAX_REPRODUCE_ROUNDS
+                        or not workflow.patched(REPRODUCE_PATCH)):
+                    return False
+                reproductions += 1
+                workflow.logger.info('Reproduce round %d: %s', reproductions, ', '.join(
+                    f'{suite} {sum(map(len, tests.values()))}' for suite, tests in wrong.items()))
+                requests = {suite: reproduce_request(tests, reproductions)
+                            for suite, tests in wrong.items()}
             self.progress.baseline_status = 'running'
             components = bool(self.progress.component_tests)
             await asyncio.gather(*(
-                self._generate_tests(bound_request(tests, attempt),
-                                     suite if components else None)
-                for suite, tests in hung.items()))
+                self._generate_tests(request, suite if components else None)
+                for suite, request in requests.items()))
             if self.progress.routing_status not in ('routed', 'not_applicable'):
                 # The author found a criterion its suite cannot observe after all.
                 self.progress.baseline_status = 'skipped'
                 return False
-        return await self._reproduce()
 
     def _hung_suites(self) -> dict[str, list[Any]]:
         """The tests of each suite the runner stopped at its per-test time limit in the
@@ -962,6 +986,29 @@ class DeliveryWorkflow:
         hung = {'contract': hung_tests(self.progress.baseline) if self.progress.tests else [],
                 'component': hung_tests(self.progress.component_baseline)}
         return {suite: tests for suite, tests in hung.items() if tests}
+
+    def _unreproducing_suites(self) -> dict[str, dict[str, list[str]]]:
+        """The added tests of each suite the last baseline run showed written wrong, by
+        the suite whose author corrects them; none while a run of either suite proves
+        nothing for another reason, which correcting the added tests would not change."""
+        tests, components = self.progress.tests, self.progress.component_tests
+        runs = []
+        if self.progress.baseline is not None:
+            # The repository's own contract tests, run when no author wrote any, add none.
+            runs.append(('contract', self.progress.baseline,
+                         tests['added_tests'] if tests else [],
+                         tests['changed_tests'] if tests else []))
+        if components and self.progress.component_baseline is not None:
+            runs.append(('component', self.progress.component_baseline,
+                         components['added_tests'], components['changed_tests']))
+        suites = {}
+        for suite, result, added, changed in runs:
+            wrong = unreproducing_tests(result, added, changed)
+            if wrong is None:
+                return {}
+            if wrong:
+                suites[suite] = wrong
+        return suites
 
     async def _build_baseline(self) -> dict[str, Any]:
         if self._seam_prepared():
@@ -1993,8 +2040,11 @@ class DeliveryWorkflow:
         """Corrections of review findings are told apart from repairs of failed tests."""
         if repair and 'review' in repair:
             return f'{stage}-review'
-        # Bounding the waits of hung tests is told apart from repairs of failed ones.
-        return f'{stage}-bounds' if repair and repair.get('bound') else stage
+        # Bounding the waits of hung tests, and rewriting tests that did not fail without
+        # the fix, are told apart from repairs of failed ones.
+        if repair and repair.get('bound'):
+            return f'{stage}-bounds'
+        return f'{stage}-reproduce' if repair and repair.get('reproduce') else stage
 
     async def _implement_service(self, repair: dict[str, Any] | None = None) -> None:
         try:

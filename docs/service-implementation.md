@@ -767,8 +767,16 @@ flowchart LR
    Tests the runner stopped at its per-test time limit go back to their suite's author
    first (`bound_request`: the hung tests as `broken_tests`, the only ones it may change,
    with instructions to bound their waits), and the baseline runs again, for at most
-   `MAX_BOUND_ROUNDS` rounds. Anything but `reproduced` after that ends the delivery with
-   `baseline_error`, verification `skipped` and nothing pushed.
+   `MAX_BOUND_ROUNDS` rounds. Regression tests written wrong go back to their suite's
+   author the same way, for at most `MAX_REPRODUCE_ROUNDS` rounds, when they alone are to
+   blame for the verdict (`unreproducing_tests`): added tests that passed without the fix
+   (`not_reproduced`) or did not run at all. `reproduce_request` gives the author those
+   tests as `broken_tests`, the only ones it may change, split into `passing_tests` and
+   `missing_tests`, with instructions to make each assert what the brief requires and so
+   fail without the fix, never by failing unconditionally. A run that could not complete,
+   failing existing tests, skipped tests or tests the change did not add that did not run
+   are not corrected this way. Anything but `reproduced` after these rounds ends the
+   delivery with `baseline_error`, verification `skipped` and nothing pushed.
 
    A change with component tests runs both suites. Its contract tests are its author's
    suite, or, when no criterion was routed `contract`, the repository's own suite as

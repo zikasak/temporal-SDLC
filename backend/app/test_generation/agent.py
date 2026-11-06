@@ -253,6 +253,46 @@ asserts; do not weaken or remove assertions. The implementation stays unavailabl
 """
 
 
+COMPONENT_REPRODUCE_PROMPT = """
+This is a repair run. /workspace/tests already holds your previous component suite. It ran
+against the code as it was before the change, where some of the regression tests you added
+did not fail as they must: the `repair` entry of the input holds the `instructions`, the
+added tests that passed there (`passing_tests`), those that did not run at all
+(`missing_tests`) and, as `broken_tests`, all of them. Those are the only tests you may
+change. Every other test must stay exactly as it is, and the outer worker rejects a suite in
+which one of them differs or is missing.
+A test that passes without the change does not observe what the brief says is wrong: it
+asserts too little, asserts what the code already does, sets up a case the problem does not
+arise in, or observes a symbol other than the seam's. Read the brief and the stubs'
+docstrings again and correct each such test with targeted edits so that it asserts exactly
+the behaviour they require, which the code without the change lacks. Make each test that
+did not run be collected and run. Never make a test fail unconditionally, nor assert what
+neither the brief nor a docstring supports: every test must pass once the change is made.
+The corrected tests run against the code without the change again, where each one you added
+must fail. The service's source stays unavailable.
+"""
+
+
+REPRODUCE_PROMPT = """
+This is a repair run. /workspace/tests already holds your previous suite. It ran against
+the service as the repository holds it, where some of the regression tests you added did
+not fail as they must: the `repair` entry of the input holds the `instructions`, the added
+tests that passed there (`passing_tests`), those that did not run at all (`missing_tests`)
+and, as `broken_tests`, all of them. Those are the only tests you may change. Every other
+test must stay exactly as it is, and the outer worker rejects a suite in which one of them
+differs or is missing.
+A test that passes against the service as it is does not observe what the brief says is
+wrong: it asserts too little, asserts what the service already does, or sends a request the
+problem does not arise for. Read the brief and the contract again and correct each such
+test with targeted edits so that it asserts exactly the behaviour they require, which the
+service does not have yet. Make each test that did not run be collected and run. Never make
+a test fail unconditionally, nor assert what the brief and the contract do not support:
+every test must pass once the problem is fixed. The corrected tests run against the service
+as the repository holds it again, where each one you added must fail. The implementation
+stays unavailable.
+"""
+
+
 REPAIR_PROMPT = """
 This is a repair run. /workspace/tests already holds your previous suite. It compiled, but
 some tests failed against the running service and a reviewer who compared them with the
@@ -310,7 +350,8 @@ def repair_prompt(inputs: dict) -> str:
     if not repair:
         return keep
     return (REVIEW_PROMPT if repair.get('review')
-            else BOUND_PROMPT if repair.get('bound') else REPAIR_PROMPT) + keep
+            else BOUND_PROMPT if repair.get('bound')
+            else REPRODUCE_PROMPT if repair.get('reproduce') else REPAIR_PROMPT) + keep
 
 
 def validate_completion(test_glob: str, root: Path, test_globs: list[str] | None = None) -> None:
@@ -341,6 +382,7 @@ def prompt(inputs: dict, language: dict) -> str:
                 + (COMPONENT_UNOBSERVABLE_PROMPT if not repair
                    else COMPONENT_REVIEW_PROMPT if repair.get('review')
                    else COMPONENT_BOUND_PROMPT if repair.get('bound')
+                   else COMPONENT_REPRODUCE_PROMPT if repair.get('reproduce')
                    else COMPONENT_REPAIR_PROMPT))
     if inputs.get('brief'):
         # A change to an existing service is told about its repository by its own prompt.

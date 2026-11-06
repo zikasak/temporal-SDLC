@@ -318,6 +318,66 @@ def bound_request(hung: list[TestFailure], attempt: int) -> dict[str, Any]:
                              for item in hung]}
 
 
+def unreproducing_tests(result: VerificationResult, added: list[str],
+                        changed: list[str] | None = None) -> dict[str, list[str]] | None:
+    """The tests a change `added` to a suite that its baseline run shows were written
+    wrong, and that their author can correct alone, by what is wrong with them:
+    `passing`, those that did not fail against the code without the change, so they do
+    not reproduce the problem, and `missing`, those the run has no report of. Empty when
+    nothing is wrong with them. None when the run proves nothing for a reason beyond
+    them, which correcting them would not change: it could not complete, tests skipped
+    themselves or hung, existing tests failed, or tests it did not add did not run.
+    `changed` are repository tests a repair corrected, which may fail or pass here."""
+    if result['status'] == 'error' or result['tracked'] is None:
+        return None
+    if result['skipped'] or hung_tests(result):
+        return None
+    tracked = result['tracked']
+    existing = result['failures'] + result['errors'] - sum(
+        tracked[case]['failed'] for case in {*added, *(changed or [])} if case in tracked)
+    missing = list(result['missing_tests'] or [])
+    if existing or any(case not in added for case in missing):
+        return None
+    missing += [case for case in added
+                if case not in missing and tracked.get(case, {'tests': 0})['tests'] == 0]
+    passing = [case for case in added if case not in missing
+               and tracked[case]['failed'] < tracked[case]['tests']]
+    return {kind: cases for kind, cases in (('passing', passing), ('missing', missing))
+            if cases}
+
+
+# What the author of a suite whose added tests did not fail in the baseline run is asked
+# to do.
+REPRODUCE_INSTRUCTIONS = (
+    'The tests in `broken_tests` are regression tests you added, and the baseline run '
+    'against the code without the change shows them written wrong. Those in '
+    '`passing_tests` passed there, so they do not reproduce the problem the brief describes: '
+    'each one has to assert the behaviour the brief requires, which that code does not have '
+    'yet, and so fail there. Those in `missing_tests` did not run at all, as when the file '
+    'is not collected, the test is not discovered, or it does not compile: make each one '
+    'run. Rewrite only these tests. Never make one fail by asserting what the brief does '
+    'not state, nor by failing unconditionally: it must pass once the problem is fixed.')
+
+
+def reproduce_request(wrong: dict[str, list[str]], attempt: int) -> dict[str, Any]:
+    """What the author of a suite receives to correct the added tests its baseline run
+    showed written `wrong` (as `unreproducing_tests` gives them): a repair that may change
+    those tests alone."""
+    cases = [*wrong.get('passing', []), *wrong.get('missing', [])]
+    return {'attempt': attempt, 'reproduce': True, 'instructions': REPRODUCE_INSTRUCTIONS,
+            'test_failures': [], 'failing_tests': 0,
+            'passing_tests': wrong.get('passing', [])[:NAMED_TESTS * 6],
+            'missing_tests': wrong.get('missing', [])[:NAMED_TESTS * 6],
+            'broken_tests': [case_ref(case) for case in cases]}
+
+
+def case_ref(case: str) -> dict[str, str]:
+    """A test as reports name it, from its identity (`class_name#name`, as each language's
+    `case_id` makes it)."""
+    class_name, _, name = case.partition('#')
+    return {'class_name': class_name, 'name': name}
+
+
 def _hung_tests(run: SuiteRun, prefix: bool) -> str | None:
     """Why a baseline run whose tests the runner had to stop proves nothing. Such a test
     waited without a bound of its own for what the code does not do yet: it fails here
