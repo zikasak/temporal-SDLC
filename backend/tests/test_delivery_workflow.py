@@ -13,7 +13,7 @@ from temporalio.client import WorkflowExecutionStatus, WorkflowUpdateFailedError
 from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Worker
+from temporalio.worker import Replayer, Worker
 
 from app.api.routes.requirements import router
 from app.api_design import service as api_design_service
@@ -35,7 +35,7 @@ from app.temporal.workflows import ApiDesignWorkflow, RequirementsWorkflow
 from tests.pipeline import (
     ADDED_COMPONENT_TESTS, ADDED_TESTS, BASELINE_IMAGE, BROKEN_TEST, CHANGED_COMPONENT_IMAGE,
     ADDED_SEAM, CODE, COMPONENT_IMAGE, SEAM, SEAM_IMAGE, FakeCodegenWorkflow, FakeStages,
-    finished, stage_workers,
+    finished, legacy_patch_markers, patch_ids, stage_workers,
 )
 
 TASK_QUEUE = "delivery-test"
@@ -1519,3 +1519,26 @@ async def test_only_the_first_of_answers_sent_together_resumes_the_agent():
     with pytest.raises(ApplicationError, match="not waiting"):
         await agent.answer_questions(["MySQL"])
     assert agent._answers == ["Postgres"]
+
+
+async def test_histories_recorded_with_the_removed_patches_still_replay(
+        env, worker, monkeypatch, repository_selection):
+    """Deliveries recorded while the patches were in use hold their markers."""
+    worker.routes = [{'FR-2': 'component'}]
+    with legacy_patch_markers(monkeypatch):
+        handle, state = await fixed(env, repository_selection)
+        assert state.publication_status == 'completed'
+        session = await handle.fetch_history()
+        delivery = await env.client.get_workflow_handle(delivery_id(handle.id)).fetch_history()
+        change = await deliver(env, repository_selection, kind="api_change")
+        assert (await delivered(env, change)).publication_status == 'completed'
+        changed = await env.client.get_workflow_handle(delivery_id(change)).fetch_history()
+    # Every patch either delivery took, as the code with the patches recorded it.
+    assert patch_ids(delivery) >= {
+        'delivery-waits', 'routing', 'component-tests', 'component-runs', 'component-repairs',
+        'component-pushes', 'pull-request', 'pull-request-text'}
+    assert patch_ids(changed) >= {'delivery-waits', 'restore-kept-tests',
+                                  'pull-request', 'pull-request-text'}
+    await Replayer(workflows=[RequirementsWorkflow]).replay_workflow(session)
+    for history in (delivery, changed):
+        await Replayer(workflows=[DeliveryWorkflow]).replay_workflow(history)

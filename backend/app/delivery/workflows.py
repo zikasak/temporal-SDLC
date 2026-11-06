@@ -43,6 +43,14 @@ MAX_REPAIR_ROUNDS = 5
 # Rounds in which the test author of an API change puts back the repository's tests the
 # changed service still passes, each verified again.
 MAX_RESTORE_ROUNDS = 2
+# Patches whose old code paths are gone; histories recorded with their markers replay
+# through workflow.deprecate_patch, called where workflow.patched was.
+RESTORE_KEPT_PATCH = 'restore-kept-tests'
+ROUTING_PATCH = 'routing'
+COMPONENT_TESTS_PATCH = 'component-tests'
+COMPONENT_RUNS_PATCH = 'component-runs'
+COMPONENT_REPAIRS_PATCH = 'component-repairs'
+COMPONENT_PUSHES_PATCH = 'component-pushes'
 # Failed tests a verification that is not repaired names.
 NAMED_FAILURES = 5
 # Runs of one verification whose result is an infrastructure error, not a verdict.
@@ -169,6 +177,7 @@ class DeliveryWorkflow:
             elif await self._mention_started():
                 await self._deliver()
                 await self._mention_finished()
+        workflow.deprecate_patch('delivery-waits')
         self.state.waiting = True
         # A fix request that arrived while this run worked starts its round now.
         self._start_queued()
@@ -186,6 +195,7 @@ class DeliveryWorkflow:
                 # again and starts its round instead of closing with it queued.
                 if not self._fix_pending():
                     return self.progress
+                workflow.deprecate_patch('idle-queued-mentions')
                 workflow.logger.info('Fix request queued while closing; continuing')
                 self.state.waiting = True
                 self._start_queued()
@@ -373,6 +383,7 @@ class DeliveryWorkflow:
     def _fix_unavailable(self) -> str | None:
         """Why the delivery cannot take a fix round, if it cannot."""
         if self.spec.architecture_only:
+            workflow.deprecate_patch('architecture-fixes')
             # The architecture takes fixes without tests, verification or code review.
             if not self.progress.publication or not self.spec.checkout:
                 return 'The architecture has not been pushed yet.'
@@ -722,6 +733,8 @@ class DeliveryWorkflow:
             self.progress.baseline_status = 'skipped'
             self.progress.verification_status = 'skipped'
             return
+        if self.progress.component_tests:
+            workflow.deprecate_patch(COMPONENT_RUNS_PATCH)
         # Nothing is fixed before the added tests are shown to fail without the fix.
         if not await self._reproduce():
             self.progress.verification_status = 'skipped'
@@ -736,6 +749,7 @@ class DeliveryWorkflow:
         has one. A routing that found one for each is kept for the retries of the tests."""
         if self.progress.routing_status == 'routed':
             return True
+        workflow.deprecate_patch(ROUTING_PATCH)
         self.progress.routing_status = 'running'
         self.progress.routing = None
         self.progress.routing_error = None
@@ -758,7 +772,7 @@ class DeliveryWorkflow:
         self.progress.routing = {
             requirement: {**route, 'source': 'routing'}
             for requirement, route in result['routes'].items()}
-        self.progress.routing_status, self.progress.routing_error = judge_routes(
+        self.progress.routing_status, self.progress.routing_error = self._judge_routes(
             self.progress.routing)
         workflow.logger.info('Routing: %s', self.progress.routing_status)
         return self.progress.routing_status == 'routed'
@@ -804,6 +818,11 @@ class DeliveryWorkflow:
     def _seam_prepared(self) -> bool:
         return self.progress.seam_status == 'prepared' and self.progress.seam is not None
 
+    def _judge_routes(self, routing: dict[str, Any]) -> tuple[str, str | None]:
+        if any(item['route'] == 'component' for item in routing.values()):
+            workflow.deprecate_patch(COMPONENT_TESTS_PATCH)
+        return judge_routes(routing)
+
     def _component_routes(self) -> dict[str, Any]:
         """The criteria routed to a seam, with their reasons and seams."""
         return {requirement: route for requirement, route in (self.progress.routing or {}).items()
@@ -816,7 +835,7 @@ class DeliveryWorkflow:
             routing[item['requirement_id']] = {
                 'route': 'unobservable', 'reason': item['reason'], 'source': 'tests'}
         self.progress.routing = routing
-        self.progress.routing_status, self.progress.routing_error = judge_routes(routing)
+        self.progress.routing_status, self.progress.routing_error = self._judge_routes(routing)
         workflow.logger.info('The test author found %d criteria unobservable',
                              len(unobservable))
 
@@ -1050,6 +1069,7 @@ class DeliveryWorkflow:
         if self.state.retry_stage == 'server':
             await self._implement_service()
         elif self.state.restore_tests:
+            workflow.deprecate_patch(RESTORE_KEPT_PATCH)
             # The suite was rejected for tests the changed service still passed: its
             # author is told so and puts them back, rather than writing the same again.
             restore, self.state.restore_tests = self.state.restore_tests, []
@@ -1062,6 +1082,7 @@ class DeliveryWorkflow:
     async def _verify_built(self) -> None:
         """Verification needs both images; a failed build leaves nothing to verify."""
         if self.progress.component_tests:
+            workflow.deprecate_patch(COMPONENT_REPAIRS_PATCH)
             await self._verify_components_and_repair()
             if self._components_passed():
                 await self._review_rounds()
@@ -1071,6 +1092,7 @@ class DeliveryWorkflow:
             await self._verify_and_repair()
             if self.spec.kind == 'api_change':
                 await self._prove_kept()
+                workflow.deprecate_patch(RESTORE_KEPT_PATCH)
                 await self._restore_kept()
             if self._passed():
                 await self._review_rounds()
@@ -1205,6 +1227,7 @@ class DeliveryWorkflow:
                 failed.append(f'{name} {run["failures"] + run["errors"]} of {run["tests"]}'
                               + (f' ({named})' if named else ''))
         if failed:
+            workflow.deprecate_patch(COMPONENT_REPAIRS_PATCH)
             return f'Tests fail against the changed code: {"; ".join(failed)}.'
         return unproven_green(contract, component)
 
@@ -1311,6 +1334,7 @@ class DeliveryWorkflow:
         be rejected again. Otherwise the corrected delivery is only verified again."""
         self.progress.correction_failed = False
         number = self.progress.reviews[-1]['round']
+        workflow.deprecate_patch('correct-rejected-suite')
         rejected = self._rejected_suite()
         if (self.progress.implementation_error or self.progress.tests_error
                 or self.progress.component_tests_error
@@ -1690,6 +1714,9 @@ class DeliveryWorkflow:
         if not self.spec.checkout:
             return
         components = bool(self.progress.component_tests)
+        if components:
+            workflow.deprecate_patch(COMPONENT_REPAIRS_PATCH)
+            workflow.deprecate_patch(COMPONENT_PUSHES_PATCH)
         # Tests that pass with review findings left after the last round are pushed too,
         # marked as unverified, with the findings in the commit message.
         open_findings = self.progress.verification_status == 'findings_open'
@@ -1719,6 +1746,7 @@ class DeliveryWorkflow:
                 # fix round a pull request comment asked for, with the earlier push.
                 self.progress.publication_status = 'completed'
                 if self.progress.pull_request_status in ('waiting', 'running'):
+                    workflow.deprecate_patch('kept-push-pull-request')
                     # A retried repository stage, such as after a failed pull request
                     # step, still opens or updates the pull request of the earlier push;
                     # a step that was not attempted is never reported as done.
@@ -1787,6 +1815,7 @@ class DeliveryWorkflow:
                 self.progress.open_findings = open_findings and not accepted
                 if open_findings and not accepted:
                     self.progress.findings_acceptance = None
+            workflow.deprecate_patch('pull-request')
             await self._pull_request()
 
     async def _revise_architecture(self, instructions: str) -> bool:
@@ -1859,6 +1888,7 @@ class DeliveryWorkflow:
             change['proofs'] = proofs
         args = [self.spec.session_id, self.spec.repository, self.progress.publication, change]
         text = None
+        workflow.deprecate_patch('pull-request-text')
         # The LLM writes the title and description; without them the generic text is
         # used, which is reported but fails neither the step nor the delivery.
         try:
@@ -1949,6 +1979,7 @@ class DeliveryWorkflow:
         none. A repair of a change with component tests runs the author of `suite`, or,
         for review findings, of each suite they concern."""
         if repair and self.progress.component_tests:
+            workflow.deprecate_patch(COMPONENT_REPAIRS_PATCH)
             await self._repair_suites(repair, suite)
             return
         component = {} if repair else self._component_routes()

@@ -127,7 +127,10 @@ class OnboardingWorkflow(_Delivering):
         accepted = known if self._decided() else []
         # A fork carries architecture_only over: adding only the architecture still needs
         # a contract without one that is readable apart from it, as in update_checkout.
-        if self._architecture_only_invalid() or any(item not in accepted for item in found):
+        invalid = self._architecture_only_invalid()
+        if invalid:
+            workflow.deprecate_patch("onboarding-fork-architecture-check")
+        if invalid or any(item not in accepted for item in found):
             self.state.replaced_contract = False
             self.state.architecture_only = False
             self.state.status = "awaiting_confirmation"
@@ -152,6 +155,7 @@ class OnboardingWorkflow(_Delivering):
         self.state.contract_problem = None
         if "contract" not in found:
             return
+        workflow.deprecate_patch("onboarding-architecture")
         try:
             inspected = await workflow.execute_activity(
                 inspect_onboarding_contract, workflow.info().workflow_id,
@@ -319,7 +323,10 @@ class OnboardingWorkflow(_Delivering):
         current decision, which a return to awaiting_confirmation resets."""
         if not self.state.drafted:
             return
-        if not draft_kind_changed(self.state, architecture_only):
+        changed = draft_kind_changed(self.state, architecture_only)
+        if changed != (architecture_only != self.state.architecture_only):
+            workflow.deprecate_patch("onboarding-draft-kind")
+        if not changed:
             return
         workflow.logger.info("Discarding the %s drafts to draft anew",
                              "architecture-only" if not architecture_only else "full")

@@ -1,6 +1,6 @@
 """Stand-ins for the delivery stages, shared by the tests of every session that delivers."""
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 from temporalio import activity, workflow
@@ -503,3 +503,24 @@ async def stage_workers(env, stages: FakeStages):
         FakeCodegenWorkflow.fail = False
         FakeCodegenWorkflow.languages = []
         yield
+
+
+@contextmanager
+def legacy_patch_markers(monkeypatch):
+    """Record workflows as the code from before their patches were deprecated did: every
+    `workflow.deprecate_patch` call writes the plain marker `workflow.patched` wrote."""
+    from temporalio import workflow
+    with monkeypatch.context() as legacy:
+        legacy.setattr(workflow, 'deprecate_patch', lambda id, **_: workflow.patched(id))
+        yield
+
+
+def patch_ids(history) -> set[str]:
+    """The ids of the patch markers `history` holds."""
+    import json
+    ids = set()
+    for event in history.events:
+        attributes = event.marker_recorded_event_attributes
+        if attributes.marker_name == 'core_patch':
+            ids.add(json.loads(attributes.details['patch-data'].payloads[0].data)['id'])
+    return ids
