@@ -648,7 +648,10 @@ async def run_component_suite(session_id: str, runner_image: str, language: str,
             if state.get('OOMKilled'):
                 result['error'] = 'The component test container was OOM killed'
             elif result['exit_code'] in STOPPED_EXIT_CODES:
-                result['error'] = 'The component tests timed out or were terminated'
+                # The runner reports the tests that finished before it was stopped.
+                result['error'] = 'The component tests timed out or were terminated' + (
+                    f" after {result['tests']} of {len(suite_tests)} tests finished"
+                    if result['tests'] else '')
             if not result['error']:
                 has_failures = result['failures'] + result['errors'] > 0
                 if result['exit_code'] == 0 and not has_failures:

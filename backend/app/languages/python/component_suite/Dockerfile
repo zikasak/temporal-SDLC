@@ -12,6 +12,10 @@ ARG REQUIREMENTS=""
 RUN for file in $REQUIREMENTS; do \
         (cd "/repository/$(dirname "$file")" && pip install --no-cache-dir -r "$(basename "$file")") || exit 1; \
     done
+# The runner's own plugin, installed last so nothing the suite or the service lists
+# replaces it: it stops a test that outlasts its limit, so one hang cannot use up the
+# time of the whole run.
+RUN pip install --no-cache-dir pytest-timeout==2.3.1
 COPY run-tests.sh prepare.py /runner/
 ARG SOURCE_ROOT=.
 ENV PYTHONPATH=/repository/${SOURCE_ROOT} PYTHONDONTWRITEBYTECODE=1
@@ -24,4 +28,4 @@ COPY --chown=tester:tester suite /tests
 WORKDIR /tests
 RUN python -m pytest --collect-only -q
 ENTRYPOINT ["bash", "/runner/run-tests.sh"]
-CMD ["python", "-m", "pytest", "--junitxml=/tests/reports/junit.xml"]
+CMD ["python", "-m", "pytest", "--timeout=30", "--timeout-method=signal", "--junitxml=/tests/reports/junit.xml"]

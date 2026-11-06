@@ -253,7 +253,9 @@ def _baseline_error(run: SuiteRun, prefix: bool, code: str = REPOSITORY_CODE) ->
     result, tracked = run.result, run.result['tracked']
     named = f'{run.name[0].upper()}{run.name[1:]}: ' if prefix else ''
     if result['status'] == 'error' or tracked is None:
-        return f'{named}The baseline run could not complete.'
+        reason = (result.get('error') or '').strip().rstrip('.')
+        return f'{named}The baseline run could not complete' + (
+            f': {reason}.' if reason else '.')
     if result['skipped']:
         # However it came to be skipped, a test that does not run protects nothing. A
         # regression test that skips itself was written for a criterion its suite cannot

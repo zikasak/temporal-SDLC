@@ -615,7 +615,8 @@ async def test_bugfix_is_delivered_red_to_green_from_the_requirements_session(en
     ('existing_failed', 'error', 'Existing tests failing against the service as the repository holds it: 1'),
     ('skipped', 'error', 'the routing of that criterion to them was wrong'),
     ('left_out', 'error', 'did not run in the baseline run: com.example.RoomsTest#lists (1)'),
-    ('error', 'error', 'The baseline run could not complete.'),
+    ('error', 'error', 'The baseline run could not complete: The service stopped during '
+                       'verification.'),
 ])
 async def test_nothing_is_fixed_unless_the_added_tests_fail_alone(env, worker, baseline, status, error, repository_selection):
     worker.baseline_results = [baseline, 'reproduced']
@@ -916,7 +917,8 @@ async def test_a_repository_without_contract_tests_is_proved_by_its_component_te
     ('skipped', 'error', 'Component tests: Tests skipped themselves in the baseline run: 1. '
                          'A test that skips itself was written for a criterion the component '
                          'tests cannot observe'),
-    ('error', 'error', 'Component tests: The baseline run could not complete.'),
+    ('error', 'error', 'Component tests: The baseline run could not complete: The '
+                       'component tests timed out or were terminated.'),
 ])
 async def test_nothing_is_fixed_unless_the_component_tests_fail_without_the_fix(
         env, worker, baseline, status, error, repository_selection):
