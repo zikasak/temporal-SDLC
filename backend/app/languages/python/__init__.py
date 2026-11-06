@@ -37,6 +37,10 @@ the test sends an update), run a `temporalio.worker.Worker` on it with the stubb
 and your fakes of its activities, registered under the activity names the stubs give, and
 drive the workflow through its stubbed signals, updates and queries. Both environments'
 servers are fetched when the suite is built and work without a network.
+Each test is stopped after 30 seconds and the whole suite after ten minutes, and every test
+you add first runs against the code without the change, where it waits out each of its
+bounds: keep a wait for something that may never happen to a few seconds, and prefer the
+time-skipping environment, whose timers do not take real time.
 List any further dependency of the tests in requirements.txt; never list the service or
 its own dependencies, which the runner installs from the service's requirements.
 The service's code is not available here, so the suite cannot be collected or run. Check

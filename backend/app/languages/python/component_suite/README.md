@@ -17,5 +17,6 @@ PYTHONPATH=<the service's source root> python -m pytest
 The trusted Docker runner builds the suite with the service's sources and dependencies,
 collects it during the build and runs it without a network when started. When the code
 uses Temporal, the build fetches the servers of `temporalio.testing.WorkflowEnvironment`
-(`start_time_skipping` and `start_local`) so the tests can start them offline. pytest is
-limited to ten minutes, and the JUnit XML report is written to `/tests/reports/junit.xml`.
+(`start_time_skipping` and `start_local`) so the tests can start them offline. Each test is
+limited to 30 seconds and pytest to ten minutes; the JUnit XML report, written to
+`/tests/reports/junit.xml`, holds the tests that ran even when the ten minutes run out.
