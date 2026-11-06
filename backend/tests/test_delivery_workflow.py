@@ -25,7 +25,7 @@ from app.delivery.models import (
     delivery_id,
 )
 from app.github.checkout import SNAPSHOT_DIR
-from app.delivery.workflows import MAX_BOUND_ROUNDS, DeliveryWorkflow
+from app.delivery.workflows import MAX_BOUND_ROUNDS, MAX_REPRODUCE_ROUNDS, DeliveryWorkflow
 from app.requirements import service as requirements_service
 from app.requirements.document import render_requirements_markdown
 from app.requirements.models import RequirementsState
@@ -619,8 +619,11 @@ async def test_bugfix_is_delivered_red_to_green_from_the_requirements_session(en
                        'verification.'),
 ])
 async def test_nothing_is_fixed_unless_the_added_tests_fail_alone(env, worker, baseline, status, error, repository_selection):
-    worker.baseline_results = [baseline, 'reproduced']
+    # Added tests that pass without the fix are rewritten once, and pass again.
+    rounds = MAX_REPRODUCE_ROUNDS if baseline == 'not_reproduced' else 0
+    worker.baseline_results = [baseline] * (1 + rounds) + ['reproduced']
     handle, state = await fixed(env, repository_selection)
+    assert [side for side, _ in worker.repairs] == ['tests'] * rounds
     assert state.baseline_status == status and error in state.baseline_error
     assert state.implementation is None and not worker.implementation_started.is_set()
     assert state.verification_status == 'skipped' and state.publication_status == 'skipped'
@@ -636,6 +639,47 @@ async def test_nothing_is_fixed_unless_the_added_tests_fail_alone(env, worker, b
     assert worker.stages[-5:] == ['tests', 'baseline', 'baseline-run', 'implementation', 'verification']
     assert state.baseline_status == 'reproduced' and state.baseline_error is None
     assert state.verification['status'] == 'passed' and state.publication_status == 'completed'
+
+
+async def test_added_tests_that_pass_without_the_fix_are_sent_back_to_be_rewritten(
+        env, worker, repository_selection):
+    worker.baseline_results = ['not_reproduced', 'reproduced']
+    _, state = await fixed(env, repository_selection)
+    # Only the added test that passed goes back to its author, then the baseline again.
+    (side, repair), = worker.repairs
+    assert side == 'tests' and repair['reproduce'] is True
+    assert repair['passing_tests'] == ADDED_TESTS[:1] and repair['missing_tests'] == []
+    assert repair['broken_tests'] == [
+        {'class_name': 'com.example.RoomsTest', 'name': 'refusesDoubleBooking'}]
+    assert 'do not reproduce the problem' in repair['instructions']
+    assert worker.stages.count('baseline-run') == 2
+    assert worker.stages.index('implementation') > worker.stages.index('baseline-run')
+    assert state.baseline_status == 'reproduced' and state.baseline_error is None
+    assert state.verification['status'] == 'passed' and worker.published
+
+
+@pytest.mark.parametrize('baseline', ['existing_failed', 'skipped', 'left_out', 'error'])
+async def test_a_baseline_the_added_tests_are_not_alone_to_blame_for_is_not_rewritten(
+        env, worker, baseline, repository_selection):
+    worker.baseline_results = [baseline, 'reproduced']
+    _, state = await fixed(env, repository_selection)
+    assert worker.repairs == [] and worker.stages.count('baseline-run') == 1
+    assert state.baseline_status == 'error' and not worker.published
+
+
+async def test_component_tests_that_pass_without_the_fix_are_sent_back_to_be_rewritten(
+        env, worker, repository_selection):
+    worker.routes = [{'FR-2': 'component'}]
+    worker.component_baseline_results = ['not_reproduced', 'reproduced']
+    _, state = await fixed(env, repository_selection)
+    (side, repair), = worker.repairs
+    assert side == 'component-tests' and repair['reproduce'] is True
+    assert repair['passing_tests'] == ADDED_COMPONENT_TESTS
+    assert [item['name'] for item in repair['broken_tests']] == [
+        ADDED_COMPONENT_TESTS[0].rpartition('#')[2]]
+    assert worker.stages.count('component-baseline') == 2
+    assert state.baseline_status == 'reproduced'
+    assert state.component_verification['status'] == 'passed'
 
 
 async def test_a_routing_that_fails_for_a_reason_of_its_own_tells_the_user_why(env, worker, repository_selection):
@@ -850,7 +894,9 @@ async def test_a_baseline_through_an_added_seam_that_proves_nothing_adds_the_sea
         env, worker, repository_selection):
     worker.routes = [{'FR-2': 'component-added'}]
     worker.component_added = [*ADDED_COMPONENT_TESTS, 'tests.test_rooms#test_merged_is_kept']
-    worker.component_baseline_results = ['not_reproduced', 'reproduced']
+    # Still passing after the round that rewrites the added tests.
+    worker.component_baseline_results = ['not_reproduced'] * (1 + MAX_REPRODUCE_ROUNDS) + [
+        'reproduced']
     handle, state = await fixed(env, repository_selection)
     assert state.baseline_status == 'not_reproduced'
     # Said of the code with the seam, which may itself be what made the test pass.
@@ -923,14 +969,18 @@ async def test_a_repository_without_contract_tests_is_proved_by_its_component_te
 async def test_nothing_is_fixed_unless_the_component_tests_fail_without_the_fix(
         env, worker, baseline, status, error, repository_selection):
     worker.routes = [{'FR-2': 'component'}]
-    # One that could not complete could not twice.
-    worker.component_baseline_results = [baseline] * (1 + (baseline == 'error')) + ['reproduced']
+    # One that could not complete could not twice; added tests that do not fail are
+    # rewritten, and do not fail again.
+    worker.component_baseline_results = [baseline] * (
+        1 + (baseline == 'error') + MAX_REPRODUCE_ROUNDS * (baseline == 'not_reproduced')) + [
+        'reproduced']
     handle, state = await fixed(env, repository_selection)
     assert state.baseline_status == status and error in state.baseline_error
     if baseline == 'skipped':
         assert 'behaviour a seam of the code shows' in state.baseline_error
     # A run that could not complete runs once more before it is judged.
-    assert worker.stages.count('component-baseline') == (2 if baseline == 'error' else 1)
+    assert worker.stages.count('component-baseline') == (
+        2 if baseline == 'error' else 1 + MAX_REPRODUCE_ROUNDS * (baseline == 'not_reproduced'))
     assert state.implementation is None and 'implementation' not in worker.stages
     assert state.verification_status == 'skipped' and not worker.published
 

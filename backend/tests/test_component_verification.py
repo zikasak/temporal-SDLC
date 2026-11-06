@@ -14,7 +14,9 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from app import docker_agents
-from app.delivery.models import component_run, judge_baseline, unproven_green
+from app.delivery.models import (
+    component_run, judge_baseline, reproduce_request, unproven_green, unreproducing_tests,
+)
 from app.languages import get_language
 from app.verification import activities
 
@@ -279,6 +281,39 @@ def test_a_baseline_against_the_code_with_an_added_seam_says_so():
     # Without a seam nothing of it is said.
     status, error = judge_baseline(contract, [], [], component_run(green, [ADDED]))
     assert 'seam' not in error and 'as the repository holds it' in error
+
+
+def test_only_added_tests_alone_to_blame_for_a_baseline_are_sent_back_to_be_rewritten():
+    red = result('failed', {ADDED: {'tests': 1, 'failed': 1}}, failures=1)
+    green = result('passed', {ADDED: {'tests': 1, 'failed': 0}})
+    # Nothing is wrong with added tests that fail without the change.
+    assert unreproducing_tests(red, [ADDED]) == {}
+    assert unreproducing_tests(green, [ADDED]) == {'passing': [ADDED]}
+    # One of a parameterized test's cases passing is enough for it not to reproduce.
+    assert unreproducing_tests(result('failed', {ADDED: {'tests': 2, 'failed': 1}},
+                                      failures=1), [ADDED]) == {'passing': [ADDED]}
+    # An added test that did not run, whether reported missing or not, is the author's.
+    assert unreproducing_tests({**red, 'missing_tests': [ADDED]}, [ADDED]) == {
+        'missing': [ADDED]}
+    assert unreproducing_tests(result('passed', {ADDED: {'tests': 0, 'failed': 0}}),
+                               [ADDED]) == {'missing': [ADDED]}
+    # Anything beyond the added tests is not corrected by rewriting them.
+    for run in (result('error', None), {**green, 'skipped': 1},
+                {**green, 'failures': 1, 'status': 'failed'},
+                {**green, 'missing_tests': [EXISTING]},
+                {**green, 'status': 'failed', 'failures': 1, 'test_failures': [
+                    {'class_name': 'tests.test_rooms', 'name': 'x', 'kind': 'failure',
+                     'message': 'Failed: Timeout >30.0s'}]}):
+        assert unreproducing_tests(run, [ADDED]) is None
+    # A corrected repository test may fail there.
+    assert unreproducing_tests(result('failed', {ADDED: {'tests': 1, 'failed': 0},
+                                                 EXISTING: {'tests': 1, 'failed': 1}},
+                                      failures=1), [ADDED], [EXISTING]) == {'passing': [ADDED]}
+    request = reproduce_request({'passing': [ADDED], 'missing': ['tests.other#test_x']}, 1)
+    assert request['reproduce'] is True and request['attempt'] == 1
+    assert request['broken_tests'] == [
+        {'class_name': 'tests.test_rooms', 'name': 'test_a_merged_room_is_closed'},
+        {'class_name': 'tests.other', 'name': 'test_x'}]
 
 
 def test_a_green_run_of_either_suite_with_a_test_that_did_not_run_proves_nothing():
