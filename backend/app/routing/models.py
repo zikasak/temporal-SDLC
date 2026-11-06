@@ -34,6 +34,10 @@ SEAM_MISMATCH = ('The code with the seam the change added does not match its com
 # user is shown them, while failures of the agent itself are not (NFR-2).
 ROUTING_ERROR = 'RoutingError'
 ROUTING_ERROR_CHARS = 800
+# The type of the failures of adding a seam that say why in words of the worker's own:
+# which step failed (the agent, its output, the image build, the contract check), never
+# what the agent or its provider said, so the user is shown them (NFR-2).
+SEAM_ERROR = 'SeamError'
 
 
 class Seam(TypedDict):

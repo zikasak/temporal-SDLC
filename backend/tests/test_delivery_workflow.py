@@ -820,7 +820,10 @@ async def test_a_seam_that_cannot_be_added_stops_the_change_before_its_tests(
     assert worker.stages == ['routing', 'seam']
     assert state.seam_status == 'error' and state.seam is None
     if outcome == 'failed':
-        assert 'could not be added to the code or built' in state.seam_error
+        # It says which step failed, in the worker's own words.
+        assert state.seam_error == (
+            'The seam the acceptance criteria are observed at could not be added to the code '
+            'or built. The seam agent left no Dockerfile at the root of the repository.')
     else:
         assert 'does not match its component contract' in state.seam_error
         assert 'Rooms.merged is not present at runtime' in state.seam_error

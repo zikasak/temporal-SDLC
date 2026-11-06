@@ -8,6 +8,7 @@ from temporalio.testing import ActivityEnvironment
 from app import docker_agents
 from app.implementation import activities, agent
 from app.languages import OTHER_PARTS_BUILD_DIRS, get_language
+from app.routing.models import SEAM_ERROR
 
 
 @pytest.mark.parametrize('previous', [False, True])
@@ -472,6 +473,62 @@ async def test_a_seam_the_code_lacks_is_added_alone_and_checked_against_its_stub
                                     {**fix, 'seam_prepared': True})
     assert sent['service/app/rooms.py'] == 'code with the seam'
     assert agent.COMPONENT_PROMPT in agent.base_prompt(json.loads(sent['input.json']), '')
+
+
+@pytest.mark.parametrize('failure, reason', [
+    ('agent', 'The seam agent did not finish (RuntimeError): what it said is in agent.log of '
+              "the session's seam stage."),
+    ('output', 'The seam agent left no Dockerfile at the root of the repository.'),
+    ('build', 'The service image could not be built from the root Dockerfile of the code '
+              'with the seam: ERROR: requirements.txt not found.'),
+    ('check', 'The code with the seam could not be checked against its component contract '
+              '(FileNotFoundError).'),
+    ('contract', 'The component contract of the routing is unavailable.'),
+])
+async def test_a_seam_that_cannot_be_added_says_which_step_failed(
+        tmp_path, monkeypatch, failure, reason):
+    monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
+    session = tmp_path / 'session'
+    files = {'repository/app/rooms.py': 'code', 'repository/Dockerfile': 'FROM scratch',
+             'routing/components/app/rooms.pyi': 'routed stub',
+             'routing/components/runtime.json': json.dumps(
+                 {'source_root': '.', 'requirements': []})}
+    if failure == 'check':
+        del files['routing/components/runtime.json']
+    if failure == 'contract':
+        files = {name: text for name, text in files.items()
+                 if not name.startswith('routing/')}
+    for name, text in files.items():
+        (session / name).parent.mkdir(parents=True, exist_ok=True)
+        (session / name).write_text(text)
+    routes = {'FR-2': {'route': 'component', 'reason': 'R.',
+                       'seam': {'module': 'app.rooms', 'symbols': ['merged'],
+                                'added': ['merged']}}}
+    context = {'requirements': [], 'language': 'python', 'component_routes': routes,
+               'brief': {'requirements': [], 'requirements_document': 'Close merged rooms.'},
+               'seam': {'app.rooms': ['merged']},
+               'repository': {'full_name': 'octocat/project', 'branch': 'main'}}
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'inspect':
+            # The agent's own words, which the user is not shown.
+            return json.dumps({'ExitCode': 1 if failure == 'agent' else 0})
+        if args[0] == 'logs':
+            return 'secret provider output'
+        if args[0] == 'cp' and args[1].endswith(':/workspace/service/.'):
+            if failure != 'output':
+                (Path(args[2]) / 'Dockerfile').write_text('FROM scratch')
+        if args[0] == 'build' and '--iidfile' in args:
+            if failure == 'build':
+                raise RuntimeError('Docker build failed: ERROR: requirements.txt not found')
+            Path(args[args.index('--iidfile') + 1]).write_text('sha256:' + 'c' * 64)
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    with pytest.raises(ApplicationError) as raised:
+        await ActivityEnvironment().run(activities.implement_service, 'session', context)
+    assert raised.value.type == SEAM_ERROR and raised.value.non_retryable
+    assert raised.value.message == reason
 
 
 @pytest.mark.parametrize('conforms', [True, False])

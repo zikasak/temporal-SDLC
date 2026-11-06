@@ -14,7 +14,8 @@ from app import docker_agents
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import (
-    StageInputs, StageSpec, copy_regular_files, run_stage, session_language, write_language,
+    StageInputs, StageSpec, build_image, copy_regular_files, run_stage, session_language,
+    write_language,
 )
 from app.agent_workflows.parts import repository_parts
 from app.config import GENERATED_CODE_DIR
@@ -22,6 +23,7 @@ from app.docker_agents import default_agent_image
 from app.github.checkout import CHECKOUT_DIR, COMPONENT_TESTS_DIR, CONTRACTS_DIR, TESTS_DIR
 from app.languages import Language
 from app.requirements.document import without_repeated_tables
+from app.routing.models import SEAM_ERROR
 from app.routing.parts import check_parts, read_routed_parts
 
 
@@ -195,35 +197,81 @@ def existing_code_changed(language: Language, checkout: Path, published: Path) -
     return _service_files(language, checkout) != _service_files(language, published)
 
 
+def seam_error(message: str) -> ApplicationError:
+    """A failure of adding the seam, worded by the worker so the user is shown it."""
+    message = message.strip()
+    return ApplicationError(message if message.endswith(('.', ')')) else f'{message}.',
+                            type=SEAM_ERROR, non_retryable=True)
+
+
+def _seam_output(clean: Path) -> None:
+    try:
+        validate_output(clean)
+    except RuntimeError as exc:
+        raise seam_error('The seam agent left no Dockerfile at the root of the repository.'
+                         ) from exc
+
+
+async def _build_seam(clean: Path, log_path: Path) -> str:
+    try:
+        return await build_image(clean, 'service', log_path)
+    except RuntimeError as exc:
+        # The tail of the build of the repository's own Dockerfile, with no build arguments,
+        # as the conformance check's build failures are shown.
+        raise seam_error('The service image could not be built from the root Dockerfile of '
+                         'the code with the seam: '
+                         f'{str(exc).removeprefix("Docker build failed: ")[-SEAM_BUILD_CHARS:]}'
+                         ) from exc
+
+
+# How much of a failed image build of the code with the seam the user is shown.
+SEAM_BUILD_CHARS = 600
+
+
 async def prepare_seam(language: Language, session_id: str,
                        context: dict[str, Any]) -> dict[str, Any]:
     """Add the seam a change's criteria are observed at, which the code does not have yet
     (`seam`: the symbols to add, by part and module), with no behaviour change, and check
-    the code with it against the whole component contract of every part with routes. Returns the stage result, its `path`
-    the code with the seam, or the `conformance_error` that says how it misses the
-    contract."""
+    the code with it against the whole component contract of every part with routes.
+    Returns the stage result, its `path` the code with the seam, or the
+    `conformance_error` that says how it misses the contract. Any other failure is a
+    SEAM_ERROR naming the step that failed."""
     if not context.get('brief') or not context.get('component_routes'):
-        raise ApplicationError('Only a change with criteria routed to a seam adds one',
-                               non_retryable=True)
+        raise seam_error('Only a change with criteria routed to a seam adds one.')
     session_dir = GENERATED_CODE_DIR / session_id
     try:
         parts = await run_sync(read_routed_parts, language, session_dir)
     except ValueError as exc:
-        raise ApplicationError(str(exc), non_retryable=True) from exc
+        raise seam_error(str(exc)) from exc
     for part in parts:
         if part.contract is None:
-            raise ApplicationError(f'{part.language.label} has no component contracts',
-                                   non_retryable=True)
-    result = await run_stage(stage(language, SEAM_DIR), session_id, context, GENERATED_CODE_DIR)
+            raise seam_error(f'{part.language.label} has no component contracts.')
+    spec = dataclasses.replace(stage(language, SEAM_DIR), validate_output=_seam_output,
+                               build_output=_build_seam)
+    try:
+        result = await run_stage(spec, session_id, context, GENERATED_CODE_DIR)
+    except ApplicationError as exc:
+        if exc.type == SEAM_ERROR:
+            raise
+        # The worker's own: the inputs the agent needs are unavailable.
+        raise seam_error(exc.message) from exc
+    except Exception as exc:
+        # What the agent or its provider said is in the stage's agent.log, not shown.
+        raise seam_error(f'The seam agent did not finish ({type(exc).__name__}): what it said '
+                         'is in agent.log of the session\'s seam stage.') from exc
     if 'questions' in result:
         return result
-    async with docker_agents.keep_activity_alive('Checking the seam against its contract'):
-        async with async_context(tempfile.TemporaryDirectory,
-                                 dir=session_dir / SEAM_DIR) as temporary:
-            # Every part's contract, not only those the seam is in: the seam changes
-            # nothing else.
-            error = await check_parts(parts, session_dir, Path(result['path']),
-                                      Path(temporary), session_dir / SEAM_DIR)
+    try:
+        async with docker_agents.keep_activity_alive('Checking the seam against its contract'):
+            async with async_context(tempfile.TemporaryDirectory,
+                                     dir=session_dir / SEAM_DIR) as temporary:
+                # Every part's contract, not only those the seam is in: the seam changes
+                # nothing else.
+                error = await check_parts(parts, session_dir, Path(result['path']),
+                                          Path(temporary), session_dir / SEAM_DIR)
+    except Exception as exc:
+        raise seam_error('The code with the seam could not be checked against its component '
+                         f'contract ({type(exc).__name__}).') from exc
     if error:
         return {'session_id': session_id, 'conformance_error': error}
     return result

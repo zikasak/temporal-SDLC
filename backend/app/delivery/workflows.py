@@ -27,8 +27,8 @@ with workflow.unsafe.imports_passed_through():
     from app.temporal.execution_fields import task_fields
     from app.requirements.models import CHANGE_KINDS
     from app.routing.models import (
-        COMPONENT_TESTS_UNRUN, ROUTING_ERROR, ROUTING_ERROR_CHARS, SEAM_MISMATCH, added_seams,
-        judge_routes,
+        COMPONENT_TESTS_UNRUN, ROUTING_ERROR, ROUTING_ERROR_CHARS, SEAM_ERROR, SEAM_MISMATCH,
+        added_seams, judge_routes,
     )
     from app.review.models import (
         MAX_REVIEW_ROUNDS, ReviewFinding, ReviewRound, correctable, earlier_findings,
@@ -115,9 +115,15 @@ def restore_finding(kept: list[str],
 def routing_failure(exc: BaseException) -> str:
     """The reason the routing gave for failing, when it is one of its own; only those are
     shown, as an agent's or provider's error may carry credentials (NFR-2)."""
+    return own_failure(exc, ROUTING_ERROR)
+
+
+def own_failure(exc: BaseException, error_type: str) -> str:
+    """The reason a stage gave for failing as an ApplicationError of `error_type`, the
+    type of the failures it words itself; '' for any other failure."""
     cause: BaseException | None = exc
     while cause is not None:
-        if isinstance(cause, ApplicationError) and cause.type == ROUTING_ERROR:
+        if isinstance(cause, ApplicationError) and cause.type == error_type:
             return str(cause.message or '')[:ROUTING_ERROR_CHARS]
         cause = cause.cause if isinstance(cause, (ActivityError, ChildWorkflowError,
                                                   ApplicationError)) else None
@@ -815,8 +821,10 @@ class DeliveryWorkflow:
             )
         except ChildWorkflowError as exc:
             workflow.logger.warning('Seam preparation failed: %s', exc.cause or exc)
+            reason = own_failure(exc, SEAM_ERROR)
             self.progress.seam_error = ('The seam the acceptance criteria are observed at could '
-                                        'not be added to the code or built.')
+                                        'not be added to the code or built.'
+                                        + (f' {reason}' if reason else ''))
             self.progress.seam_status = 'error'
             return False
         if result.get('conformance_error'):
