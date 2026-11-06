@@ -17,8 +17,8 @@ with workflow.unsafe.imports_passed_through():
     from app.delivery.models import (
         MENTION_HANDLED,
         OUTCOME_OWED, STOPPED, TASK_IDLE_TIMEOUT, AgentQuestions, DeliveryProgress,
-        DeliveryState, component_run, is_mention, judge_baseline, judge_kept, kept_tests,
-        mention_key, open_review_findings, restorable_tests, unproven_green,
+        DeliveryState, bound_request, component_run, hung_tests, is_mention, judge_baseline,
+        judge_kept, kept_tests, mention_key, open_review_findings, restorable_tests, unproven_green,
     )
     from app.diagnosis.models import repair_request
     from app.github.checkout import SNAPSHOT_DIR
@@ -43,6 +43,12 @@ MAX_REPAIR_ROUNDS = 5
 # Rounds in which the test author of an API change puts back the repository's tests the
 # changed service still passes, each verified again.
 MAX_RESTORE_ROUNDS = 2
+# Rounds in which the authors of a change's tests bound the waits of the tests the runner
+# stopped at its per-test time limit in the baseline run, each run against it again.
+MAX_BOUND_ROUNDS = 2
+# Marks the workflow code that sends such tests back to their authors; deliveries
+# recorded before it stopped at that baseline.
+BOUND_HUNG_PATCH = 'bound-hung-tests'
 # Patches whose old code paths are gone; histories recorded with their markers replay
 # through workflow.deprecate_patch, called where workflow.patched was.
 RESTORE_KEPT_PATCH = 'restore-kept-tests'
@@ -736,7 +742,7 @@ class DeliveryWorkflow:
         if self.progress.component_tests:
             workflow.deprecate_patch(COMPONENT_RUNS_PATCH)
         # Nothing is fixed before the added tests are shown to fail without the fix.
-        if not await self._reproduce():
+        if not await self._reproduce_bounded():
             self.progress.verification_status = 'skipped'
             return
         # Retried tests are verified against the fix the delivery already has.
@@ -923,6 +929,39 @@ class DeliveryWorkflow:
             self.progress.baseline, added, changed, seam=self._seam_prepared())
         workflow.logger.info('Baseline run: %s', self.progress.baseline_status)
         return self.progress.baseline_status == 'reproduced'
+
+    async def _reproduce_bounded(self) -> bool:
+        """The baseline run, and while the runner stopped tests of it at its per-test time
+        limit, at most MAX_BOUND_ROUNDS rounds in which the authors of those tests bound
+        their waits, changing them alone, and the baseline runs again. Such a test proves
+        nothing: it waited for what the code does not do yet without saying what."""
+        for attempt in range(1, MAX_BOUND_ROUNDS + 1):
+            if await self._reproduce():
+                return True
+            hung = self._hung_suites()
+            if not hung or not workflow.patched(BOUND_HUNG_PATCH):
+                return False
+            workflow.logger.info('Bound round %d: %s', attempt, ', '.join(
+                f'{suite} {len(tests)}' for suite, tests in hung.items()))
+            self.progress.baseline_status = 'running'
+            components = bool(self.progress.component_tests)
+            await asyncio.gather(*(
+                self._generate_tests(bound_request(tests, attempt),
+                                     suite if components else None)
+                for suite, tests in hung.items()))
+            if self.progress.routing_status not in ('routed', 'not_applicable'):
+                # The author found a criterion its suite cannot observe after all.
+                self.progress.baseline_status = 'skipped'
+                return False
+        return await self._reproduce()
+
+    def _hung_suites(self) -> dict[str, list[Any]]:
+        """The tests of each suite the runner stopped at its per-test time limit in the
+        last baseline run, by the suite whose author corrects them."""
+        # The repository's own contract tests, run when no author wrote any, have none.
+        hung = {'contract': hung_tests(self.progress.baseline) if self.progress.tests else [],
+                'component': hung_tests(self.progress.component_baseline)}
+        return {suite: tests for suite, tests in hung.items() if tests}
 
     async def _build_baseline(self) -> dict[str, Any]:
         if self._seam_prepared():
@@ -1952,7 +1991,10 @@ class DeliveryWorkflow:
     @staticmethod
     def _stage_name(stage: str, repair: dict[str, Any] | None) -> str:
         """Corrections of review findings are told apart from repairs of failed tests."""
-        return f'{stage}-review' if repair and 'review' in repair else stage
+        if repair and 'review' in repair:
+            return f'{stage}-review'
+        # Bounding the waits of hung tests is told apart from repairs of failed ones.
+        return f'{stage}-bounds' if repair and repair.get('bound') else stage
 
     async def _implement_service(self, repair: dict[str, Any] | None = None) -> None:
         try:

@@ -14,7 +14,7 @@ from app.llm.questions import Question
 from app.requirements.models import Requirement, TaskKind
 from app.review.models import FindingsAcceptance, ReviewRound
 from app.routing.models import RequirementRoute, RoutingStatus
-from app.verification.models import VerificationResult, VerificationStatus
+from app.verification.models import TestFailure, VerificationResult, VerificationStatus
 
 # `review` runs a failed code review again on the verified delivery, or goes on from a
 # correction of review findings that did not pass verification.
@@ -293,13 +293,37 @@ def _baseline_error(run: SuiteRun, prefix: bool, code: str = REPOSITORY_CODE) ->
 RUNNER_TIMEOUT = re.compile(r'\s*Failed: Timeout >\d')
 
 
+def hung_tests(result: VerificationResult | None) -> list[TestFailure]:
+    """The tests of a run that the runner stopped at its per-test time limit."""
+    return [item for item in (result or {}).get('test_failures') or []
+            if RUNNER_TIMEOUT.match(item['message'])]
+
+
+# What the author of a suite whose tests hung in the baseline run is asked to do.
+BOUND_INSTRUCTIONS = (
+    'The runner stopped the tests in `broken_tests` at its per-test time limit when they ran '
+    'against the code without the change: each one waited, with no bound of its own, for '
+    'something that code never does. Rewrite only those tests so that every wait for what '
+    'the change is to do gives up after a few seconds and fails with an assertion that says '
+    'what did not happen, while what each test asserts stays the same. Fakes of '
+    'collaborators answer at once and never wait for something the test may not provide.')
+
+
+def bound_request(hung: list[TestFailure], attempt: int) -> dict[str, Any]:
+    """What the author of a suite receives to bound the waits of its `hung` tests: a
+    repair that may change those tests alone."""
+    return {'attempt': attempt, 'bound': True, 'instructions': BOUND_INSTRUCTIONS,
+            'test_failures': hung[:NAMED_TESTS * 6], 'failing_tests': len(hung),
+            'broken_tests': [{'class_name': item['class_name'], 'name': item['name']}
+                             for item in hung]}
+
+
 def _hung_tests(run: SuiteRun, prefix: bool) -> str | None:
     """Why a baseline run whose tests the runner had to stop proves nothing. Such a test
     waited without a bound of its own for what the code does not do yet: it fails here
     without saying what was missing, costs the run its whole per-test limit, and enough
     of them leave the run no time to finish."""
-    hung = [f'{item["class_name"]}#{item["name"]}' for item in run.result.get('test_failures') or []
-            if RUNNER_TIMEOUT.match(item['message'])]
+    hung = [f'{item["class_name"]}#{item["name"]}' for item in hung_tests(run.result)]
     if not hung:
         return None
     named = f'{run.name[0].upper()}{run.name[1:]}: ' if prefix else ''

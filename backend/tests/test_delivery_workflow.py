@@ -25,7 +25,7 @@ from app.delivery.models import (
     delivery_id,
 )
 from app.github.checkout import SNAPSHOT_DIR
-from app.delivery.workflows import DeliveryWorkflow
+from app.delivery.workflows import MAX_BOUND_ROUNDS, DeliveryWorkflow
 from app.requirements import service as requirements_service
 from app.requirements.document import render_requirements_markdown
 from app.requirements.models import RequirementsState
@@ -919,8 +919,6 @@ async def test_a_repository_without_contract_tests_is_proved_by_its_component_te
                          'tests cannot observe'),
     ('error', 'error', 'Component tests: The baseline run could not complete: The '
                        'component tests timed out or were terminated.'),
-    ('hung', 'error', 'Component tests: Tests the runner stopped at its per-test time limit '
-                      f'in the baseline run: {ADDED_COMPONENT_TESTS[0]} (1)'),
 ])
 async def test_nothing_is_fixed_unless_the_component_tests_fail_without_the_fix(
         env, worker, baseline, status, error, repository_selection):
@@ -941,6 +939,35 @@ async def test_nothing_is_fixed_unless_the_component_tests_fail_without_the_fix(
     state = await delivered(env, handle.id)
     assert state.baseline_status == 'reproduced' and state.baseline_error is None
     assert state.component_verification['status'] == 'passed'
+
+
+async def test_component_tests_that_hang_in_the_baseline_are_sent_back_to_be_bounded(
+        env, worker, repository_selection):
+    worker.routes = [{'FR-2': 'component'}]
+    worker.component_baseline_results = ['hung', 'reproduced']
+    _, state = await fixed(env, repository_selection)
+    # Only the hung tests go back to the component tests' author, then the baseline again.
+    (side, repair), = worker.repairs
+    assert side == 'component-tests' and repair['bound'] is True
+    assert [item['name'] for item in repair['broken_tests']] == [
+        ADDED_COMPONENT_TESTS[0].rpartition('#')[2]]
+    assert 'per-test time limit' in repair['instructions']
+    assert worker.stages.count('component-baseline') == 2
+    assert state.baseline_status == 'reproduced' and state.baseline_error is None
+    assert state.component_verification['status'] == 'passed'
+
+
+async def test_component_tests_that_keep_hanging_stop_the_delivery(
+        env, worker, repository_selection):
+    worker.routes = [{'FR-2': 'component'}]
+    worker.component_baseline_results = ['hung']
+    _, state = await fixed(env, repository_selection)
+    assert [side for side, _ in worker.repairs] == ['component-tests'] * MAX_BOUND_ROUNDS
+    assert worker.stages.count('component-baseline') == MAX_BOUND_ROUNDS + 1
+    assert state.baseline_status == 'error' and (
+        'Component tests: Tests the runner stopped at its per-test time limit in the '
+        f'baseline run: {ADDED_COMPONENT_TESTS[0]} (1)') in state.baseline_error
+    assert 'implementation' not in worker.stages and not worker.published
 
 
 async def test_a_change_with_component_tests_is_not_green_while_one_of_its_tests_skips(

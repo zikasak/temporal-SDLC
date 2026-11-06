@@ -221,6 +221,37 @@ to make it pass. The brief and the stubs remain the authority. The service's sou
 unavailable.
 """
 
+COMPONENT_BOUND_PROMPT = """
+This is a repair run. /workspace/tests already holds your previous component suite. It ran
+against the code as it was before the change, where the runner stopped some of your tests
+at its per-test time limit: they waited for what the change is to do with no bound of their
+own. The `repair` entry of the input holds the `instructions`, those tests' `test_failures`
+and `broken_tests`: the tests that hung. Those are the only tests you may change. Every
+other test must stay exactly as it is, and the outer worker rejects a suite in which one of
+them differs or is missing.
+Find each wait in them that the code without the change may never satisfy, such as the
+result of a workflow that keeps waiting, a loop polling a query or a description until a
+status changes, an event or queue a fake fills, or a fake that itself waits, and bound it
+to a few seconds so that the test fails with an assertion that names what did not happen.
+Keep what each test asserts; do not weaken or remove assertions. The corrected tests run
+against the code without the change again, where each one must fail within its bounds.
+The service's source stays unavailable.
+"""
+
+
+BOUND_PROMPT = """
+This is a repair run. /workspace/tests already holds your previous suite. It ran against
+the service as the repository holds it, where the runner stopped some of your tests at its
+per-test time limit: they waited for what the change is to do with no bound of their own.
+The `repair` entry of the input holds the `instructions`, those tests' `test_failures` and
+`broken_tests`: the tests that hung. Those are the only tests you may change. Every other
+test must stay exactly as it is, and the outer worker rejects a suite in which one of them
+differs or is missing. Bound each of their waits for something the service may never do,
+such as polling until a state changes or a request without a timeout, to a few seconds, so
+that the test fails with an assertion that names what did not happen. Keep what each test
+asserts; do not weaken or remove assertions. The implementation stays unavailable.
+"""
+
 
 REPAIR_PROMPT = """
 This is a repair run. /workspace/tests already holds your previous suite. It compiled, but
@@ -278,7 +309,8 @@ def repair_prompt(inputs: dict) -> str:
     repair = inputs.get('repair')
     if not repair:
         return keep
-    return (REVIEW_PROMPT if repair.get('review') else REPAIR_PROMPT) + keep
+    return (REVIEW_PROMPT if repair.get('review')
+            else BOUND_PROMPT if repair.get('bound') else REPAIR_PROMPT) + keep
 
 
 def validate_completion(test_glob: str, root: Path, test_globs: list[str] | None = None) -> None:
@@ -308,6 +340,7 @@ def prompt(inputs: dict, language: dict) -> str:
                 + (COMPONENT_PARTS_PROMPT if inputs.get('parts') else '')
                 + (COMPONENT_UNOBSERVABLE_PROMPT if not repair
                    else COMPONENT_REVIEW_PROMPT if repair.get('review')
+                   else COMPONENT_BOUND_PROMPT if repair.get('bound')
                    else COMPONENT_REPAIR_PROMPT))
     if inputs.get('brief'):
         # A change to an existing service is told about its repository by its own prompt.
