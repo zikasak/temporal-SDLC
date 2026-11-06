@@ -11,6 +11,7 @@ from app.api.main import app
 from app.api.routes import auth as auth_routes
 from app.auth import limits, storage, tokens
 from app.auth.passwords import hash_password
+from app.github import storage as github_storage
 
 PASSWORD = "correct horse battery"
 PUBLIC = {("POST", "/auth/login"), ("POST", "/auth/logout"), ("GET", "/auth/registration"),
@@ -24,8 +25,14 @@ def http(monkeypatch):
         "created_at": "2026-01-01T00:00:00Z"}})
     monkeypatch.setattr(tokens, "AUTH_JWT_SECRET", "s" * 32)
     monkeypatch.setattr(auth_routes, "login_attempts", limits.AttemptLimiter(10))
+    # No GitHub connection: webhook deliveries cannot be signed with its secret.
+    monkeypatch.setattr(github_storage, "get_connection", no_connection)
     # No lifespan: these requests never reach PostgreSQL or Temporal.
     return TestClient(app)
+
+
+async def no_connection():
+    return None
 
 
 def use_accounts(monkeypatch, users):

@@ -1,15 +1,13 @@
-"""Real PostgreSQL/crypto lifecycle; never uses the default application database."""
+"""The connection lifecycle and its encryption against an in-memory stand-in of the
+connection table: no database is used."""
 
-import os
+from datetime import datetime, timezone
 
 import httpx
-import psycopg
 import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from psycopg.conninfo import conninfo_to_dict
-from psycopg.rows import dict_row
 
 from app.api.routes.github import router
 from app.github import storage
@@ -20,26 +18,70 @@ CONNECTION = {"app_id": 123, "app_slug": "my-app", "installation_id": 99, "accou
               "bot_user_id": 77}
 
 
+def use_connection_table(monkeypatch):
+    """Replace the single-row connection table with a dict; encryption stays real."""
+    table = {}
+
+    def returned(row):
+        return {**row, "webhook_secret_set": row["encrypted_webhook_secret"] is not None}
+
+    async def ensure_schema():
+        pass
+
+    async def get_connection():
+        return returned(table["row"]) if "row" in table else None
+
+    async def save_connection(private_key, connection, webhook_secret=None):
+        cipher = storage._cipher()
+        table["row"] = {
+            "app_id": connection["app_id"], "app_slug": connection["app_slug"],
+            "encrypted_private_key": cipher.encrypt(private_key.encode("utf-8")),
+            "installation_id": connection["installation_id"], "account": connection["account"],
+            "bot_user_id": connection["bot_user_id"],
+            "encrypted_webhook_secret": (cipher.encrypt(webhook_secret.encode("utf-8"))
+                                         if webhook_secret else None),
+            "manifest_created": bool(connection.get("manifest_created")),
+            "webhook_events_missing": bool(connection.get("webhook_events_missing")),
+            "validated_at": datetime.now(timezone.utc)}
+        return storage.metadata(returned(table["row"]))
+
+    async def mark_validated(row, connection):
+        current = table.get("row")
+        if current is None or current["encrypted_private_key"] != row["encrypted_private_key"]:
+            raise GitHubError(409, "The GitHub connection changed. Refresh and try again.")
+        current.update({key: connection[key] for key in
+                        ("app_slug", "installation_id", "account", "bot_user_id")},
+                       webhook_events_missing=bool(connection.get("webhook_events_missing")),
+                       validated_at=datetime.now(timezone.utc))
+        if connection.get("manifest_created") is not None:
+            current["manifest_created"] = connection["manifest_created"]
+        return storage.metadata(returned(current))
+
+    async def initialize_webhook_secret(row, configure):
+        current = table.get("row")
+        if current is None or current["encrypted_private_key"] != row["encrypted_private_key"]:
+            raise GitHubError(409, "The GitHub connection changed. Refresh and try again.")
+        if current["encrypted_webhook_secret"] is not None:
+            return False
+        secret = await configure()
+        current["encrypted_webhook_secret"] = storage._cipher().encrypt(secret.encode("utf-8"))
+        return True
+
+    async def disconnect():
+        table.pop("row", None)
+
+    for function in (ensure_schema, get_connection, save_connection, mark_validated,
+                     initialize_webhook_secret, disconnect):
+        monkeypatch.setattr(storage, function.__name__, function)
+    return table
+
+
 @pytest.fixture
-async def database(monkeypatch):
-    dsn = os.environ.get("TEST_DATABASE_URL")
-    if not dsn:
-        pytest.skip("Set TEST_DATABASE_URL to a disposable PostgreSQL database named github_test_*")
-    if not conninfo_to_dict(dsn).get("dbname", "").startswith("github_test_"):
-        pytest.fail("Refusing storage tests: the disposable database name must start with github_test_")
-
-    async def connect():
-        return await psycopg.AsyncConnection.connect(dsn, row_factory=dict_row)
-
-    monkeypatch.setattr(storage, "connect", connect)
+def database(monkeypatch):
     key = Fernet.generate_key().decode()
     monkeypatch.setattr(storage, "GITHUB_TOKEN_ENCRYPTION_KEY", key)
-    await storage.ensure_schema()
-    async with await connect() as conn:
-        await conn.execute("DELETE FROM app.github_app_connection")
-    yield key
-    async with await connect() as conn:
-        await conn.execute("DELETE FROM app.github_app_connection")
+    use_connection_table(monkeypatch)
+    return key
 
 
 async def test_connection_routes_persist_encrypt_validate_replace_and_disconnect(
@@ -111,6 +153,8 @@ async def test_an_app_created_from_the_manifest_is_saved_and_connected_once_inst
     responses["/app/installations"] = lambda request: httpx.Response(200, json=installations)
     responses["/app/installations/99/access_tokens"] = httpx.Response(201, json={"token": TOKEN})
     responses["/users/my-app[bot]"] = httpx.Response(200, json={"id": 77})
+    # The app has no webhook secret yet: the first check turns its webhook on with one.
+    responses["/app/hook/config"] = httpx.Response(200, json={})
     app = FastAPI()
     app.include_router(router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
@@ -135,6 +179,7 @@ async def test_an_app_created_from_the_manifest_is_saved_and_connected_once_inst
         assert installed.status_code == 200
         assert installed.json()["installation"] == {"id": 99, "account": "octocat"}
         assert (await storage.get_connection())["bot_user_id"] == 77
+        assert installed.json()["webhook_secret_set"] is True
 
         # Uninstalled and installed again: the next check follows the new installation.
         responses["/app/installations/99"] = httpx.Response(404)
@@ -177,12 +222,3 @@ async def test_check_cannot_overwrite_a_connection_replaced_while_github_was_res
         await storage.mark_validated(previous, CONNECTION)
     row = await storage.get_connection()
     assert row["app_slug"] == "new-app" and storage.decrypt_private_key(row) == "new key"
-
-
-async def test_startup_discards_the_personal_access_token_table(database):
-    async with await storage.connect() as conn:
-        await conn.execute("CREATE TABLE app.github_connection (encrypted_token bytea)")
-    await storage.ensure_schema()
-    async with await storage.connect() as conn:
-        cursor = await conn.execute("SELECT to_regclass('app.github_connection') AS found")
-        assert (await cursor.fetchone())["found"] is None

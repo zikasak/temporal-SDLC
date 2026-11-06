@@ -139,6 +139,94 @@ def claude_http(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def no_database(monkeypatch):
+    """Tests never use a database: any connection attempt fails the test that makes it,
+    so that none silently reads or writes a developer's PostgreSQL. A test replaces the
+    storage functions it needs with in-memory stand-ins instead."""
+    import psycopg
+
+    def connect(*args, **kwargs):
+        pytest.fail("A test reached the database; replace the storage it uses with a stand-in")
+
+    monkeypatch.setattr(psycopg.AsyncConnection, "connect", connect)
+    monkeypatch.setattr(psycopg.Connection, "connect", connect)
+
+
+def replace_everywhere(monkeypatch, original, stand_in):
+    """Replace `original` in every application module, including those that imported it
+    by name."""
+    for module in list(sys.modules.values()):
+        if getattr(module, "__name__", "").split(".")[0] != "app":
+            continue
+        for name, value in list(vars(module).items()):
+            if value is original:
+                monkeypatch.setattr(module, name, stand_in)
+
+
+@pytest.fixture(autouse=True)
+def workflow_registry(monkeypatch):
+    """The IDs of started sessions and requests, in memory instead of PostgreSQL."""
+    from app.temporal import registry
+
+    registered = set()
+
+    async def ensure_schema():
+        pass
+
+    async def register(workflow_id):
+        registered.add(workflow_id)
+
+    async def is_registered(workflow_id):
+        return workflow_id in registered
+
+    for function in (ensure_schema, register, is_registered):
+        replace_everywhere(monkeypatch, getattr(registry, function.__name__), function)
+    return registered
+
+
+@pytest.fixture(autouse=True)
+def mention_history(monkeypatch):
+    """Each delivery's mentions, oldest first, in memory instead of PostgreSQL: keyed by
+    session, then by (comment type, comment id), holding (mention, recorded_by)."""
+    from app.delivery import mentions
+
+    deliveries = {}
+
+    def key(mention):
+        return mention["comment_type"], mention["comment_id"]
+
+    async def ensure_schema():
+        pass
+
+    async def add(session_id, mention, recording=None):
+        rows = deliveries.setdefault(session_id, {})
+        if key(mention) not in rows:
+            rows[key(mention)] = (dict(mention), recording)
+            return True
+        return bool(recording) and rows[key(mention)][1] == recording
+
+    async def recording(session_id, comment_type, comment_id):
+        row = deliveries.get(session_id, {}).get((comment_type, comment_id))
+        return None if row is None else (row[1] or "")
+
+    async def save(session_id, mention):
+        rows = deliveries.setdefault(session_id, {})
+        saved, recorded_by = rows.get(key(mention), ({}, None))
+        rows[key(mention)] = ({"body": saved.get("body", ""), **mention}, recorded_by)
+
+    async def body(session_id, comment_type, comment_id):
+        row = deliveries.get(session_id, {}).get((comment_type, comment_id))
+        return row[0].get("body") if row else None
+
+    async def history(session_id):
+        return [dict(mention) for mention, _ in deliveries.get(session_id, {}).values()]
+
+    for function in (ensure_schema, add, recording, save, body, history):
+        replace_everywhere(monkeypatch, getattr(mentions, function.__name__), function)
+    return deliveries
+
+
+@pytest.fixture(autouse=True)
 def saved_model_settings(monkeypatch):
     """Replace the external settings store for tests of the Docker lifecycle."""
     from app import docker_agents
