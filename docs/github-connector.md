@@ -100,7 +100,7 @@ Run focused connector and existing session tests from `backend/`:
 env/bin/python -m pytest tests/test_github_connector.py tests/test_github_storage.py tests/test_repository_checkout.py tests/test_requirements_workflow.py tests/test_api_design_workflow.py tests/test_conversation_fork.py
 ```
 
-GitHub HTTP is mocked; no real GitHub App or model calls are made. Checkout and push tests run the real `git` against a repository on disk. Real storage tests require an explicit `TEST_DATABASE_URL` pointing to a **disposable** PostgreSQL database whose name starts with `github_test_`. They initialize the connector schema and clear the connector table between tests. They never default to `APP_DATABASE_URL`. Without the variable, storage tests skip; do not mistake that for persistence verification.
+GitHub HTTP is mocked; no real GitHub App or model calls are made. Checkout and push tests run the real `git` against a repository on disk. Tests use no database: the connection lifecycle tests replace the connection table with an in-memory stand-in, keeping the real encryption, so the SQL itself is not exercised by the test suite.
 
 Run `npm run build` from `frontend/`. Manually inspect settings/picker/summary flows on desktop/mobile, including a wrong App ID or key, a missing encryption key, an uninstalled app, repositories removed from the installation, multi-page lists, branches containing `/`, empty repositories, stale requests during repository changes, and Disconnect. Verify independent sessions retain their own immutable selections after retrieval, branching, derivation, and restart.
 

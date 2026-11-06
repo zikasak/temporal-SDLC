@@ -1,19 +1,17 @@
-"""Settings API and provider selection against a disposable PostgreSQL database."""
+"""Settings API and provider selection against an in-memory stand-in of the settings
+table: no database is used."""
 import copy
-import os
 
 import psycopg
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from psycopg.conninfo import conninfo_to_dict
-from psycopg.rows import dict_row
 
 from app.api.routes.settings import router
 from app.llm import model
 from app.settings import storage
 from app.settings import providers
-from app.settings.models import ModelSettings
+from app.settings.models import ModelSettings, WORKFLOW_LABELS, WorkflowSettings
 
 
 @pytest.fixture(autouse=True)
@@ -41,23 +39,30 @@ def provider_catalog(monkeypatch):
 
 @pytest.fixture
 async def database(monkeypatch):
-    dsn = os.getenv('TEST_SETTINGS_DATABASE_URL')
-    if not dsn:
-        pytest.skip('Set TEST_SETTINGS_DATABASE_URL to a disposable settings_test_* database')
-    if not conninfo_to_dict(dsn).get('dbname', '').startswith('settings_test_'):
-        pytest.fail('Refusing settings tests: database name must start with settings_test_')
+    """Replace the settings table with a dict holding each workflow's saved JSON."""
+    table = {}
 
-    async def connect():
-        return await psycopg.AsyncConnection.connect(dsn, row_factory=dict_row)
+    async def ensure_schema():
+        for workflow_type in WORKFLOW_LABELS:
+            table.setdefault(workflow_type, ModelSettings().model_dump())
 
-    monkeypatch.setattr(storage, 'connect', connect)
-    await storage.ensure_schema()
-    async with await connect() as conn:
-        await conn.execute('TRUNCATE app.workflow_settings')
-    await storage.ensure_schema()
-    yield
-    async with await connect() as conn:
-        await conn.execute('TRUNCATE app.workflow_settings')
+    async def get_settings():
+        return WorkflowSettings(workflows=copy.deepcopy(table))
+
+    async def get_workflow_settings(workflow_type):
+        if workflow_type not in table:
+            raise ValueError(f'Missing settings for workflow: {workflow_type}')
+        return ModelSettings.model_validate(table[workflow_type])
+
+    async def save_settings(settings):
+        table.update({workflow_type: saved.model_dump()
+                      for workflow_type, saved in settings.workflows.items()})
+        return settings
+
+    for function in (ensure_schema, get_settings, get_workflow_settings, save_settings):
+        monkeypatch.setattr(storage, function.__name__, function)
+    monkeypatch.setattr(model, 'get_workflow_settings', get_workflow_settings)
+    await ensure_schema()
 
 
 @pytest.fixture
