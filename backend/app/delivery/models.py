@@ -498,6 +498,10 @@ class DeliveryState:
     # before the type was recorded has none.
     mention: int | None = None
     mention_type: str | None = None
+    # The criteria a test author found unobservable where they were routed, with its
+    # reasons: a retry of the tests routes them again told so, so the new stubs name
+    # what the author lacked, such as collaborators the seam calls by name.
+    declined_routes: dict[str, Any] | None = None
     # The mentions waiting for their round, in the order they arrived, each as
     # [comment type, comment ID]; a state from before has bare comment IDs.
     mention_queue: list[Any] = field(default_factory=list)

@@ -154,7 +154,11 @@ stubbed symbols exactly as the brief states it. The code under test is the seam 
 drive it through the symbols its stub declares and never fake, patch or subclass it, or
 anything else of the service but the collaborators the stubs name. Replace every one of
 those with a fake of your own that has the stubbed signature and records or answers the
-calls as the test needs. Never use anything of the service's code the stubs do not
+calls as the test needs. A collaborator the code reaches by a name, such as a child
+workflow or activity run by its registered name, is named when a stub's docstring states
+that name, or a stubbed constant holds it: fake it by registering a workflow or
+activity of your own under that name, with the arguments and result the docstring
+states. Never use anything of the service's code the stubs do not
 declare. The suite is first run against the code as it is today, where every test you add
 must fail and every existing test must pass; a new test that passes there does not
 reproduce the problem and stops the task.

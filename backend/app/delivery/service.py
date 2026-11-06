@@ -339,6 +339,11 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
             progress.baseline_status = 'waiting'
             # Criteria were routed again unless every one had a suite that observes it.
             progress.routing_error = None
+            if progress.routing_status == 'unobservable':
+                # Criteria a test author declined are routed again told why.
+                state.declined_routes = {
+                    requirement: route for requirement, route in (progress.routing or {}).items()
+                    if route['source'] == 'tests'} or None
             if progress.routing_status != 'routed' or mismatch:
                 progress.routing = None
                 progress.routing_status = 'waiting'

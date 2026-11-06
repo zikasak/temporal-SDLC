@@ -62,7 +62,8 @@ class RequirementRoute(TypedDict):
     # How the suite observes the criterion, or why none can.
     reason: str
     source: RouteSource
-    # Only for the `component` route.
+    # For the `component` route, and for one the component tests' author found
+    # unobservable at that seam after all: the seam it was routed to.
     seam: NotRequired[Seam]
 
 
@@ -203,9 +204,17 @@ def judge_routes(routes: dict[str, RequirementRoute]) -> tuple[RoutingStatus, st
                       for requirement, item in unobservable[:NAMED_CRITERIA])
     more = len(unobservable) - NAMED_CRITERIA
     by_tests = all(item['source'] == 'tests' for _, item in unobservable)
+    # A criterion the author declined at a seam may need no more than stubs that name
+    # what it lacked, which a new routing is told; HTTP would not observe it either.
+    at_seam = any('seam' in item for _, item in unobservable)
     return 'unobservable', (
         ('The test author found that its suite cannot observe '
          if by_tests else 'The contract tests cannot observe ')
         + f'{len(unobservable)} of the {len(routes)} acceptance criteria, so nothing was '
-        f'changed: {named}{f"; {more} more" if more > 0 else ""}. Rephrase each of them as '
-        "behaviour the service's HTTP API shows, in a fork of the interview.")
+        f'changed: {named}{f"; {more} more" if more > 0 else ""}. '
+        + ('Retry the tests to route them again: the routing is told what the test author '
+           'lacked, so it can write stubs that name it. Otherwise rephrase each of them as '
+           "behaviour the service's HTTP API or a seam of its code shows, in a fork of the "
+           'interview.' if at_seam else
+           "Rephrase each of them as behaviour the service's HTTP API shows, in a fork of "
+           'the interview.'))

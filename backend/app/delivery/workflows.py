@@ -766,10 +766,14 @@ class DeliveryWorkflow:
         self.progress.routing_status = 'running'
         self.progress.routing = None
         self.progress.routing_error = None
+        context = self._stage_context(None)
+        if self.state.declined_routes:
+            # What the test author lacked at the seams of the last routing.
+            context['declined'] = self.state.declined_routes
         try:
             result = await workflow.execute_child_workflow(
                 'ObservabilityWorkflow',
-                args=[self.spec.session_id, self._stage_context(None)],
+                args=[self.spec.session_id, context],
                 id=self._child_id('routing'),
                 task_queue=ROUTING_TASK_QUEUE,
                 result_type=dict,
@@ -782,6 +786,7 @@ class DeliveryWorkflow:
                                                                      else ''))
             self.progress.routing_status = 'error'
             return False
+        self.state.declined_routes = None
         self.progress.routing = {
             requirement: {**route, 'source': 'routing'}
             for requirement, route in result['routes'].items()}
@@ -845,8 +850,11 @@ class DeliveryWorkflow:
         """Record criteria a test author found its suite cannot observe."""
         routing = dict(self.progress.routing or {})
         for item in unobservable:
+            # The seam it was routed to, if any, is kept: a new routing is told of it.
+            seam = (routing.get(item['requirement_id']) or {}).get('seam')
             routing[item['requirement_id']] = {
-                'route': 'unobservable', 'reason': item['reason'], 'source': 'tests'}
+                'route': 'unobservable', 'reason': item['reason'], 'source': 'tests',
+                **({'seam': seam} if seam else {})}
         self.progress.routing = routing
         self.progress.routing_status, self.progress.routing_error = self._judge_routes(routing)
         workflow.logger.info('The test author found %d criteria unobservable',
