@@ -15,7 +15,7 @@ from app.config import (
     TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
 )
 from app.delivery.models import DeliveryProgress, DeliveryState, delivery_id
-from app.routing.models import ROUTING_ERROR
+from app.routing.models import ROUTING_ERROR, SEAM_ERROR
 from app.diagnosis.workflows import DiagnosisWorkflow
 from app.documentation.workflows import DocumentationWorkflow
 from app.implementation.workflows import ImplementationWorkflow
@@ -223,7 +223,8 @@ class FakeStages:
             self.stages.append('seam')
             self.seam_contexts.append(context)
             if self.fail_seam:
-                raise ApplicationError('build failed', non_retryable=True)
+                raise ApplicationError('The seam agent left no Dockerfile at the root of the '
+                                       'repository.', type=SEAM_ERROR, non_retryable=True)
             if self.seam_conformance_error:
                 return {'session_id': session_id,
                         'conformance_error': self.seam_conformance_error}
