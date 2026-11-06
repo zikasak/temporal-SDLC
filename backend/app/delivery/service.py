@@ -12,7 +12,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from app.delivery.models import (
-    COMPONENT_CHANGE_UNPUBLISHED, MENTION_HANDLED, OUTCOME_OWED, RETRY_STAGES, DeliveryProgress, DeliveryState, RetryStage, delivery_id, interrupted,
+    MENTION_HANDLED, OUTCOME_OWED, RETRY_STAGES, DeliveryProgress, DeliveryState, RetryStage, delivery_id, interrupted,
     restorable_tests,
 )
 from app.delivery import mentions as mention_history
@@ -276,11 +276,6 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
                              or progress.pull_request_text_error)}[stage]
     if not failed:
         raise SessionBusy('Only failed generation can be retried.')
-    if stage == 'repository' and progress.publication_error == COMPONENT_CHANGE_UNPUBLISHED:
-        # Verified before such changes were reviewed: a push now would skip the review.
-        raise SessionBusy('This change was verified before changes with component tests '
-                          'were code-reviewed, so it cannot be pushed as it is. Fork the '
-                          'session from a message to deliver it again.')
     # An onboarding generates no code: its tests are written for the existing code.
     if stage == 'tests' and not progress.code and not change and not state.spec.onboarding:
         raise SessionBusy('Retry server generation first.')

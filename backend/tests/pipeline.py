@@ -348,9 +348,12 @@ class FakeStages:
                     'error': 'The component tests timed out or were terminated'}
         failed = (tracked_tests[1:] if outcome == 'not_reproduced'
                   else tracked_tests if baseline or outcome == 'failed' else [])
-        if failed and not baseline:
-            result['test_failures'] = [{'class_name': 'tests.test_rooms', 'name': case,
-                                        'kind': 'failure', 'message': 'assert False'}
+        if failed and (outcome == 'hung' or not baseline):
+            # 'hung': the runner stopped the added tests at its per-test limit.
+            message = 'Failed: Timeout >30.0s' if outcome == 'hung' else 'assert False'
+            result['test_failures'] = [{'class_name': 'tests.test_rooms',
+                                        'name': case.rpartition('#')[2] if outcome == 'hung' else case,
+                                        'kind': 'failure', 'message': message}
                                        for case in failed]
         return {**result, 'status': 'failed' if failed else 'passed',
                 'exit_code': 1 if failed else 0, 'failures': len(failed),

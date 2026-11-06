@@ -38,12 +38,6 @@ DRAFT_FAILED = "The LLM could not draft the contract. Retry."
 TURN_FAILED = "The LLM could not answer. Retry this message."
 CONTRACT_UNKNOWN = ("The existing contract could not be read, so only replacing it or "
                     "declining is offered. Update the checkout to read it again.")
-# Onboardings that also draft the architecture and may add only it.
-ARCHITECTURE_STAGE = "onboarding-architecture"
-# Onboardings that record which kind of draft exists apart from the current decision.
-DRAFT_KIND = "onboarding-draft-kind"
-# Onboardings whose first checkout checks that adding only the architecture still applies.
-FORK_ARCHITECTURE_CHECK = "onboarding-fork-architecture-check"
 
 
 @workflow.defn
@@ -133,9 +127,7 @@ class OnboardingWorkflow(_Delivering):
         accepted = known if self._decided() else []
         # A fork carries architecture_only over: adding only the architecture still needs
         # a contract without one that is readable apart from it, as in update_checkout.
-        invalid = self._architecture_only_invalid() and workflow.patched(
-            FORK_ARCHITECTURE_CHECK)
-        if invalid or any(item not in accepted for item in found):
+        if self._architecture_only_invalid() or any(item not in accepted for item in found):
             self.state.replaced_contract = False
             self.state.architecture_only = False
             self.state.status = "awaiting_confirmation"
@@ -158,7 +150,7 @@ class OnboardingWorkflow(_Delivering):
         only that, and whether the rest of it is readable."""
         self.state.architecture_missing = False
         self.state.contract_problem = None
-        if "contract" not in found or not workflow.patched(ARCHITECTURE_STAGE):
+        if "contract" not in found:
             return
         try:
             inspected = await workflow.execute_activity(
@@ -327,12 +319,7 @@ class OnboardingWorkflow(_Delivering):
         current decision, which a return to awaiting_confirmation resets."""
         if not self.state.drafted:
             return
-        changed = draft_kind_changed(self.state, architecture_only)
-        # Histories from before the draft kind was recorded compared the current decision.
-        previous = architecture_only != self.state.architecture_only
-        if changed != previous and not workflow.patched(DRAFT_KIND):
-            changed = previous
-        if not changed:
+        if not draft_kind_changed(self.state, architecture_only):
             return
         workflow.logger.info("Discarding the %s drafts to draft anew",
                              "architecture-only" if not architecture_only else "full")

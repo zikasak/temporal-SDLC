@@ -15,7 +15,6 @@ with workflow.unsafe.imports_passed_through():
     )
     from app.delivery.contract import with_requirements
     from app.delivery.models import (
-        COMPONENT_CHANGE_UNPUBLISHED, COMPONENT_CHANGE_UNPUSHED, COMPONENT_CHANGE_UNREPAIRED,
         MENTION_HANDLED,
         OUTCOME_OWED, STOPPED, TASK_IDLE_TIMEOUT, AgentQuestions, DeliveryProgress,
         DeliveryState, component_run, is_mention, judge_baseline, judge_kept, kept_tests,
@@ -27,7 +26,7 @@ with workflow.unsafe.imports_passed_through():
     from app.temporal.execution_fields import task_fields
     from app.requirements.models import CHANGE_KINDS
     from app.routing.models import (
-        COMPONENT_TESTS_UNRUN, ROUTING_ERROR, ROUTING_ERROR_CHARS, SEAM_ERROR, SEAM_MISMATCH,
+        ROUTING_ERROR, ROUTING_ERROR_CHARS, SEAM_ERROR, SEAM_MISMATCH,
         added_seams, judge_routes,
     )
     from app.review.models import (
@@ -44,23 +43,6 @@ MAX_REPAIR_ROUNDS = 5
 # Rounds in which the test author of an API change puts back the repository's tests the
 # changed service still passes, each verified again.
 MAX_RESTORE_ROUNDS = 2
-# Marks the workflow code that sends a suite rejected for such tests back to its author.
-RESTORE_KEPT_PATCH = 'restore-kept-tests'
-# Marks the workflow code that routes a change's criteria to the suites that can prove them
-# before any test is written; deliveries started before it wrote their tests at once.
-ROUTING_PATCH = 'routing'
-# Marks the workflow code that writes component tests for criteria routed to a seam, which
-# stopped the delivery at its routing before.
-COMPONENT_TESTS_PATCH = 'component-tests'
-# Marks the workflow code that runs component tests, at the baseline and with the change,
-# where deliveries stopped once they were written before.
-COMPONENT_RUNS_PATCH = 'component-runs'
-# Marks the workflow code that diagnoses, repairs and reviews a change with component tests,
-# which ended with their verification before.
-COMPONENT_REPAIRS_PATCH = 'component-repairs'
-# Marks the workflow code that pushes a change with component tests, with its component
-# contract, which stopped where its push would be before.
-COMPONENT_PUSHES_PATCH = 'component-pushes'
 # Failed tests a verification that is not repaired names.
 NAMED_FAILURES = 5
 # Runs of one verification whose result is an infrastructure error, not a verdict.
@@ -187,9 +169,6 @@ class DeliveryWorkflow:
             elif await self._mention_started():
                 await self._deliver()
                 await self._mention_finished()
-        # Histories from before deliveries waited end with their work.
-        if not workflow.patched('delivery-waits'):
-            return self.progress
         self.state.waiting = True
         # A fix request that arrived while this run worked starts its round now.
         self._start_queued()
@@ -205,7 +184,7 @@ class DeliveryWorkflow:
                 # A mention whose classification overlapped the idle timeout may have
                 # turned out to be a fix request: it was accepted, so the delivery waits
                 # again and starts its round instead of closing with it queued.
-                if not self._fix_pending() or not workflow.patched('idle-queued-mentions'):
+                if not self._fix_pending():
                     return self.progress
                 workflow.logger.info('Fix request queued while closing; continuing')
                 self.state.waiting = True
@@ -393,10 +372,6 @@ class DeliveryWorkflow:
 
     def _fix_unavailable(self) -> str | None:
         """Why the delivery cannot take a fix round, if it cannot."""
-        if self.spec.architecture_only and not workflow.patched('architecture-fixes'):
-            # Histories from before architecture fixes turned them down.
-            return ('This pull request only adds the architecture to the contract, which '
-                    'was reviewed in the onboarding; start a new onboarding to change it.')
         if self.spec.architecture_only:
             # The architecture takes fixes without tests, verification or code review.
             if not self.progress.publication or not self.spec.checkout:
@@ -747,12 +722,6 @@ class DeliveryWorkflow:
             self.progress.baseline_status = 'skipped'
             self.progress.verification_status = 'skipped'
             return
-        if self.progress.component_tests and not workflow.patched(COMPONENT_RUNS_PATCH):
-            # Deliveries that wrote component tests before they could run them stopped here.
-            self.progress.baseline_status = 'skipped'
-            self.progress.baseline_error = COMPONENT_TESTS_UNRUN
-            self.progress.verification_status = 'skipped'
-            return
         # Nothing is fixed before the added tests are shown to fail without the fix.
         if not await self._reproduce():
             self.progress.verification_status = 'skipped'
@@ -766,10 +735,6 @@ class DeliveryWorkflow:
         """Decide which suite can prove each criterion of the brief: true when every one
         has one. A routing that found one for each is kept for the retries of the tests."""
         if self.progress.routing_status == 'routed':
-            return True
-        if not workflow.patched(ROUTING_PATCH):
-            # Deliveries started before the routing wrote their tests without one.
-            self.progress.routing_status = 'not_applicable'
             return True
         self.progress.routing_status = 'running'
         self.progress.routing = None
@@ -793,7 +758,7 @@ class DeliveryWorkflow:
         self.progress.routing = {
             requirement: {**route, 'source': 'routing'}
             for requirement, route in result['routes'].items()}
-        self.progress.routing_status, self.progress.routing_error = self._judge_routes(
+        self.progress.routing_status, self.progress.routing_error = judge_routes(
             self.progress.routing)
         workflow.logger.info('Routing: %s', self.progress.routing_status)
         return self.progress.routing_status == 'routed'
@@ -839,13 +804,6 @@ class DeliveryWorkflow:
     def _seam_prepared(self) -> bool:
         return self.progress.seam_status == 'prepared' and self.progress.seam is not None
 
-    def _judge_routes(self, routing: dict[str, Any]) -> tuple[str, str | None]:
-        component = any(item['route'] == 'component' for item in routing.values())
-        # Asked only when it decides something, so other deliveries' histories stay as
-        # they were.
-        return judge_routes(routing, component_tests=(
-            component and workflow.patched(COMPONENT_TESTS_PATCH)))
-
     def _component_routes(self) -> dict[str, Any]:
         """The criteria routed to a seam, with their reasons and seams."""
         return {requirement: route for requirement, route in (self.progress.routing or {}).items()
@@ -858,7 +816,7 @@ class DeliveryWorkflow:
             routing[item['requirement_id']] = {
                 'route': 'unobservable', 'reason': item['reason'], 'source': 'tests'}
         self.progress.routing = routing
-        self.progress.routing_status, self.progress.routing_error = self._judge_routes(routing)
+        self.progress.routing_status, self.progress.routing_error = judge_routes(routing)
         workflow.logger.info('The test author found %d criteria unobservable',
                              len(unobservable))
 
@@ -1091,7 +1049,7 @@ class DeliveryWorkflow:
             return
         if self.state.retry_stage == 'server':
             await self._implement_service()
-        elif self.state.restore_tests and workflow.patched(RESTORE_KEPT_PATCH):
+        elif self.state.restore_tests:
             # The suite was rejected for tests the changed service still passed: its
             # author is told so and puts them back, rather than writing the same again.
             restore, self.state.restore_tests = self.state.restore_tests, []
@@ -1104,10 +1062,6 @@ class DeliveryWorkflow:
     async def _verify_built(self) -> None:
         """Verification needs both images; a failed build leaves nothing to verify."""
         if self.progress.component_tests:
-            if not self._repairs_components():
-                # Histories from before such changes were repaired and reviewed.
-                await self._verify_components()
-                return
             await self._verify_components_and_repair()
             if self._components_passed():
                 await self._review_rounds()
@@ -1117,8 +1071,7 @@ class DeliveryWorkflow:
             await self._verify_and_repair()
             if self.spec.kind == 'api_change':
                 await self._prove_kept()
-                if workflow.patched(RESTORE_KEPT_PATCH):
-                    await self._restore_kept()
+                await self._restore_kept()
             if self._passed():
                 await self._review_rounds()
         else:
@@ -1152,11 +1105,6 @@ class DeliveryWorkflow:
                     and not self.progress.tests_error
                     and not self.progress.component_tests_error
                     and self.progress.baseline_status == 'reproduced')
-
-    def _repairs_components(self) -> bool:
-        """Whether a change with component tests is diagnosed, repaired and reviewed as one
-        with contract tests alone is."""
-        return workflow.patched(COMPONENT_REPAIRS_PATCH)
 
     def _component_tests_failed(self) -> bool:
         """Whether verification of a change with component tests ran, and tests of either
@@ -1257,9 +1205,7 @@ class DeliveryWorkflow:
                 failed.append(f'{name} {run["failures"] + run["errors"]} of {run["tests"]}'
                               + (f' ({named})' if named else ''))
         if failed:
-            # Histories from before such changes were repaired said they could not be.
-            unrepaired = '' if self._repairs_components() else f' {COMPONENT_CHANGE_UNREPAIRED}'
-            return f'Tests fail against the changed code: {"; ".join(failed)}.{unrepaired}'
+            return f'Tests fail against the changed code: {"; ".join(failed)}.'
         return unproven_green(contract, component)
 
     async def _review_rounds(self, instructions: str | None = None,
@@ -1365,7 +1311,7 @@ class DeliveryWorkflow:
         be rejected again. Otherwise the corrected delivery is only verified again."""
         self.progress.correction_failed = False
         number = self.progress.reviews[-1]['round']
-        rejected = self._rejected_suite() if workflow.patched('correct-rejected-suite') else None
+        rejected = self._rejected_suite()
         if (self.progress.implementation_error or self.progress.tests_error
                 or self.progress.component_tests_error
                 or self.spec.kind == 'bugfix' and self.progress.baseline_status != 'reproduced'):
@@ -1744,21 +1690,6 @@ class DeliveryWorkflow:
         if not self.spec.checkout:
             return
         components = bool(self.progress.component_tests)
-        if components and not (self._repairs_components()
-                               and workflow.patched(COMPONENT_PUSHES_PATCH)):
-            # Histories from before the code review or the push of a change with component
-            # tests: one that passed both suites says so where its push would be.
-            self.progress.publication_status = 'skipped'
-            self.progress.pull_request_status = 'skipped'
-            if not self._repairs_components():
-                if self._components_passed():
-                    self.progress.publication_error = COMPONENT_CHANGE_UNPUBLISHED
-            elif self._components_passed() or (
-                    self.progress.verification_status == 'findings_open'):
-                remaining = len(open_review_findings(self.progress))
-                self.progress.publication_error = COMPONENT_CHANGE_UNPUSHED + (
-                    f' {remaining} code review findings remain open.' if remaining else '')
-            return
         # Tests that pass with review findings left after the last round are pushed too,
         # marked as unverified, with the findings in the commit message.
         open_findings = self.progress.verification_status == 'findings_open'
@@ -1787,16 +1718,11 @@ class DeliveryWorkflow:
                 # earlier unverified push on the branch, and the flag raised. So does a
                 # fix round a pull request comment asked for, with the earlier push.
                 self.progress.publication_status = 'completed'
-                if (self.progress.pull_request_status in ('waiting', 'running')
-                        and workflow.patched('kept-push-pull-request')):
+                if self.progress.pull_request_status in ('waiting', 'running'):
                     # A retried repository stage, such as after a failed pull request
                     # step, still opens or updates the pull request of the earlier push;
                     # a step that was not attempted is never reported as done.
                     await self._pull_request()
-                elif self.progress.pull_request_status in ('waiting', 'running'):
-                    # Histories that predate the patch keep their pull request as it was.
-                    self.progress.pull_request_status = (
-                        'completed' if self.progress.pull_request else 'skipped')
             else:
                 self.progress.publication_status = 'skipped'
                 self.progress.pull_request_status = 'skipped'
@@ -1861,12 +1787,7 @@ class DeliveryWorkflow:
                 self.progress.open_findings = open_findings and not accepted
                 if open_findings and not accepted:
                     self.progress.findings_acceptance = None
-            if workflow.patched('pull-request'):
-                await self._pull_request()
-            else:
-                # A delivery whose history predates the pull request step opens none;
-                # the step ends here instead of waiting for good.
-                self.progress.pull_request_status = 'not_applicable'
+            await self._pull_request()
 
     async def _revise_architecture(self, instructions: str) -> bool:
         """Change the architecture of an architecture-only onboarding as a comment on its
@@ -1938,31 +1859,30 @@ class DeliveryWorkflow:
             change['proofs'] = proofs
         args = [self.spec.session_id, self.spec.repository, self.progress.publication, change]
         text = None
-        if workflow.patched('pull-request-text'):
-            # The LLM writes the title and description; without them the generic text is
-            # used, which is reported but fails neither the step nor the delivery.
-            try:
-                text = await workflow.execute_activity(
-                    'write_pull_request_text',
-                    args=[self.spec.session_id, self.progress.publication,
-                          {**change, 'task': (brief['requirements_document'] if brief
-                                              else self.spec.requirements_document)}],
-                    start_to_close_timeout=timedelta(minutes=10),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                    result_type=dict,
-                )
-            except ActivityError as exc:
-                workflow.logger.warning('The pull request text could not be written: %s',
-                                        exc.cause or exc)
-                # Only the activity's own explanations are shown: a provider's error
-                # message may carry credentials (NFR-2).
-                reason = (str(getattr(exc.cause, 'message', '') or '')[:500]
-                          if isinstance(exc.cause, ApplicationError)
-                          and exc.cause.type == 'PullRequestTextError' else '')
-                self.progress.pull_request_text_error = (
-                    'The LLM could not write the pull request title and description, so the '
-                    'generic text was used.' + (f' {reason}' if reason else ''))
-            args.append(text)
+        # The LLM writes the title and description; without them the generic text is
+        # used, which is reported but fails neither the step nor the delivery.
+        try:
+            text = await workflow.execute_activity(
+                'write_pull_request_text',
+                args=[self.spec.session_id, self.progress.publication,
+                      {**change, 'task': (brief['requirements_document'] if brief
+                                          else self.spec.requirements_document)}],
+                start_to_close_timeout=timedelta(minutes=10),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+                result_type=dict,
+            )
+        except ActivityError as exc:
+            workflow.logger.warning('The pull request text could not be written: %s',
+                                    exc.cause or exc)
+            # Only the activity's own explanations are shown: a provider's error
+            # message may carry credentials (NFR-2).
+            reason = (str(getattr(exc.cause, 'message', '') or '')[:500]
+                      if isinstance(exc.cause, ApplicationError)
+                      and exc.cause.type == 'PullRequestTextError' else '')
+            self.progress.pull_request_text_error = (
+                'The LLM could not write the pull request title and description, so the '
+                'generic text was used.' + (f' {reason}' if reason else ''))
+        args.append(text)
         try:
             self.progress.pull_request = await workflow.execute_activity(
                 open_pull_request,
@@ -2028,7 +1948,7 @@ class DeliveryWorkflow:
         tests' author is then given the criteria routed to it, and not run when there are
         none. A repair of a change with component tests runs the author of `suite`, or,
         for review findings, of each suite they concern."""
-        if repair and self.progress.component_tests and self._repairs_components():
+        if repair and self.progress.component_tests:
             await self._repair_suites(repair, suite)
             return
         component = {} if repair else self._component_routes()

@@ -29,11 +29,6 @@ KICKOFF_MESSAGE = (
     "ask_user."
 )
 
-CHANGE_OPENING_FALLBACK = (
-    "I've read the change you want and the API your service has now. Tell me which "
-    "endpoint or field of the existing API should change first, and how."
-)
-
 CHANGE_KICKOFF_MESSAGE = (
     "Here are the requirements document of my existing service and the document of "
     "the change I want. The API model already holds the service's API as it is. "
@@ -110,11 +105,9 @@ ARCHITECTURE_GUIDANCE = (
 )
 
 
-def opening_fallback(change: bool) -> ConversationMessage:
-    """The first message of a session whose first turn failed. Change sessions only
-    get theirs when replaying histories from before their opening could be retried."""
-    if change:
-        return {"role": "assistant", "content": CHANGE_OPENING_FALLBACK}
+def opening_fallback() -> ConversationMessage:
+    """The first message of a session whose first turn failed; a change session has
+    none, as its opening is retried instead."""
     return {"role": "assistant", "content": OPENING_FALLBACK,
             "questions": [{**item, "options": list(item["options"])}
                           for item in OPENING_QUESTIONS]}
