@@ -333,6 +333,8 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
                 progress.seam = None
                 progress.seam_error = None
                 progress.seam_status = 'not_applicable'
+                progress.seam_reviews = []
+            progress.test_reviews = []
             progress.baseline = None
             progress.baseline_error = None
             progress.component_baseline = None

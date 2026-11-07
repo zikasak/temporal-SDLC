@@ -6,6 +6,17 @@ REVIEW_TARGETS = ('implementation', 'tests', 'both')
 # Each run of review rounds, including one started by the user's instructions, reviews
 # the delivery at most this often; test repair rounds have a limit of their own.
 MAX_REVIEW_ROUNDS = 5
+# What a review before the fix looks at, when it is not the whole verified delivery: the
+# seam a change added first, or its regression tests once they were seen failing without
+# the fix. Each is reviewed and corrected in rounds of its own before the next stage
+# starts, at most MAX_STAGE_REVIEW_ROUNDS times; the final review sees them again.
+ReviewScope = Literal['seam', 'regression']
+SCOPE_KEY = 'review_scope'
+# The one worker a stage review's findings go to.
+SCOPE_TARGETS: dict[str, ReviewTarget] = {'seam': 'implementation', 'regression': 'tests'}
+MAX_STAGE_REVIEW_ROUNDS = 3
+# How a change's regression tests failed without the fix, in a regression review's context.
+BASELINE_KEY = 'baseline'
 MAX_FINDINGS = 50
 SUMMARY_CHARS = 2000
 REASON_CHARS = 500
@@ -95,11 +106,13 @@ def earlier_findings(findings: list[ReviewFinding]) -> list[dict[str, Any]]:
 
 def review_request(findings: list[ReviewFinding], worker: str, attempt: int,
                    instructions: str | None = None,
-                   restore: list[str] | None = None) -> dict[str, Any]:
+                   restore: list[str] | None = None,
+                   before_fix: bool = False) -> dict[str, Any]:
     """What an author receives to correct review findings. The test author never sees
     the implementation and the implementation author never sees the tests: only the
     findings' own words reach them. `restore` names repository tests the test author has
-    to put back as the repository holds them."""
+    to put back as the repository holds them. `before_fix` marks a review of a change's
+    regression tests before the fix, which they still have to fail without."""
     review: dict[str, Any] = {
         'findings': [{key: value for key, value in item.items()
                       if key not in ('target', 'repeats')}
@@ -108,6 +121,8 @@ def review_request(findings: list[ReviewFinding], worker: str, attempt: int,
         review['instructions'] = instructions
     if restore and worker == 'tests':
         review['restore'] = restore
+    if before_fix:
+        review['before_fix'] = True
     return {'attempt': attempt, 'review': review}
 
 

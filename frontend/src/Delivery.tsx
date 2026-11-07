@@ -96,11 +96,15 @@ export type DeliveryProgress = {
   // The seam the change adds, with no behaviour change, before its tests are written.
   seam_status: SeamStatus;
   seam_error: string | null;
+  // The seam's review rounds before any test is written, each corrected by its author.
+  seam_reviews: ReviewRound[];
   baseline_status: BaselineStatus;
   baseline: VerificationResult | null;
   // The component tests' run against the code as the repository holds it.
   component_baseline: VerificationResult | null;
   baseline_error: string | null;
+  // The regression tests' review rounds once they failed without the fix, before it.
+  test_reviews: ReviewRound[];
   verification_status: VerificationStatus;
   verification: VerificationResult | null;
   // The component tests' run with the change, once it conforms to its component contract.
@@ -318,11 +322,13 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     seam_status: seamStatuses.includes(value.seam_status as SeamStatus)
       ? value.seam_status as SeamStatus : "not_applicable",
     seam_error: text(value.seam_error),
+    seam_reviews: reviewRounds(value.seam_reviews),
     baseline_status: baselineStatuses.includes(value.baseline_status as BaselineStatus)
       ? value.baseline_status as BaselineStatus : "not_applicable",
     baseline: verificationRecord(value.baseline),
     component_baseline: verificationRecord(value.component_baseline),
     baseline_error: text(value.baseline_error),
+    test_reviews: reviewRounds(value.test_reviews),
     verification_status: verificationStatuses.includes(value.verification_status as VerificationStatus)
       ? value.verification_status as VerificationStatus : "not_applicable",
     verification: verificationRecord(value.verification),
@@ -422,9 +428,10 @@ export function retriedProgress(progress: DeliveryProgress, stage: GenerationSta
     // A seam that was not added, or whose baseline proved nothing, is added again.
     ...(stage === "tests" && change && (progress.seam_status === "error" ||
       progress.routing_status !== "routed" || ["not_reproduced", "error"].includes(progress.baseline_status))
-      ? { seam_status: "not_applicable" as const, seam_error: null } : {}),
+      ? { seam_status: "not_applicable" as const, seam_error: null, seam_reviews: [] } : {}),
     ...(stage === "tests" && change
-      ? { baseline: null, component_baseline: null, baseline_error: null, baseline_status: "waiting" as const, routing_error: null } : {}),
+      ? { baseline: null, component_baseline: null, baseline_error: null, baseline_status: "waiting" as const,
+          routing_error: null, test_reviews: [] } : {}),
     // The criteria are routed again unless every one had a suite that observes it.
     ...(stage === "tests" && change && progress.routing_status !== "routed" &&
       progress.routing_status !== "not_applicable"
@@ -572,6 +579,7 @@ function Routing({ progress, retrying, disabled, onRetry }: {
       {progress.seam_status === "prepared" && <p className="verification-outcome verification-passed" role="status">
         The seam was added and matches its component contract; the baseline runs against the code with it
       </p>}
+      <StageReview name="Seam review" rounds={progress.seam_reviews} />
       {progress.seam_error && <div className="generation-failure">
         <p role="alert">{progress.seam_error}</p>
         <button type="button" className="generate-button" disabled={disabled}
@@ -588,6 +596,28 @@ function Routing({ progress, retrying, disabled, onRetry }: {
       </div>}
     </section>
   );
+}
+
+/** The review rounds of a stage before the fix: the seam a change adds, or its regression
+ * tests. Each round's new findings go back to their author, unless it is the last; those
+ * of the last round go on with the delivery, whose code review sees them again. */
+function StageReview({ name, rounds }: { name: string; rounds: ReviewRound[] }) {
+  const last = rounds[rounds.length - 1];
+  if (!last) return null;
+  const corrected = rounds.slice(0, -1).reduce((count, item) => count + item.findings.length, 0);
+  return <>
+    <p role="status">
+      {name}, round {last.round}: {last.findings.length === 0 ? "no findings" :
+        `${last.findings.length} finding${last.findings.length === 1 ? "" : "s"}`}
+      {corrected > 0 && ` (${corrected} sent for correction in earlier rounds)`}
+    </p>
+    {last.findings.length > 0 && <ul className="verification-failures">
+      {last.findings.map((item, index) => <li key={index}>
+        <strong>{item.path ?? "General"}{item.repeats !== undefined && ", reported again after a correction"}</strong>
+        <span>{item.summary}</span>
+      </li>)}
+    </ul>}
+  </>;
 }
 
 /** The baseline run of a change: its added tests against the unchanged service. */
@@ -649,6 +679,7 @@ function Baseline({ progress, retrying, disabled, onRetry }: {
           {retrying === "tests" ? "Writing the regression tests again…" : "Write the regression tests again"}
         </button>
       </div>}
+      <StageReview name="Regression test review" rounds={progress.test_reviews} />
       {stage !== "reproduced" &&
         <SuiteRuns contract={progress.baseline} component={progress.component_baseline} />}
     </section>

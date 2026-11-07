@@ -134,6 +134,13 @@ class FakeStages:
         # The findings of successive code reviews; the last one repeats.
         self.review_findings: list[list[dict[str, Any]]] = [[]]
         self.reviewed: list[dict[str, Any]] = []
+        # The same of the reviews of a stage before the fix, by scope: of the seam a
+        # change adds, and of its regression tests.
+        self.stage_review_findings: dict[str, list[list[dict[str, Any]]]] = {
+            'seam': [[]], 'regression': [[]]}
+        self.stage_reviewed: dict[str, list[dict[str, Any]]] = {'seam': [], 'regression': []}
+        # The stages that had started when each of them ran.
+        self.stage_review_after: dict[str, list[list[str]]] = {'seam': [], 'regression': []}
         # The route of each requirement of a brief, by ID, that is not 'contract', for
         # successive routings; the last one repeats.
         self.routes: list[dict[str, str]] = [{}]
@@ -161,6 +168,10 @@ class FakeStages:
         # with the seam does not conform to the component contract, if it does not.
         self.seam_contexts: list[dict[str, Any]] = []
         self.fail_seam = False
+        # Why the code with the seam does not conform once its author corrected review
+        # findings, if it does not; and whether a stage review fails to run.
+        self.seam_correction_conformance_error: str | None = None
+        self.fail_stage_review = False
         self.seam_conformance_error: str | None = None
         # The service image of each run of the repository's own contract tests.
         self.existing_services: list[str] = []
@@ -225,6 +236,9 @@ class FakeStages:
             if self.fail_seam:
                 raise ApplicationError('The seam agent left no Dockerfile at the root of the '
                                        'repository.', type=SEAM_ERROR, non_retryable=True)
+            if self.seam_correction_conformance_error and 'repair' in context:
+                return {'session_id': session_id,
+                        'conformance_error': self.seam_correction_conformance_error}
             if self.seam_conformance_error:
                 return {'session_id': session_id,
                         'conformance_error': self.seam_conformance_error}
@@ -375,8 +389,16 @@ class FakeStages:
 
     @activity.defn(name='review_changes')
     async def review_changes(self, session_id: str, context: dict[str, Any]) -> dict[str, Any]:
-        findings = self.review_findings[min(len(self.reviewed), len(self.review_findings) - 1)]
-        self.reviewed.append(context)
+        scope = context.get('review_scope')
+        if scope:
+            if self.fail_stage_review:
+                raise ApplicationError('the reviewer crashed', non_retryable=True)
+            self.stage_review_after[scope].append(list(self.stages))
+            listed, reviewed = self.stage_review_findings[scope], self.stage_reviewed[scope]
+        else:
+            listed, reviewed = self.review_findings, self.reviewed
+        findings = listed[min(len(reviewed), len(listed) - 1)]
+        reviewed.append(context)
         return {'session_id': session_id, 'findings': findings, 'path': '/review'}
 
     def _baseline(self, service_image: str, test_image: str, tracked: list[str]) -> dict[str, Any]:
@@ -393,7 +415,11 @@ class FakeStages:
                 'errors': 0, 'skipped': int(outcome == 'skipped'), 'error': None,
                 'missing_tests': ['com.example.RoomsTest#lists'] if outcome == 'left_out' else [],
                 'tracked': {case: {'tests': 1, 'failed': int(case not in passing)}
-                            for case in tracked}}
+                            for case in tracked},
+                'test_failures': [
+                    {'class_name': case.partition('#')[0], 'name': case.partition('#')[2],
+                     'kind': 'failure', 'message': 'expected 409 but was 201'}
+                    for case in tracked if case not in passing]}
 
     @activity.defn(name='verify_service')
     async def verify_service(self, session_id: str, service_image: str, test_image: str,

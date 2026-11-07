@@ -333,6 +333,36 @@ worker rejects a suite in which one of them still differs.
 """
 
 
+REGRESSION_REVIEW_PROMPT = """
+This is a correction run after a review of your regression tests, before the problem is
+fixed. /workspace/tests already holds your previous suite. It ran against the service as the
+repository holds it, where each test you added failed, as it must. A review of your changes
+found problems the tests must correct. The `repair.review` entry of the input holds the
+`findings` sent to you (each with its summary, the file it is about, when it is about one,
+and why it was sent to you). Correct each finding with targeted edits; do not start over or
+change tests the findings do not concern. Never weaken a test, nor make one fail
+unconditionally: each test you added must still fail against the service as it is, and pass
+once the problem is fixed. The corrected tests run against the service as the repository
+holds it again, where each one you added must fail. The brief and the contract remain the
+authority. The implementation stays unavailable.
+"""
+
+
+COMPONENT_REGRESSION_REVIEW_PROMPT = """
+This is a correction run after a review of your regression tests, before the change is
+made. /workspace/tests already holds your previous component suite. It ran against the code
+as it was before the change, where each test you added failed, as it must. A review of your
+changes found problems the component tests must correct. The `repair.review` entry of the
+input holds the `findings` sent to you (each with its summary, the file it is about, when it
+is about one, and why it was sent to you). Correct each finding with targeted edits; do not
+start over or change tests the findings do not concern. Never weaken a test, fake the seam,
+nor make a test fail unconditionally: each test you added must still fail against the code
+without the change, and pass once it is made. The corrected tests run against the code
+without the change again, where each one you added must fail. The brief and the stubs
+remain the authority. The service's source stays unavailable.
+"""
+
+
 KEEP_PROMPT = """
 The `keep` entry of the input maps tests of the repository, by identity (`module.Class#test`
 or `package.Class#method`), to their source as the repository holds them, with layout and
@@ -353,7 +383,9 @@ def repair_prompt(inputs: dict) -> str:
     repair = inputs.get('repair')
     if not repair:
         return keep
-    return (REVIEW_PROMPT if repair.get('review')
+    review = repair.get('review')
+    return (REGRESSION_REVIEW_PROMPT if review and review.get('before_fix')
+            else REVIEW_PROMPT if review
             else BOUND_PROMPT if repair.get('bound')
             else REPRODUCE_PROMPT if repair.get('reproduce') else REPAIR_PROMPT) + keep
 
@@ -384,6 +416,8 @@ def prompt(inputs: dict, language: dict) -> str:
         return (COMPONENT_PROMPT.format(instructions=instructions)
                 + (COMPONENT_PARTS_PROMPT if inputs.get('parts') else '')
                 + (COMPONENT_UNOBSERVABLE_PROMPT if not repair
+                   else COMPONENT_REGRESSION_REVIEW_PROMPT
+                   if (repair.get('review') or {}).get('before_fix')
                    else COMPONENT_REVIEW_PROMPT if repair.get('review')
                    else COMPONENT_BOUND_PROMPT if repair.get('bound')
                    else COMPONENT_REPRODUCE_PROMPT if repair.get('reproduce')

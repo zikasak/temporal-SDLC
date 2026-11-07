@@ -51,7 +51,10 @@ author never sees the tests and the test author never sees the implementation, s
 summary self-contained: name the endpoint or requirement, quote what the contract requires,
 state the wrong or missing behaviour and the required correction.
 
-Work within the tool-turn budget: prioritize significant changed behaviour, keep track of
+{work}"""
+
+# How every review works and finishes, whatever it reviews.
+WORK_PROMPT = """Work within the tool-turn budget: prioritize significant changed behaviour, keep track of
 confirmed findings, and finish when the remaining-turn notice tells you to wrap up. Do not
 expand the review into another investigation at that point or invent findings to fill gaps.
 
@@ -61,11 +64,119 @@ it with the note tool in the same turn as your next reads: the file and lines, t
 and for a problem the contract statement it breaks and the evidence. Do not reread a region
 your notes already judge.
 
-Do not change service/ or tests/ and do not run the tests. Finish by writing findings.json
+Do not change {readonly} and do not run the tests. Finish by writing findings.json
 in the project root with write_file, containing exactly this JSON object:
 {findings_format}
 Writing findings.json ends the review immediately, so write it only when the findings are
 final. No additional tool call or final text reply is needed.
+"""
+
+SEAM_PROMPT = """You review a seam that a change added to an existing {label} service before the
+change itself is made. The `brief` entry of the input describes the change: the problem, the
+expected behaviour and the acceptance criteria. Some of those criteria cannot be observed over
+HTTP, so the `component_routes` entry of the input routes each of them to a seam of the code
+(`seam`: a dotted module and its symbols), at which independently written component tests
+will drive the code in-process, faking the collaborators it calls. The code lacked some of
+the seam's symbols: the `seam` entry of the input lists them by module, and an author added
+exactly those, each doing the least its signature allows, with no behaviour of its own yet.
+The component tests are written from the stubs alone and have to fail against this code; the
+fix is written later, from the code as the author left it, and has to make them pass.
+
+/workspace/review contains, read-only for your purposes:
+- service/ the code with the seam
+- contracts/components/ the stubs: the signature, types and behaviour docstring of every
+  symbol of the seam and of the collaborators the tests fake (a part P other than the
+  service has its stubs in contracts/parts/P/components/)
+- changes.diff the author's changes to the code, as a unified diff
+The `changes` entry of the input lists the changed files.
+
+Review only these changes. Never report anything about code the author did not change, nor
+about the stubs, which no author of this delivery may change. Report:
+- a listed symbol that is missing, or added with another signature, type, kind or module
+  than its stub declares;
+- anything changed beyond the listed symbols: code renamed, moved, removed or rewritten,
+  dependencies or configuration changed, behaviour the code has today altered;
+- an added symbol that already does part of what its docstring says the fix will do, or that
+  is called, registered or wired in where it changes what the code does today;
+- an added symbol the component tests could not drive in-process as its stub states, such
+  as one not reachable from its module, or a collaborator the stub names that the code does
+  not declare as the stub has it;
+- build, startup, concurrency or resource problems the additions introduce.
+Do not report the behaviour the docstrings describe as missing: the fix adds it later.
+Style, naming the stubs fix, formatting, refactoring ideas and matters of taste are not
+findings. An empty list is the right answer when the seam is right.
+
+Every finding goes to the author of the seam: set its target to "implementation". Make each
+summary self-contained: name the module and symbol, quote the stub where it matters, state
+what is wrong and the required correction. Read the diff first, then read only the relevant
+line ranges of the surrounding code and of the stubs with read_file; locate code with
+search_files.
+
+{work}"""
+
+REGRESSION_PROMPT = """You review the regression tests that a change added to the tests of an
+existing {label} service, before the change itself is made. The `brief` entry of the input
+says what is wrong today: the problem, the expected behaviour and the acceptance criteria;
+it has the same authority as the contract, and overrides it where it states the expected
+behaviour more precisely. Test authors who never saw the code added tests that prove each
+criterion, and those tests were run against the code as the repository holds it (or, when
+the change added a seam first, against the code with only that seam added): every added
+test failed there, as it must, and every existing test passed. The `baseline` entry of the
+input holds how the added tests failed. The fix is written next, by an author who never
+sees the tests, and every added test has to pass once it is made, whichever correct way the
+fix takes.
+
+/workspace/review contains, read-only for your purposes:
+- service/ the code the tests ran against. It is not part of the changes: read it only to
+  judge the tests, and never report anything about it
+- tests/ the HTTP contract tests after the authors' changes, when the change has any
+- changes.diff the authors' changes to the tests, as a unified diff
+The `changes` entry of the input lists the changed files of each suite.
+
+Review only these changes. Report:
+- an added test that fails for another reason than the problem the brief names: a wrong
+  request, setup, fixture or expectation, an error in its own code, or a failure in
+  `baseline` that does not show the problem;
+- an added test that asserts what neither the brief nor the contract states, or that
+  depends on how the fix is made rather than on what it must achieve, so that a correct fix
+  could still fail it;
+- an added test that an incomplete fix would already pass, because it asserts too little of
+  what its criterion requires;
+- a criterion of the brief that no added test proves, or proves only in part;
+- tests that are flaky, depend on order, timing or shared state, or leave state behind that
+  other tests see;
+- existing tests changed or removed, or fixtures, helpers or configuration other tests use
+  changed, where the brief does not call for it.
+Do not report what the code does wrong: that is the problem the tests prove. Style,
+naming, formatting, refactoring ideas and matters of taste are not findings. An empty list
+is the right answer when the tests are right.
+
+Every finding goes to the test authors: set its target to "tests". An author sees only the
+brief, the contract and its own tests, never the code, so make each summary self-contained:
+name the test and the criterion, quote what the brief or the contract requires, and state
+what is wrong and the required correction, without quoting the code. Read the diff first,
+then read only the relevant line ranges of the tests and the code with read_file; locate
+code with search_files.
+
+{work}"""
+
+REGRESSION_COMPONENT_PROMPT = """
+Some acceptance criteria cannot be observed over HTTP, so the `component_routes` entry of
+the input routes each of them to a seam of the code (`seam`: a dotted module and its
+symbols), where component tests prove it in-process. Their author wrote them from the
+stubs of the component contract alone, faking the collaborators the stubs name.
+/workspace/review also contains, read-only for your purposes:
+- component-tests/ the component test sources after the authors' changes
+- contracts/components/ the stubs: the signature, types and behaviour docstring of every
+  symbol the component tests use, and of the collaborators they fake
+A seam may be in another part of the repository than the service (its `seam` names the
+`part`): that part's tests are in component-tests/parts/P/ and its stubs in
+contracts/parts/P/components/. The stubs are not part of the changes. When
+`contract_tests` is false the change has no contract tests of its own, and tests/ is
+absent.
+Review the component tests as the contract tests, and also report a component test that
+fakes, patches or subclasses the seam itself rather than its collaborators, or uses
+anything of the code the stubs do not declare.
 """
 
 # The reviewer's progress is its judgments, not files on disk, so the checkpoint keeps them.
@@ -169,6 +280,34 @@ wrong, not further hardening of code an earlier round already judged.
 """
 
 
+def prompt(inputs: dict, label: str) -> str:
+    """What the reviewer is asked: by default to review the verified delivery, or, for a
+    stage review (`review_scope`), the seam a change added first or its regression tests
+    before the fix."""
+    scope = inputs.get('review_scope')
+    part = PART_PROMPT if inputs.get('review_part') else ''
+    previous = PREVIOUS_PROMPT if inputs.get('previous_findings') else ''
+    if scope == 'seam':
+        work = WORK_PROMPT.format(readonly='service/ or contracts/',
+                                  findings_format=FINDINGS_FORMAT)
+        return SEAM_PROMPT.format(label=label, work=work) + part + previous
+    if scope == 'regression':
+        work = WORK_PROMPT.format(readonly='service/, tests/, component-tests/ or contracts/',
+                                  findings_format=FINDINGS_FORMAT)
+        return (REGRESSION_PROMPT.format(label=label, work=work) + part
+                + (REGRESSION_COMPONENT_PROMPT if inputs.get('component_routes') else '')
+                + previous)
+    work = WORK_PROMPT.format(readonly='service/ or tests/', findings_format=FINDINGS_FORMAT)
+    return (PROMPT.format(label=label, work=work)
+            + part
+            + (CHANGE_PROMPT if inputs.get('brief') else '')
+            + (PARTS_PROMPT if inputs.get('repository_parts') else '')
+            + (ONBOARDING_PROMPT if inputs.get('onboarding') else '')
+            + (COMPONENT_PROMPT if inputs.get('component_routes') else '')
+            + (INSTRUCTIONS_PROMPT if inputs.get('instructions') else '')
+            + previous)
+
+
 def validate_completion(root: Path) -> None:
     try:
         result = json.loads((root / FINDINGS).read_text())
@@ -191,14 +330,7 @@ async def main() -> None:
     inputs = json.loads(context)
     language = json.loads(await run_sync(LANGUAGE.read_text))
     await run_agent(AgentProfile(
-        root=ROOT, prompt=(PROMPT.format(label=language['label'], findings_format=FINDINGS_FORMAT)
-                           + (PART_PROMPT if inputs.get('review_part') else '')
-                           + (CHANGE_PROMPT if inputs.get('brief') else '')
-                           + (PARTS_PROMPT if inputs.get('repository_parts') else '')
-                           + (ONBOARDING_PROMPT if inputs.get('onboarding') else '')
-                           + (COMPONENT_PROMPT if inputs.get('component_routes') else '')
-                           + (INSTRUCTIONS_PROMPT if inputs.get('instructions') else '')
-                           + (PREVIOUS_PROMPT if inputs.get('previous_findings') else '')),
+        root=ROOT, prompt=prompt(inputs, language['label']),
         initial_messages=[context],
         max_turns_env='REVIEW_MAX_TURNS', validate_completion=validate_completion,
         completion_message='Code review completed',

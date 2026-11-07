@@ -26,6 +26,7 @@ from app.delivery.models import (
 )
 from app.github.checkout import SNAPSHOT_DIR
 from app.delivery.workflows import MAX_BOUND_ROUNDS, MAX_REPRODUCE_ROUNDS, DeliveryWorkflow
+from app.review.models import MAX_STAGE_REVIEW_ROUNDS
 from app.requirements import service as requirements_service
 from app.requirements.document import render_requirements_markdown
 from app.requirements.models import RequirementsState
@@ -896,6 +897,127 @@ async def test_a_seam_that_cannot_be_added_stops_the_change_before_its_tests(
     assert worker.stages.count('seam') == 2
     assert state.seam_status == 'prepared' and state.seam_error is None
     assert state.baseline_status == 'reproduced'
+    assert state.publication_status == 'completed'
+
+
+SEAM_FINDING = {'summary': 'Rooms.merged already merges bookings.', 'target': 'implementation',
+                'reason': 'The seam may not change behaviour.', 'path': 'service/rooms.py'}
+TEST_FINDING = {'summary': 'refusesDoubleBooking fails on a missing fixture, not the bug.',
+                'target': 'tests', 'reason': 'It fails for another reason.'}
+
+
+async def test_the_seam_is_reviewed_and_corrected_before_any_test_is_written(
+        env, worker, repository_selection):
+    worker.routes = [{'FR-2': 'component-added'}]
+    worker.stage_review_findings['seam'] = [[SEAM_FINDING], []]
+    _, state = await fixed(env, repository_selection)
+    # Each review runs on the seam as added, before its component tests are written.
+    assert worker.stage_review_after['seam'] == [['routing', 'seam'], ['routing', 'seam', 'seam']]
+    first, second = worker.stage_reviewed['seam']
+    assert first['review_scope'] == 'seam' and first['seam'] == {'service.rooms': ['Rooms.merged']}
+    assert 'previous_findings' not in first
+    # The second round knows what the first had corrected.
+    assert second['previous_findings'] == [
+        {'number': 1, 'summary': SEAM_FINDING['summary'], 'target': 'implementation',
+         'path': 'service/rooms.py'}]
+    # The seam's author corrects the findings, adding the same symbols.
+    added, corrected = worker.seam_contexts
+    assert 'repair' not in added
+    assert corrected['seam'] == added['seam']
+    assert corrected['repair'] == {'attempt': 1, 'review': {'findings': [
+        {key: value for key, value in SEAM_FINDING.items() if key != 'target'}]}}
+    assert [item['findings'] for item in state.seam_reviews] == [[SEAM_FINDING], []]
+    assert state.seam_status == 'prepared' and state.seam['image_id'] == SEAM_IMAGE
+    assert state.baseline_status == 'reproduced' and state.publication_status == 'completed'
+
+
+async def test_a_seam_whose_correction_misses_its_contract_stops_the_change(
+        env, worker, repository_selection):
+    worker.routes = [{'FR-2': 'component-added'}]
+    worker.stage_review_findings['seam'] = [[SEAM_FINDING]]
+    worker.seam_correction_conformance_error = 'service.rooms.Rooms.merged takes no argument'
+    handle, state = await fixed(env, repository_selection)
+    assert worker.stages == ['routing', 'seam', 'seam']
+    assert state.seam_status == 'error'
+    assert 'does not match its component contract' in state.seam_error
+    assert state.component_tests is None and state.implementation is None
+    assert state.baseline_status == 'skipped' and not worker.published
+
+    # Retrying the tests adds the seam again, from a new routing, and reviews it again.
+    worker.seam_correction_conformance_error = None
+    worker.stage_review_findings['seam'] = [[]]
+    await requirements_service.retry_generation(handle.id, 'tests')
+    state = await delivered(env, handle.id)
+    assert [item['findings'] for item in state.seam_reviews] == [[]]
+    assert state.seam_status == 'prepared' and state.publication_status == 'completed'
+
+
+async def test_the_regression_tests_are_reviewed_and_corrected_before_the_fix(
+        env, worker, repository_selection):
+    worker.stage_review_findings['regression'] = [[TEST_FINDING], []]
+    _, state = await fixed(env, repository_selection)
+    # Reviewed once seen failing without the fix; corrected; failing again; reviewed again.
+    assert worker.stages == ['routing', 'tests', 'baseline', 'baseline-run', 'tests',
+                             'baseline', 'baseline-run', 'implementation', 'verification']
+    assert worker.stage_review_after['regression'] == [worker.stages[:4], worker.stages[:7]]
+    first, second = worker.stage_reviewed['regression']
+    assert first['review_scope'] == 'regression' and first['contract_tests'] is True
+    # The reviewer sees how the added tests failed.
+    assert first['baseline']['contract'][0]['name'] == 'refusesDoubleBooking'
+    assert second['previous_findings'][0]['summary'] == TEST_FINDING['summary']
+    # The test author is told the tests have to keep failing without the fix.
+    (side, repair), = worker.repairs
+    assert side == 'tests' and repair == {'attempt': 1, 'review': {
+        'findings': [{key: value for key, value in TEST_FINDING.items() if key != 'target'}],
+        'before_fix': True}}
+    assert [item['findings'] for item in state.test_reviews] == [[TEST_FINDING], []]
+    # The delivery's own review is told apart, and runs after the fix.
+    assert len(worker.reviewed) == 1 and 'review_scope' not in worker.reviewed[0]
+    assert state.baseline_status == 'reproduced' and state.publication_status == 'completed'
+
+
+async def test_corrected_regression_tests_that_pass_without_the_fix_stop_the_change(
+        env, worker, repository_selection):
+    worker.stage_review_findings['regression'] = [[TEST_FINDING]]
+    # Passing without the fix after the correction, and after the round that rewrites them.
+    worker.baseline_results = ['reproduced'] + ['not_reproduced'] * (1 + MAX_REPRODUCE_ROUNDS)
+    _, state = await fixed(env, repository_selection)
+    assert state.baseline_status == 'not_reproduced'
+    assert state.implementation is None and not worker.implementation_started.is_set()
+    assert state.verification_status == 'skipped' and not worker.published
+
+
+async def test_stage_reviews_end_after_their_round_limit_and_the_delivery_goes_on(
+        env, worker, repository_selection):
+    worker.stage_review_findings['regression'] = [[TEST_FINDING]]
+    _, state = await fixed(env, repository_selection)
+    # Every round but the last is corrected; the last one's findings go on with the fix.
+    assert len(state.test_reviews) == MAX_STAGE_REVIEW_ROUNDS
+    assert [side for side, _ in worker.repairs] == ['tests'] * (MAX_STAGE_REVIEW_ROUNDS - 1)
+    assert state.implementation is not None and state.publication_status == 'completed'
+
+
+async def test_stage_reviews_end_when_they_only_repeat_corrected_findings(
+        env, worker, repository_selection):
+    worker.stage_review_findings['regression'] = [[TEST_FINDING], [{**TEST_FINDING, 'repeats': 1}]]
+    _, state = await fixed(env, repository_selection)
+    assert len(state.test_reviews) == 2
+    assert [side for side, _ in worker.repairs] == ['tests']
+    assert state.publication_status == 'completed'
+
+
+async def test_regression_tests_that_cannot_be_reviewed_are_not_fixed(
+        env, worker, repository_selection):
+    worker.fail_stage_review = True
+    handle, state = await fixed(env, repository_selection)
+    assert state.tests_error == 'The regression tests could not be reviewed.'
+    assert state.implementation is None and not worker.published
+
+    # Retrying the tests writes and reviews them again.
+    worker.fail_stage_review = False
+    await requirements_service.retry_generation(handle.id, 'tests')
+    state = await delivered(env, handle.id)
+    assert state.tests_error is None and len(state.test_reviews) == 1
     assert state.publication_status == 'completed'
 
 

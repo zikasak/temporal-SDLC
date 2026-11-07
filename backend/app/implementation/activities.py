@@ -78,8 +78,10 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
     if change and not checkout:
         raise ApplicationError('The repository checkout is unavailable', non_retryable=True)
     # A repair continues from the published implementation, not the generated skeleton,
-    # and a change whose seam was added first from the code with that seam.
-    source = (session_dir / 'implementation/service' if repair
+    # and a change whose seam was added first from the code with that seam; a correction
+    # of the seam itself, after its review, from the seam as it was added.
+    source = (session_dir / SEAM_DIR / 'service' if repair and context.get('seam')
+              else session_dir / 'implementation/service' if repair
               else session_dir / SEAM_DIR / 'service' if change and context.get('seam_prepared')
               else checkout if change else session_dir / 'server')
     if not source.is_dir():
