@@ -158,6 +158,18 @@ Only finish once every listed symbol is added and the build succeeds.
 """
 
 
+SEAM_REVIEW_PROMPT = """
+This is a correction run after a review of the seam. /workspace/service already holds the
+code with the seam as you added it. A review of your changes found problems you must
+correct. The `repair.review` entry of the input holds the `findings` sent to you (each with
+its summary, the file it is about, when it is about one, and why it was sent to you).
+Correct each finding with targeted edits; do not start over. Everything above still holds:
+add exactly the listed symbols, with the stubbed signatures and no behaviour of their own,
+and change nothing else. The stubs remain the authority: where a finding contradicts them,
+follow the stubs.
+"""
+
+
 REPAIR_PROMPT = """
 This is a repair run. /workspace/service already holds your previous implementation. It
 compiled, but independently written HTTP contract tests failed against the running service
@@ -228,6 +240,8 @@ def repair_prompt(inputs: dict) -> str:
     repair = inputs.get('repair')
     if not repair:
         return ''
+    if inputs.get('seam'):
+        return SEAM_REVIEW_PROMPT
     if inputs.get('onboarding'):
         if repair.get('code_change') or (repair.get('review') or {}).get('instructions'):
             return CODE_CHANGE_PROMPT

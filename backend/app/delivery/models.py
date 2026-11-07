@@ -131,10 +131,17 @@ class DeliveryProgress:
     seam: dict[str, Any] | None = None
     seam_error: str | None = None
     seam_status: SeamStatus = 'not_applicable'
+    # The review rounds of the seam before any test is written, each followed by its
+    # author's correction of their findings, while the seam is `running`.
+    seam_reviews: list[ReviewRound] = field(default_factory=list)
     # The run of a change's tests against the service as the repository holds it.
     baseline: VerificationResult | None = None
     baseline_error: str | None = None
     baseline_status: BaselineStatus = 'not_applicable'
+    # The review rounds of a change's regression tests once the baseline was reproduced,
+    # before the fix: each followed by the authors' correction of their findings and the
+    # baseline again.
+    test_reviews: list[ReviewRound] = field(default_factory=list)
     # The component tests' runs beside the contract tests': against the code as the
     # repository holds it, judged with `baseline` into `baseline_status`, and against the
     # changed code, which verification runs once the change conforms to its component

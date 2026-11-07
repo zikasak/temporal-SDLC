@@ -479,7 +479,9 @@ flowchart LR
     routing -- every criterion observable over HTTP --> tests[TestGenerationWorkflow]
     routing -- criteria observable only at a seam --> components[ComponentTestGenerationWorkflow]
     routing -- at a seam the code lacks --> seam[ImplementationWorkflow adds the seam]
-    seam -- conforms to its stubs --> components
+    seam -- conforms to its stubs --> sreview[Seam review rounds]
+    sreview -- findings --> seam
+    sreview -- none left --> components
     seam -- anything else --> stop
     routing -- a criterion unobservable --> stop
     tests -- a criterion unobservable --> stop
@@ -487,7 +489,10 @@ flowchart LR
     tests --> baseline[Baseline run]
     components --> baseline
     repository[Repository service image] --> baseline
-    baseline -- added tests fail, existing pass --> fix[ImplementationWorkflow]
+    baseline -- added tests fail, existing pass --> treview[Regression test review rounds]
+    treview -- findings --> tests
+    treview -- findings --> components
+    treview -- none left --> fix[ImplementationWorkflow]
     baseline -- anything else --> stop[Stop and report]
     fix --> verification[VerificationWorkflow and repair loop]
     fix -- with component tests --> conformance[Conformance check, both suites, repair loop]
@@ -692,6 +697,24 @@ flowchart LR
    seam may itself be at fault, so it is added again. The code review and the push
    compare with the repository as recorded, so the seam is part of the change, and the
    pull request names the symbols each seam added.
+
+   Before any test is written, the seam is reviewed (`_review_seam`, behind the
+   `seam-review` workflow patch). `ReviewWorkflow` runs with `review_scope: seam`: the
+   reviewer sees only the code with the seam against the repository's, with the stubs
+   beside it to read, and its prompt (`SEAM_PROMPT` in `app/review/agent.py`) asks for
+   missing or mismatched symbols, changes beyond them, behaviour they already have, and
+   build or wiring problems, never the behaviour the docstrings promise the fix. Every
+   finding goes to the seam's author (`SCOPE_TARGETS`), who corrects it in a run of its
+   own (`SEAM_REVIEW_PROMPT` in `app/implementation/agent.py`, starting from
+   `<session-id>/seam/service`); the code is built and checked against the component
+   contract again, and reviewed again. The rounds work as the delivery's own review
+   rounds: each knows the findings already corrected, a finding reported again
+   (`repeats`) is not sent back, and findings about the stubs go to nobody. They stop when
+   no new finding is left or after `MAX_STAGE_REVIEW_ROUNDS` rounds, whose last findings
+   go on with the delivery: its own code review sees the seam again. The rounds are
+   `DeliveryProgress.seam_reviews`, while `seam_status` stays `running`. A correction
+   that fails or misses the contract, or a review that cannot run, sets `seam_status:
+   error` and `seam_error`, and stops the delivery as a seam that could not be added does.
 2. **Regression tests.** The test author's workspace is the repository's `contract-tests/`
    as usual. It adds tests wherever they belong, in an existing class or a new one, and
    may not change or remove an existing test; the stage fails otherwise (see
@@ -790,6 +813,24 @@ flowchart LR
    `judge_baseline` holds both runs to the same rules, naming the suite whose run broke
    one (a component test that skips itself is reported as a criterion its seam cannot
    observe). A component run that could not complete runs once more.
+3a. **Regression test review.** Once the baseline is `reproduced`, the regression tests are
+   reviewed before the fix is written (`_review_regression_tests`, behind the
+   `regression-review` workflow patch). `ReviewWorkflow` runs with `review_scope:
+   regression`: the reviewer sees the suites the authors changed against the
+   repository's as recorded, the code they ran against (the repository's, or with the
+   seam) beside them to read only, and `baseline`, how the added tests failed. Its prompt
+   (`REGRESSION_PROMPT`) asks whether each added test fails for the problem the brief
+   names and will pass with any correct fix: tests failing for another reason, asserting
+   too little or what neither brief nor contract states, criteria proved only in part,
+   flaky tests, and changes to tests or fixtures the brief does not call for. Every
+   finding goes to the test authors, split by suite as the delivery's review findings
+   are, whose correction run (`review_request(..., before_fix=True)`, prompted by
+   `REGRESSION_REVIEW_PROMPT` or `COMPONENT_REGRESSION_REVIEW_PROMPT`) keeps every added
+   test failing without the fix. The baseline then runs again, with its bound and
+   reproduce rounds, and must be `reproduced` again before the next review; otherwise the
+   delivery ends there as at any baseline. The rounds end as the seam's do, and are
+   `DeliveryProgress.test_reviews`. A review that cannot run sets `tests_error`, so the
+   `tests` retry writes and reviews the tests again.
 4. **The fix.** The implementation author's workspace is the checkout alone (or the
    code with the seam the change added, step 1a), without generated code, and its prompt
    asks for targeted edits for the brief. A change with

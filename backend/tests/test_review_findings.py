@@ -147,3 +147,98 @@ def test_findings_about_the_stubs_go_to_no_author_and_tests_findings_to_their_su
     tests = review_request(findings, 'tests', 1)['review']['findings']
     assert [item['summary'] for item in for_suite(tests, 'component')] == ['C', 'A']
     assert [item['summary'] for item in for_suite(tests, 'contract')] == ['H', 'A']
+
+
+def _session(tmp_path, files):
+    session = tmp_path / 'session'
+    for path, text in files.items():
+        (session / path).parent.mkdir(parents=True, exist_ok=True)
+        (session / path).write_text(text)
+    return session
+
+
+# A change whose criterion is observed at a seam it added first, before its fix.
+SEAM_FILES = {
+    'checkout/app/rooms.py': 'def close(): pass\n',
+    'checkout/contracts/components/app/rooms.pyi': 'def close() -> None: ...\n',
+    'repository-tests/components/tests/test_rooms.py': 'def test_open(): pass\n',
+    'seam/service/app/rooms.py': 'def close(): pass\ndef merged(): return None\n',
+    'routing/components/app/rooms.pyi': 'def close() -> None: ...\ndef merged() -> None: ...\n',
+    'routing/components/runtime.json': '{}',
+}
+
+
+def test_a_seam_is_reviewed_alone_with_its_stubs_beside_it(tmp_path):
+    from app.languages import get_language
+    from app.review import activities as review
+    from app.review import agent
+
+    language = get_language('python')
+    session = _session(tmp_path, SEAM_FILES)
+    context = {'review_scope': 'seam', 'seam': {'app.rooms': ['merged']},
+               'component_routes': {'FR-2': {'route': 'component'}}}
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    changes, _ = review.prepare_review(language, session, context, workspace)
+    # Only the code with the seam is under review: no tests exist yet, and the stubs are
+    # there to read.
+    assert changes == {'service': ['service/app/rooms.py']}
+    assert (workspace / 'review/contracts/components/app/rooms.pyi').is_file()
+    assert '+def merged(): return None' in (workspace / 'review/changes.diff').read_text()
+    inputs = json.loads((workspace / 'input.json').read_text())
+    assert inputs['review_scope'] == 'seam' and inputs['seam'] == {'app.rooms': ['merged']}
+    prompt = agent.prompt(inputs, 'Python')
+    assert prompt.startswith('You review a seam') and 'service/ or contracts/' in prompt
+    assert agent.COMPONENT_PROMPT not in prompt
+
+
+def test_regression_tests_are_reviewed_before_the_fix_beside_the_code_they_ran_against(tmp_path):
+    import shutil
+
+    from app.languages import get_language
+    from app.review import activities as review
+    from app.review import agent
+
+    language = get_language('python')
+    session = _session(tmp_path, {
+        **SEAM_FILES,
+        'component-tests/suite/tests/test_rooms.py': 'def test_open(): pass\n'
+                                                     'def test_merged(): assert False\n',
+    })
+    shutil.copytree(language.test_suite.template, session / 'tests/suite')
+    baseline = {'component': [{'class_name': 'tests.test_rooms', 'name': 'test_merged',
+                               'kind': 'failure', 'message': 'assert False'}]}
+    context = {'review_scope': 'regression', 'seam_prepared': True, 'contract_tests': True,
+               'component_routes': {'FR-2': {'route': 'component'}}, 'baseline': baseline}
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    changes, _ = review.prepare_review(language, session, context, workspace)
+    # The tests are under review; the code with the seam is beside them, unchanged.
+    assert set(changes) == {'tests', 'component-tests'}
+    assert changes['component-tests'] == ['component-tests/tests/test_rooms.py']
+    assert 'merged' in (workspace / 'review/service/app/rooms.py').read_text()
+    assert 'service/' not in (workspace / 'review/changes.diff').read_text()
+    inputs = json.loads((workspace / 'input.json').read_text())
+    assert inputs['baseline'] == baseline and inputs['contract_tests'] is True
+    prompt = agent.prompt(inputs, 'Python')
+    assert prompt.startswith('You review the regression tests')
+    assert agent.REGRESSION_COMPONENT_PROMPT in prompt
+
+
+def test_a_stage_review_sends_every_finding_to_its_one_worker(tmp_path):
+    from app.review.activities import read_findings
+
+    output = _written(tmp_path, [
+        {'summary': 'Calls the new query from close().', 'target': 'both',
+         'path': 'service/app/rooms.py'}])
+    finding, = read_findings(output, {'service/app/rooms.py'}, None, 'implementation')
+    assert finding['target'] == 'implementation'
+
+
+def test_the_delivery_review_prompt_is_as_it_was(tmp_path):
+    from app.review import agent
+
+    prompt = agent.prompt({'brief': {'requirements': []}}, 'Java')
+    assert prompt.startswith('You review the changes a delivery made to a Java service')
+    assert 'Do not change service/ or tests/ and do not run the tests.' in prompt
+    assert agent.CHANGE_PROMPT in prompt

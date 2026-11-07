@@ -31,8 +31,8 @@ with workflow.unsafe.imports_passed_through():
         added_seams, judge_routes,
     )
     from app.review.models import (
-        MAX_REVIEW_ROUNDS, ReviewFinding, ReviewRound, correctable, earlier_findings,
-        for_suite, for_worker, review_request,
+        BASELINE_KEY, MAX_REVIEW_ROUNDS, MAX_STAGE_REVIEW_ROUNDS, SCOPE_KEY, ReviewFinding,
+        ReviewRound, correctable, earlier_findings, for_suite, for_worker, review_request,
     )
     from app.temporal.activities import (
         open_pull_request, publish_documentation, publish_onboarding,
@@ -56,6 +56,15 @@ MAX_REPRODUCE_ROUNDS = 1
 # Marks the workflow code that sends such tests back; deliveries recorded before it
 # stopped at that baseline.
 REPRODUCE_PATCH = 'reproduce-baseline-tests'
+# Marks the workflow code that reviews the seam a change adds, and its regression tests
+# once they fail without the fix, in rounds of their own before the next stage; deliveries
+# recorded before it went on unreviewed.
+SEAM_REVIEW_PATCH = 'seam-review'
+REGRESSION_REVIEW_PATCH = 'regression-review'
+# How many failures of each baseline run, and how much of each message, a regression
+# review is shown.
+BASELINE_FAILURES = 50
+BASELINE_MESSAGE_CHARS = 1000
 # Patches whose old code paths are gone; histories recorded with their markers replay
 # through workflow.deprecate_patch, called where workflow.patched was.
 RESTORE_KEPT_PATCH = 'restore-kept-tests'
@@ -748,8 +757,9 @@ class DeliveryWorkflow:
             return
         if self.progress.component_tests:
             workflow.deprecate_patch(COMPONENT_RUNS_PATCH)
-        # Nothing is fixed before the added tests are shown to fail without the fix.
-        if not await self._reproduce_bounded():
+        # Nothing is fixed before the added tests are shown to fail without the fix, and
+        # reviewed as the regression tests they are.
+        if not await self._reproduce_bounded() or not await self._review_regression_tests():
             self.progress.verification_status = 'skipped'
             return
         # Retried tests are verified against the fix the delivery already has.
@@ -798,8 +808,9 @@ class DeliveryWorkflow:
     async def _prepare_seam(self) -> bool:
         """Add the seam criteria routed to the component tests are observed at, when the
         code does not have it yet: with no behaviour change, checked against the component
-        contract. True when the code has every seam the routing named. A seam added
-        already is kept for the retries of the tests."""
+        contract, then reviewed and corrected in rounds of its own. True when the code has
+        every seam the routing named. A seam added already is kept for the retries of the
+        tests."""
         added = added_seams(self._component_routes())
         if not added:
             return True
@@ -808,20 +819,35 @@ class DeliveryWorkflow:
         self.progress.seam_status = 'running'
         self.progress.seam = None
         self.progress.seam_error = None
+        self.progress.seam_reviews = []
+        if not await self._add_seam(added):
+            return False
+        if workflow.patched(SEAM_REVIEW_PATCH) and not await self._review_seam(added):
+            return False
+        self.progress.seam_status = 'prepared'
+        workflow.logger.info('Seam added: %s', sorted(added))
+        return True
+
+    async def _add_seam(self, added: dict[str, Any],
+                        repair: dict[str, Any] | None = None) -> bool:
+        """Have the seam's author add it, or with `repair` correct the review's findings
+        about it; true when the code it published conforms to the component contract."""
         try:
             result = await workflow.execute_child_workflow(
                 'ImplementationWorkflow',
-                args=[self.spec.session_id, {**self._stage_context(None), 'seam': added}],
-                id=self._child_id('seam'),
+                args=[self.spec.session_id, {**self._stage_context(repair), 'seam': added}],
+                id=self._child_id('seam', repair['attempt'] if repair else 0),
                 task_queue=IMPLEMENTATION_TASK_QUEUE,
                 result_type=dict,
             )
         except ChildWorkflowError as exc:
             workflow.logger.warning('Seam preparation failed: %s', exc.cause or exc)
             reason = own_failure(exc, SEAM_ERROR)
-            self.progress.seam_error = ('The seam the acceptance criteria are observed at could '
-                                        'not be added to the code or built.'
-                                        + (f' {reason}' if reason else ''))
+            self.progress.seam_error = (
+                ('The review findings about the seam could not be corrected in the code or '
+                 'built.' if repair else
+                 'The seam the acceptance criteria are observed at could not be added to the '
+                 'code or built.') + (f' {reason}' if reason else ''))
             self.progress.seam_status = 'error'
             return False
         if result.get('conformance_error'):
@@ -829,9 +855,107 @@ class DeliveryWorkflow:
             self.progress.seam_status = 'error'
             return False
         self.progress.seam = result
-        self.progress.seam_status = 'prepared'
-        workflow.logger.info('Seam added: %s', sorted(added))
         return True
+
+    async def _review_seam(self, added: dict[str, Any]) -> bool:
+        """Review the seam before any test is written; while new findings remain, its
+        author corrects them, the code is checked against the contract again and reviewed
+        again. True when the delivery goes on with it."""
+        async def correct(findings: list[ReviewFinding], number: int) -> bool:
+            return await self._add_seam(
+                added, review_request(findings, 'implementation', number))
+
+        reviewed = await self._stage_review_rounds(
+            'seam', self.progress.seam_reviews, correct, lambda: {'seam': added})
+        if reviewed is None:
+            self.progress.seam_error = 'The seam the change added could not be reviewed.'
+            self.progress.seam_status = 'error'
+            return False
+        return reviewed
+
+    async def _review_regression_tests(self) -> bool:
+        """Review the regression tests once they were seen failing without the fix; while
+        new findings remain, their authors correct them, each suite its own, the baseline
+        runs again (with its own rounds) and the tests are reviewed again. True when the
+        fix may be written."""
+        self.progress.test_reviews = []
+        if not workflow.patched(REGRESSION_REVIEW_PATCH):
+            return True
+
+        async def correct(findings: list[ReviewFinding], number: int) -> bool:
+            self.progress.baseline_status = 'running'
+            await self._generate_tests(
+                review_request(findings, 'tests', number, before_fix=True))
+            if self.progress.tests_error or self.progress.component_tests_error:
+                self.progress.baseline_status = 'skipped'
+                return False
+            # Corrected tests that no longer fail without the fix prove nothing.
+            return await self._reproduce_bounded()
+
+        reviewed = await self._stage_review_rounds(
+            'regression', self.progress.test_reviews, correct, lambda: {
+                BASELINE_KEY: self._baseline_failures(),
+                'contract_tests': bool(self.progress.tests)})
+        if reviewed is None:
+            self.progress.tests_error = 'The regression tests could not be reviewed.'
+            return False
+        return reviewed
+
+    def _baseline_failures(self) -> dict[str, list[dict[str, str]]]:
+        """How the tests failed in the last baseline run of each suite, bounded."""
+        runs = {'contract': self.progress.baseline,
+                'component': self.progress.component_baseline}
+        return {suite: [{**item, 'message': item['message'][:BASELINE_MESSAGE_CHARS]}
+                        for item in run['test_failures'][:BASELINE_FAILURES]]
+                for suite, run in runs.items() if run}
+
+    async def _stage_review_rounds(self, scope: str, rounds: list[ReviewRound],
+                                   correct: Any, extra: Any) -> bool | None:
+        """Review one stage's output before the next stage starts, as the delivery's own
+        review rounds do: while new findings an author can correct remain, `correct`
+        them, and review again, at most MAX_STAGE_REVIEW_ROUNDS times. Each round knows
+        the findings already corrected, and a finding reported again is not sent for
+        another correction. Findings left go on with the delivery, whose own review sees
+        them again. None when a review could not run, False when a correction failed."""
+        earlier: list[ReviewFinding] = []
+        for count in range(1, MAX_STAGE_REVIEW_ROUNDS + 1):
+            findings = await self._stage_review(scope, rounds, earlier, extra())
+            if findings is None:
+                return None
+            new = [item for item in findings if 'repeats' not in item and correctable(item)]
+            if not new:
+                return True
+            if count == MAX_STAGE_REVIEW_ROUNDS:
+                workflow.logger.info('%s review findings remain after %d rounds', scope,
+                                     MAX_STAGE_REVIEW_ROUNDS)
+                return True
+            if not await correct(new, rounds[-1]['round']):
+                return False
+            earlier += new
+        return True
+
+    async def _stage_review(self, scope: str, rounds: list[ReviewRound],
+                            earlier: list[ReviewFinding],
+                            extra: dict[str, Any]) -> list[ReviewFinding] | None:
+        """One round of a stage review, recorded in `rounds`; None when it could not run."""
+        number = len(rounds) + 1
+        context = {**self._coding_context(), SCOPE_KEY: scope, **extra}
+        if earlier:
+            context['previous_findings'] = earlier_findings(earlier)
+        try:
+            result = await workflow.execute_child_workflow(
+                'ReviewWorkflow', args=[self.spec.session_id, context],
+                id=self._child_id(f'{scope}-review', number),
+                task_queue=REVIEW_TASK_QUEUE,
+                result_type=dict,
+            )
+        except ChildWorkflowError as exc:
+            workflow.logger.warning('The %s review failed: %s', scope, exc.cause or exc)
+            return None
+        findings: list[ReviewFinding] = list(result.get('findings') or [])
+        rounds.append({'round': number, 'findings': findings})
+        workflow.logger.info('%s review round %d: %d findings', scope, number, len(findings))
+        return findings
 
     def _seam_prepared(self) -> bool:
         return self.progress.seam_status == 'prepared' and self.progress.seam is not None
