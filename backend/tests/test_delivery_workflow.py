@@ -659,6 +659,50 @@ async def test_added_tests_that_pass_without_the_fix_are_sent_back_to_be_rewritt
     assert state.verification['status'] == 'passed' and worker.published
 
 
+MISSING_TEST_FINDING = {'summary': 'No test shows that a booking is listed once.',
+                        'target': 'tests', 'reason': 'A criterion is untested.'}
+
+
+async def test_tests_added_for_review_findings_that_pass_without_the_fix_go_back_to_their_author(
+        env, worker, repository_selection):
+    worker.review_findings = [[MISSING_TEST_FINDING], []]
+    # The test the review asked for passes without the fix; its author's next round fails there.
+    worker.baseline_results = ['reproduced', 'not_reproduced', 'reproduced']
+    _, state = await fixed(env, repository_selection)
+    # The reviewer of a bugfix knows that every test it asks for has to fail without the fix.
+    assert worker.reviewed[0]['regression'] is True
+    (_, corrected), (side, reproduce) = worker.repairs
+    assert corrected['review']['findings'] == [
+        {key: value for key, value in MISSING_TEST_FINDING.items() if key != 'target'}]
+    # The author is told which finding it corrected, and may drop a test of what the code did.
+    assert side == 'tests' and reproduce['reproduce'] is True
+    assert reproduce['findings'] == corrected['review']['findings']
+    assert 'remove that test' in reproduce['instructions']
+    assert not state.correction_failed and state.baseline_status == 'reproduced'
+    assert state.verification_status == 'completed' and state.publication_status == 'completed'
+
+
+async def test_a_retried_correction_whose_tests_passed_without_the_fix_does_not_correct_them_again(
+        env, worker, repository_selection):
+    worker.review_findings = [[MISSING_TEST_FINDING], []]
+    worker.baseline_results = (['reproduced'] + ['not_reproduced'] * (1 + MAX_REPRODUCE_ROUNDS)
+                               + ['reproduced'])
+    handle, state = await fixed(env, repository_selection)
+    assert state.correction_failed and state.baseline_status == 'not_reproduced'
+    assert [side for side, _ in worker.repairs] == ['tests'] * (1 + MAX_REPRODUCE_ROUNDS)
+
+    await delivery_service.retry(handle.id, 'review')
+    state = await delivered(env, handle.id)
+    # The finding would only ask for the same test again: the author goes on from the
+    # baseline that showed it passing, and the implementation is not corrected again.
+    side, retried = worker.repairs[-1]
+    assert len(worker.repairs) == 2 + MAX_REPRODUCE_ROUNDS
+    assert side == 'tests' and 'review' not in retried and retried['reproduce'] is True
+    assert retried['findings'] and retried['passing_tests'] == ADDED_TESTS[:1]
+    assert not state.correction_failed and state.baseline_status == 'reproduced'
+    assert state.verification_status == 'completed' and state.publication_status == 'completed'
+
+
 @pytest.mark.parametrize('baseline', ['existing_failed', 'skipped', 'left_out', 'error'])
 async def test_a_baseline_the_added_tests_are_not_alone_to_blame_for_is_not_rewritten(
         env, worker, baseline, repository_selection):

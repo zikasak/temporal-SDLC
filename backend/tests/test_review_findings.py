@@ -242,3 +242,11 @@ def test_the_delivery_review_prompt_is_as_it_was(tmp_path):
     assert prompt.startswith('You review the changes a delivery made to a Java service')
     assert 'Do not change service/ or tests/ and do not run the tests.' in prompt
     assert agent.CHANGE_PROMPT in prompt
+    assert agent.BUGFIX_PROMPT not in prompt
+
+
+def test_a_bugfix_review_asks_only_for_tests_that_can_fail_without_the_fix():
+    from app.review import agent
+
+    prompt = agent.prompt({'brief': {'requirements': []}, 'regression': True}, 'Java')
+    assert agent.BUGFIX_PROMPT in prompt

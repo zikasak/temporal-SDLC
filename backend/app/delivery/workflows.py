@@ -56,6 +56,11 @@ MAX_REPRODUCE_ROUNDS = 1
 # Marks the workflow code that sends such tests back; deliveries recorded before it
 # stopped at that baseline.
 REPRODUCE_PATCH = 'reproduce-baseline-tests'
+# Marks the workflow code that also sends a bugfix's tests corrected for review findings
+# back to their authors when they pass without the fix, and that, when such a correction is
+# retried, sends them back again instead of correcting the same findings again; deliveries
+# recorded before it failed the correction at that baseline.
+CORRECTION_REPRODUCE_PATCH = 'reproduce-corrected-tests'
 # Marks the workflow code that reviews the seam a change adds, and its regression tests
 # once they fail without the fix, in rounds of their own before the next stage; deliveries
 # recorded before it went on unreviewed.
@@ -1069,7 +1074,8 @@ class DeliveryWorkflow:
         workflow.logger.info('Baseline run: %s', self.progress.baseline_status)
         return self.progress.baseline_status == 'reproduced'
 
-    async def _reproduce_bounded(self) -> bool:
+    async def _reproduce_bounded(self, repair: int = 0,
+                                 findings: list[dict[str, Any]] | None = None) -> bool:
         """The baseline run, with rounds in which the authors of a change's tests correct
         those the run showed written wrong, changing them alone, and the baseline runs
         again. While the runner stopped tests at its per-test time limit, at most
@@ -1077,10 +1083,12 @@ class DeliveryWorkflow:
         does not do yet without saying what. Then, when added tests passed without the
         fix or did not run, at most MAX_REPRODUCE_ROUNDS rounds rewrite them: such a test
         does not reproduce the problem. A baseline that fails for anything else, such as
-        failing existing tests, proves nothing the authors can correct."""
+        failing existing tests, proves nothing the authors can correct. `repair` numbers
+        the review round whose correction of the tests this baseline holds, and
+        `findings` are the review findings the test authors corrected then."""
         bounds = reproductions = 0
         while True:
-            if await self._reproduce():
+            if await self._reproduce(repair):
                 return True
             hung = self._hung_suites()
             if hung:
@@ -1099,17 +1107,21 @@ class DeliveryWorkflow:
                 reproductions += 1
                 workflow.logger.info('Reproduce round %d: %s', reproductions, ', '.join(
                     f'{suite} {sum(map(len, tests.values()))}' for suite, tests in wrong.items()))
-                requests = {suite: reproduce_request(tests, reproductions)
+                requests = {suite: reproduce_request(tests, reproductions, findings)
                             for suite, tests in wrong.items()}
-            self.progress.baseline_status = 'running'
-            components = bool(self.progress.component_tests)
-            await asyncio.gather(*(
-                self._generate_tests(request, suite if components else None)
-                for suite, request in requests.items()))
+            await self._rewrite_tests(requests)
             if self.progress.routing_status not in ('routed', 'not_applicable'):
                 # The author found a criterion its suite cannot observe after all.
                 self.progress.baseline_status = 'skipped'
                 return False
+
+    async def _rewrite_tests(self, requests: dict[str, dict[str, Any]]) -> None:
+        """Have the author of each suite correct the tests its request names."""
+        self.progress.baseline_status = 'running'
+        components = bool(self.progress.component_tests)
+        await asyncio.gather(*(
+            self._generate_tests(request, suite if components else None)
+            for suite, request in requests.items()))
 
     def _hung_suites(self) -> dict[str, list[Any]]:
         """The tests of each suite the runner stopped at its per-test time limit in the
@@ -1495,6 +1507,9 @@ class DeliveryWorkflow:
         if 'component_routes' in context:
             # The criteria the HTTP suite proves have contract tests of the change's own.
             context['contract_tests'] = bool(self.progress.tests)
+        if self.spec.kind == 'bugfix':
+            # Every test a correction adds has to fail without the fix, as the others did.
+            context['regression'] = True
         if instructions:
             context['instructions'] = instructions
         if earlier:
@@ -1546,16 +1561,33 @@ class DeliveryWorkflow:
 
     async def _retry_correction(self) -> None:
         """Go on from a correction of review findings that did not pass, then with the
-        review rounds. A worker that failed, or corrected tests of a bugfix that no longer
-        failed without the fix, correct the findings again. A suite that verification ran
+        review rounds. Corrected tests of a bugfix that passed without the fix go back to
+        their authors with the baseline, as correcting the same findings again would write
+        them again. A worker that failed, or corrected tests of a bugfix whose baseline
+        proved nothing for another reason, correct the findings again. A suite that verification ran
         and rejected goes back to the test author with the reason, as the same suite would
         be rejected again. Otherwise the corrected delivery is only verified again."""
         self.progress.correction_failed = False
         number = self.progress.reviews[-1]['round']
         workflow.deprecate_patch('correct-rejected-suite')
         rejected = self._rejected_suite()
-        if (self.progress.implementation_error or self.progress.tests_error
-                or self.progress.component_tests_error
+        failed = (self.progress.implementation_error or self.progress.tests_error
+                  or self.progress.component_tests_error)
+        # Corrected tests that still pass without the fix: correcting the same findings
+        # again would write them again, so only their authors go on from the baseline.
+        wrong = (self._unreproducing_suites()
+                 if not failed and self.spec.kind == 'bugfix'
+                 and self.progress.baseline_status == 'not_reproduced' else {})
+        if wrong and workflow.patched(CORRECTION_REPRODUCE_PATCH):
+            workflow.logger.info('Reproduce round of the corrected tests: %s', ', '.join(
+                f'{suite} {sum(map(len, tests.values()))}' for suite, tests in wrong.items()))
+            self.progress.verification_status = 'repairing'
+            findings = self._test_findings(number)
+            await self._rewrite_tests({suite: reproduce_request(tests, number, findings)
+                                       for suite, tests in wrong.items()})
+            corrected = await self._verify_correction(['tests'], number)
+            self.progress.correction_failed = not corrected
+        elif (failed
                 or self.spec.kind == 'bugfix' and self.progress.baseline_status != 'reproduced'):
             self.progress.implementation_error = None
             self.progress.tests_error = None
@@ -1637,7 +1669,7 @@ class DeliveryWorkflow:
             self.progress.verification_status = 'error'
             return False
         if ('tests' in workers and self.spec.kind == 'bugfix'
-                and not await self._reproduce(number)):
+                and not await self._reproduce_corrected(number)):
             # Corrected added tests that no longer fail without the fix prove nothing.
             self.progress.verification_status = 'error'
             return False
@@ -1656,6 +1688,21 @@ class DeliveryWorkflow:
                 self.progress.verification_error
                 or 'Verification failed after correcting the review findings.')
         return False
+
+    async def _reproduce_corrected(self, number: int) -> bool:
+        """The baseline of a bugfix's tests corrected for the findings of review round
+        `number`. A finding may ask for a test of what the code already did before the
+        fix, which cannot fail there: such tests go back to their authors, who may
+        remove them, as tests written wrong do before the fix."""
+        if not workflow.patched(CORRECTION_REPRODUCE_PATCH):
+            return await self._reproduce(number)
+        return await self._reproduce_bounded(number, self._test_findings(number))
+
+    def _test_findings(self, number: int) -> list[dict[str, Any]]:
+        """The findings of review round `number` the test authors corrected."""
+        findings = next((item['findings'] for item in self.progress.reviews
+                         if item['round'] == number), [])
+        return review_request(findings, 'tests', number)['review']['findings']
 
     async def _instructed(self) -> None:
         """The user's instructions about the open review findings: a round of fixes from

@@ -297,6 +297,17 @@ stays unavailable.
 """
 
 
+CORRECTED_REPRODUCE_PROMPT = """
+These tests ran after a code review of the change: the `repair` entry also holds the
+review `findings` your previous run corrected the suite for. A test of `passing_tests`
+that you added for one of those findings, which asked for a test of what the code already
+did before the change, cannot fail there whatever it asserts. Remove that test instead of
+rewriting it, unless the brief says that this very behaviour is what is wrong; the tests
+that already fail there keep proving the criterion. Rewrite every other test of
+`broken_tests` as above.
+"""
+
+
 REPAIR_PROMPT = """
 This is a repair run. /workspace/tests already holds your previous suite. It compiled, but
 some tests failed against the running service and a reviewer who compared them with the
@@ -387,7 +398,13 @@ def repair_prompt(inputs: dict) -> str:
     return (REGRESSION_REVIEW_PROMPT if review and review.get('before_fix')
             else REVIEW_PROMPT if review
             else BOUND_PROMPT if repair.get('bound')
-            else REPRODUCE_PROMPT if repair.get('reproduce') else REPAIR_PROMPT) + keep
+            else REPRODUCE_PROMPT + corrected_prompt(repair) if repair.get('reproduce')
+            else REPAIR_PROMPT) + keep
+
+
+def corrected_prompt(repair: dict) -> str:
+    """What a reproduce run is told when it follows a correction of review findings."""
+    return CORRECTED_REPRODUCE_PROMPT if repair.get('findings') else ''
 
 
 def validate_completion(test_glob: str, root: Path, test_globs: list[str] | None = None) -> None:
@@ -420,7 +437,8 @@ def prompt(inputs: dict, language: dict) -> str:
                    if (repair.get('review') or {}).get('before_fix')
                    else COMPONENT_REVIEW_PROMPT if repair.get('review')
                    else COMPONENT_BOUND_PROMPT if repair.get('bound')
-                   else COMPONENT_REPRODUCE_PROMPT if repair.get('reproduce')
+                   else COMPONENT_REPRODUCE_PROMPT + corrected_prompt(repair)
+                   if repair.get('reproduce')
                    else COMPONENT_REPAIR_PROMPT))
     if inputs.get('brief'):
         # A change to an existing service is told about its repository by its own prompt.
