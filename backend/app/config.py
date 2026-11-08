@@ -85,6 +85,22 @@ if not re.fullmatch(r"https?://[^\s/?#]+(/[^\s?#]*)?", GITHUB_WEBHOOK_URL):
     # Not an http or https URL: derived from the request instead.
     GITHUB_WEBHOOK_URL = ""
 
+
+def _check_interval_seconds() -> float:
+    """PULL_REQUEST_CHECK_INTERVAL_SECONDS: how often a delivery waiting after its push
+    asks GitHub whether its pull request was merged or closed; one hour by default, at
+    least one minute and at most one day."""
+    try:
+        seconds = float(os.getenv("PULL_REQUEST_CHECK_INTERVAL_SECONDS", "3600"))
+    except ValueError:
+        return 3600.0
+    if seconds != seconds:  # NaN
+        return 3600.0
+    return min(max(seconds, 60.0), 86400.0)
+
+
+PULL_REQUEST_CHECK_INTERVAL_SECONDS = _check_interval_seconds()
+
 # Signs session tokens: at least 32 random characters, the same for every API replica.
 # Changing it signs everyone out.
 AUTH_JWT_SECRET = os.getenv("AUTH_JWT_SECRET", "")

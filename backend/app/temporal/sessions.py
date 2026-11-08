@@ -145,6 +145,25 @@ async def start_update(session_id: str, update: str, *args: Any,
         raise SessionEnded("This session has ended.") from exc
 
 
+FLOW_CLOSED = ("This flow has completed or been cancelled, such as after its pull request "
+               "was merged or closed; its sessions can no longer be forked.")
+
+
+async def flow_closed(workflow_id: str) -> bool:
+    """Whether the workflow's latest run completed or was cancelled, as the root of a
+    flow does once its delivery's pull request was merged or closed; false while it runs,
+    when it stopped otherwise and when there is none."""
+    client = await connect_temporal()
+    try:
+        description = await client.get_workflow_handle(workflow_id).describe()
+    except RPCError as exc:
+        if exc.status != RPCStatusCode.NOT_FOUND:
+            raise
+        return False
+    return description.status in (WorkflowExecutionStatus.COMPLETED,
+                                  WorkflowExecutionStatus.CANCELED)
+
+
 async def is_running(workflow_id: str) -> bool:
     """Whether the workflow's latest run is open; false when there is none."""
     client = await connect_temporal()

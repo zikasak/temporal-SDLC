@@ -1,7 +1,10 @@
 """A session's delivery: its progress, and the manual retry of a failed stage."""
 
 import asyncio
+import dataclasses
+import hashlib
 import logging
+import shutil
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,18 +14,24 @@ from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
+from app.config import GENERATED_CODE_DIR
 from app.delivery.models import (
-    MENTION_HANDLED, OUTCOME_OWED, RETRY_STAGES, DeliveryProgress, DeliveryState, RetryStage, delivery_id, interrupted,
+    DELIVERY_CLOSING, FOLLOW_UP_PREFIX, MENTION_HANDLED, OUTCOME_OWED, RETRY_STAGES, DeliveryProgress, DeliveryState, RetryStage, delivery_id, interrupted,
     restorable_tests,
 )
+from app.delivery import acceptances
 from app.delivery import mentions as mention_history
+from app.github.checkout import CheckoutError, checkout_path
 from app.github.errors import GitHubError
 from app.github.models import PullRequestMention
 from app.requirements.models import CHANGE_KINDS
 from app.routing.models import SEAM_MISMATCH
+from app.temporal import registry
 from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import task_fields
-from app.temporal.sessions import SessionBusy, SessionEnded, is_running, start_update
+from app.temporal.sessions import (
+    SessionBusy, SessionEnded, SessionNotFound, is_running, start_update,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +61,52 @@ async def get_state(session_id: str) -> DeliveryState | None:
     if description.status not in (WorkflowExecutionStatus.RUNNING,
                                   WorkflowExecutionStatus.COMPLETED):
         state = interrupted(state)
+    state = await _with_acceptance(client, session_id, description, state)
     state.progress = await with_mention_history(session_id, state.progress)
+    return state
+
+
+async def follow_up_session(session_id: str) -> dict:
+    """The flow `session_id` that carries on a closed delivery on a new branch, as a
+    requirements session reports it: it has no interview of its own, only the task it
+    builds, and its delivery's progress with its fix round, agents' questions, review
+    findings and new pull request. SessionNotFound when no such flow started."""
+    if not session_id.startswith(FOLLOW_UP_PREFIX):
+        raise SessionNotFound('Session not found')
+    state = await get_state(session_id)
+    if state is None:
+        raise SessionNotFound('Session not found')
+    spec = state.spec
+    brief = spec.brief or {}
+    return {
+        'session_id': session_id,
+        'status': 'completed',
+        'kind': spec.kind,
+        'messages': [],
+        'requirements': list(brief.get('requirements') or []),
+        'retired': list(brief.get('retired') or []),
+        'document': None,
+        'error': None,
+        'forked_from': None,
+        'repository': spec.repository,
+        'checkout': spec.checkout,
+        'architecture_session_id': None,
+        'delivery': dataclasses.asdict(state.progress),
+    }
+
+
+async def _with_acceptance(client: Client, session_id: str,
+                           description: WorkflowExecutionDescription,
+                           state: DeliveryState) -> DeliveryState:
+    """The state of a closed delivery with the acceptance of its open findings that the
+    user gave after it closed, which its workflow could not record."""
+    if (description.status in CLOSED_STATUSES and state.progress.open_findings
+            and description.run_id):
+        acceptance = await acceptances.find(client, session_id, description.run_id)
+        if acceptance:
+            state.progress.open_findings = False
+            state.progress.findings_acceptance = acceptance
+            state.progress.agent_questions = []
     return state
 
 
@@ -127,6 +181,7 @@ async def _finished(session_id: str, busy: str) -> _Finished:
     elif description.status != WorkflowExecutionStatus.COMPLETED:
         # Stopped from outside, such as terminated while a stage was stuck.
         state = interrupted(state)
+    state = await _with_acceptance(client, session_id, description, state)
     return _Finished(client, description, state)
 
 
@@ -163,6 +218,173 @@ async def _restart(finished: _Finished, session_id: str) -> None:
         raise SessionBusy(busy) from exc
 
 
+CLOSED_STATUSES = (WorkflowExecutionStatus.COMPLETED, WorkflowExecutionStatus.CANCELED)
+# How many follow-up flows of one closed delivery are looked through for the open one.
+MAX_FOLLOW_UPS = 50
+FOLLOW_UP_BUSY = 'The fix round of this closed flow is still running.'
+
+
+def _closed(finished: _Finished) -> bool:
+    """Whether the delivery's flow has closed: its workflow completed, or was cancelled,
+    such as because its pull request was merged or closed."""
+    return finished.description.status in CLOSED_STATUSES
+
+
+# How long reading a pull request's state from GitHub may take before it counts as unknown.
+PULL_REQUEST_STATE_SECONDS = 15
+
+
+async def _pull_request_state(full_name: object, number: object) -> str | None:
+    """How GitHub reports the pull request now: 'open', 'merged' or 'closed' (without
+    merging); None when it cannot be read, such as without a connection, when GitHub
+    cannot be reached or answers 404, which says nothing about the pull request."""
+    if not isinstance(full_name, str) or type(number) is not int or number <= 0:
+        return None
+    from app.github import client as github_client
+    from app.github import service as github_service
+    from app.github import storage as github_storage
+
+    async def read() -> dict | None:
+        connection = await github_storage.get_connection()
+        token = await github_service.installation_token(connection)
+        return await github_client.get_pull_request_state(token, full_name, number)
+    try:
+        current = await asyncio.wait_for(read(), PULL_REQUEST_STATE_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - an unknown state falls back to the delivery's
+        logger.warning('State of pull request #%s of %s not read: %s', number, full_name, exc)
+        return None
+    if current is None:
+        return None
+    if current.get('merged'):
+        return 'merged'
+    return 'closed' if current.get('state') == 'closed' else 'open'
+
+
+def _pull_request_of(state: DeliveryState) -> tuple[str | None, int | None]:
+    """The repository and number of the delivery's pull request, if it has one."""
+    pull = state.progress.pull_request or {}
+    repository = state.spec.repository or {}
+    return repository.get('full_name'), pull.get('number')
+
+
+async def _report_closed(client: Client, session_id: str, number: int,
+                         merged: bool) -> None:
+    """Tell the running delivery its pull request was merged or closed, as the webhook
+    would, and wait a little for it to close."""
+    workflow_id = delivery_id(session_id)
+    try:
+        await client.get_workflow_handle(workflow_id).signal(
+            'pull_request_closed', args=[number, merged])
+    except RPCError as exc:
+        if exc.status != RPCStatusCode.NOT_FOUND:
+            raise
+        return
+    logger.info('Told the delivery of session %s that pull request #%d was %s',
+                session_id, number, 'merged' if merged else 'closed')
+    await _closed_soon(client, workflow_id)
+
+
+async def _as_pull_request_stands(finished: _Finished, session_id: str,
+                                  busy: str) -> tuple[_Finished, bool]:
+    """The delivery as its pull request's actual state leaves it, and whether its flow
+    has closed with the pull request. A running delivery whose pull request was merged or
+    closed, which neither the webhook nor its check reported yet, is told and closes; a
+    delivery that closed while its pull request is still open, such as one idle for long,
+    has not closed with it. When the state cannot be read, the delivery's status says."""
+    full_name, number = _pull_request_of(finished.state)
+    current = await _pull_request_state(full_name, number)
+    status = finished.description.status
+    if status == WorkflowExecutionStatus.RUNNING and current in ('merged', 'closed'):
+        await _report_closed(finished.client, session_id, number, current == 'merged')
+        finished = await _finished(session_id, busy)
+        status = finished.description.status
+    if status not in CLOSED_STATUSES:
+        return finished, False
+    return finished, current != 'open'
+
+
+def follow_up_session_id(session_id: str, number: int) -> str:
+    """The session of the `number`th flow that carries on the closed delivery of
+    `session_id` (from 1): derived from it, so that a handover tried again finds the flow
+    it started, and named like a session so that it pushes to a branch of its own."""
+    digest = hashlib.sha256(f'{session_id}:follow-up:{number}'.encode()).hexdigest()[:32]
+    return f'{FOLLOW_UP_PREFIX}{digest}'
+
+
+def _follow_up_state(state: DeliveryState, session_id: str) -> DeliveryState:
+    """The closed delivery's task as a flow of its own: the same task, its built
+    artifacts and its last push to start from, under a session of its own, whose result
+    goes to a new branch and a new pull request. It records nothing until a fix round
+    starts, and has none of the closed delivery's mentions or pull request."""
+    spec = dataclasses.replace(state.spec, session_id=session_id)
+    progress = dataclasses.replace(
+        state.progress, mentions=[], agent_questions=[], pull_request=None,
+        pull_request_error=None, pull_request_status='skipped')
+    return dataclasses.replace(
+        state, spec=spec, progress=progress, retry_stage=None, instructions=None,
+        record_only=True, mention=None, mention_type=None, mention_queue=[],
+        waiting=False)
+
+
+async def _copy_workspace(source: str, target: str) -> None:
+    """Give the follow-up session the closed one's working copy and build artifacts, which
+    its fix round changes and pushes; without them its stages report what is missing."""
+    def copy() -> None:
+        try:
+            origin = checkout_path(GENERATED_CODE_DIR, source).parent
+            destination = checkout_path(GENERATED_CODE_DIR, target).parent
+        except CheckoutError:
+            return
+        if not origin.is_dir() or destination.exists():
+            return
+        shutil.copytree(origin, destination, symlinks=True)
+    try:
+        await asyncio.to_thread(copy)
+    except OSError as exc:
+        logger.warning('Working copy of session %s not copied to %s: %s', source, target, exc)
+
+
+async def _follow_up(finished: _Finished, session_id: str,
+                     prepare=None) -> tuple[str, bool]:
+    """The open flow that carries on the closed delivery of `session_id`, as its session
+    ID, started as a new top-level DeliveryWorkflow when there is none: the earliest of
+    its follow-ups whose workflow does not exist yet or still runs. `prepare(state)`
+    changes the state a new one starts from. Also true when this call started it."""
+    client = finished.client
+    for number in range(1, MAX_FOLLOW_UPS + 1):
+        follow_up = follow_up_session_id(session_id, number)
+        workflow_id = delivery_id(follow_up)
+        try:
+            description = await client.get_workflow_handle(workflow_id).describe()
+        except RPCError as exc:
+            if exc.status != RPCStatusCode.NOT_FOUND:
+                raise
+        else:
+            if description.status == WorkflowExecutionStatus.RUNNING:
+                return follow_up, False
+            continue
+        state = _follow_up_state(finished.state, follow_up)
+        if prepare is not None:
+            prepare(state)
+        await _copy_workspace(session_id, follow_up)
+        try:
+            await client.start_workflow(
+                'DeliveryWorkflow', state, id=workflow_id,
+                task_queue=finished.description.task_queue,
+                id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+                id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
+                **task_fields(state.spec),
+            )
+        except WorkflowAlreadyStartedError:
+            # Started concurrently, such as by another handover: that one is the flow.
+            return follow_up, False
+        await registry.register(workflow_id)
+        logger.info('Delivery of session %s closed; carried on as the flow %s',
+                    session_id, workflow_id)
+        return follow_up, True
+    raise SessionBusy('This closed flow has been carried on too often.')
+
+
 async def _flagged(session_id: str) -> _Finished:
     finished = await _finished(
         session_id, 'Wait for the delivery to finish before deciding about its findings.')
@@ -187,6 +409,13 @@ async def accept_findings(session_id: str, login: str) -> DeliveryProgress:
     state.mention = None
     state.mention_type = None
     state.record_only = True
+    if _closed(finished):
+        # The flow closed with its pull request: it is not reopened, and nothing runs.
+        # The acceptance is kept for the closed run and reported with its progress.
+        await acceptances.record(finished.client, session_id, finished.description.run_id,
+                                 progress.findings_acceptance)
+        logger.info('Open review findings accepted for the closed session %s', session_id)
+        return progress
     await _restart(finished, session_id)
     logger.info('Open review findings accepted for session %s', session_id)
     return progress
@@ -194,8 +423,15 @@ async def accept_findings(session_id: str, login: str) -> DeliveryProgress:
 
 async def instruct_findings(session_id: str, instructions: str) -> DeliveryProgress:
     """Start a fix round from the user's instructions about the open review findings,
-    then verification and code review; the result is pushed to the same branch."""
+    then verification and code review. While the pull request is open, the result is
+    pushed to the same branch; once it was merged or closed, the round runs as a flow of
+    its own on a new branch."""
     finished = await _flagged(session_id)
+    finished, closed = await _as_pull_request_stands(
+        finished, session_id,
+        'Wait for the delivery to finish before deciding about its findings.')
+    if not finished.state.progress.open_findings:
+        raise SessionBusy('The delivery has no open review findings.')
     state = finished.state
     if not state.spec.language:
         raise SessionBusy('No implementation language was chosen for this session.')
@@ -214,6 +450,35 @@ async def instruct_findings(session_id: str, instructions: str) -> DeliveryProgr
     state.instructions = instructions
     state.mention = None
     state.mention_type = None
+    if closed:
+        # The flow closed with its pull request: the round runs as a flow of its own,
+        # pushed to a new branch with a new pull request, and the closed one stays.
+        def instructed(follow_up: DeliveryState) -> None:
+            follow_up.record_only = False
+            follow_up.instructions = instructions
+        follow_up, started = await _follow_up(finished, session_id, instructed)
+        if not started:
+            # The flow that carries on the closed one takes the round when it waits.
+            current = await finished.client.get_workflow_handle(
+                delivery_id(follow_up)).query('get_state', result_type=DeliveryState)
+            if not current.waiting:
+                raise SessionBusy(FOLLOW_UP_BUSY)
+            current.retry_stage = None
+            current.record_only = False
+            current.instructions = instructions
+            current.mention = None
+            current.mention_type = None
+            current.progress.agent_questions = []
+            current.progress.review_error = None
+            current.progress.correction_failed = False
+            current.progress.verification_status = 'repairing'
+            try:
+                await start_update(delivery_id(follow_up), 'restart', current)
+            except SessionBusy as exc:
+                raise SessionBusy(FOLLOW_UP_BUSY) from exc
+        logger.info('Instructions about open review findings of the closed session %s '
+                    'started the flow of %s', session_id, follow_up)
+        return progress
     await _restart(finished, session_id)
     logger.info('Instructions about open review findings sent for session %s', session_id)
     return progress
@@ -423,6 +688,15 @@ async def receive_mention(session_id: str, mention: PullRequestMention) -> bool:
     mention."""
     client = await connect_temporal()
     workflow_id = delivery_id(session_id)
+    # Which branch takes the fix is decided by the pull request's actual state: its own
+    # while it is open, a new one once it was merged or closed. Unknown, such as when
+    # GitHub cannot be read, the delivery's status decides.
+    pull_number = mention.get('pull_number') if isinstance(mention, dict) else None
+    pull_repository = mention.get('repository') if isinstance(mention, dict) else None
+    current = await _pull_request_state(pull_repository, pull_number)
+    # Set once the delivery rejected the mention because its pull request was merged or
+    # closed: a reading of 'open' taken before then no longer holds.
+    ended = False
     for attempt in range(1, MENTION_HANDOVER_ATTEMPTS + 1):
         try:
             description = await client.get_workflow_handle(workflow_id).describe()
@@ -430,24 +704,104 @@ async def receive_mention(session_id: str, mention: PullRequestMention) -> bool:
             if exc.status != RPCStatusCode.NOT_FOUND:
                 raise
             return False
-        if description.status != WorkflowExecutionStatus.RUNNING:
+        if (description.status == WorkflowExecutionStatus.RUNNING
+                and current in ('merged', 'closed')):
+            # Its pull request ended, which the delivery has not been told yet: it closes
+            # first, so that the fix goes to a new branch rather than the ended one's.
+            await _report_closed(client, session_id, pull_number, current == 'merged')
+            try:
+                description = await client.get_workflow_handle(workflow_id).describe()
+            except RPCError as exc:
+                if exc.status != RPCStatusCode.NOT_FOUND:
+                    raise
+                return False
+        # The session whose delivery takes the mention: this one's while it runs or its
+        # pull request is open, or the flow that carries on a delivery whose flow closed
+        # with its pull request.
+        target = session_id
+        if description.status in CLOSED_STATUSES and (ended or current != 'open'):
+            state = await client.get_workflow_handle(
+                workflow_id, run_id=description.run_id,
+            ).query('get_state', result_type=DeliveryState)
+
+            def mentioned(follow_up: DeliveryState) -> None:
+                # Its fix round is the comment's, not the closed delivery's findings.
+                follow_up.progress.open_findings = False
+            target, _ = await _follow_up(_Finished(client, description, state),
+                                         session_id, mentioned)
+        elif description.status != WorkflowExecutionStatus.RUNNING:
             await _reopen(client, description, session_id)
         update_id = f'mention-{uuid.uuid4().hex}'
         try:
-            await start_update(workflow_id, 'mention', mention, update_id=update_id)
+            await start_update(delivery_id(target), 'mention', mention, update_id=update_id)
         except SessionEnded:
-            # It closed before the update reached it: reopen it and try again.
+            # It closed before the update reached it, perhaps with its pull request: the
+            # pull request's state is read again, and the mention handed over again.
             if attempt == MENTION_HANDOVER_ATTEMPTS:
                 raise
+            current = await _pull_request_state(pull_repository, pull_number)
             continue
         except SessionBusy as exc:
             if MENTION_HANDLED in str(exc):
                 raise MentionHandled(str(exc)) from exc
+            if DELIVERY_CLOSING in str(exc) and attempt < MENTION_HANDOVER_ATTEMPTS:
+                # Its pull request was just merged or closed: once the delivery has
+                # closed, the flow that carries it on takes the mention, never a reopened
+                # run of the closed delivery on the ended pull request's branch.
+                ended = True
+                await _closed_soon(client, delivery_id(target))
+                current = await _pull_request_state(pull_repository, pull_number)
+                continue
             raise
         # Accepted is not yet admitted: a comment the delivery handled before, which has
         # left its live state, is only found by its durable recording.
-        await _admitted(session_id, mention, update_id)
-        logger.info('Mention %s on the pull request of session %s handed to its delivery',
-                    mention['comment_id'], session_id)
+        await _admitted(target, mention, update_id)
+        logger.info('Mention %s on the pull request of session %s handed to the delivery '
+                    'of %s', mention['comment_id'], session_id, target)
         return True
     return False
+
+
+async def pull_request_closed(session_id: str, number: int, merged: bool) -> bool:
+    """Tell the session's delivery that its pull request `number` was closed, merged when
+    `merged` is true, so that it and its flow close; false when it has no delivery that
+    runs."""
+    client = await connect_temporal()
+    try:
+        await client.get_workflow_handle(delivery_id(session_id)).signal(
+            'pull_request_closed', args=[number, merged])
+    except RPCError as exc:
+        # A closed or missing delivery has nothing left to close.
+        if exc.status != RPCStatusCode.NOT_FOUND:
+            raise
+        return False
+    return True
+
+
+async def check_waiting_pull_requests() -> int:
+    """Ask every running delivery to check its pull request now, such as when the workers
+    start: a delivery that began to wait before deliveries checked their pull request
+    moves on to a run that does. The number asked."""
+    client = await connect_temporal()
+    asked = 0
+    async for item in client.list_workflows(
+            "WorkflowType = 'DeliveryWorkflow' AND ExecutionStatus = 'Running'"):
+        try:
+            await client.get_workflow_handle(item.id).signal('check_pull_request')
+        except RPCError as exc:
+            logger.warning('Delivery %s not asked to check its pull request: %s', item.id, exc)
+            continue
+        asked += 1
+    return asked
+
+
+async def _closed_soon(client: Client, workflow_id: str) -> None:
+    """Wait a little for a delivery that is closing to have closed."""
+    for _ in range(MENTION_RESTART_POLLS):
+        try:
+            description = await client.get_workflow_handle(workflow_id).describe()
+        except RPCError:
+            return
+        if description.status != WorkflowExecutionStatus.RUNNING:
+            return
+        await asyncio.sleep(MENTION_RESTART_POLL_SECONDS)

@@ -698,17 +698,25 @@ export default function Requirements() {
 
             <div ref={chatEnd} aria-hidden="true" />
 
-            {session?.document && (
+            {session && (session.document || session.delivery) && (
               <section className="generated-documents" aria-label="Requirements document">
-                <h3>Requirements document</h3>
-                <ul>
-                  <li>
-                    <a href={documentUrl} download={session.document.filename}>
-                      {session.document.filename}
-                    </a>
-                    <span>revision {session.document.revision}</span>
-                  </li>
-                </ul>
+                {session.document ? (
+                  <>
+                    <h3>Requirements document</h3>
+                    <ul>
+                      <li>
+                        <a href={documentUrl} download={session.document.filename}>
+                          {session.document.filename}
+                        </a>
+                        <span>revision {session.document.revision}</span>
+                      </li>
+                    </ul>
+                  </>
+                ) : (
+                  // A fix flow of a closed delivery has no document: only its delivery,
+                  // which pushes to a new branch and opens a new pull request.
+                  <h3>Fix round on a new branch</h3>
+                )}
                 {session.architecture_session_id && (
                   <a className="next-step"
                     href={`?mode=architecture&session_id=${encodeURIComponent(session.architecture_session_id)}`}>

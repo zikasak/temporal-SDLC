@@ -51,6 +51,8 @@ x-app: &app
     # Optional, such as https://app.example.com/api/connectors/github/events; derived
     # from the request through the frontend's proxy otherwise.
     GITHUB_WEBHOOK_URL: ${GITHUB_WEBHOOK_URL:-}
+    # How often a waiting delivery checks whether its pull request was merged or closed.
+    PULL_REQUEST_CHECK_INTERVAL_SECONDS: ${PULL_REQUEST_CHECK_INTERVAL_SECONDS:-3600}
     AUTH_JWT_SECRET: ${SERVICE_PASSWORD_64_JWT}
     AUTH_TOKEN_TTL_HOURS: ${AUTH_TOKEN_TTL_HOURS:-12}
     AUTH_LOGIN_ATTEMPTS_PER_MINUTE: ${AUTH_LOGIN_ATTEMPTS_PER_MINUTE:-10}

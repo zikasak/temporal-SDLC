@@ -36,6 +36,7 @@ with workflow.unsafe.imports_passed_through():
         publish_onboarding,
         publish_onboarding_architecture,
         publish_repository,
+        pull_request_state,
         read_repository_contract,
         read_requirements_document,
         register_session,
@@ -82,10 +83,35 @@ async def main():
             revise_onboarding_architecture,
             classify_mention, answer_mention, reply_to_mention,
             record_new_mention, save_mention, mention_body,
+            pull_request_state,
         ],
     )
     logger.info("Worker started on task queue %s at %s", TASK_QUEUE, TEMPORAL_ADDRESS)
-    await run_worker(worker)
+    checks = asyncio.create_task(_check_waiting_deliveries())
+    try:
+        await run_worker(worker)
+    finally:
+        checks.cancel()
+
+
+# How long after starting the worker asks the waiting deliveries to check their pull
+# request, so that it polls their workflow tasks by then.
+CHECK_DELAY_SECONDS = 15
+
+
+async def _check_waiting_deliveries() -> None:
+    """Have every delivery that waits check its pull request once the worker runs, so that
+    one merged or closed while no webhook reached the instance, or before deliveries
+    watched their pull request, closes with its flow."""
+    from app.delivery.service import check_waiting_pull_requests
+    await asyncio.sleep(CHECK_DELAY_SECONDS)
+    try:
+        asked = await check_waiting_pull_requests()
+    except Exception:  # noqa: BLE001 - the deliveries' own checks still run
+        logger.warning("Could not ask the waiting deliveries to check their pull request",
+                       exc_info=True)
+        return
+    logger.info("Asked %d running deliveries to check their pull request", asked)
 
 if __name__ == "__main__":
     asyncio.run(main())

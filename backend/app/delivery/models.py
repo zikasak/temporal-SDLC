@@ -5,6 +5,7 @@ from datetime import timedelta
 from typing import Any, Literal, TypedDict
 
 from app.api_design.models import ApiModel
+from app.config import PULL_REQUEST_CHECK_INTERVAL_SECONDS
 from app.diagnosis.models import RepairRound
 from app.github.models import (
     PublicationStatus, PullRequest, PullRequestMention, RepositoryCheckout,
@@ -24,8 +25,15 @@ NAMED_TESTS = 5
 # How long a finished delivery waits for the user's next decision, such as a retry, and
 # its sessions with it. Only a closed workflow falls to the namespace's retention.
 TASK_IDLE_TIMEOUT = timedelta(days=14)
+# How often a delivery that waits after its push checks the state of its pull request
+# (the `pull_request_state` activity): the configured interval, one hour unless the
+# instance configures another (PULL_REQUEST_CHECK_INTERVAL_SECONDS).
+PULL_REQUEST_CHECK_INTERVAL = timedelta(seconds=PULL_REQUEST_CHECK_INTERVAL_SECONDS)
 # How a delivery rejects a mention it already has; handing a mention over is idempotent.
 MENTION_HANDLED = 'This comment was already handled.'
+# How a delivery whose pull request was just merged or closed rejects a mention: it is
+# handed over again once the delivery has closed.
+DELIVERY_CLOSING = 'The delivery is closing: its pull request was merged or closed.'
 # How the tests a change added fared against the service as the repository holds it.
 # `reproduced`: they all fail and the existing tests pass, so the change has something to
 # turn green. `not_reproduced`: one of them does not fail, so nothing may be fixed.
@@ -34,6 +42,10 @@ MENTION_HANDLED = 'This comment was already handled.'
 SeamStatus = Literal['not_applicable', 'waiting', 'running', 'prepared', 'error']
 BaselineStatus = Literal['not_applicable', 'waiting', 'running', 'reproduced', 'not_reproduced',
                          'skipped', 'error']
+
+
+# How the session IDs of flows that carry on a closed delivery begin.
+FOLLOW_UP_PREFIX = 'fix-session-'
 
 
 def delivery_id(session_id: str) -> str:

@@ -51,13 +51,6 @@
   },
   {
     "category": "functional",
-    "description": "A requirements session starts in a chosen repository and branch from the intake: the kind of task (new service, API change, bugfix or documentation), the answers to that kind's questions and what needs to be done. An LLM interviewer then records requirements while the user sends messages or answers its questions. A failed turn can be retried, and a session can be forked after any message.",
-    "id": "FR-10",
-    "priority": "must",
-    "title": "Specify a task in a requirements session"
-  },
-  {
-    "category": "functional",
     "description": "GET /requirements/intake returns the kind question, the kinds of task, the questions asked for each kind and the task question, for the page to show before a session starts.",
     "id": "FR-11",
     "priority": "must",
@@ -243,14 +236,6 @@
   },
   {
     "category": "functional",
-    "description": "When the user gives instructions about open review findings, the instructions are passed to a new round of fixes, followed by verification and code review, and the result is pushed to the same branch as the unverified delivery.",
-    "id": "FR-31",
-    "priority": "must",
-    "rationale": "User chose: instructions go into a new round of fixes, then verification, review and push to the same branch.",
-    "title": "Human instructions start a new fix round on the same branch"
-  },
-  {
-    "category": "functional",
     "description": "When a delivery is pushed with open review findings, the commit message of the pushed commit lists those findings.",
     "id": "FR-32",
     "priority": "must",
@@ -312,14 +297,6 @@
     "priority": "must",
     "rationale": "User chose: show the pull request link once it is opened.",
     "title": "Pull request link in delivery progress"
-  },
-  {
-    "category": "functional",
-    "description": "When a comment on a pull request mentions the GitHub App and asks for a fix, the comment's text is passed to a new round of fixes, followed by verification and code review, and the result is pushed to the pull request's branch, as with the user's instructions on open review findings.",
-    "id": "FR-40",
-    "priority": "must",
-    "rationale": "User: mention the app in the PR asking for a fix; behave like instructions on open findings.",
-    "title": "Mention the app to request a fix"
   },
   {
     "category": "functional",
@@ -408,14 +385,6 @@
     "priority": "must",
     "rationale": "User chose to show each mention, its classification and the round or reply it led to.",
     "title": "Mentions shown in delivery progress"
-  },
-  {
-    "category": "technical",
-    "description": "The GitHub App manifest this instance offers requests the pull_requests: write permission in addition to its existing permissions, turns on the webhook pointing at POST /connectors/github/events, and subscribes to pull request conversation comment and inline review comment events; the webhook secret GitHub returns with the created app is stored encrypted with the connection.",
-    "id": "TR-5",
-    "priority": "must",
-    "rationale": "Replaces TR-4: mentions arrive through the app's webhook.",
-    "title": "Pull request permission and comment webhook in the app manifest"
   },
   {
     "category": "functional",
@@ -560,14 +529,6 @@
     "priority": "must",
     "rationale": "User chose to always return the fields, with null when they do not apply.",
     "title": "Inapplicable new fields are null"
-  },
-  {
-    "category": "functional",
-    "description": "The web client shows every flow on one Flows page instead of separate Chat, Requirements, API design, Onboarding and Workflows tabs. The page lists the top-level flows; opening one lists its child flows and steps with their statuses, highlights each one waiting for the user (unanswered questions, a coding agent's questions, open review findings or a contract decision) with a button that opens its questions, and opens a flow's conversation, session or onboarding in a panel on the same page. New chats, requirements interviews and onboardings are started from that page.",
-    "id": "FR-75",
-    "priority": "must",
-    "rationale": "User asked to see each flow on the same page rather than on a page per kind of flow.",
-    "title": "One page for every flow"
   },
   {
     "category": "functional",
@@ -768,5 +729,141 @@
     "priority": "must",
     "rationale": "Replaces FR-62: the user chose no code review for architecture-only onboarding.",
     "title": "Review applies to code-producing deliveries and full onboarding"
+  },
+  {
+    "category": "functional",
+    "description": "Today, after a delivery has pushed its branch and its pull request has been merged, the delivery (and the requirements session it belongs to) is still shown as running on the Flows page, because the finished delivery keeps waiting for a user decision or a pull request mention for up to 14 days (TASK_IDLE_TIMEOUT) and nothing reacts to the merge.",
+    "id": "FR-101",
+    "priority": "must",
+    "rationale": "User: a feature pipeline was finished, pushed, merged and deployed, but is still shown as running. Code: DeliveryWorkflow waits after the push; webhooks only handle comment events.",
+    "title": "Problem: flow stays running after its pull request is merged"
+  },
+  {
+    "category": "functional",
+    "description": "When a delivery's pull request is merged, the delivery stops waiting and completes, and the flow it belongs to (its requirements, architecture and API design sessions) completes too, so none of them is shown as running on the Flows page.",
+    "id": "FR-102",
+    "priority": "must",
+    "rationale": "User chose: the delivery closes and its whole flow completes.",
+    "title": "Merged pull request completes the whole flow"
+  },
+  {
+    "category": "functional",
+    "description": "When a delivery's pull request is closed without being merged, the delivery and its whole flow stop and are shown on the Flows page as cancelled (abandoned), not as running or completed.",
+    "id": "FR-103",
+    "priority": "must",
+    "rationale": "User chose: the flow closes and is shown as abandoned/cancelled.",
+    "title": "Pull request closed without merging cancels the flow"
+  },
+  {
+    "category": "functional",
+    "description": "The app learns that a delivery's pull request was merged or closed from GitHub pull_request webhook events, and, while the delivery waits after its push, also checks the pull request's state periodically, at an interval that is configurable and defaults to one hour, so the flow closes even when no webhook arrives (for example, when the connection has no webhook secret).",
+    "id": "FR-104",
+    "priority": "must",
+    "rationale": "User chose both: webhook with a periodic check as a fallback; interval configurable, default every hour.",
+    "title": "Detect merge or close by webhook, with a periodic check as fallback"
+  },
+  {
+    "category": "functional",
+    "description": "After a delivery's pull request is merged, the delivery and its requirements, architecture and API design sessions are shown as completed on the Flows page no later than one check interval after the merge, even when no webhook event arrives.",
+    "id": "FR-105",
+    "priority": "must",
+    "rationale": "User's acceptance criterion.",
+    "title": "Acceptance: merged pull request shows the flow as completed"
+  },
+  {
+    "category": "functional",
+    "description": "A delivery that was already waiting after its push when the fix is deployed also completes, together with its flow, once its pull request is merged (and is cancelled once it is closed without merging).",
+    "id": "FR-106",
+    "priority": "must",
+    "rationale": "User's acceptance criterion: existing waiting deliveries must close too.",
+    "title": "Acceptance: deliveries already waiting also close"
+  },
+  {
+    "category": "functional",
+    "description": "When an onboarding's pull request is merged, the onboarding stops waiting and is shown as completed on the Flows page; when it is closed without being merged, the onboarding is shown as cancelled; both are detected in the same way as for a delivery's pull request.",
+    "id": "FR-107",
+    "priority": "must",
+    "rationale": "User chose: onboardings behave the same as deliveries.",
+    "title": "Onboardings close when their pull request is merged or closed"
+  },
+  {
+    "category": "functional",
+    "description": "When an authorised mention asking for a fix arrives on a pull request whose delivery or onboarding has already completed or been cancelled (the pull request was merged or closed), a new fix round still runs as a new top-level flow of its own on the Flows page, followed by verification and code review; its result is pushed to a new branch, a new pull request is opened from that branch, and the app replies on the old pull request with a link to the new one.",
+    "id": "FR-108",
+    "priority": "must",
+    "rationale": "User chose: new branch, new pull request linked from the old one, shown as a new top-level flow.",
+    "title": "Fix request on a closed flow's pull request uses a new branch"
+  },
+  {
+    "category": "functional",
+    "description": "When a comment on a pull request mentions the GitHub App and asks for a fix, the comment's text is passed to a new round of fixes, followed by verification and code review; while the pull request is open, the result is pushed to the pull request's branch, as with the user's instructions on open review findings.",
+    "id": "FR-109",
+    "priority": "must",
+    "rationale": "Replaces FR-40: the user confirmed that a fix is pushed to the pull request's branch only while the pull request is open.",
+    "title": "Mention the app to request a fix"
+  },
+  {
+    "category": "functional",
+    "description": "When a delivery's or onboarding's pull request is merged or closed while its open-review-findings flag is still raised, the flow still completes or is cancelled. On the Flows page it is shown as completed or cancelled with an \"unresolved findings\" marker, and it is not highlighted as waiting for the user.",
+    "id": "FR-110",
+    "priority": "must",
+    "rationale": "User chose: the flow closes and the flag stays visible as unresolved. A closed flow gets a marker only and is not highlighted as waiting.",
+    "title": "Open review findings stay visible after the flow closes"
+  },
+  {
+    "category": "functional",
+    "description": "On a delivery or onboarding whose pull request was merged or closed with its open-review-findings flag still raised, the user can still accept the findings, which clears the flag and the unresolved findings marker. The user can also give instructions about them. The instructions start a new fix round as a new top-level flow on the Flows page, followed by verification and code review. Its result is pushed to a new branch, and a new pull request is opened from that branch.",
+    "id": "FR-111",
+    "priority": "must",
+    "rationale": "User: on a closed flow, accepting still clears the flag and instructions start a new flow on a new branch.",
+    "title": "Act on open review findings of a closed flow"
+  },
+  {
+    "category": "functional",
+    "description": "Forking a requirements, architecture or API design session whose flow has completed or been cancelled answers 409.",
+    "id": "FR-112",
+    "priority": "must",
+    "rationale": "User chose: forking any session of a closed flow answers 409.",
+    "title": "No fork of a session of a closed flow"
+  },
+  {
+    "category": "functional",
+    "description": "When the user gives instructions about open review findings, the instructions are passed to a new round of fixes, followed by verification and code review; while the delivery's pull request is open, the result is pushed to the same branch as the unverified delivery.",
+    "id": "FR-113",
+    "priority": "must",
+    "rationale": "Replaces FR-31: the user confirmed the same branch is used only while the pull request is open (closed flows: FR-111).",
+    "title": "Human instructions start a new fix round on the same branch while the PR is open"
+  },
+  {
+    "category": "functional",
+    "description": "A requirements session starts in a chosen repository and branch from the intake: the kind of task (new service, API change, bugfix or documentation), the answers to that kind's questions and what needs to be done. An LLM interviewer then records requirements while the user sends messages or answers its questions. A failed turn can be retried, and a session can be forked after any message while its flow has not completed or been cancelled.",
+    "id": "FR-114",
+    "priority": "must",
+    "rationale": "Replaces FR-10: the user confirmed forking works only while the session's flow is not closed (FR-112).",
+    "title": "Specify a task in a requirements session"
+  },
+  {
+    "category": "functional",
+    "description": "The web client shows every flow on one Flows page instead of separate Chat, Requirements, API design, Onboarding and Workflows tabs. The page lists the top-level flows; opening one lists its child flows and steps with their statuses, highlights each one of a flow that has not completed or been cancelled that is waiting for the user (unanswered questions, a coding agent's questions, open review findings or a contract decision) with a button that opens its questions, shows a completed or cancelled flow with open review findings only with an \"unresolved findings\" marker, and opens a flow's conversation, session or onboarding in a panel on the same page. New chats, requirements interviews and onboardings are started from that page.",
+    "id": "FR-115",
+    "priority": "must",
+    "rationale": "Replaces FR-75: the user confirmed closed flows are not highlighted as waiting, only marked (FR-110).",
+    "title": "One page for every flow"
+  },
+  {
+    "category": "functional",
+    "description": "When a delivery or onboarding is pushed but no pull request can be opened (for example, because the pull request permission is missing), the delivery or onboarding and its whole flow complete right after the push instead of waiting until TASK_IDLE_TIMEOUT.",
+    "id": "FR-116",
+    "priority": "must",
+    "rationale": "User chose: complete right after the push, since there is no pull request to wait for.",
+    "title": "Flow without a pull request completes after the push"
+  },
+  {
+    "category": "technical",
+    "description": "The GitHub App manifest this instance offers requests the pull_requests: write permission in addition to its existing permissions, turns on the webhook pointing at POST /connectors/github/events, and subscribes to pull request conversation comment, inline review comment and pull request events; the webhook secret GitHub returns with the created app is stored encrypted with the connection.",
+    "id": "TR-6",
+    "priority": "must",
+    "rationale": "Replaces TR-5: the user confirmed the manifest also subscribes to pull request events so merges and closes are seen.",
+    "title": "Pull request permission, comment and pull request webhooks in the app manifest"
   }
 ]

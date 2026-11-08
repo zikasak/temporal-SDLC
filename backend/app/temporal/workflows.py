@@ -5,7 +5,9 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflowError
+from temporalio.exceptions import (
+    ActivityError, ApplicationError, CancelledError, ChildWorkflowError,
+)
 
 with workflow.unsafe.imports_passed_through():
     from app.api_design.models import ApiDesignState
@@ -16,6 +18,7 @@ with workflow.unsafe.imports_passed_through():
     from app.architecture.source import architecture_state
     from app.delivery.models import TASK_IDLE_TIMEOUT, DeliveryState, TaskSpec, delivery_id
     from app.github.models import RepositorySelection
+    from app.temporal.closing import end_cancelled
     from app.temporal.execution_fields import execution_fields, task_fields
     from app.requirements.document import render_requirements_markdown
     from app.requirements.models import (
@@ -51,6 +54,10 @@ DISCUSSION_TOO_LONG = "This discussion is too long to continue. Generate the Ope
 TASK_TREE = "task-tree"
 AUTO_API_DESIGN = "auto-api-design"
 ARCHITECTURE_STAGE = "architecture-stage"
+# Marks the workflow code that ends a flow's sessions as soon as all of its parts have
+# ended, as cancelled when its delivery was, rather than waiting idle after them.
+FLOW_ENDS_PATCH = "flow-ends-with-delivery"
+FLOW_CANCELLED = "The flow's pull request was closed without being merged."
 
 
 def pending_questions(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -130,6 +137,8 @@ class _Delivering:
     def _init_delivery(self) -> None:
         self._delivering = False
         self._redelivery: DeliveryState | None = None
+        # Set when the delivery ended cancelled, its pull request closed without merging.
+        self._delivery_cancelled = False
 
     async def _run_delivery(self, state: DeliveryState) -> None:
         session_id = workflow.info().workflow_id
@@ -144,6 +153,13 @@ class _Delivering:
                 # Stage failures are results of the delivery; only an aborted one ends here.
                 workflow.logger.warning("Delivery did not finish: %s", exc.cause or exc)
                 stopped = True
+                if (isinstance(exc.cause, CancelledError)
+                        and workflow.patched(FLOW_ENDS_PATCH)):
+                    # Its pull request was closed without merging: the flow ends with it.
+                    self._delivering = False
+                    self._delivery_cancelled = True
+                    await workflow.wait_condition(workflow.all_handlers_finished)
+                    return
             workflow.deprecate_patch(TASK_TREE)
             if stopped and self._redelivery is None:
                 try:
@@ -231,6 +247,12 @@ class RequirementsWorkflow(_Delivering):
         # The API design sessions started from this one, each followed to its end.
         self._designs: list[asyncio.Task[None]] = []
         self._owns_designs = False
+        # How many of those ended completed, and how many cancelled.
+        self._designs_completed = 0
+        self._designs_cancelled = 0
+        # How many ended after their delivery closed, returning their document; a design
+        # that expired or failed returns none.
+        self._designs_delivered = 0
         # Set when the user generated the document, rather than an idle session expiring.
         self._finalized = False
 
@@ -260,6 +282,8 @@ class RequirementsWorkflow(_Delivering):
         await workflow.wait_condition(workflow.all_handlers_finished)
         if self.state.status == "completed" and self.state.kind in DIRECT_KINDS:
             await self._deliver()
+            if self._delivery_cancelled:
+                await end_cancelled(FLOW_CANCELLED)
         elif self.state.status == "completed":
             workflow.deprecate_patch(TASK_TREE)
             if self._finalized and self.state.repository:
@@ -270,6 +294,8 @@ class RequirementsWorkflow(_Delivering):
                 else:
                     await self._start_first_design()
             await self._own_designs()
+            if self._designs_cancelled and not self._designs_completed:
+                await end_cancelled(FLOW_CANCELLED)
         return self.state.document
 
     async def _own_designs(self) -> None:
@@ -280,6 +306,19 @@ class RequirementsWorkflow(_Delivering):
             await workflow.wait_condition(
                 lambda: all(task.done() for task in self._designs)
                 and workflow.all_handlers_finished())
+            if (self._designs and workflow.patched(FLOW_ENDS_PATCH)
+                    and (self._designs_delivered or self._designs_cancelled)):
+                # Every part of the flow has ended, its delivery with its pull request:
+                # so does the flow, at once. A flow whose parts ended otherwise, such as
+                # an API design that expired or an architecture session that ended
+                # without handing on, still waits for a fork or a new design.
+                self._owns_designs = False
+                await workflow.wait_condition(workflow.all_handlers_finished)
+                if all(task.done() for task in self._designs):
+                    workflow.logger.info("Every part of the flow ended, closing its task")
+                    return
+                self._owns_designs = True
+                continue
             started = len(self._designs)
             try:
                 await workflow.wait_condition(lambda: len(self._designs) != started,
@@ -386,13 +425,21 @@ class RequirementsWorkflow(_Delivering):
         if not self._owns_designs:
             raise ValueError("Generate the requirements document before designing the API.")
 
-    @staticmethod
-    async def _follow_design(handle: workflow.ChildWorkflowHandle) -> None:
+    async def _follow_design(self, handle: workflow.ChildWorkflowHandle) -> None:
         try:
-            await handle
+            result = await handle
         except ChildWorkflowError as exc:
             workflow.logger.warning("API design %s did not finish: %s", handle.id,
                                     exc.cause or exc)
+            if isinstance(exc.cause, CancelledError):
+                # Its delivery's pull request was closed without merging.
+                self._designs_cancelled += 1
+        else:
+            self._designs_completed += 1
+            if result:
+                # It returns its document only once it was finalized and delivered: its
+                # delivery ended with its pull request, or after a push that opened none.
+                self._designs_delivered += 1
 
     @workflow.update
     def restart_delivery(self, state: DeliveryState) -> None:
@@ -709,6 +756,8 @@ class ApiDesignWorkflow(_Delivering):
         await workflow.wait_condition(workflow.all_handlers_finished)
         if self.state.status == "completed" and self.state.document:
             await self._deliver()
+            if self._delivery_cancelled:
+                await end_cancelled(FLOW_CANCELLED)
         return self.state.document
 
     @workflow.query

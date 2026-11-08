@@ -8,6 +8,7 @@ from app.api.downloads import session_document_download
 from app.api.errors import http_error
 from app.api.routes.auth import require_user
 from app.api.routes.github import RepositoryInput
+from app.delivery import service as delivery_service
 from app.github.service import resolve_repository_selection
 from app.llm.questions import ANSWER_CHARS, MAX_QUESTIONS
 from app.requirements.models import TaskKind
@@ -126,6 +127,19 @@ def _check_session_id(session_id: str) -> None:
         raise HTTPException(status_code=404, detail="Session not found")
 
 
+# A flow that carries on a closed delivery on a new branch, as a top-level flow of its own:
+# it has no interview, and its session reports only its delivery, which the delivery
+# endpoints below act on as on a requirements session's own delivery.
+FOLLOW_UP_ID_PATTERN = re.compile(r"fix-session-[0-9a-f]{32}")
+
+
+def _follow_up(session_id: str) -> bool:
+    if FOLLOW_UP_ID_PATTERN.fullmatch(session_id):
+        return True
+    _check_session_id(session_id)
+    return False
+
+
 @router.get("/intake")
 async def retrieve_intake():
     return intake()
@@ -146,8 +160,10 @@ async def create_session(body: CreateBody):
 
 @router.get("/sessions/{session_id}")
 async def retrieve_session(session_id: str):
-    _check_session_id(session_id)
+    follow_up = _follow_up(session_id)
     try:
+        if follow_up:
+            return await delivery_service.follow_up_session(session_id)
         return await get_session(session_id)
     except Exception as exc:
         raise http_error(exc) from exc
@@ -175,9 +191,12 @@ async def submit_answers(session_id: str, body: AnswersBody):
 
 @router.post("/sessions/{session_id}/delivery/answers", status_code=202)
 async def submit_agent_answers(session_id: str, body: AgentAnswersBody):
-    _check_session_id(session_id)
+    follow_up = _follow_up(session_id)
     try:
-        await answer_delivery_questions(session_id, body.workflow_id, body.answers)
+        if follow_up:
+            await delivery_service.answer(session_id, body.workflow_id, body.answers)
+        else:
+            await answer_delivery_questions(session_id, body.workflow_id, body.answers)
     except Exception as exc:
         raise http_error(exc) from exc
     return {"session_id": session_id}
@@ -195,9 +214,10 @@ async def retry(session_id: str):
 
 @router.post('/sessions/{session_id}/generation/retry', status_code=202)
 async def restart_generation(session_id: str, body: RetryGenerationBody):
-    _check_session_id(session_id)
+    follow_up = _follow_up(session_id)
     try:
-        progress = await retry_generation(session_id, body.stage)
+        progress = await (delivery_service.retry(session_id, body.stage) if follow_up
+                          else retry_generation(session_id, body.stage))
     except Exception as exc:
         raise http_error(exc) from exc
     return {'session_id': session_id, 'verification_status': progress.verification_status}
@@ -206,9 +226,10 @@ async def restart_generation(session_id: str, body: RetryGenerationBody):
 @router.post('/sessions/{session_id}/delivery/findings/accept')
 async def accept_open_findings(session_id: str, user: dict = Depends(require_user)):
     """Keep the delivery pushed with open review findings as it is."""
-    _check_session_id(session_id)
+    follow_up = _follow_up(session_id)
     try:
-        progress = await accept_findings(session_id, user['login'])
+        progress = await (delivery_service.accept_findings(session_id, user['login'])
+                          if follow_up else accept_findings(session_id, user['login']))
     except Exception as exc:
         raise http_error(exc) from exc
     return {'session_id': session_id, 'verification_status': progress.verification_status}
@@ -217,9 +238,10 @@ async def accept_open_findings(session_id: str, user: dict = Depends(require_use
 @router.post('/sessions/{session_id}/delivery/findings/instructions', status_code=202)
 async def instruct_open_findings(session_id: str, body: FindingsInstructionsBody):
     """Start a fix round from the user's instructions about open review findings."""
-    _check_session_id(session_id)
+    follow_up = _follow_up(session_id)
     try:
-        progress = await instruct_findings(session_id, body.instructions)
+        progress = await (delivery_service.instruct_findings(session_id, body.instructions)
+                          if follow_up else instruct_findings(session_id, body.instructions))
     except Exception as exc:
         raise http_error(exc) from exc
     return {'session_id': session_id, 'verification_status': progress.verification_status}
