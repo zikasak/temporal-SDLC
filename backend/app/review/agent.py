@@ -218,6 +218,19 @@ more precisely. The brief's `retired` entry lists the requirements of the contra
 change ends: they no longer hold, whatever the contract still says.
 """
 
+BUGFIX_PROMPT = """
+The change fixes a bug, and its added tests are regression tests: each one was seen to fail
+against the code as it was before the change (or, when the change added a seam first,
+against the code with only that seam), and every test a correction adds or changes is held
+against that code again, where it has to fail too. A test of behaviour the code already had
+before the change cannot fail there, so a correction that adds one is rejected. Never ask
+for a test of such behaviour, even where a criterion or a route names it: for example a
+step of a criterion that code changes.diff leaves as it was already performs, when only
+another part of the code, which the delivery changed, got the criterion wrong. Nor report
+that such a test is missing or was removed. Ask for tests only of behaviour the delivery's
+changes add or correct.
+"""
+
 PARTS_PROMPT = """
 The repository holds more than the service: the `repository_parts` entry of the input lists
 its projects by directory and toolchain, such as a web frontend beside the service, and
@@ -301,6 +314,7 @@ def prompt(inputs: dict, label: str) -> str:
     return (PROMPT.format(label=label, work=work)
             + part
             + (CHANGE_PROMPT if inputs.get('brief') else '')
+            + (BUGFIX_PROMPT if inputs.get('regression') else '')
             + (PARTS_PROMPT if inputs.get('repository_parts') else '')
             + (ONBOARDING_PROMPT if inputs.get('onboarding') else '')
             + (COMPONENT_PROMPT if inputs.get('component_routes') else '')

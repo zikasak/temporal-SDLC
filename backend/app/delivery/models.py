@@ -366,16 +366,31 @@ REPRODUCE_INSTRUCTIONS = (
     'not state, nor by failing unconditionally: it must pass once the problem is fixed.')
 
 
-def reproduce_request(wrong: dict[str, list[str]], attempt: int) -> dict[str, Any]:
+# What the author is told in addition when the tests were corrected for code review findings
+# after the fix: a test a finding asked for may observe what the code already did.
+CORRECTED_REPRODUCE_INSTRUCTIONS = (
+    ' These tests were corrected for the code review `findings` given with them. A test you '
+    'added for a finding that passes without the change shows that the code already behaved '
+    'as the finding asked: remove that test instead of making it fail, unless the brief says '
+    'that this very behaviour is what is wrong.')
+
+
+def reproduce_request(wrong: dict[str, list[str]], attempt: int,
+                      findings: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """What the author of a suite receives to correct the added tests its baseline run
     showed written `wrong` (as `unreproducing_tests` gives them): a repair that may change
-    those tests alone."""
+    those tests alone. `findings` are the code review findings the author corrected the
+    suite for after the fix, when it was; it may then remove a test one of them asked for."""
     cases = [*wrong.get('passing', []), *wrong.get('missing', [])]
-    return {'attempt': attempt, 'reproduce': True, 'instructions': REPRODUCE_INSTRUCTIONS,
-            'test_failures': [], 'failing_tests': 0,
-            'passing_tests': wrong.get('passing', [])[:NAMED_TESTS * 6],
-            'missing_tests': wrong.get('missing', [])[:NAMED_TESTS * 6],
-            'broken_tests': [case_ref(case) for case in cases]}
+    request = {'attempt': attempt, 'reproduce': True, 'instructions': REPRODUCE_INSTRUCTIONS,
+               'test_failures': [], 'failing_tests': 0,
+               'passing_tests': wrong.get('passing', [])[:NAMED_TESTS * 6],
+               'missing_tests': wrong.get('missing', [])[:NAMED_TESTS * 6],
+               'broken_tests': [case_ref(case) for case in cases]}
+    if findings:
+        request['instructions'] += CORRECTED_REPRODUCE_INSTRUCTIONS
+        request['findings'] = findings
+    return request
 
 
 def case_ref(case: str) -> dict[str, str]:
