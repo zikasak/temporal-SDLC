@@ -39,7 +39,10 @@ logger = logging.getLogger(__name__)
 async def get_progress(session_id: str) -> DeliveryProgress | None:
     """None in the moment between the session finishing and its delivery starting. A
     delivery stopped from outside reports the stage it stopped in as failed, which is
-    how a retry finds it."""
+    how a retry finds it. The progress is the one its `get_state` query reports, with
+    every mention from the mention history and, for a closed (completed or cancelled)
+    delivery, with an acceptance of its open findings recorded after it closed applied:
+    `open_findings` is then false and `findings_acceptance` set."""
     state = await get_state(session_id)
     return state.progress if state else None
 
@@ -643,6 +646,8 @@ async def _reopen(client: Client, description: WorkflowExecutionDescription,
     ).query('get_state', result_type=DeliveryState)
     if description.status != WorkflowExecutionStatus.COMPLETED:
         state = interrupted(state)
+    # An acceptance of its open findings given after it closed goes on with the next run.
+    state = await _with_acceptance(client, session_id, description, state)
     state.waiting = False
     state.retry_stage = None
     state.instructions = None
@@ -723,6 +728,7 @@ async def receive_mention(session_id: str, mention: PullRequestMention) -> bool:
             state = await client.get_workflow_handle(
                 workflow_id, run_id=description.run_id,
             ).query('get_state', result_type=DeliveryState)
+            state = await _with_acceptance(client, session_id, description, state)
 
             def mentioned(follow_up: DeliveryState) -> None:
                 # Its fix round is the comment's, not the closed delivery's findings.

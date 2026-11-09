@@ -122,6 +122,77 @@ class TestRequirementsSessionEndsWithItsFlow:
             assert status == WorkflowExecutionStatus.CANCELED
 
 
+@workflow.defn(name="ArchitectureWorkflow")
+class ArchitectureWithoutHandOn:
+    """An architecture session that ended without handing on to an API design."""
+
+    @workflow.run
+    async def run(self, state: ArchitectureState) -> ArchitectureResult | None:
+        return None
+
+
+@workflow.defn(name="ApiDesignWorkflow")
+class ExpiredApiDesign:
+    """An API design session that expired before it was finalized: it ends with no document."""
+
+    @workflow.init
+    def __init__(self, state: ApiDesignState) -> None:
+        if not workflow.unsafe.is_replaying():
+            info = workflow.info()
+            RECORD.child_runs.append(Started(info.workflow_id, info.parent, state))
+
+    @workflow.run
+    async def run(self, state: ApiDesignState) -> dict[str, Any] | None:
+        return None
+
+
+class TestRequirementsSessionWhoseFlowEndedWithoutADelivery:
+    async def test_session_ends_cancelled_when_its_architecture_ended_without_handing_on(
+        self, local_env: WorkflowEnvironment,
+    ) -> None:
+        queue = unique_queue()
+        worker = make_worker(
+            local_env.client, queue,
+            [RequirementsWorkflow, ArchitectureWithoutHandOn, ChildApiDesign, FakeDelivery],
+            REQUIREMENTS_ACTIVITIES,
+        )
+        async with worker:
+            handle = await local_env.client.start_workflow(
+                RequirementsWorkflow.run, requirements_state(), id="req-1", task_queue=queue,
+            )
+            await handle.execute_update("finalize")
+
+            status = await wait_closed(
+                handle,
+                "the requirements session stayed open after its architecture ended without an API design",
+            )
+            assert status == WorkflowExecutionStatus.CANCELED
+            assert RECORD.child_runs == [], "no API design can have been started"
+            assert RECORD.delivery_runs == [], "no delivery can have been started"
+
+    async def test_session_ends_cancelled_when_its_api_design_expired_and_no_delivery_ran(
+        self, local_env: WorkflowEnvironment,
+    ) -> None:
+        queue = unique_queue()
+        worker = make_worker(
+            local_env.client, queue,
+            [RequirementsWorkflow, FinalizedArchitecture, ExpiredApiDesign, FakeDelivery],
+            REQUIREMENTS_ACTIVITIES,
+        )
+        async with worker:
+            handle = await local_env.client.start_workflow(
+                RequirementsWorkflow.run, requirements_state(), id="req-1", task_queue=queue,
+            )
+            await handle.execute_update("finalize")
+            await wait_until(lambda: len(RECORD.child_runs) == 1, "the requirements session did not start its API design")
+
+            status = await wait_closed(
+                handle, "the requirements session stayed open after its API design expired with no delivery",
+            )
+            assert status == WorkflowExecutionStatus.CANCELED
+            assert RECORD.delivery_runs == [], "no delivery can have been started"
+
+
 class TestApiDesignSessionEndsWithItsDelivery:
     async def test_session_ends_cancelled_at_once_when_its_delivery_was_cancelled(
         self, local_env: WorkflowEnvironment,

@@ -15,9 +15,11 @@ with workflow.unsafe.imports_passed_through():
     from app.architecture.source import handed_design
     from app.llm.questions import answers_text
     from app.temporal.activities import register_session
+    from app.temporal.closing import end_cancelled
     from app.temporal.execution_fields import execution_fields
     from app.temporal.workflows import (
-        _check_out, assistant_message, check_answers, check_message, pending_questions,
+        FLOW_ABANDONED, FLOW_ABANDONED_PATCH, _check_out, assistant_message, check_answers,
+        check_message, pending_questions,
     )
 
 DISCUSSION_TOO_LONG = "This discussion is too long to continue. Finalize the architecture."
@@ -77,6 +79,10 @@ class ArchitectureWorkflow:
                 workflow.continue_as_new(self.state)
         await workflow.wait_condition(workflow.all_handlers_finished)
         if self.state.status == "failed" or not self.state.api_design_session_id:
+            if workflow.patched(FLOW_ABANDONED_PATCH):
+                # The session ended without handing the task on, so nothing of it will be
+                # delivered: it was abandoned, and shows as cancelled.
+                await end_cancelled(FLOW_ABANDONED)
             return None
         design = handed_design(self.state, workflow.info().workflow_id)
         if workflow.info().parent is None:

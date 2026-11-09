@@ -22,7 +22,7 @@ with workflow.unsafe.imports_passed_through():
     from app.temporal.activities import checkout_repository, update_repository_checkout
     from app.temporal.closing import end_cancelled
     from app.temporal.workflows import (
-        FLOW_CANCELLED, SESSION_IDLE_TIMEOUT, _Delivering, assistant_message, check_answers, check_message,
+        FLOW_ABANDONED, FLOW_ABANDONED_PATCH, FLOW_CANCELLED, SESSION_IDLE_TIMEOUT, _Delivering, assistant_message, check_answers, check_message,
         pending_questions,
     )
 
@@ -60,6 +60,8 @@ class OnboardingWorkflow(_Delivering):
         self._updates = 0
         self._turn_lock = asyncio.Lock()
         self._init_delivery()
+        # Set when the onboarding expired without activity.
+        self._expired = False
 
     @workflow.run
     async def run(self, state: OnboardingState) -> dict[str, Any] | None:
@@ -81,6 +83,7 @@ class OnboardingWorkflow(_Delivering):
                     self.state.status = "failed"
                     self.state.error = ("The onboarding expired after a day without "
                                         "activity. Start a new one.")
+                    self._expired = True
                 continue
             if workflow.info().is_continue_as_new_suggested():
                 await workflow.wait_condition(workflow.all_handlers_finished)
@@ -92,6 +95,11 @@ class OnboardingWorkflow(_Delivering):
             if self._delivery_cancelled:
                 # Its pull request was closed without merging: the onboarding is cancelled.
                 await end_cancelled(FLOW_CANCELLED)
+        elif workflow.patched(FLOW_ABANDONED_PATCH):
+            # The onboarding ended without running its delivery: it expired, failed,
+            # was declined or replaced by a fork. It was abandoned, and shows as
+            # cancelled.
+            await end_cancelled(FLOW_ABANDONED)
         return None
 
     async def _check_out(self) -> None:

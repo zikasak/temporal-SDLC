@@ -58,6 +58,10 @@ ARCHITECTURE_STAGE = "architecture-stage"
 # ended, as cancelled when its delivery was, rather than waiting idle after them.
 FLOW_ENDS_PATCH = "flow-ends-with-delivery"
 FLOW_CANCELLED = "The flow's pull request was closed without being merged."
+# Marks the workflow code that ends a flow as cancelled as soon as its parts have all
+# ended without anything delivered, rather than waiting for a fork or a new design.
+FLOW_ABANDONED_PATCH = "flow-ends-without-delivery"
+FLOW_ABANDONED = "The flow ended without a delivery."
 
 
 def pending_questions(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -296,6 +300,12 @@ class RequirementsWorkflow(_Delivering):
             await self._own_designs()
             if self._designs_cancelled and not self._designs_completed:
                 await end_cancelled(FLOW_CANCELLED)
+            if not self._designs_delivered and workflow.patched(FLOW_ABANDONED_PATCH):
+                # Nothing of the flow was delivered: it was abandoned.
+                await end_cancelled(FLOW_ABANDONED)
+        elif self.state.status == "failed" and workflow.patched(FLOW_ABANDONED_PATCH):
+            # The session expired before anything could be delivered.
+            await end_cancelled(FLOW_ABANDONED)
         return self.state.document
 
     async def _own_designs(self) -> None:
@@ -306,12 +316,15 @@ class RequirementsWorkflow(_Delivering):
             await workflow.wait_condition(
                 lambda: all(task.done() for task in self._designs)
                 and workflow.all_handlers_finished())
-            if (self._designs and workflow.patched(FLOW_ENDS_PATCH)
-                    and (self._designs_delivered or self._designs_cancelled)):
-                # Every part of the flow has ended, its delivery with its pull request:
-                # so does the flow, at once. A flow whose parts ended otherwise, such as
-                # an API design that expired or an architecture session that ended
-                # without handing on, still waits for a fork or a new design.
+            ends = (self._designs and workflow.patched(FLOW_ENDS_PATCH)
+                    and (self._designs_delivered or self._designs_cancelled))
+            # A flow whose parts all ended with no delivery, such as an API design that
+            # expired or an architecture session that ended without handing on, or a
+            # session that expired with no part started, ends too, as cancelled.
+            if not ends and workflow.patched(FLOW_ABANDONED_PATCH):
+                ends = True
+            if ends:
+                # Every part of the flow has ended: so does the flow, at once.
                 self._owns_designs = False
                 await workflow.wait_condition(workflow.all_handlers_finished)
                 if all(task.done() for task in self._designs):
@@ -758,6 +771,10 @@ class ApiDesignWorkflow(_Delivering):
             await self._deliver()
             if self._delivery_cancelled:
                 await end_cancelled(FLOW_CANCELLED)
+        elif self.state.status == "failed" and workflow.patched(FLOW_ABANDONED_PATCH):
+            # The design expired, or could not start, before anything was delivered: it
+            # was abandoned, and shows as cancelled.
+            await end_cancelled(FLOW_ABANDONED)
         return self.state.document
 
     @workflow.query
