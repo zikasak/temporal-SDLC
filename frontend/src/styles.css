@@ -2096,6 +2096,16 @@ h2 {
   background: #fdf6ec;
 }
 
+/* A closed flow whose review findings stayed open: marked, not highlighted. */
+.flow-unresolved {
+  border: 1px solid #c9a46a;
+  border-radius: 999px;
+  color: #7a5520;
+  font-size: 0.8em;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
 .flow-body {
   padding: 4px 14px 14px 32px;
   border-top: 1px dashed #e2e6e0;

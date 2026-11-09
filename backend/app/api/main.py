@@ -12,6 +12,7 @@ from app.api.routes import (
     workflows,
 )
 from app.auth.storage import ensure_schema as ensure_auth_schema
+from app.delivery.acceptances import ensure_schema as ensure_acceptance_schema
 from app.delivery.mentions import ensure_schema as ensure_mention_schema
 from app.documents import cleanup_expired_documents, ensure_document_schema
 from app.logging_setup import configure_logging
@@ -43,6 +44,7 @@ async def lifespan(_: FastAPI):
     await ensure_registry_schema()
     await ensure_settings_schema()
     await ensure_mention_schema()
+    await ensure_acceptance_schema()
     await ensure_onboarding_schema()
     tasks = [asyncio.create_task(_cleanup_loop()), asyncio.create_task(refresh_pi_credentials_loop()),
              asyncio.create_task(github.recover_mentions_loop())]

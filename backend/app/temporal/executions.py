@@ -17,7 +17,8 @@ from temporalio.api.workflowservice.v1 import DeleteWorkflowExecutionRequest
 from temporalio.client import Client, WorkflowExecution
 
 from app.db import connect
-from app.delivery.models import delivery_id
+from app.delivery.acceptances import RECORD_TYPE as ACCEPTANCE_RECORD_TYPE
+from app.delivery.models import FOLLOW_UP_PREFIX, delivery_id
 from app.github.client import NAME_PATTERN as REPOSITORY_PATTERN
 from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import (
@@ -90,11 +91,15 @@ def check_filters(repository: str | None, branch: str | None,
 def _query(workflow_type: str | None, repository: str | None, branch: str | None,
            onboarding_id: str | None, parent: str | None = None,
            top_level: bool = False) -> str | None:
-    clauses = []
+    # Records of acceptances of closed deliveries' findings are not flows.
+    clauses = [f"WorkflowType != '{ACCEPTANCE_RECORD_TYPE}'"]
     # A session's delivery is its child, except for a run started again on its own after
-    # the session closed: it is listed under the session by its ID, never at the top.
+    # the session closed: it is listed under the session by its ID, never at the top. A
+    # flow that carries on a closed delivery, such as a fix a pull request comment asked
+    # for after the pull request was merged, is a top-level flow of its own.
     if top_level:
-        clauses.append("ParentWorkflowId IS NULL AND WorkflowType != 'DeliveryWorkflow'")
+        clauses.append("ParentWorkflowId IS NULL AND (WorkflowType != 'DeliveryWorkflow' "
+                       f"OR WorkflowId STARTS_WITH '{delivery_id(FOLLOW_UP_PREFIX)}')")
     if parent is not None:
         clauses.append(f"(ParentWorkflowId = {_quote(parent)} "
                        f"OR WorkflowId = {_quote(delivery_id(parent))})")

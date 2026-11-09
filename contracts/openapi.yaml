@@ -291,7 +291,6 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-30
-      - FR-31
   /api-design/sessions/{session_id}/document:
     get:
       operationId: getApiDesignSessionsBySessionIdDocument
@@ -1535,7 +1534,6 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-50
-      - TR-5
   /connectors/github/connection/manifest:
     post:
       operationId: postConnectorsGithubConnectionManifest
@@ -1598,7 +1596,6 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-50
-      - TR-5
   /connectors/github/events:
     post:
       operationId: postConnectorsGithubEvents
@@ -1686,7 +1683,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
       x-requirements:
-      - FR-40
       - FR-41
       - FR-42
       - FR-43
@@ -2914,7 +2910,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
       x-requirements:
-      - FR-10
       - NFR-5
   /requirements/sessions/{session_id}:
     get:
@@ -2956,7 +2951,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
       x-requirements:
-      - FR-10
       - FR-34
       - FR-35
       - FR-36
@@ -3025,8 +3019,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-10
   /requirements/sessions/{session_id}/checkout:
     post:
       operationId: postRequirementsSessionsBySessionIdCheckout
@@ -3253,7 +3245,6 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-30
-      - FR-31
   /requirements/sessions/{session_id}/document:
     get:
       operationId: getRequirementsSessionsBySessionIdDocument
@@ -3405,8 +3396,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-10
   /requirements/sessions/{session_id}/generation/retry:
     post:
       operationId: postRequirementsSessionsBySessionIdGenerationRetry
@@ -3542,8 +3531,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-10
   /requirements/sessions/{session_id}/retry:
     post:
       operationId: postRequirementsSessionsBySessionIdRetry
@@ -3589,8 +3576,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-      x-requirements:
-      - FR-10
   /workflows:
     get:
       operationId: getWorkflows

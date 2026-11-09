@@ -1,0 +1,3 @@
+async def register(workflow_id: str) -> None:
+    """Record a session the API started, so that it is listed as the user's."""
+    ...

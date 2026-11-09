@@ -148,8 +148,7 @@
       "path": "/api-design/sessions/{session_id}/delivery/findings/instructions",
       "request_schema": "FindingsInstructionsInput",
       "requirement_ids": [
-        "FR-30",
-        "FR-31"
+        "FR-30"
       ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
@@ -814,8 +813,7 @@
       "path": "/connectors/github/connection/check",
       "request_schema": "EmptyObject",
       "requirement_ids": [
-        "FR-50",
-        "TR-5"
+        "FR-50"
       ],
       "response_array": false,
       "response_schema": "GitHubConnection",
@@ -838,8 +836,7 @@
       "path": "/connectors/github/connection/manifest",
       "request_schema": "ManifestCode",
       "requirement_ids": [
-        "FR-50",
-        "TR-5"
+        "FR-50"
       ],
       "response_array": false,
       "response_schema": "GitHubConnection",
@@ -883,7 +880,6 @@
       "path": "/connectors/github/events",
       "request_schema": "GitHubWebhookEvent",
       "requirement_ids": [
-        "FR-40",
         "FR-41",
         "FR-42",
         "FR-43",
@@ -1537,7 +1533,6 @@
       "path": "/requirements/sessions",
       "request_schema": "CreateRequirementsSession",
       "requirement_ids": [
-        "FR-10",
         "NFR-5"
       ],
       "response_array": false,
@@ -1566,7 +1561,6 @@
       "path": "/requirements/sessions/{session_id}",
       "request_schema": null,
       "requirement_ids": [
-        "FR-10",
         "FR-34",
         "FR-35",
         "FR-36",
@@ -1605,9 +1599,7 @@
       ],
       "path": "/requirements/sessions/{session_id}/answers",
       "request_schema": "AnswersInput",
-      "requirement_ids": [
-        "FR-10"
-      ],
+      "requirement_ids": [],
       "response_array": false,
       "response_schema": "SessionStatusChange",
       "response_status": 202,
@@ -1725,8 +1717,7 @@
       "path": "/requirements/sessions/{session_id}/delivery/findings/instructions",
       "request_schema": "FindingsInstructionsInput",
       "requirement_ids": [
-        "FR-30",
-        "FR-31"
+        "FR-30"
       ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
@@ -1813,9 +1804,7 @@
       ],
       "path": "/requirements/sessions/{session_id}/fork",
       "request_schema": "ForkInput",
-      "requirement_ids": [
-        "FR-10"
-      ],
+      "requirement_ids": [],
       "response_array": false,
       "response_schema": "SessionCreated",
       "response_status": 201,
@@ -1880,9 +1869,7 @@
       ],
       "path": "/requirements/sessions/{session_id}/messages",
       "request_schema": "MessageInput",
-      "requirement_ids": [
-        "FR-10"
-      ],
+      "requirement_ids": [],
       "response_array": false,
       "response_schema": "SessionStatusChange",
       "response_status": 202,
@@ -1909,9 +1896,7 @@
       ],
       "path": "/requirements/sessions/{session_id}/retry",
       "request_schema": null,
-      "requirement_ids": [
-        "FR-10"
-      ],
+      "requirement_ids": [],
       "response_array": false,
       "response_schema": "SessionStatusChange",
       "response_status": 202,

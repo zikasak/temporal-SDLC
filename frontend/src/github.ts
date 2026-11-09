@@ -135,7 +135,8 @@ export function createGitHubApp(name: string, organization: string) {
     // secret GitHub returns with the created app.
     hook_attributes: { url: `${origin}/api/connectors/github/events`, active: true },
     default_permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "read" },
-    default_events: ["issue_comment", "pull_request_review_comment"],
+    // Pull request events tell the app when a delivery's pull request is merged or closed.
+    default_events: ["issue_comment", "pull_request_review_comment", "pull_request"],
   };
   const form = document.createElement("form");
   form.method = "post";

@@ -14,7 +14,9 @@ from app.requirements.prompt import intake_messages, opening_message
 from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import execution_fields
 from app.temporal.registry import register
-from app.temporal.sessions import SessionBusy, fork_messages, start_update, state_at_message
+from app.temporal.sessions import (
+    FLOW_CLOSED, SessionBusy, flow_closed, fork_messages, start_update, state_at_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +50,11 @@ async def start_session(
 
 async def fork_session(session_id: str, message_index: int) -> str:
     """A new session with the conversation up to the message, and the
-    requirements as they were at that point."""
+    requirements as they were at that point; 409 once the session's flow has completed
+    or been cancelled."""
     source = await get_state(session_id)
+    if await flow_closed(session_id):
+        raise SessionBusy(FLOW_CLOSED)
     messages = fork_messages(source.messages, message_index)
     requirements = await state_at_message(
         session_id, source.messages, message_index,

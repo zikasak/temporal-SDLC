@@ -16,7 +16,8 @@ from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import execution_fields
 from app.temporal.registry import register
 from app.temporal.sessions import (
-    SessionBusy, SessionNotFound, fork_messages, is_running, start_update, state_at_message,
+    FLOW_CLOSED, SessionBusy, SessionNotFound, flow_closed, fork_messages, is_running,
+    start_update, state_at_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,8 +47,10 @@ async def _start(state: ApiDesignState) -> str:
 
 async def fork_session(session_id: str, message_index: int) -> str:
     """A new session with the discussion up to the message, and the API model
-    as it was at that point."""
+    as it was at that point; 409 once its flow has completed or been cancelled."""
     source = await get_state(session_id)
+    if source.source_session_id and await flow_closed(source.source_session_id):
+        raise SessionBusy(FLOW_CLOSED)
     messages = fork_messages(source.messages, message_index)
     api = await state_at_message(
         session_id, source.messages, message_index,

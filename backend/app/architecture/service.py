@@ -17,7 +17,8 @@ from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import execution_fields
 from app.temporal.registry import register
 from app.temporal.sessions import (
-    SessionBusy, fork_messages, is_running, start_update, state_at_message,
+    FLOW_CLOSED, SessionBusy, flow_closed, fork_messages, is_running, start_update,
+    state_at_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,8 @@ async def fork_session(session_id: str, message_index: int) -> str:
     source = await get_state(session_id)
     if source.api_design_session_id:
         raise SessionBusy(DESIGN_STARTED)
+    if source.source_session_id and await flow_closed(source.source_session_id):
+        raise SessionBusy(FLOW_CLOSED)
     messages = fork_messages(source.messages, message_index)
     structure = await state_at_message(
         session_id, source.messages, message_index,

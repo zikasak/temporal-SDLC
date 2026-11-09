@@ -200,10 +200,30 @@ async function fetchChildren(parent: string, signal?: AbortSignal, type?: string
   return latestRuns(flows).reverse();
 }
 
+// The session ID prefix of a flow that carries on a closed delivery on a new branch.
+const followUpPrefix = "fix-session-";
+
+/** The session endpoint that reports `flow` and the session ID it is reported under: a
+ * session's own, or for a fix flow of a closed delivery the session it runs as. */
+function sessionOf(flow: Flow): { path: string; id: string } | null {
+  const path = sessionPaths[flow.workflow_type];
+  if (path) return { path, id: flow.workflow_id };
+  if (flow.workflow_type === "DeliveryWorkflow" &&
+      flow.workflow_id.startsWith(`delivery-${followUpPrefix}`)) {
+    return { path: sessionPaths.RequirementsWorkflow, id: flow.workflow_id.replace(/^delivery-/, "") };
+  }
+  return null;
+}
+
 /** A delivery is named after the session whose task it builds, and shown in its view. */
-function deliveryLink(workflowId: string) {
+function deliveryLink(workflowId: string): string | null {
   const sessionId = workflowId.replace(/^delivery-/, "");
   if (sessionId.startsWith("onboarding-session-")) return onboardingLink(sessionId);
+  // A flow that carries on a closed delivery on a new branch is shown, with its delivery's
+  // progress, questions, findings and new pull request, as a session of its own.
+  if (sessionId.startsWith(followUpPrefix)) {
+    return `?mode=requirements&session_id=${encodeURIComponent(sessionId)}`;
+  }
   const mode = sessionId.startsWith("requirements-session-") ? "requirements" : "api-design";
   return `?mode=${mode}&session_id=${encodeURIComponent(sessionId)}`;
 }
@@ -211,7 +231,9 @@ function deliveryLink(workflowId: string) {
 /** The view that shows this flow, if it has one of its own. */
 function flowLink(item: Flow) {
   const id = encodeURIComponent(item.workflow_id);
-  if (item.onboarding_id) return onboardingLink(item.onboarding_id);
+  if (item.onboarding_id && !item.onboarding_id.startsWith(followUpPrefix)) {
+    return onboardingLink(item.onboarding_id);
+  }
   switch (item.workflow_type) {
     case "LLMRequestWorkflow":
       return `?mode=chat&request_id=${id}`;
@@ -237,7 +259,7 @@ function plural(count: number, word: string) {
 /** What the session `body` of `flow` waits for from the user. */
 function sessionAttention(flow: Flow, body: unknown): Attention[] {
   if (!isObject(body)) return [];
-  const sessionId = flow.workflow_id;
+  const sessionId = sessionOf(flow)?.id ?? flow.workflow_id;
   const link = flowLink(flow) ?? "";
   const items: Attention[] = [];
   const messages = Array.isArray(body.messages) ? body.messages : [];
@@ -255,9 +277,7 @@ function sessionAttention(flow: Flow, body: unknown): Attention[] {
     items.push({ workflow_id: sessionId, scope: sessionId, link,
       label: asked ? `${plural(asked, "question")} to answer` : "Waiting for your reply" });
   }
-  // An API design reports its delivery's progress with its own fields.
-  const delivery = isObject(body.delivery) ? body.delivery
-    : flow.workflow_type === "ApiDesignWorkflow" ? body : null;
+  const delivery = sessionDelivery(flow, body);
   if (delivery) {
     const scope = `delivery-${sessionId}`;
     for (const item of Array.isArray(delivery.agent_questions) ? delivery.agent_questions : []) {
@@ -276,9 +296,9 @@ function sessionAttention(flow: Flow, body: unknown): Attention[] {
 }
 
 async function fetchAttention(flow: Flow, signal: AbortSignal): Promise<Attention[]> {
-  const path = sessionPaths[flow.workflow_type];
-  if (!path || flow.status !== "running") return [];
-  const response = await fetch(`${path}${encodeURIComponent(flow.workflow_id)}`, { signal });
+  const session = sessionOf(flow);
+  if (!session || flow.status !== "running") return [];
+  const response = await fetch(`${session.path}${encodeURIComponent(session.id)}`, { signal });
   const body = await readBody(response);
   if (!response.ok) throw new Error(errorMessage(body, response.status));
   const items = sessionAttention(flow, body);
@@ -293,24 +313,69 @@ async function fetchAttention(flow: Flow, signal: AbortSignal): Promise<Attentio
   return items;
 }
 
-/** What a running top-level flow waits for, checked again on every `tick`. */
+// Statuses of a flow that has closed with its pull request: merged, or closed unmerged.
+const closedStatuses = ["completed", "canceled"];
+
+/** The delivery progress the session `body` of `flow` reports, if any. */
+function sessionDelivery(flow: Flow, body: unknown): Record<string, unknown> | null {
+  if (!isObject(body)) return null;
+  // An API design reports its delivery's progress with its own fields.
+  return isObject(body.delivery) ? body.delivery
+    : flow.workflow_type === "ApiDesignWorkflow" ? body : null;
+}
+
+/** Whether a delivery of the closed `flow`, or of its architecture sessions and API
+ * designs, still has open review findings: shown as unresolved, not as waiting. */
+async function fetchUnresolved(flow: Flow, signal: AbortSignal): Promise<boolean> {
+  const session = sessionOf(flow);
+  if (!session) return false;
+  const response = await fetch(`${session.path}${encodeURIComponent(session.id)}`, { signal });
+  const body = await readBody(response);
+  if (!response.ok) throw new Error(errorMessage(body, response.status));
+  if (sessionDelivery(flow, body)?.open_findings === true) return true;
+  if (flow.workflow_type === "RequirementsWorkflow") {
+    const children = (await fetchChildren(flow.workflow_id, signal))
+      .filter((child) => childTypes.includes(child.workflow_type));
+    const nested = await Promise.all(children.map((child) => fetchUnresolved(child, signal)));
+    return nested.some(Boolean);
+  }
+  return false;
+}
+
+/** What a running top-level flow waits for, checked again on every `tick`; for one that
+ * has completed or been cancelled, whether it closed with review findings unresolved. */
 function useAttention(flow: Flow, tick: number) {
   const [attention, setAttention] = useState<Attention[]>([]);
+  const [unresolved, setUnresolved] = useState(false);
+  const closed = closedStatuses.includes(flow.status);
   useEffect(() => {
-    if (!sessionPaths[flow.workflow_type] || flow.status !== "running") {
+    if (!sessionOf(flow) || (flow.status !== "running" && !closed)) {
       setAttention([]);
+      setUnresolved(false);
       return;
     }
     const controller = new AbortController();
-    fetchAttention(flow, controller.signal)
-      .then((items) => {
-        if (!controller.signal.aborted) setAttention(items);
-      })
-      // Keep the last answer; the next tick tries again.
-      .catch(() => undefined);
+    if (closed) {
+      // A closed flow waits for nothing; its findings are only marked.
+      setAttention([]);
+      fetchUnresolved(flow, controller.signal)
+        .then((found) => {
+          if (!controller.signal.aborted) setUnresolved(found);
+        })
+        .catch(() => undefined);
+    } else {
+      setUnresolved(false);
+      fetchAttention(flow, controller.signal)
+        .then((items) => {
+          if (!controller.signal.aborted) setAttention(items);
+        })
+        // Keep the last answer; the next tick tries again.
+        .catch(() => undefined);
+    }
     return () => controller.abort();
+    // A closed flow's findings change only when the user accepts them: checked on each tick.
   }, [flow.workflow_id, flow.run_id, flow.status, flow.workflow_type, tick]);
-  return attention;
+  return { attention, unresolved };
 }
 
 const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
@@ -391,7 +456,8 @@ function FlowChildren({ parent, link, attention, tick, onOpen }: {
 }
 
 /** A flow and, once opened, its steps; `attention` is what the whole tree waits for. */
-function FlowRow({ flow, inheritedLink, attention, tick, onOpen, onFilter, topLevel = false }: {
+function FlowRow({ flow, inheritedLink, attention, tick, onOpen, onFilter, unresolved = false,
+  topLevel = false }: {
   flow: Flow;
   inheritedLink: string | null;
   attention: Attention[];
@@ -399,6 +465,8 @@ function FlowRow({ flow, inheritedLink, attention, tick, onOpen, onFilter, topLe
   onOpen: (link: string) => void;
   // Narrows the list to the flow's repository or branch; top-level flows only.
   onFilter?: (next: Partial<Filters>) => void;
+  // A closed flow whose review findings were neither accepted nor acted on.
+  unresolved?: boolean;
   topLevel?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -445,6 +513,11 @@ function FlowRow({ flow, inheritedLink, attention, tick, onOpen, onFilter, topLe
           {took && <span>{took}</span>}
         </span>
         <Status status={flow.status} />
+        {unresolved && (
+          <span className="flow-unresolved" title="Closed with open review findings">
+            unresolved findings
+          </span>
+        )}
         <span className="flow-actions">
           {asking.length > 0 && (
             <button type="button" className="flow-questions-button" onClick={() => onOpen(asking[0].link)}>
@@ -466,15 +539,15 @@ function FlowRow({ flow, inheritedLink, attention, tick, onOpen, onFilter, topLe
   );
 }
 
-function TopLevelFlow({ flow, tick, onOpen, onFilter }: {
+export function TopLevelFlow({ flow, tick, onOpen, onFilter }: {
   flow: Flow;
   tick: number;
   onOpen: (link: string) => void;
   onFilter: (next: Partial<Filters>) => void;
 }) {
-  const attention = useAttention(flow, tick);
+  const { attention, unresolved } = useAttention(flow, tick);
   return <FlowRow flow={flow} inheritedLink={null} attention={attention} tick={tick} onOpen={onOpen}
-    onFilter={onFilter} topLevel />;
+    onFilter={onFilter} unresolved={unresolved} topLevel />;
 }
 
 /** Every top-level flow, newest first; each opens into its steps and its view. */

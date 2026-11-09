@@ -422,6 +422,33 @@ async def open_pull_request(
 
 
 @activity.defn
+async def pull_request_state(full_name: str, number: int) -> dict[str, Any]:
+    """Activity 'pull_request_state': the state of pull request `number` of the
+    repository `full_name` ('owner/name') on GitHub, as {'state': 'open' or 'closed',
+    'merged': bool}. Run by a waiting delivery every PULL_REQUEST_CHECK_INTERVAL."""
+    token, _ = await _github_token()
+    try:
+        current = await github_client.get_pull_request_state(token, full_name, number)
+    except GitHubError as exc:
+        activity.logger.warning("Could not read pull request #%s of %s: %s",
+                                number, full_name, exc)
+        # The waiting delivery checks again at its next interval.
+        raise ApplicationError(str(exc), type='PullRequestError',
+                               non_retryable=True) from exc
+    if current is None:
+        # GitHub answers 404 also when the installation lost access to the repository or
+        # the repository moved: that says nothing about the pull request, so the check
+        # fails and the waiting delivery checks again at its next interval.
+        activity.logger.warning("Pull request #%s of %s not found; state unknown",
+                                number, full_name)
+        raise ApplicationError(
+            f"Pull request #{number} of {full_name} was not found.",
+            type='PullRequestError', non_retryable=True)
+    return {'state': 'closed' if current['state'] == 'closed' else 'open',
+            'merged': bool(current['merged'])}
+
+
+@activity.defn
 @trace_activity('read-repository-contract', feature='repository', input_parameter='session_id')
 async def read_repository_contract(session_id: str) -> RepositoryContract:
     """The contract the session's repository was published with, which a task that

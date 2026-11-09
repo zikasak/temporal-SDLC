@@ -141,9 +141,8 @@ async def mention_candidate(connection: dict[str, Any], event: str | None,
     if comment.author.lower() == bot.lower():
         logger.info('Ignored the app\'s own comment on %s', where)
         return None
-    if comment.state != 'open':
-        logger.info('Ignored a mention on the closed or merged pull request %s', where)
-        return None
+    # A mention on a merged or closed pull request is acted on too: its delivery's flow has
+    # closed with it, so a fix it asks for runs as a flow of its own, on a new branch.
     if comment.pull_author is not None and comment.pull_author.lower() != bot.lower():
         logger.info('Ignored a mention on %s, a pull request the app did not open', where)
         return None
@@ -156,17 +155,16 @@ async def mention_candidate(connection: dict[str, Any], event: str | None,
 
 async def authorise(connection: dict[str, Any], comment: Comment,
                     session_id: str) -> Mention | None:
-    """The mention to hand over when GitHub confirms the pull request is open, the app's,
-    and its author may write to the repository; None when it is ignored."""
+    """The mention to hand over when GitHub confirms the pull request exists and is the
+    app's, and its author may write to the repository; None when it is ignored. A pull
+    request that was merged or closed still takes mentions: its delivery hands their fix
+    rounds to a flow of its own, which pushes to a new branch."""
     bot = f"{connection['app_slug']}[bot]"
     where = f'{comment.full_name}#{comment.number} comment {comment.comment_id}'
     token = await service.installation_token(connection)
-    # The payload tells the state the pull request had when the comment was made; a
-    # delivery that arrives later, such as after the pull request was closed or merged,
-    # starts nothing new. Fix requests already queued then still run.
     current = await client.get_pull_request_state(token, comment.full_name, comment.number)
-    if current is None or current['state'] != 'open' or current['merged']:
-        logger.info('Ignored a mention on %s, which is no longer open', where)
+    if current is None:
+        logger.info('Ignored a mention on %s, which no longer exists', where)
         return None
     if current['author'] is not None and current['author'].lower() != bot.lower():
         logger.info('Ignored a mention on %s, a pull request the app did not open', where)
@@ -185,8 +183,59 @@ async def authorise(connection: dict[str, Any], comment: Comment,
     })
 
 
+PULL_REQUEST_EVENT = 'pull_request'
+
+
+@dataclass
+class ClosedPullRequest:
+    """A pull request GitHub reported closed, merged when `merged` is true."""
+
+    full_name: str
+    number: int
+    merged: bool
+
+
+def parse_closed_pull_request(payload: dict[str, Any]) -> ClosedPullRequest | None:
+    """The pull request a pull_request delivery reports closed; None for other actions."""
+    if payload.get('action') != 'closed':
+        return None
+    pull = _object(payload.get('pull_request'), 'pull_request')
+    repository = _object(payload.get('repository'), 'repository')
+    full_name, number = repository.get('full_name'), pull.get('number')
+    if (not isinstance(full_name, str) or not client.NAME_PATTERN.fullmatch(full_name)
+            or type(number) is not int or number <= 0):
+        raise InvalidEvent('The webhook payload lacks the pull request or the repository.')
+    merged = pull.get('merged') is True or bool(pull.get('merged_at'))
+    return ClosedPullRequest(full_name, number, merged)
+
+
+async def _pull_request_event(delivery_id: str | None, payload: dict[str, Any],
+                              report_closed) -> bool:
+    """Tell the delivery whose pull request was merged or closed, so that it and its flow
+    close; true when one was told. `report_closed(session_id, number, merged)` returns
+    false when the session has no delivery that waits for it."""
+    if delivery_id and await storage.delivery_handled(delivery_id):
+        raise AlreadyHandled('This delivery was already handled.')
+    closed = parse_closed_pull_request(payload)
+    if closed is None or report_closed is None:
+        await _record_ignored(delivery_id)
+        return False
+    where = f'{closed.full_name}#{closed.number}'
+    session_id = await storage.pull_request_session(closed.full_name, closed.number)
+    if session_id is None:
+        logger.info('Ignored the close of %s, which belongs to no delivery', where)
+        await _record_ignored(delivery_id)
+        return False
+    told = await report_closed(session_id, closed.number, closed.merged)
+    logger.info('Pull request %s was %s; delivery of session %s %s', where,
+                'merged' if closed.merged else 'closed', session_id,
+                'told' if told else 'not waiting')
+    await _record_ignored(delivery_id)
+    return bool(told)
+
+
 async def handle(connection: dict[str, Any], event: str | None, delivery_id: str | None,
-                 payload: dict[str, Any], hand_over) -> bool:
+                 payload: dict[str, Any], hand_over, report_closed=None) -> bool:
     """Act on a correctly signed delivery: true when it was accepted and acted on, false
     when it is ignored. `hand_over(session_id, mention)` gives a mention to its delivery,
     returns false when the session has none and raises AlreadyHandled when the delivery
@@ -201,7 +250,12 @@ async def handle(connection: dict[str, Any], event: str | None, delivery_id: str
     taking the next number of that order, before GitHub is asked about it, and handed
     over only after every earlier mention of the delivery was handed over or turned out
     to be ignored. A delivery queues fix requests in the order it is handed them, so a
-    later fix request never overtakes an earlier one."""
+    later fix request never overtakes an earlier one.
+
+    A pull_request delivery that reports a pull request of a delivery closed, merged or
+    not, is passed on with `report_closed(session_id, number, merged)`."""
+    if event == PULL_REQUEST_EVENT:
+        return await _pull_request_event(delivery_id, payload, report_closed)
     if delivery_id:
         pending = await storage.pending_delivery(delivery_id)
         if pending is not None:
