@@ -19,6 +19,7 @@ from app.temporal import sessions
 from app.temporal.executions import ensure_search_attributes
 from app.temporal.sessions import InvalidForkPoint
 from app.temporal.workflows import RequirementsWorkflow
+from tests.pipeline import abandoned
 
 TASK_QUEUE = "requirements-test"
 DOCUMENT = {"document_id": "0" * 32, "filename": "requirements.md",
@@ -85,9 +86,12 @@ designs: dict[str, ApiDesignState] = {}
 
 @workflow.defn(name="ApiDesignWorkflow", sandboxed=False)
 class FakeApiDesign:
+    """Finalized and delivered at once: it returns its document, as a delivered design does."""
+
     @workflow.run
-    async def run(self, state: ApiDesignState) -> None:
+    async def run(self, state: ApiDesignState) -> dict[str, Any]:
         designs[workflow.info().workflow_id] = state
+        return DOCUMENT
 
 
 # The API design each architecture session handed on, by the architecture session's ID.
@@ -215,7 +219,8 @@ async def test_interview_and_finalize(env, worker):
     assert state.status == "interviewing"
 
     await handle.execute_update(RequirementsWorkflow.finalize)
-    assert await handle.result() == DOCUMENT
+    # Without a repository no part of the flow starts, so nothing is delivered.
+    await abandoned(handle)
     assert worker.documents == [handle.id]
     state = await handle.query(RequirementsWorkflow.get_state)
     assert state.status == "completed" and state.document == DOCUMENT
@@ -262,7 +267,8 @@ async def test_idle_session_auto_finalizes(env, worker):
     handle = await start(env)
     await handle.execute_update(RequirementsWorkflow.answer_questions, ["Book rooms"])
     await env.sleep(timedelta(hours=25))
-    assert await handle.result() == DOCUMENT
+    await abandoned(handle)
+    assert (await handle.query(RequirementsWorkflow.get_state)).document == DOCUMENT
 
 
 async def test_finalized_session_starts_its_api_design(server, live, repository_selection):
@@ -289,7 +295,8 @@ async def test_finalized_session_starts_its_api_design(server, live, repository_
     assert live.registered == [architecture_id, design_id]
     description = await server.client.get_workflow_handle(design_id).describe()
     assert description.parent_id == handle.id
-    await handle.terminate()
+    # The design was delivered, and the flow ends with it.
+    assert await handle.result() == DOCUMENT
 
 
 async def test_expired_session_starts_no_api_design(env, worker, repository_selection):
@@ -298,9 +305,10 @@ async def test_expired_session_starts_no_api_design(env, worker, repository_sele
     await wait_for_status(handle, "interviewing")
     await handle.execute_update(RequirementsWorkflow.send_message, "Book rooms")
     await env.sleep(timedelta(hours=25))
-    state = await wait_for_status(handle, "completed")
+    await abandoned(handle)
+    state = await handle.query(RequirementsWorkflow.get_state)
+    assert state.status == "completed"
     assert state.api_design_session_id is None and worker.registered == []
-    await handle.terminate()
 
 
 async def test_kind_must_be_recorded_before_the_document_is_generated(env, worker):
@@ -317,8 +325,9 @@ async def test_kind_must_be_recorded_before_the_document_is_generated(env, worke
     worker.kind = None
     await handle.execute_update(RequirementsWorkflow.send_message, "Rooms double-book")
     await handle.execute_update(RequirementsWorkflow.finalize)
-    assert await handle.result() == DOCUMENT
-    assert (await handle.query(RequirementsWorkflow.get_state)).kind == "new_service"
+    await abandoned(handle)
+    state = await handle.query(RequirementsWorkflow.get_state)
+    assert state.document == DOCUMENT and state.kind == "new_service"
 
 
 async def test_idle_session_without_kind_fails(env, worker):
@@ -326,7 +335,7 @@ async def test_idle_session_without_kind_fails(env, worker):
     worker.kind = None
     await handle.execute_update(RequirementsWorkflow.answer_questions, ["Book rooms"])
     await env.sleep(timedelta(hours=25))
-    assert await handle.result() is None
+    await abandoned(handle)
     assert worker.documents == []
     assert (await handle.query(RequirementsWorkflow.get_state)).status == "failed"
 
@@ -334,7 +343,7 @@ async def test_idle_session_without_kind_fails(env, worker):
 async def test_idle_session_without_requirements_fails(env, worker):
     handle = await start(env)
     await env.sleep(timedelta(hours=25))
-    assert await handle.result() is None
+    await abandoned(handle)
     state = await handle.query(RequirementsWorkflow.get_state)
     assert state.status == "failed"
 

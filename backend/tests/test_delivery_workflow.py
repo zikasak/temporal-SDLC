@@ -71,6 +71,8 @@ class FakeActivities(FakeStages):
         self.retired: list[dict[str, Any]] = []
         # A second acceptance criterion of the brief, by its ID, if any.
         self.second_requirement: str | None = None
+        # How GitHub reports the delivery's pull request when the service reads it.
+        self.pull_request_state: str | None = 'open'
 
     @activity.defn(name="requirements_turn")
     async def requirements_turn(
@@ -176,6 +178,12 @@ async def workers(env, monkeypatch):
 
     for module in (requirements_service, api_design_service, delivery_service, sessions):
         monkeypatch.setattr(module, "connect_temporal", connect)
+
+    async def pull_request_state(full_name: object, number: object) -> str | None:
+        # GitHub's answer about the delivery's pull request, without its connection.
+        return activities.pull_request_state
+
+    monkeypatch.setattr(delivery_service, "_pull_request_state", pull_request_state)
     async with Worker(
         env.client, task_queue=TASK_QUEUE,
         workflows=[RequirementsWorkflow, ArchitectureWorkflow, ApiDesignWorkflow,

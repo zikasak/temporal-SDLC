@@ -3,8 +3,10 @@ import asyncio
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
+import pytest
 from temporalio import activity, workflow
-from temporalio.exceptions import ApplicationError
+from temporalio.client import WorkflowFailureError
+from temporalio.exceptions import ApplicationError, CancelledError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
@@ -42,6 +44,14 @@ ADDED_SEAM = {"module": "service.rooms", "symbols": ["Rooms.close", "Rooms.merge
               "added": ["Rooms.merged"]}
 SEAM_IMAGE = "sha256:" + "7" * 64
 BROKEN_TEST = {"class_name": "RoomsTest", "name": "lists"}
+
+
+async def abandoned(handle) -> None:
+    """Wait for a flow session that delivered nothing, such as one that expired, failed or
+    was finalized with no part started, to end as cancelled."""
+    with pytest.raises(WorkflowFailureError) as ended:
+        await handle.result()
+    assert isinstance(ended.value.cause, CancelledError)
 
 
 async def finished(env, session_id: str) -> DeliveryProgress:
