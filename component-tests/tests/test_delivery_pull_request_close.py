@@ -210,11 +210,14 @@ class TestOnboardingDelivery:
             assert await lifetime(handle) <= PULL_REQUEST_CHECK_INTERVAL + SLACK
 
     async def test_onboarding_is_cancelled_when_its_pull_request_is_closed(
-        self, skipping_env: WorkflowEnvironment,
+        self, local_env: WorkflowEnvironment,
     ) -> None:
+        # No time is skipped here. The time-skipping server can skip past its default
+        # execution timeout while the run's request to cancel itself is still pending,
+        # so the run times out instead of ending cancelled.
         state = delivery_state("onb-1", number=3, onboarding=True)
         checks = PullRequestChecks(always(OPEN))
-        async with waiting_delivery(skipping_env, state, checks) as handle:
+        async with waiting_delivery(local_env, state, checks) as handle:
             await wait_started(handle)
             await handle.signal(DeliveryWorkflow.pull_request_closed, args=[3, False])
             status = await wait_closed(handle, "the onboarding did not end cancelled after the close")
