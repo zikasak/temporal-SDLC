@@ -27,7 +27,8 @@ from app.temporal import sessions
 from app.temporal.executions import ensure_search_attributes
 from app.temporal.workflows import ApiDesignWorkflow
 from tests.pipeline import (
-    CODE, FakeCodegenWorkflow, FakeStages, finished, legacy_patch_markers, patch_ids, stage_workers,
+    CODE, FakeCodegenWorkflow, FakeStages, abandoned, finished, legacy_patch_markers, patch_ids,
+    stage_workers,
 )
 
 TASK_QUEUE = "api-design-test"
@@ -224,7 +225,7 @@ async def test_api_change_goes_on_from_a_moved_repository_only_with_the_same_con
         assert state.contract_commit == "1" * 40 and worker.turns == 1
         await handle.terminate()
         return
-    assert await handle.result() is None
+    await abandoned(handle)
     state = await handle.query(ApiDesignWorkflow.get_state)
     assert state.status == "failed" and "contract is no longer the one" in state.error
     assert worker.turns == 0 and state.messages == []
@@ -288,7 +289,7 @@ async def test_histories_recorded_with_the_removed_patches_still_replay(
 async def test_session_fails_without_a_model_turn_when_checkout_fails(env, worker, repository_selection):
     worker.fail_checkout = True
     handle = await start(env, repository_selection)
-    assert await handle.result() is None
+    await abandoned(handle)
     state = await handle.query(ApiDesignWorkflow.get_state)
     assert state.status == "failed" and "could not be checked out" in state.error
     assert worker.turns == 0 and state.messages == []
@@ -569,7 +570,7 @@ async def test_idle_session_with_problems_fails(env, worker):
     handle = await start(env)
     await wait_for_status(handle, "interviewing")
     await env.sleep(timedelta(hours=25))
-    assert await handle.result() is None
+    await abandoned(handle)
     state = await handle.query(ApiDesignWorkflow.get_state)
     assert state.status == "failed" and worker.documents == []
 
