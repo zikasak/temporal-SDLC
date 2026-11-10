@@ -25,7 +25,8 @@ from app.delivery.models import (
     delivery_id,
 )
 from app.github.checkout import SNAPSHOT_DIR
-from app.delivery.workflows import MAX_BOUND_ROUNDS, MAX_REPRODUCE_ROUNDS, DeliveryWorkflow
+from app.delivery.flow.baseline import MAX_BOUND_ROUNDS, MAX_REPRODUCE_ROUNDS
+from app.delivery.workflows import DeliveryWorkflow
 from app.review.models import MAX_STAGE_REVIEW_ROUNDS
 from app.requirements import service as requirements_service
 from app.requirements.document import render_requirements_markdown

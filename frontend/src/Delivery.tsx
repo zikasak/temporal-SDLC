@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { repositoryPublication, type RepositoryPublication, type RepositorySelection } from "./github";
 import { QuestionForm, questionList, type Question } from "./Questions";
+import { isObject } from "./api";
 
 type GeneratedCode = {
   server: { path: string; files: number };
@@ -189,10 +190,6 @@ const seamStatuses: SeamStatus[] = ["not_applicable", "waiting", "running", "pre
 const publicationStatuses: PublicationStatus[] = [
   "not_applicable", "waiting", "running", "completed", "skipped", "error",
 ];
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
 
 function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];

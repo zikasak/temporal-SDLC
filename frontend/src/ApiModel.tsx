@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { isObject } from "./api";
 
 /** The designed endpoints and schemas of an API design or an onboarding's drafts. */
 
@@ -41,10 +42,6 @@ const authLabels: Record<string, string> = {
   api_key: "API key",
   basic: "Basic auth",
 };
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
 
 /** Whether a session's api field has the shape the page shows. */
 export function isApiModel(value: unknown): value is ApiModel {

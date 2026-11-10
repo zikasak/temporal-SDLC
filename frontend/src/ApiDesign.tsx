@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import Markdown from "react-markdown";
-import { errorMessage, failure, readBody } from "./api";
+import { errorMessage, failure, isObject, readBody } from "./api";
 import { ApiModelSection, type ApiModel } from "./ApiModel";
 import { ArchitectureSection, architectureStructure, type ArchitectureStructure } from "./Architecture";
 import ForkButton from "./ForkButton";
@@ -14,6 +14,7 @@ import {
   repositoryCheckout, repositorySelection, type RepositoryCheckout, type RepositorySelection,
 } from "./github";
 import { markdownComponents, remarkPlugins } from "./markdown";
+import { rememberSessionId, urlParam } from "./url";
 
 type SessionStatus = "preparing" | "interviewing" | "turn_running" | "finalizing" | "completed" | "failed";
 
@@ -70,22 +71,6 @@ const statusLabels: Record<SessionStatus, string> = {
   completed: "Complete",
   failed: "Failed",
 };
-function urlParam(name: string) {
-  return new URLSearchParams(window.location.search).get(name) ?? "";
-}
-
-function rememberSessionId(sessionId: string) {
-  const url = new URL(window.location.href);
-  url.searchParams.set("mode", "api-design");
-  if (sessionId) url.searchParams.set("session_id", sessionId);
-  else url.searchParams.delete("session_id");
-  window.history.replaceState(null, "", url);
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function sessionRecord(value: unknown): Session {
   if (
     !isObject(value) ||
@@ -204,7 +189,7 @@ export default function ApiDesign() {
     setSessionId(id);
     setLookupId(id);
     setRefreshKey((value) => value + 1);
-    rememberSessionId(id);
+    rememberSessionId("api-design", id);
   }
 
   async function post(path: string, body?: unknown) {

@@ -12,6 +12,7 @@ import { AskedQuestions, QuestionForm, questionList, type Question } from "./Que
 import RepositoryPicker, { RepositorySummary } from "./RepositoryPicker";
 import { repositoryCheckout, repositorySelection, selectionInput, type RepositoryCheckout, type RepositorySelection } from "./github";
 import { markdownComponents, remarkPlugins } from "./markdown";
+import { rememberSessionId, urlParam } from "./url";
 
 type SessionStatus = "preparing" | "interviewing" | "turn_running" | "finalizing" | "completed" | "failed";
 type Category = "functional" | "non_functional" | "technical";
@@ -84,18 +85,6 @@ const statusLabels: Record<SessionStatus, string> = {
   completed: "Complete",
   failed: "Failed",
 };
-
-function sessionIdFromUrl() {
-  return new URLSearchParams(window.location.search).get("session_id") ?? "";
-}
-
-function rememberSessionId(sessionId: string) {
-  const url = new URL(window.location.href);
-  url.searchParams.set("mode", "requirements");
-  if (sessionId) url.searchParams.set("session_id", sessionId);
-  else url.searchParams.delete("session_id");
-  window.history.replaceState(null, "", url);
-}
 
 function isRequirement(item: unknown): boolean {
   if (typeof item !== "object" || item === null) return false;
@@ -182,8 +171,8 @@ function forkOrigin(value: object): Session["forked_from"] {
 }
 
 export default function Requirements() {
-  const [sessionId, setSessionId] = useState(sessionIdFromUrl);
-  const [lookupId, setLookupId] = useState(sessionIdFromUrl);
+  const [sessionId, setSessionId] = useState(() => urlParam("session_id"));
+  const [lookupId, setLookupId] = useState(() => urlParam("session_id"));
   const [refreshKey, setRefreshKey] = useState(0);
   const [session, setSession] = useState<Session | null>(null);
   const [message, setMessage] = useState("");
@@ -239,7 +228,7 @@ export default function Requirements() {
     setSessionId(id);
     setLookupId(id);
     setRefreshKey((value) => value + 1);
-    rememberSessionId(id);
+    rememberSessionId("requirements", id);
   }
 
   async function post(path: string, body?: unknown) {
@@ -584,7 +573,7 @@ export default function Requirements() {
                 setLookupId("");
                 setMessage("");
                 setError("");
-                rememberSessionId("");
+                rememberSessionId("requirements", "");
               }}
             >
               Start a new session

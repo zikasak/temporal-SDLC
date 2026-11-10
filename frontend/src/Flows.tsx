@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { errorMessage, failure, readBody } from "./api";
+import { errorMessage, failure, isObject, readBody } from "./api";
 import { repositorySelection, type RepositorySelection } from "./github";
 import { onboardingLink } from "./Onboarding";
 import { questionList } from "./Questions";
@@ -97,10 +97,6 @@ const POLL_MS = 10000;
 
 function text(value: unknown) {
   return typeof value === "string" && value ? value : null;
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }
 
 function typeLabel(type: string) {

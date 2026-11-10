@@ -11,6 +11,21 @@ An API change goes the whole way, starting from the contract its repository hold
 [Changing an existing API](#changing-an-existing-api).
 A documentation task has one author and no service, tests or check; see
 [Changing documentation only](#changing-documentation-only).
+The workflow class is in `backend/app/delivery/workflows.py`: its run, the pipeline of each
+task kind and the retries. Its rounds are mixins in `backend/app/delivery/flow/`, all working
+on the workflow's one `state`:
+
+| Module | What it holds |
+| --- | --- |
+| `stages.py` | The implementation and test authors, their context and child workflow IDs |
+| `change.py` | Routing, the seam and the stage reviews of a change |
+| `baseline.py` | The baseline run of a change's tests and its correction rounds |
+| `verification.py` | Verification, diagnosis and the repair rounds |
+| `review.py` | Code review rounds, corrections and fix rounds from instructions |
+| `publication.py` | The push and the pull request |
+| `mention_rounds.py` | Mentions on the pull request and their fix rounds |
+| `waiting.py` | Waiting for the user's decision or the end of the pull request |
+
 The delivery keeps each stage's result or error in its own `DeliveryProgress`, which the
 session GET endpoint merges into the session it reports. The design session stays open
 until its delivery ends; see [One workflow tree per task](#one-workflow-tree-per-task).
@@ -1218,7 +1233,7 @@ passing when:
 - diagnosis fails (`verification_error` is set);
 - the repair stage fails: the previous image stays published, the stage's error is
   recorded and the existing manual retry for that stage is offered;
-- `MAX_REPAIR_ROUNDS` (5, in `app/delivery/workflows.py`) rounds did not produce a pass
+- `MAX_REPAIR_ROUNDS` (5, in `app/delivery/flow/verification.py`) rounds did not produce a pass
   (`verification_error` is set and the last failed result is kept).
 
 To exercise real Docker networking, the trusted runner and Surefire collection without

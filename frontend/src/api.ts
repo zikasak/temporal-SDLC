@@ -22,3 +22,7 @@ export function failure(error: unknown, fallback: string) {
   }
   return error instanceof Error ? error.message : fallback;
 }
+
+export function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}

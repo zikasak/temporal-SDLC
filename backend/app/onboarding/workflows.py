@@ -10,7 +10,6 @@ with workflow.unsafe.imports_passed_through():
     from app.api_design.models import empty_api
     from app.architecture.models import normalize_structure, render_architecture_markdown
     from app.delivery.models import DeliveryState, TaskSpec
-    from app.llm.questions import answers_text
     from app.onboarding.activities import (
         find_onboarding_artifacts, inspect_onboarding_contract, onboarding_turn,
     )
@@ -21,9 +20,9 @@ with workflow.unsafe.imports_passed_through():
     from app.requirements.document import render_requirements_markdown
     from app.temporal.activities import checkout_repository, update_repository_checkout
     from app.temporal.closing import end_cancelled
+    from app.temporal.interview import Interview, assistant_message
     from app.temporal.workflows import (
-        FLOW_ABANDONED, FLOW_ABANDONED_PATCH, FLOW_CANCELLED, SESSION_IDLE_TIMEOUT, _Delivering, assistant_message, check_answers, check_message,
-        pending_questions,
+        FLOW_ABANDONED, FLOW_ABANDONED_PATCH, FLOW_CANCELLED, SESSION_IDLE_TIMEOUT, _Delivering,
     )
 
 REVIEW_TOO_LONG = "This review is too long to continue. Finalize the onboarding."
@@ -42,7 +41,7 @@ CONTRACT_UNKNOWN = ("The existing contract could not be read, so only replacing 
 
 
 @workflow.defn
-class OnboardingWorkflow(_Delivering):
+class OnboardingWorkflow(Interview, _Delivering):
     """One onboarding of an existing repository: the branch is checked out, the user
     confirms replacing a contract, contract tests or Dockerfile it already has, the LLM
     drafts the requirements, the API and the language from the code, and the user reviews
@@ -50,6 +49,9 @@ class OnboardingWorkflow(_Delivering):
     hands it to a DeliveryWorkflow, which writes and verifies the contract tests and the
     Dockerfile against the existing code, reviews and publishes them; the onboarding stays
     open as long as its delivery is."""
+
+    TOO_LONG = REVIEW_TOO_LONG
+    CLOSED = "This onboarding is no longer accepting messages."
 
     @workflow.init
     def __init__(self, state: OnboardingState) -> None:
@@ -267,38 +269,6 @@ class OnboardingWorkflow(_Delivering):
             raise ValueError("The onboarding is not waiting for a message.")
         if self.state.messages and self.state.messages[-1]["role"] == "user":
             raise ValueError("Retry the unanswered message before sending another.")
-
-    @workflow.update
-    async def send_message(self, message: str) -> None:
-        self._updates += 1
-        async with self._turn_lock:
-            if self.state.status != "interviewing":
-                raise ApplicationError("This onboarding is no longer accepting messages.")
-            self.state.messages.append({"role": "user", "content": message.strip()})
-            await self._turn()
-
-    @send_message.validator
-    def validate_send_message(self, message: str) -> None:
-        self._check_open()
-        if pending_questions(self.state.messages):
-            raise ValueError("Answer the interviewer's questions first.")
-        check_message(self.state.messages, message.strip(), REVIEW_TOO_LONG)
-
-    @workflow.update
-    async def answer_questions(self, answers: list[str]) -> None:
-        self._updates += 1
-        async with self._turn_lock:
-            if self.state.status != "interviewing":
-                raise ApplicationError("This onboarding is no longer accepting messages.")
-            questions = pending_questions(self.state.messages)
-            self.state.messages.append(
-                {"role": "user", "content": answers_text(questions, answers)})
-            await self._turn()
-
-    @answer_questions.validator
-    def validate_answer_questions(self, answers: list[str]) -> None:
-        self._check_open()
-        check_answers(self.state.messages, answers, REVIEW_TOO_LONG)
 
     def _retryable(self) -> bool:
         return self.state.status == "interviewing" and (

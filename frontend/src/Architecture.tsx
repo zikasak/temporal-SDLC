@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import Markdown from "react-markdown";
-import { errorMessage, failure, readBody } from "./api";
+import { errorMessage, failure, isObject, readBody } from "./api";
 import ForkButton from "./ForkButton";
 import { AskedQuestions, QuestionForm, questionList, type Question } from "./Questions";
 import { RepositorySummary } from "./RepositoryPicker";
@@ -8,6 +8,7 @@ import {
   repositoryCheckout, repositorySelection, type RepositoryCheckout, type RepositorySelection,
 } from "./github";
 import { markdownComponents, remarkPlugins } from "./markdown";
+import { rememberSessionId, urlParam } from "./url";
 
 type SessionStatus =
   | "preparing" | "drafting" | "interviewing" | "turn_running" | "finalizing" | "completed"
@@ -56,22 +57,6 @@ const statusLabels: Record<SessionStatus, string> = {
   skipped: "Skipped",
   failed: "Failed",
 };
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function urlParam(name: string) {
-  return new URLSearchParams(window.location.search).get(name) ?? "";
-}
-
-function rememberSessionId(sessionId: string) {
-  const url = new URL(window.location.href);
-  url.searchParams.set("mode", "architecture");
-  if (sessionId) url.searchParams.set("session_id", sessionId);
-  else url.searchParams.delete("session_id");
-  window.history.replaceState(null, "", url);
-}
 
 /** The architecture structure in `value`, or null when it is not one. */
 export function architectureStructure(value: unknown): ArchitectureStructure | null {
@@ -258,7 +243,7 @@ export default function Architecture() {
     setSessionId(id);
     setLookupId(id);
     setRefreshKey((value) => value + 1);
-    rememberSessionId(id);
+    rememberSessionId("architecture", id);
   }
 
   async function post(path: string, body?: unknown) {
