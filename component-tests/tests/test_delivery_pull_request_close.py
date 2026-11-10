@@ -72,6 +72,18 @@ async def waiting_delivery(
                 pass
 
 
+async def wait_cancelled(
+    env: WorkflowEnvironment, handle: WorkflowHandle[Any, Any], what: str,
+) -> WorkflowExecutionStatus:
+    """Wait for a run that ends cancelled to close, with time skipping off.
+
+    The run ends cancelled by asking the server to cancel itself. While that request is
+    pending the run waits on nothing, so the time-skipping server may skip straight to its
+    default execution timeout and end the run TIMED_OUT instead."""
+    with env.auto_time_skipping_disabled():
+        return await wait_closed(handle, what)
+
+
 async def lifetime(handle: WorkflowHandle[Any, Any]) -> timedelta:
     """How long the execution ran, on the Temporal server's (time-skipping) clock."""
     desc = await handle.describe()
@@ -95,7 +107,11 @@ class TestMergeOrCloseFoundByTheCheck:
     ) -> None:
         checks = PullRequestChecks(always(CLOSED_UNMERGED))
         async with waiting_delivery(skipping_env, delivery_state(), checks) as handle:
-            status = await wait_closed(handle, "the delivery did not stop waiting for a closed pull request")
+            await wait_started(handle)
+            # Skip only to the first check; the cancellation it leads to runs unskipped.
+            await skipping_env.sleep(PULL_REQUEST_CHECK_INTERVAL)
+            status = await wait_cancelled(
+                skipping_env, handle, "the delivery did not stop waiting for a closed pull request")
             assert status == WorkflowExecutionStatus.CANCELED
             assert checks.calls[:1] == [("acme/widgets", 7)]
             assert await lifetime(handle) <= PULL_REQUEST_CHECK_INTERVAL + SLACK
@@ -152,7 +168,7 @@ class TestMergeOrCloseReportedBySignal:
         async with waiting_delivery(skipping_env, delivery_state(number=7), checks) as handle:
             await wait_started(handle)
             await handle.signal(DeliveryWorkflow.pull_request_closed, args=[7, False])
-            status = await wait_closed(handle, "the delivery did not stop waiting after the close signal")
+            status = await wait_cancelled(skipping_env, handle, "the delivery did not stop waiting after the close signal")
             assert status == WorkflowExecutionStatus.CANCELED
             assert await lifetime(handle) < PULL_REQUEST_CHECK_INTERVAL
 
@@ -193,7 +209,7 @@ class TestDeliveryAlreadyWaiting:
         async with waiting_delivery(skipping_env, state, checks) as handle:
             await wait_started(handle)
             await handle.signal(DeliveryWorkflow.pull_request_closed, args=[12, False])
-            status = await wait_closed(handle, "the resumed delivery did not end cancelled after the close")
+            status = await wait_cancelled(skipping_env, handle, "the resumed delivery did not end cancelled after the close")
             assert status == WorkflowExecutionStatus.CANCELED
 
 
@@ -217,7 +233,7 @@ class TestOnboardingDelivery:
         async with waiting_delivery(skipping_env, state, checks) as handle:
             await wait_started(handle)
             await handle.signal(DeliveryWorkflow.pull_request_closed, args=[3, False])
-            status = await wait_closed(handle, "the onboarding did not end cancelled after the close")
+            status = await wait_cancelled(skipping_env, handle, "the onboarding did not end cancelled after the close")
             assert status == WorkflowExecutionStatus.CANCELED
 
 
@@ -243,7 +259,7 @@ class TestOpenReviewFindingsStayRaised:
         async with waiting_delivery(skipping_env, state, checks) as handle:
             await wait_started(handle)
             await handle.signal(DeliveryWorkflow.pull_request_closed, args=[5, False])
-            status = await wait_closed(handle, "the delivery with open findings did not end cancelled after the close")
+            status = await wait_cancelled(skipping_env, handle, "the delivery with open findings did not end cancelled after the close")
             assert status == WorkflowExecutionStatus.CANCELED
             assert await lifetime(handle) < PULL_REQUEST_CHECK_INTERVAL
             reported = await handle.query(DeliveryWorkflow.get_state)
