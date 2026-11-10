@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import Markdown from "react-markdown";
-import { errorMessage, failure, readBody } from "./api";
+import { errorMessage, failure, isObject, readBody } from "./api";
 import { ApiModelSection, isApiModel, type ApiModel } from "./ApiModel";
 import { ArchitectureSection, architectureStructure, type ArchitectureStructure } from "./Architecture";
 import {
@@ -14,6 +14,7 @@ import {
   repositoryCheckout, repositorySelection, selectionInput, type RepositoryCheckout, type RepositorySelection,
 } from "./github";
 import { markdownComponents, remarkPlugins } from "./markdown";
+import { rememberSessionId, urlParam } from "./url";
 
 type OnboardingStatus =
   | "preparing"
@@ -121,22 +122,6 @@ export async function startOnboarding(repository: RepositorySelection): Promise<
   return sessionIdResult(body);
 }
 
-function sessionIdFromUrl() {
-  return new URLSearchParams(window.location.search).get("session_id") ?? "";
-}
-
-function rememberSessionId(sessionId: string) {
-  const url = new URL(window.location.href);
-  url.searchParams.set("mode", "onboarding");
-  if (sessionId) url.searchParams.set("session_id", sessionId);
-  else url.searchParams.delete("session_id");
-  window.history.replaceState(null, "", url);
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function isRequirement(item: unknown): item is Requirement {
   return isObject(item) && typeof item.id === "string" &&
     categories.some(([category]) => category === item.category) &&
@@ -196,8 +181,8 @@ function artifactList(artifacts: Artifact[]) {
 }
 
 export default function Onboarding() {
-  const [sessionId, setSessionId] = useState(sessionIdFromUrl);
-  const [lookupId, setLookupId] = useState(sessionIdFromUrl);
+  const [sessionId, setSessionId] = useState(() => urlParam("session_id"));
+  const [lookupId, setLookupId] = useState(() => urlParam("session_id"));
   const [refreshKey, setRefreshKey] = useState(0);
   const [session, setSession] = useState<Session | null>(null);
   const [message, setMessage] = useState("");
@@ -246,7 +231,7 @@ export default function Onboarding() {
     setSessionId(id);
     setLookupId(id);
     setRefreshKey((value) => value + 1);
-    rememberSessionId(id);
+    rememberSessionId("onboarding", id);
   }
 
   async function post(path: string, body?: unknown) {
@@ -400,7 +385,7 @@ export default function Onboarding() {
     setLookupId("");
     setMessage("");
     setError("");
-    rememberSessionId("");
+    rememberSessionId("onboarding", "");
   }
 
   // Scroll to the latest turn, not past it to the drafts below.

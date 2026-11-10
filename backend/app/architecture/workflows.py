@@ -13,14 +13,11 @@ with workflow.unsafe.imports_passed_through():
         architecture_problems, can_skip,
     )
     from app.architecture.source import handed_design
-    from app.llm.questions import answers_text
     from app.temporal.activities import register_session
     from app.temporal.closing import end_cancelled
     from app.temporal.execution_fields import execution_fields
-    from app.temporal.workflows import (
-        FLOW_ABANDONED, FLOW_ABANDONED_PATCH, _check_out, assistant_message, check_answers,
-        check_message, pending_questions,
-    )
+    from app.temporal.interview import Interview, assistant_message
+    from app.temporal.workflows import FLOW_ABANDONED, FLOW_ABANDONED_PATCH, _check_out
 
 DISCUSSION_TOO_LONG = "This discussion is too long to continue. Finalize the architecture."
 DRAFT_FAILED = "The LLM could not draft the architecture. Retry."
@@ -30,13 +27,16 @@ NO_SKIP = ("A new service always goes through the architecture stage; only the s
 
 
 @workflow.defn
-class ArchitectureWorkflow:
+class ArchitectureWorkflow(Interview):
     """One architecture session of a task: the LLM drafts the top-level architecture from
     the requirements (an API change starting from the repository's existing one, or
     proposing to skip the stage instead), and the user reviews it in a conversation of
     updates. Finalizing writes architecture.md and architecture.json; finalizing or
     confirming the skip of an API change ends the session and hands the task's API design
     to the requirements session, whose child it becomes. The session has no idle timeout."""
+
+    INTERVIEWER = "architect"
+    TOO_LONG = DISCUSSION_TOO_LONG
 
     @workflow.init
     def __init__(self, state: ArchitectureState) -> None:
@@ -151,47 +151,17 @@ class ArchitectureWorkflow:
         if self.state.messages and self.state.messages[-1]["role"] == "user":
             raise ValueError("Retry the unanswered message before sending another.")
 
-    def _decline_skip(self) -> None:
+    def _questions_open(self) -> bool:
+        # A message while a skip proposal is open declines the proposal instead.
+        return super()._questions_open() and self.state.skip_proposal is None
+
+    def _user_replies(self) -> None:
+        """A message or answers while a skip proposal is open decline the proposal and
+        say what the architecture should cover."""
         if self.state.skip_proposal is not None:
             workflow.logger.info("The user declined skipping the stage")
             self.state.skip_proposal = None
             self.state.skip_declined = True
-
-    @workflow.update
-    async def send_message(self, message: str) -> None:
-        """The user's message; while a skip proposal is open, it declines the proposal and
-        says what the architecture should cover."""
-        self._updates += 1
-        async with self._turn_lock:
-            if self.state.status != "interviewing":
-                raise ApplicationError("This session is no longer accepting messages.")
-            self._decline_skip()
-            self.state.messages.append({"role": "user", "content": message.strip()})
-            await self._turn()
-
-    @send_message.validator
-    def validate_send_message(self, message: str) -> None:
-        self._check_open()
-        if pending_questions(self.state.messages) and self.state.skip_proposal is None:
-            raise ValueError("Answer the architect's questions first.")
-        check_message(self.state.messages, message.strip(), DISCUSSION_TOO_LONG)
-
-    @workflow.update
-    async def answer_questions(self, answers: list[str]) -> None:
-        self._updates += 1
-        async with self._turn_lock:
-            if self.state.status != "interviewing":
-                raise ApplicationError("This session is no longer accepting messages.")
-            questions = pending_questions(self.state.messages)
-            self._decline_skip()
-            self.state.messages.append(
-                {"role": "user", "content": answers_text(questions, answers)})
-            await self._turn()
-
-    @answer_questions.validator
-    def validate_answer_questions(self, answers: list[str]) -> None:
-        self._check_open()
-        check_answers(self.state.messages, answers, DISCUSSION_TOO_LONG)
 
     def _retryable(self) -> bool:
         return self.state.status == "interviewing" and (
