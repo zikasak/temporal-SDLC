@@ -18,10 +18,13 @@ from app.requirements.models import RequirementsState
 from app.temporal import sessions
 from app.temporal.executions import ensure_search_attributes
 from app.temporal.sessions import InvalidForkPoint
+from app.temporal import workflows as session_workflows
 from app.temporal.workflows import RequirementsWorkflow
 from tests.pipeline import abandoned
 
 TASK_QUEUE = "requirements-test"
+# How long a session waits for the user before it expires, in the tests that let it.
+IDLE_TIMEOUT = timedelta(seconds=3)
 DOCUMENT = {"document_id": "0" * 32, "filename": "requirements.md",
             "content_type": "text/markdown", "size_bytes": 10, "revision": 1}
 
@@ -36,6 +39,7 @@ class FakeActivities:
         self.kind: str | None = "new_service"
         self.checkouts: list[str] = []
         self.registered: list[str] = []
+        self.turns = 0
 
     @activity.defn(name="checkout_repository")
     async def checkout_repository(self, session_id: str, repository: dict[str, Any]) -> dict[str, Any]:
@@ -47,6 +51,7 @@ class FakeActivities:
         self, messages: list[dict[str, Any]], requirements: list[dict[str, Any]],
         kind: str | None, retired: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        self.turns += 1
         await self.release_turn.wait()
         if self.fail_turn:
             raise ApplicationError("model unavailable", non_retryable=True)
@@ -125,13 +130,14 @@ async def server():
 
 
 @asynccontextmanager
-async def workers(env):
+async def workers(env, **options):
     activities = FakeActivities()
     async with Worker(
         env.client, task_queue=TASK_QUEUE, workflows=[RequirementsWorkflow, FakeApiDesign, FakeArchitecture],
         activities=[activities.requirements_turn, activities.write_requirements_document,
                     activities.checkout_repository, activities.read_requirements_document,
                     activities.register_session],
+        **options,
     ):
         yield activities
 
@@ -145,6 +151,18 @@ async def worker(env):
 @pytest.fixture
 async def live(server):
     async with workers(server) as activities:
+        yield activities
+
+
+@pytest.fixture
+async def idle(server, monkeypatch):
+    """Workers on the dev server, whose sessions expire after IDLE_TIMEOUT. A session that
+    expires with nothing delivered ends by asking the server to cancel it, and a
+    time-skipping server skipping past the idle timeout with `env.sleep` can hang on that
+    request until the call fails, so the expiry is waited for in real time instead. The
+    workflows run unsandboxed so that they read the shortened timeout."""
+    monkeypatch.setattr(session_workflows, "SESSION_IDLE_TIMEOUT", IDLE_TIMEOUT)
+    async with workers(server, workflow_runner=UnsandboxedWorkflowRunner()) as activities:
         yield activities
 
 
@@ -263,10 +281,25 @@ async def test_failed_turn_keeps_message_and_can_retry(env, worker):
     await handle.terminate()
 
 
-async def test_idle_session_auto_finalizes(env, worker):
-    handle = await start(env)
+async def test_answer_in_the_first_task_runs_one_turn(server):
+    """An answer the server hands over with the session's start, as when its worker is
+    slow to pick the session up, is answered by the update alone."""
+    handle = await start(server)
+    answered = asyncio.create_task(
+        handle.execute_update(RequirementsWorkflow.answer_questions, ["Book rooms"]))
+    # No worker polls yet, so the update waits with the start for the first task.
+    await asyncio.sleep(0.5)
+    async with workers(server) as activities:
+        await answered
+        state = await wait_for_status(handle, "interviewing")
+        await handle.terminate()
+    assert [item["role"] for item in state.messages] == ["assistant", "user", "assistant"]
+    assert activities.turns == 1
+
+
+async def test_idle_session_auto_finalizes(server, idle):
+    handle = await start(server)
     await handle.execute_update(RequirementsWorkflow.answer_questions, ["Book rooms"])
-    await env.sleep(timedelta(hours=25))
     await abandoned(handle)
     assert (await handle.query(RequirementsWorkflow.get_state)).document == DOCUMENT
 
@@ -299,16 +332,15 @@ async def test_finalized_session_starts_its_api_design(server, live, repository_
     assert await handle.result() == DOCUMENT
 
 
-async def test_expired_session_starts_no_api_design(env, worker, repository_selection):
-    handle = await start(env, RequirementsState(messages=[
+async def test_expired_session_starts_no_api_design(server, idle, repository_selection):
+    handle = await start(server, RequirementsState(messages=[
         {"role": "assistant", "content": "Hello"}], repository=repository_selection))
     await wait_for_status(handle, "interviewing")
     await handle.execute_update(RequirementsWorkflow.send_message, "Book rooms")
-    await env.sleep(timedelta(hours=25))
     await abandoned(handle)
     state = await handle.query(RequirementsWorkflow.get_state)
     assert state.status == "completed"
-    assert state.api_design_session_id is None and worker.registered == []
+    assert state.api_design_session_id is None and idle.registered == []
 
 
 async def test_kind_must_be_recorded_before_the_document_is_generated(env, worker):
@@ -330,19 +362,17 @@ async def test_kind_must_be_recorded_before_the_document_is_generated(env, worke
     assert state.document == DOCUMENT and state.kind == "new_service"
 
 
-async def test_idle_session_without_kind_fails(env, worker):
-    handle = await start(env)
-    worker.kind = None
+async def test_idle_session_without_kind_fails(server, idle):
+    handle = await start(server)
+    idle.kind = None
     await handle.execute_update(RequirementsWorkflow.answer_questions, ["Book rooms"])
-    await env.sleep(timedelta(hours=25))
     await abandoned(handle)
-    assert worker.documents == []
+    assert idle.documents == []
     assert (await handle.query(RequirementsWorkflow.get_state)).status == "failed"
 
 
-async def test_idle_session_without_requirements_fails(env, worker):
-    handle = await start(env)
-    await env.sleep(timedelta(hours=25))
+async def test_idle_session_without_requirements_fails(server, idle):
+    handle = await start(server)
     await abandoned(handle)
     state = await handle.query(RequirementsWorkflow.get_state)
     assert state.status == "failed"

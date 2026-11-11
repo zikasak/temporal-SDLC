@@ -132,6 +132,47 @@ export type DeliveryProgress = {
   mentions: PullRequestMention[];
   // Whether an onboarding changed the existing code after the user confirmed a bug in it.
   existing_code_changed: boolean;
+  // The repository's CI on the last pushed commit.
+  ci: CiChecks | null;
+};
+
+const ciStatuses = ["pending", "passed", "failed", "inconclusive", "none", "timed_out", "unavailable"] as const;
+type CiStatus = typeof ciStatuses[number];
+type CiChecks = {
+  commit: string;
+  status: CiStatus;
+  failed: { name: string; url: string | null }[];
+  error: string | null;
+  fix_round: number;
+};
+
+function ciChecks(value: unknown): CiChecks | null {
+  if (!value || typeof value !== "object") return null;
+  const item = value as Record<string, unknown>;
+  if (typeof item.commit !== "string" || !ciStatuses.includes(item.status as CiStatus)) return null;
+  const checks = Array.isArray(item.checks) ? item.checks : [];
+  const failed = checks.flatMap((check) => {
+    if (!check || typeof check !== "object") return [];
+    const entry = check as Record<string, unknown>;
+    if (typeof entry.name !== "string"
+      || !["failure", "timed_out", "startup_failure", "action_required"].includes(entry.conclusion as string)) return [];
+    const url = typeof entry.url === "string" && entry.url.startsWith("https://github.com/") ? entry.url : null;
+    return [{ name: entry.name, url }];
+  });
+  return {
+    commit: item.commit, status: item.status as CiStatus, failed, error: text(item.error),
+    fix_round: typeof item.fix_round === "number" ? item.fix_round : 0,
+  };
+}
+
+const ciText: Record<CiStatus, string> = {
+  pending: "CI is running on the pushed commit…",
+  passed: "CI passed on the pushed commit.",
+  failed: "CI failed on the pushed commit.",
+  inconclusive: "CI finished without a verdict on the pushed commit, such as a cancelled check.",
+  none: "The repository ran no CI checks on the pushed commit.",
+  timed_out: "CI did not finish on the pushed commit within three hours.",
+  unavailable: "The CI of the pushed commit could not be read.",
 };
 
 export type PullRequestMention = {
@@ -348,6 +389,7 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
       ? value.pull_request_status as PublicationStatus : "not_applicable",
     mentions: pullRequestMentions(value.mentions),
     existing_code_changed: value.existing_code_changed === true,
+    ci: ciChecks(value.ci),
   };
 }
 
@@ -733,6 +775,19 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
       <a href={progress.pull_request.url} target="_blank" rel="noreferrer">
         #{progress.pull_request.number} {progress.pull_request.title}
       </a>{" "}into <code>{progress.pull_request.base}</code>
+    </p>}
+    {progress.pull_request && progress.ci && <p
+      className={`verification-outcome ${progress.ci.status === "passed" ? "verification-passed" : progress.ci.status === "failed" ? "verification-failed" : ""}`}
+      role="status">
+      {ciText[progress.ci.status]} <code>{progress.ci.commit.slice(0, 12)}</code>
+      {progress.ci.fix_round > 0 && <> (pushed by automatic fix round {progress.ci.fix_round})</>}
+      {progress.ci.failed.length > 0 && <> Failed:{" "}
+        {progress.ci.failed.map((check, index) => <span key={index}>
+          {index > 0 && ", "}
+          {check.url ? <a href={check.url} target="_blank" rel="noreferrer">{check.name}</a> : check.name}
+        </span>)}
+      </>}
+      {progress.ci.error && <> {progress.ci.error}</>}
     </p>}
     {progress.pull_request_error && <div className="generation-failure">
       <p role="alert">{progress.pull_request_error} The push itself succeeded.</p>
