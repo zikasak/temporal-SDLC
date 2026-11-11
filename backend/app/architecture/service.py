@@ -13,6 +13,7 @@ from app.architecture.models import (
     render_architecture_markdown,
 )
 from app.config import TASK_QUEUE
+from app.requirements.lookup import source_session_lookup
 from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import execution_fields
 from app.temporal.registry import register
@@ -145,4 +146,6 @@ async def get_session(session_id: str) -> dict[str, Any]:
         "structure": structure,
         "architecture": render_architecture_markdown(structure) if structure else None,
         "problems": problems(state),
+        "lookup_requirements": await source_session_lookup(state.source_session_id,
+                                                           state.requirements),
     }

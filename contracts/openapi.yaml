@@ -9,7 +9,8 @@ paths:
     get:
       operationId: getApiDesignSessionsBySessionId
       summary: Get a API design session
-      description: The session's conversation, state and delivery progress.
+      description: The session's conversation, state and delivery progress, with lookup_requirements
+        for explaining requirement IDs.
       tags:
       - api-design
       parameters:
@@ -56,6 +57,10 @@ paths:
       - FR-55
       - FR-83
       - FR-85
+      - FR-118
+      - FR-119
+      - FR-120
+      - FR-123
   /api-design/sessions/{session_id}/answers:
     post:
       operationId: postApiDesignSessionsBySessionIdAnswers
@@ -613,9 +618,10 @@ paths:
     get:
       operationId: getArchitectureSessionsBySessionId
       summary: Get an architecture session
-      description: 'The session''s draft, conversation, skip proposal and state. Architecture
-        sessions are started only by their requirements session (there is no POST
-        /architecture/sessions) and have no idle timeout: they wait for the user indefinitely.'
+      description: 'The session''s draft, conversation, skip proposal and state, with
+        lookup_requirements for explaining requirement IDs. Architecture sessions
+        are started only by their requirements session (there is no POST /architecture/sessions)
+        and have no idle timeout: they wait for the user indefinitely.'
       tags:
       - architecture
       parameters:
@@ -657,6 +663,9 @@ paths:
       - FR-81
       - FR-84
       - FR-86
+      - FR-118
+      - FR-119
+      - FR-120
   /architecture/sessions/{session_id}/answers:
     post:
       operationId: postArchitectureSessionsBySessionIdAnswers
@@ -2132,7 +2141,8 @@ paths:
     get:
       operationId: getOnboardingSessionsBySessionId
       summary: Get an onboarding
-      description: The onboarding's drafts, conversation, state and delivery progress.
+      description: The onboarding's drafts, conversation, state and delivery progress,
+        with lookup_requirements for explaining requirement IDs.
       tags:
       - onboarding
       parameters:
@@ -2170,6 +2180,10 @@ paths:
       x-requirements:
       - FR-65
       - FR-66
+      - FR-118
+      - FR-119
+      - FR-120
+      - FR-123
   /onboarding/sessions/{session_id}/answers:
     post:
       operationId: postOnboardingSessionsBySessionIdAnswers
@@ -2915,7 +2929,8 @@ paths:
     get:
       operationId: getRequirementsSessionsBySessionId
       summary: Get a requirements session
-      description: The session's conversation, state and delivery progress.
+      description: The session's conversation, state and delivery progress, with lookup_requirements
+        for explaining requirement IDs.
       tags:
       - requirements
       parameters:
@@ -2961,6 +2976,10 @@ paths:
       - FR-54
       - FR-55
       - FR-81
+      - FR-118
+      - FR-119
+      - FR-120
+      - FR-123
   /requirements/sessions/{session_id}/answers:
     post:
       operationId: postRequirementsSessionsBySessionIdAnswers
@@ -4200,6 +4219,14 @@ components:
           items:
             $ref: '#/components/schemas/Requirement'
           description: Requirements of the repository's contract the change ends.
+        lookup_requirements:
+          type: array
+          items:
+            $ref: '#/components/schemas/LookupRequirement'
+          description: 'Every requirement a requirement ID mentioned in the conversation
+            or in the delivery''s agent questions can refer to: those recorded in
+            the session, the existing service''s and those the task retires (retired
+            true). Empty when there are none.'
         document:
           type: object
           description: The requirements document, once written.
@@ -4240,6 +4267,7 @@ components:
       - messages
       - requirements
       - retired
+      - lookup_requirements
     ApiDesignSession:
       type: object
       description: An API design session and its delivery.
@@ -4289,6 +4317,14 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Requirement'
+        lookup_requirements:
+          type: array
+          items:
+            $ref: '#/components/schemas/LookupRequirement'
+          description: 'Every requirement a requirement ID mentioned in the conversation
+            or in the delivery''s agent questions can refer to: those recorded in
+            the task''s requirements session, the existing service''s and those the
+            task retires (retired true). Empty when there are none.'
         api:
           type: object
           description: The designed endpoints and schemas.
@@ -4426,6 +4462,7 @@ components:
       - source_session_id
       - messages
       - requirements
+      - lookup_requirements
       - api
       - problems
       - verification_status
@@ -4877,6 +4914,14 @@ components:
             $ref: '#/components/schemas/Requirement'
           description: The drafted requirements, as corrected in the interview; empty
             for an architecture-only onboarding.
+        lookup_requirements:
+          type: array
+          items:
+            $ref: '#/components/schemas/LookupRequirement'
+          description: 'Every requirement a requirement ID mentioned in the conversation
+            or in the delivery''s agent questions can refer to: the drafted requirements
+            and the existing contract''s requirements, with retired false. Empty when
+            there are none.'
         architecture:
           type: string
           description: The architecture drafted by the LLM from the existing code,
@@ -4932,6 +4977,7 @@ components:
       - architecture_only
       - messages
       - requirements
+      - lookup_requirements
       - api
       - problems
     ContractDecisionInput:
@@ -5007,6 +5053,14 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Requirement'
+        lookup_requirements:
+          type: array
+          items:
+            $ref: '#/components/schemas/LookupRequirement'
+          description: 'Every requirement a requirement ID mentioned in the conversation
+            can refer to: those recorded in the task''s requirements session, the
+            existing service''s and those the task retires (retired true). Empty when
+            there are none.'
         architecture:
           type: string
           description: 'The current draft as Markdown, rendered from structure with
@@ -5055,6 +5109,7 @@ components:
       - kind
       - messages
       - requirements
+      - lookup_requirements
       - skip_declined
       - problems
     ArchitectureComponent:
@@ -5124,6 +5179,50 @@ components:
       - components
       - data_flows
       - technology_choices
+    LookupRequirement:
+      type: object
+      description: 'A requirement a requirement ID mentioned in the conversation can
+        refer to, for the web client to show on hover or tap. The list holds one entry
+        per ID and every requirement that applies, without a size limit: when the
+        session records a requirement with the same ID as one of the existing service,
+        the session''s version is listed, and an ID the task retires is listed with
+        retired true. For a session without an existing service (a new service, or
+        an onboarding of a branch without a contract), it holds only the requirements
+        recorded or drafted in the session.'
+      properties:
+        id:
+          type: string
+          description: 'The requirement''s ID in canonical form: upper-case prefix,
+            a dash and the number (PREFIX-NUMBER), such as FR-12, whatever form it
+            was recorded in. The client matches fr12, FR12 or fr-12 to it by upper-casing
+            and inserting the dash.'
+        category:
+          type: string
+          enum:
+          - functional
+          - non_functional
+          - technical
+        title:
+          type: string
+        description:
+          type: string
+        priority:
+          type: string
+          enum:
+          - must
+          - should
+          - could
+        retired:
+          type: boolean
+          description: True when the task retires this requirement of the existing
+            service.
+      required:
+      - id
+      - category
+      - title
+      - description
+      - priority
+      - retired
     Error:
       type: object
       properties:

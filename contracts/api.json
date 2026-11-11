@@ -1,7 +1,7 @@
 {
   "endpoints": [
     {
-      "description": "The session's conversation, state and delivery progress.",
+      "description": "The session's conversation, state and delivery progress, with lookup_requirements for explaining requirement IDs.",
       "error_statuses": [
         401,
         404,
@@ -30,7 +30,11 @@
         "FR-54",
         "FR-55",
         "FR-83",
-        "FR-85"
+        "FR-85",
+        "FR-118",
+        "FR-119",
+        "FR-120",
+        "FR-123"
       ],
       "response_array": false,
       "response_schema": "ApiDesignSession",
@@ -330,7 +334,7 @@
       "tag": "api-design"
     },
     {
-      "description": "The session's draft, conversation, skip proposal and state. Architecture sessions are started only by their requirements session (there is no POST /architecture/sessions) and have no idle timeout: they wait for the user indefinitely.",
+      "description": "The session's draft, conversation, skip proposal and state, with lookup_requirements for explaining requirement IDs. Architecture sessions are started only by their requirements session (there is no POST /architecture/sessions) and have no idle timeout: they wait for the user indefinitely.",
       "error_statuses": [
         401,
         404,
@@ -354,7 +358,10 @@
         "FR-80",
         "FR-81",
         "FR-84",
-        "FR-86"
+        "FR-86",
+        "FR-118",
+        "FR-119",
+        "FR-120"
       ],
       "response_array": false,
       "response_schema": "ArchitectureSession",
@@ -1145,7 +1152,7 @@
       "tag": "onboarding"
     },
     {
-      "description": "The onboarding's drafts, conversation, state and delivery progress.",
+      "description": "The onboarding's drafts, conversation, state and delivery progress, with lookup_requirements for explaining requirement IDs.",
       "error_statuses": [
         401,
         404,
@@ -1165,7 +1172,11 @@
       "request_schema": null,
       "requirement_ids": [
         "FR-65",
-        "FR-66"
+        "FR-66",
+        "FR-118",
+        "FR-119",
+        "FR-120",
+        "FR-123"
       ],
       "response_array": false,
       "response_schema": "OnboardingSession",
@@ -1542,7 +1553,7 @@
       "tag": "requirements"
     },
     {
-      "description": "The session's conversation, state and delivery progress.",
+      "description": "The session's conversation, state and delivery progress, with lookup_requirements for explaining requirement IDs.",
       "error_statuses": [
         401,
         404,
@@ -1570,7 +1581,11 @@
         "FR-52",
         "FR-54",
         "FR-55",
-        "FR-81"
+        "FR-81",
+        "FR-118",
+        "FR-119",
+        "FR-120",
+        "FR-123"
       ],
       "response_array": false,
       "response_schema": "RequirementsSession",
@@ -2769,6 +2784,13 @@
           "type": "Requirement"
         },
         {
+          "array": true,
+          "description": "Every requirement a requirement ID mentioned in the conversation or in the delivery's agent questions can refer to: those recorded in the session, the existing service's and those the task retires (retired true). Empty when there are none.",
+          "name": "lookup_requirements",
+          "required": true,
+          "type": "LookupRequirement"
+        },
+        {
           "array": false,
           "description": "The requirements document, once written.",
           "name": "document",
@@ -2895,6 +2917,13 @@
           "name": "requirements",
           "required": true,
           "type": "Requirement"
+        },
+        {
+          "array": true,
+          "description": "Every requirement a requirement ID mentioned in the conversation or in the delivery's agent questions can refer to: those recorded in the task's requirements session, the existing service's and those the task retires (retired true). Empty when there are none.",
+          "name": "lookup_requirements",
+          "required": true,
+          "type": "LookupRequirement"
         },
         {
           "array": false,
@@ -3736,6 +3765,13 @@
           "type": "Requirement"
         },
         {
+          "array": true,
+          "description": "Every requirement a requirement ID mentioned in the conversation or in the delivery's agent questions can refer to: the drafted requirements and the existing contract's requirements, with retired false. Empty when there are none.",
+          "name": "lookup_requirements",
+          "required": true,
+          "type": "LookupRequirement"
+        },
+        {
           "array": false,
           "description": "The architecture drafted by the LLM from the existing code, as Markdown with the fixed headings (Components with their responsibilities, Data flow, Technology choices), rendered from architecture_structure as corrected in the interview; written to contracts/architecture.md. Null until drafted.",
           "name": "architecture",
@@ -3879,6 +3915,13 @@
           "name": "requirements",
           "required": true,
           "type": "Requirement"
+        },
+        {
+          "array": true,
+          "description": "Every requirement a requirement ID mentioned in the conversation can refer to: those recorded in the task's requirements session, the existing service's and those the task retires (retired true). Empty when there are none.",
+          "name": "lookup_requirements",
+          "required": true,
+          "type": "LookupRequirement"
         },
         {
           "array": false,
@@ -4047,6 +4090,60 @@
           "name": "technology_choices",
           "required": true,
           "type": "ArchitectureTechnologyChoice"
+        }
+      ]
+    },
+    {
+      "description": "A requirement a requirement ID mentioned in the conversation can refer to, for the web client to show on hover or tap. The list holds one entry per ID and every requirement that applies, without a size limit: when the session records a requirement with the same ID as one of the existing service, the session's version is listed, and an ID the task retires is listed with retired true. For a session without an existing service (a new service, or an onboarding of a branch without a contract), it holds only the requirements recorded or drafted in the session.",
+      "name": "LookupRequirement",
+      "properties": [
+        {
+          "array": false,
+          "description": "The requirement's ID in canonical form: upper-case prefix, a dash and the number (PREFIX-NUMBER), such as FR-12, whatever form it was recorded in. The client matches fr12, FR12 or fr-12 to it by upper-casing and inserting the dash.",
+          "name": "id",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "enum": [
+            "functional",
+            "non_functional",
+            "technical"
+          ],
+          "name": "category",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "name": "title",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "name": "description",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "enum": [
+            "must",
+            "should",
+            "could"
+          ],
+          "name": "priority",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "True when the task retires this requirement of the existing service.",
+          "name": "retired",
+          "required": true,
+          "type": "boolean"
         }
       ]
     }

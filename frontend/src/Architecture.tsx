@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import Markdown from "react-markdown";
 import { errorMessage, failure, isObject, readBody } from "./api";
 import ForkButton from "./ForkButton";
 import { AskedQuestions, QuestionForm, questionList, type Question } from "./Questions";
@@ -7,7 +6,9 @@ import { RepositorySummary } from "./RepositoryPicker";
 import {
   repositoryCheckout, repositorySelection, type RepositoryCheckout, type RepositorySelection,
 } from "./github";
-import { markdownComponents, remarkPlugins } from "./markdown";
+import {
+  ConversationMarkdown, RequirementLookupProvider, lookupRequirementList, type LookupRequirement,
+} from "./RequirementLookup";
 import { rememberSessionId, urlParam } from "./url";
 
 type SessionStatus =
@@ -29,6 +30,8 @@ type Session = {
   kind: "new_service" | "api_change";
   messages: { role: "user" | "assistant"; content: string; questions: Question[] }[];
   requirements: Requirement[];
+  // Every requirement a mentioned requirement ID can refer to, shown on hover or tap.
+  lookup_requirements: LookupRequirement[];
   architecture: string | null;
   structure: ArchitectureStructure | null;
   skip_proposal: { reason: string; message_index: number } | null;
@@ -110,6 +113,8 @@ function sessionRecord(value: unknown): Session {
       role: item.role, content: item.content, questions: questionList(item.questions),
     })),
     requirements: value.requirements as Requirement[],
+    lookup_requirements: lookupRequirementList(
+      "lookup_requirements" in value ? value.lookup_requirements : null),
     architecture: typeof value.architecture === "string" ? value.architecture : null,
     structure: architectureStructure(value.structure),
     skip_proposal: proposal,
@@ -367,6 +372,7 @@ export default function Architecture() {
     : "";
 
   return (
+    <RequirementLookupProvider requirements={session?.lookup_requirements ?? null}>
     <main className="page-shell">
       <header className="page-heading">
         <h1>Architecture</h1>
@@ -505,9 +511,7 @@ export default function Architecture() {
                     <span className="turn-label">{item.role === "user" ? "You" : "Architect"}</span>
                     {item.role === "assistant" ? (
                       <div className="turn-content turn-markdown">
-                        <Markdown remarkPlugins={remarkPlugins} components={markdownComponents}>
-                          {item.content}
-                        </Markdown>
+                        <ConversationMarkdown>{item.content}</ConversationMarkdown>
                         <AskedQuestions questions={item.questions} />
                       </div>
                     ) : (
@@ -590,5 +594,6 @@ export default function Architecture() {
         </section>
       </div>
     </main>
+    </RequirementLookupProvider>
   );
 }

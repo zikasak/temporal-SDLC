@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import Markdown from "react-markdown";
 import { errorMessage, failure, isObject, readBody } from "./api";
 import { ApiModelSection, isApiModel, type ApiModel } from "./ApiModel";
 import { ArchitectureSection, architectureStructure, type ArchitectureStructure } from "./Architecture";
@@ -13,7 +12,9 @@ import RepositoryPicker, { RepositorySummary } from "./RepositoryPicker";
 import {
   repositoryCheckout, repositorySelection, selectionInput, type RepositoryCheckout, type RepositorySelection,
 } from "./github";
-import { markdownComponents, remarkPlugins } from "./markdown";
+import {
+  ConversationMarkdown, RequirementLookupProvider, lookupRequirementList, type LookupRequirement,
+} from "./RequirementLookup";
 import { rememberSessionId, urlParam } from "./url";
 
 type OnboardingStatus =
@@ -58,6 +59,8 @@ type Session = {
   // An assistant message's questions are answered by the next user message.
   messages: { role: "user" | "assistant"; content: string; questions: Question[] }[];
   requirements: Requirement[];
+  // Every requirement a mentioned requirement ID can refer to, shown on hover or tap.
+  lookup_requirements: LookupRequirement[];
   api: ApiModel;
   language: string | null;
   problems: string[];
@@ -167,6 +170,8 @@ function sessionRecord(value: unknown): Session {
       role: item.role, content: item.content, questions: questionList(item.questions),
     })),
     requirements: value.requirements as Requirement[],
+    lookup_requirements: lookupRequirementList(
+      "lookup_requirements" in value ? value.lookup_requirements : null),
     api: value.api,
     language: typeof value.language === "string" ? value.language : null,
     problems: value.problems.filter((item): item is string => typeof item === "string"),
@@ -418,6 +423,7 @@ export default function Onboarding() {
   );
 
   return (
+    <RequirementLookupProvider requirements={session?.lookup_requirements ?? null}>
     <main className="page-shell">
       <header className="page-heading">
         <h1>Onboarding</h1>
@@ -596,9 +602,7 @@ export default function Onboarding() {
                     <span className="turn-label">{item.role === "user" ? "You" : "Analyst"}</span>
                     {item.role === "assistant" ? (
                       <div className="turn-content turn-markdown">
-                        <Markdown remarkPlugins={remarkPlugins} components={markdownComponents}>
-                          {item.content}
-                        </Markdown>
+                        <ConversationMarkdown>{item.content}</ConversationMarkdown>
                         <AskedQuestions questions={item.questions} />
                       </div>
                     ) : (
@@ -723,6 +727,7 @@ export default function Onboarding() {
         </section>
       </div>
     </main>
+    </RequirementLookupProvider>
   );
 }
 

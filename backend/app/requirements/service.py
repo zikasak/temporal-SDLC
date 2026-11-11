@@ -9,6 +9,7 @@ from app.config import TASK_QUEUE
 from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, RetryStage
 from app.github.models import RepositorySelection
+from app.requirements.lookup import requirements_session_lookup
 from app.requirements.models import DIRECT_KINDS, RequirementsState, TaskKind
 from app.requirements.prompt import intake_messages, opening_message
 from app.temporal.client import connect_temporal
@@ -152,4 +153,6 @@ async def get_session(session_id: str) -> dict[str, Any]:
                 verification_status='waiting',
                 baseline_status='waiting' if state.kind == 'bugfix' else 'not_applicable',
                 routing_status='waiting' if state.kind == 'bugfix' else 'not_applicable'))
-    return {"session_id": session_id, **session, "delivery": delivery}
+    return {"session_id": session_id, **session,
+            "lookup_requirements": await requirements_session_lookup(session_id, state),
+            "delivery": delivery}

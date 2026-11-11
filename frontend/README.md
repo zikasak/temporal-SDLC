@@ -8,6 +8,10 @@ The **GitHub** tab connects one shared GitHub App installation: the app's ID and
 
 Requirements and API-design sessions check the branch out before the LLM starts, keep all LLM file access inside that checkout, and push the verified service and tests to a new `generated/…` branch; the app therefore needs the Contents read and write permission. Chat only records its selection. The connection is shared by every signed-in user. See [GitHub setup, permissions, security, and API details](../docs/github-connector.md).
 
+## Requirement IDs in conversations
+
+In the requirements, architecture, API design and onboarding conversations, and in the coding agents' questions in the delivery progress, requirement IDs the LLM mentions in its messages, questions and options (such as `FR-12`, `fr12` or `NFR-3`) are marked. Hovering over one or tapping it shows the requirement's ID, title, description, priority and category, marked "retired" when the task retires it, or "Unknown requirement" when no requirement has that ID. The text comes from the session response's `lookup_requirements` field.
+
 ## Sign-in
 
 Every API route except `POST /auth/login`, `POST /auth/logout`, `GET /auth/registration` and `POST /auth/register` requires a signed-in user. A login is an email address or a username, case-insensitive.

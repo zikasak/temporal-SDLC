@@ -865,5 +865,69 @@
     "priority": "must",
     "rationale": "Replaces TR-5: the user confirmed the manifest also subscribes to pull request events so merges and closes are seen.",
     "title": "Pull request permission, comment and pull request webhooks in the app manifest"
+  },
+  {
+    "category": "functional",
+    "description": "When an LLM's message text, question or question option mentions a requirement ID (for example FR-12, NFR-3 or TR-1), the web client marks the ID, and hovering over it with the mouse or tapping it shows that requirement's text.",
+    "id": "FR-117",
+    "priority": "must",
+    "rationale": "User: a user should see the requirement text on mouse hover/finger tap; IDs recognised in the message text, the questions and their options.",
+    "title": "Show requirement text on hover or tap"
+  },
+  {
+    "category": "functional",
+    "description": "Requirement IDs are shown with their text in the requirements, architecture, API design and onboarding conversations and in the coding agents' questions in the delivery progress.",
+    "id": "FR-118",
+    "priority": "must",
+    "rationale": "User chose every LLM conversation plus coding agents' questions.",
+    "title": "Conversations where requirement IDs are explained"
+  },
+  {
+    "category": "functional",
+    "description": "A mentioned ID is resolved against the requirements recorded in the session, the existing service's requirements and the requirements retired by the task, so the text of any of them is shown.",
+    "id": "FR-119",
+    "priority": "must",
+    "rationale": "User chose all of them.",
+    "title": "Which requirements can be looked up"
+  },
+  {
+    "category": "functional",
+    "description": "The responses of GET for requirements, architecture, API design and onboarding sessions include a new field listing every requirement a mentioned ID can refer to (recorded in the session, the existing service's and those retired by the task), each with its ID, title, description, priority, category and whether it is retired.",
+    "id": "FR-120",
+    "priority": "must",
+    "rationale": "User chose a new field in each session response.",
+    "title": "Lookup requirements in session responses"
+  },
+  {
+    "category": "functional",
+    "description": "The text shown on hover or tap for a requirement ID gives its ID, title, description, priority and category, and is marked \"retired\" when the task retires that requirement.",
+    "id": "FR-121",
+    "priority": "must",
+    "rationale": "User chose ID, title, description, priority and category with a retired marker.",
+    "title": "Content of the requirement popup"
+  },
+  {
+    "category": "functional",
+    "description": "A requirement-ID-like text (such as FR-999) that matches no known requirement is still marked, and hovering over or tapping it shows \"Unknown requirement\".",
+    "id": "FR-122",
+    "priority": "must",
+    "rationale": "User chose to mark unknown IDs and show \"Unknown requirement\".",
+    "title": "Unknown requirement IDs"
+  },
+  {
+    "category": "functional",
+    "description": "Requirement IDs mentioned in the coding agents' questions in the delivery progress are looked up in the requirements field of the requirements session or onboarding that the delivery belongs to.",
+    "id": "FR-123",
+    "priority": "must",
+    "rationale": "User chose to use the field of the session or onboarding the delivery belongs to.",
+    "title": "Delivery progress uses its session's lookup requirements"
+  },
+  {
+    "category": "functional",
+    "description": "Requirement IDs are recognised in any letter case and with or without the dash (for example FR-12, fr-12, FR12 and fr12), and each form is looked up as the same requirement (FR-12).",
+    "id": "FR-124",
+    "priority": "must",
+    "rationale": "User chose to also recognise lowercase forms and forms without the dash.",
+    "title": "Recognised forms of requirement IDs"
   }
 ]
