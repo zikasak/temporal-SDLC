@@ -141,6 +141,15 @@ Contract ambiguities and how the suite reads them:
   exist (404 or 405). The legacy `test_api_design_needs_an_existing_requirements_session` is a
   protected test that must stay unchanged; it only observes that this route answers 404 and
   does not claim any documented behaviour of the removed endpoint.
+- Flow closing (FR-101 to FR-108, FR-110 to FR-113, FR-116) and requirement lookup
+  (FR-117 to FR-124, `lookup_requirements`) happen on sessions that need GitHub, Temporal and an
+  LLM, and the webhook that detects a merged or closed pull request needs the webhook secret.
+  `tests/test_flow_closing_and_access.py` therefore checks only that an unsigned or wrongly
+  signed `pull_request` delivery (merged or closed) is rejected with 401, that `top_level` of
+  `GET /workflows` must be a boolean (422 otherwise; 200 or 503 for `true`/`false`), and
+  that every requirements and API design session action requires sign-in. The contract does
+  not say how an invalid `page_token` is reported before Temporal is contacted, so it is not
+  tested.
 - Unknown IDs are well formed (prefix and 32 hex digits) so that they are treated as
   unknown rather than malformed.
 

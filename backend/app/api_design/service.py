@@ -10,6 +10,7 @@ from temporalio.client import WorkflowUpdateStage
 from app.api_design.models import ApiDesignState
 from app.api_design.openapi import design_problems
 from app.config import TASK_QUEUE
+from app.requirements.lookup import source_session_lookup
 from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, RetryStage
 from app.temporal.client import connect_temporal
@@ -147,5 +148,9 @@ async def get_session(session_id: str) -> dict[str, Any]:
     if state.status == 'completed' and state.document:
         progress = (await delivery_service.get_progress(session_id)
                     or DeliveryProgress(verification_status='waiting'))
+    lookup = await source_session_lookup(
+        state.source_session_id, state.requirements,
+        (state.contract or {}).get("requirements"))
     return {"session_id": session_id, **session, **dataclasses.asdict(progress),
-            "problems": design_problems(state.api, state.language)}
+            "problems": design_problems(state.api, state.language),
+            "lookup_requirements": lookup}

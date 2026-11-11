@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import Markdown from "react-markdown";
 import { errorMessage, failure, isObject, readBody } from "./api";
 import { ApiModelSection, type ApiModel } from "./ApiModel";
 import { ArchitectureSection, architectureStructure, type ArchitectureStructure } from "./Architecture";
@@ -13,7 +12,9 @@ import {
 import {
   repositoryCheckout, repositorySelection, type RepositoryCheckout, type RepositorySelection,
 } from "./github";
-import { markdownComponents, remarkPlugins } from "./markdown";
+import {
+  ConversationMarkdown, RequirementLookupProvider, lookupRequirementList, type LookupRequirement,
+} from "./RequirementLookup";
 import { rememberSessionId, urlParam } from "./url";
 
 type SessionStatus = "preparing" | "interviewing" | "turn_running" | "finalizing" | "completed" | "failed";
@@ -39,6 +40,8 @@ type Session = DeliveryProgress & {
   // An assistant message's questions are answered by the next user message.
   messages: { role: "user" | "assistant"; content: string; questions: Question[] }[];
   requirements: Requirement[];
+  // Every requirement a mentioned requirement ID can refer to, shown on hover or tap.
+  lookup_requirements: LookupRequirement[];
   // The kind of task the requirements session recorded: a new service or an API change.
   kind: TaskKind | null;
   api: ApiModel;
@@ -112,6 +115,8 @@ function sessionRecord(value: unknown): Session {
       role: item.role, content: item.content, questions: questionList(item.questions),
     })),
     requirements: value.requirements as Requirement[],
+    lookup_requirements: lookupRequirementList(
+      "lookup_requirements" in value ? value.lookup_requirements : null),
     kind: taskKind(value.kind),
     api: value.api as ApiModel,
     language: typeof value.language === "string" ? value.language : null,
@@ -387,6 +392,7 @@ export default function ApiDesign() {
     : "";
 
   return (
+    <RequirementLookupProvider requirements={session?.lookup_requirements ?? null}>
     <main className="page-shell">
       <header className="page-heading">
         <h1>API design</h1>
@@ -537,9 +543,7 @@ export default function ApiDesign() {
                     <span className="turn-label">{item.role === "user" ? "You" : "Designer"}</span>
                     {item.role === "assistant" ? (
                       <div className="turn-content turn-markdown">
-                        <Markdown remarkPlugins={remarkPlugins} components={markdownComponents}>
-                          {item.content}
-                        </Markdown>
+                        <ConversationMarkdown>{item.content}</ConversationMarkdown>
                         <AskedQuestions questions={item.questions} />
                       </div>
                     ) : (
@@ -649,5 +653,6 @@ export default function ApiDesign() {
         </section>
       </div>
     </main>
+    </RequirementLookupProvider>
   );
 }

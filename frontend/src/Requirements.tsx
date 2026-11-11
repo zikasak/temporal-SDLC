@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import Markdown from "react-markdown";
 import { errorMessage, failure, readBody } from "./api";
 import {
   DeliveryResults, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress,
@@ -11,7 +10,9 @@ import IntakeForm, { type Intake } from "./Intake";
 import { AskedQuestions, QuestionForm, questionList, type Question } from "./Questions";
 import RepositoryPicker, { RepositorySummary } from "./RepositoryPicker";
 import { repositoryCheckout, repositorySelection, selectionInput, type RepositoryCheckout, type RepositorySelection } from "./github";
-import { markdownComponents, remarkPlugins } from "./markdown";
+import {
+  ConversationMarkdown, RequirementLookupProvider, lookupRequirementList, type LookupRequirement,
+} from "./RequirementLookup";
 import { rememberSessionId, urlParam } from "./url";
 
 type SessionStatus = "preparing" | "interviewing" | "turn_running" | "finalizing" | "completed" | "failed";
@@ -42,6 +43,8 @@ type Session = {
   requirements: Requirement[];
   // Requirements of the existing service that this change ends.
   retired: Requirement[];
+  // Every requirement a mentioned requirement ID can refer to, shown on hover or tap.
+  lookup_requirements: LookupRequirement[];
   kind: TaskKind | null;
   document: RequirementsDocument | null;
   error: string | null;
@@ -144,6 +147,8 @@ function sessionRecord(value: unknown): Session {
     })),
     requirements: value.requirements as Requirement[],
     retired: value.retired as Requirement[],
+    lookup_requirements: lookupRequirementList(
+      "lookup_requirements" in value ? value.lookup_requirements : null),
     kind: "kind" in value && typeof value.kind === "string" && value.kind in kindLabels
       ? (value.kind as TaskKind)
       : null,
@@ -482,6 +487,7 @@ export default function Requirements() {
     : "";
 
   return (
+    <RequirementLookupProvider requirements={session?.lookup_requirements ?? null}>
     <main className="page-shell">
       <header className="page-heading">
         <h1>Requirements interview</h1>
@@ -654,9 +660,7 @@ export default function Requirements() {
                     <span className="turn-label">{item.role === "user" ? "You" : "Analyst"}</span>
                     {item.role === "assistant" ? (
                       <div className="turn-content turn-markdown">
-                        <Markdown remarkPlugins={remarkPlugins} components={markdownComponents}>
-                          {item.content}
-                        </Markdown>
+                        <ConversationMarkdown>{item.content}</ConversationMarkdown>
                         <AskedQuestions questions={item.questions} />
                       </div>
                     ) : (
@@ -803,5 +807,6 @@ export default function Requirements() {
         </section>
       </div>
     </main>
+    </RequirementLookupProvider>
   );
 }

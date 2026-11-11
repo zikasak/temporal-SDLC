@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { RequirementText } from "./RequirementLookup";
 
 /** A question the model asked with ask_user: the user picks an option or writes their own. */
 export type Question = { question: string; options: string[] };
@@ -23,8 +24,10 @@ export function AskedQuestions({ questions }: { questions: Question[] }) {
   return (
     <ol className="asked-questions">
       {questions.map((item, index) => <li key={index}>
-        <strong>{item.question}</strong>
-        <span>{item.options.join(" · ")}</span>
+        <strong><RequirementText text={item.question} /></strong>
+        <span>{item.options.map((option, position) => <span key={position}>
+          {position > 0 && " · "}<RequirementText text={option} />
+        </span>)}</span>
       </li>)}
     </ol>
   );
@@ -83,12 +86,12 @@ export function QuestionField({ name, question, value, disabled, onChange }: {
 }) {
   return (
     <fieldset disabled={disabled}>
-      <legend>{question.question}</legend>
+      <legend><RequirementText text={question.question} /></legend>
       {question.options.map((option) => (
         <label key={option} className="question-option">
           <input type="radio" name={name} value={option} checked={value.option === option}
             onChange={() => onChange({ ...value, option })} />
-          <span>{option}</span>
+          <span><RequirementText text={option} /></span>
         </label>
       ))}
       <label className="question-option">

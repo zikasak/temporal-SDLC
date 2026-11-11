@@ -17,6 +17,7 @@ from app.onboarding.models import (
     FINISHED_STATUSES, OnboardingState, draft_kind_changed, drafted_architecture_only,
     onboarding_problems,
 )
+from app.requirements.lookup import checkout_requirements, lookup_requirements
 from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import execution_fields
 from app.temporal.registry import register
@@ -231,4 +232,7 @@ async def get_session(session_id: str) -> dict[str, Any]:
     return {"session_id": session_id, **session,
             "existing_contract": bool(state.existing_artifacts),
             "architecture": architecture,
-            "problems": onboarding_problems(state), "delivery": delivery}
+            "problems": onboarding_problems(state), "delivery": delivery,
+            # The drafted requirements and the existing contract's; none is retired.
+            "lookup_requirements": lookup_requirements(
+                state.requirements, await checkout_requirements(session_id))}

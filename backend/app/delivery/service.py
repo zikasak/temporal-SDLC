@@ -24,6 +24,7 @@ from app.delivery import mentions as mention_history
 from app.github.checkout import CheckoutError, checkout_path
 from app.github.errors import GitHubError
 from app.github.models import PullRequestMention
+from app.requirements.lookup import lookup_requirements
 from app.requirements.models import CHANGE_KINDS
 from app.routing.models import SEAM_MISMATCH
 from app.temporal import registry
@@ -88,6 +89,8 @@ async def follow_up_session(session_id: str) -> dict:
         'messages': [],
         'requirements': list(brief.get('requirements') or []),
         'retired': list(brief.get('retired') or []),
+        'lookup_requirements': lookup_requirements(
+            brief.get('requirements'), spec.requirements, brief.get('retired')),
         'document': None,
         'error': None,
         'forked_from': None,
