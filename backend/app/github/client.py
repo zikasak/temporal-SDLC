@@ -460,6 +460,8 @@ async def reply_to_review_comment(token: str, full_name: str, number: int, comme
 
 
 CHECK_RUNS_PAGE = 100
+# How many pages of check runs are read at most: a commit with more is judged on these.
+CHECK_RUN_PAGES = 10
 # Where GitHub redirects the download of an Actions job's log: signed storage URLs, which
 # are fetched without the installation token.
 LOG_HOST_SUFFIXES = (".actions.githubusercontent.com", ".blob.core.windows.net")
@@ -490,18 +492,26 @@ def _check_run(value: Any) -> dict[str, Any] | None:
     }
 
 
-async def list_check_runs(token: str, full_name: str, commit: str) -> list[dict[str, Any]]:
-    """The latest check run of each check of `commit`, such as each GitHub Actions job.
-    Needs the installation's checks: read permission; GitHub answers 403 without it."""
+async def list_check_runs(token: str, full_name: str,
+                          commit: str) -> tuple[list[dict[str, Any]], bool]:
+    """The latest check run of each check of `commit`, such as each GitHub Actions job,
+    from every page GitHub lists them on, up to CHECK_RUN_PAGES pages; and whether that
+    is all of them. Needs the installation's checks: read permission; GitHub answers 403
+    without it."""
     validate_selection(full_name, "main")
     if not COMMIT_PATTERN.fullmatch(commit):
         raise GitHubError(422, "Choose a full commit SHA.")
-    data, _ = await _request(
-        "GET", token, f"{_repo_path(full_name)}/commits/{commit}/check-runs",
-        params={"per_page": CHECK_RUNS_PAGE, "filter": "latest"})
-    if not isinstance(data, dict) or not isinstance(data.get("check_runs"), list):
-        raise _invalid_response()
-    return [run for run in map(_check_run, data["check_runs"]) if run is not None]
+    runs: list[dict[str, Any]] = []
+    for page in range(1, CHECK_RUN_PAGES + 1):
+        data, more = await _request(
+            "GET", token, f"{_repo_path(full_name)}/commits/{commit}/check-runs",
+            params={"per_page": CHECK_RUNS_PAGE, "filter": "latest", "page": page})
+        if not isinstance(data, dict) or not isinstance(data.get("check_runs"), list):
+            raise _invalid_response()
+        runs.extend(run for run in map(_check_run, data["check_runs"]) if run is not None)
+        if not more:
+            return runs, True
+    return runs, False
 
 
 def _log_location(response: httpx.Response) -> str:

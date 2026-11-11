@@ -35,9 +35,11 @@ ANSI = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\^\[\[[0-9;]*m')
 POST_STEPS = re.compile(r'^(?:Post job cleanup|##\[group\]Run actions/|Cleaning up orphan)')
 
 
-def summarize_checks(runs: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize_checks(runs: list[dict[str, Any]], complete: bool = True) -> dict[str, Any]:
     """How the commit's CI stands from its check runs: `status` (`pending`, `passed`,
-    `failed`, `inconclusive` or `none`) and the checks, the failed ones first."""
+    `failed`, `inconclusive` or `none`) and the checks, the failed ones first. Runs that
+    are not `complete`, only the first pages of more than were read, never pass: a check
+    left unread may have failed."""
     if not runs:
         return {'status': 'none', 'checks': []}
     finished = all(run['status'] == 'completed' for run in runs)
@@ -47,7 +49,7 @@ def summarize_checks(runs: list[dict[str, Any]]) -> dict[str, Any]:
         status = 'pending'
     elif failed:
         status = 'failed'
-    elif all(run['conclusion'] in PASSED for run in runs):
+    elif complete and all(run['conclusion'] in PASSED for run in runs):
         status = 'passed'
     else:
         status = 'inconclusive'
@@ -66,7 +68,7 @@ async def commit_checks(full_name: str, commit: str) -> dict[str, Any]:
     GitHub App may not read them."""
     token, _ = await _github_token()
     try:
-        runs = await github_client.list_check_runs(token, full_name, commit)
+        runs, complete = await github_client.list_check_runs(token, full_name, commit)
     except GitHubError as exc:
         activity.logger.warning('Could not read the checks of %s@%s: %s', full_name,
                                 commit[:12], exc)
@@ -75,7 +77,7 @@ async def commit_checks(full_name: str, commit: str) -> dict[str, Any]:
                                    non_retryable=True) from exc
         # The waiting delivery reads them again at its next interval.
         raise ApplicationError(str(exc), type='ChecksError', non_retryable=True) from exc
-    return summarize_checks(runs)
+    return summarize_checks(runs, complete)
 
 
 def log_excerpt(log: str, limit: int = LOG_CHARS) -> str:

@@ -29,6 +29,12 @@ def test_the_commit_ci_is_judged_from_all_of_its_checks(runs, status):
     assert summarize_checks(runs)["status"] == status
 
 
+def test_a_commit_with_unread_checks_never_passes():
+    assert summarize_checks([run("backend")], complete=False)["status"] == "inconclusive"
+    assert summarize_checks([run("backend", conclusion="failure")],
+                            complete=False)["status"] == "failed"
+
+
 def test_failed_checks_are_listed_first():
     checks = summarize_checks([run("a-lint"), run("backend", conclusion="failure")])["checks"]
     assert [check["name"] for check in checks] == ["backend", "a-lint"]
@@ -56,8 +62,8 @@ async def test_check_runs_of_a_commit_are_read(github_http):
          "app": {"slug": "github-actions"}, "output": {"title": None, "summary": None}},
         {"id": "not an id"},
     ]})
-    runs = await client.list_check_runs("token", "octocat/private-project", COMMIT)
-    assert runs == [{"id": 7, "name": "Backend tests", "status": "completed",
+    runs, complete = await client.list_check_runs("token", "octocat/private-project", COMMIT)
+    assert complete and runs == [{"id": 7, "name": "Backend tests", "status": "completed",
                      "conclusion": "failure",
                      "url": "https://github.com/octocat/private-project/actions/runs/1/job/7",
                      "app": "github-actions", "summary": None, "text": None}]
@@ -92,3 +98,33 @@ async def test_a_job_log_redirected_elsewhere_is_not_downloaded(github_http, loc
     with pytest.raises(GitHubError):
         await client.job_log_tail("token", "octocat/private-project", 7, 10)
     assert len(requests) == 1
+
+
+def page_of(runs: list[dict], more: bool):
+    def respond(request):
+        headers = {"link": f'<https://api.github.com{CHECKS_PATH}?page=9>; rel="next"'} if more else {}
+        return httpx.Response(200, headers=headers, json={"check_runs": runs})
+    return respond
+
+
+async def test_check_runs_are_read_from_every_page(github_http):
+    responses, requests = github_http
+    first = [{"id": index, "name": f"job {index}", "status": "completed",
+              "conclusion": "success"} for index in range(1, 101)]
+    failed = {"id": 101, "name": "Backend tests", "status": "completed", "conclusion": "failure"}
+    pages = iter([page_of(first, True), page_of([failed], False)])
+    responses[CHECKS_PATH] = lambda request: next(pages)(request)
+    runs, complete = await client.list_check_runs("token", "octocat/private-project", COMMIT)
+    assert complete and len(runs) == 101 and runs[-1]["conclusion"] == "failure"
+    # The next page is asked for by number, never by following GitHub's link.
+    assert [request.url.params["page"] for request in requests] == ["1", "2"]
+    assert summarize_checks(runs)["status"] == "failed"
+
+
+async def test_check_runs_beyond_the_page_limit_are_reported_incomplete(github_http, monkeypatch):
+    responses, requests = github_http
+    monkeypatch.setattr(client, "CHECK_RUN_PAGES", 2)
+    responses[CHECKS_PATH] = page_of([{"id": 1, "name": "job", "status": "completed",
+                                       "conclusion": "success"}], True)
+    runs, complete = await client.list_check_runs("token", "octocat/private-project", COMMIT)
+    assert not complete and len(runs) == 2 and len(requests) == 2
