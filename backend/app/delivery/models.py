@@ -29,6 +29,23 @@ TASK_IDLE_TIMEOUT = timedelta(days=14)
 # (the `pull_request_state` activity): the configured interval, one hour unless the
 # instance configures another (PULL_REQUEST_CHECK_INTERVAL_SECONDS).
 PULL_REQUEST_CHECK_INTERVAL = timedelta(seconds=PULL_REQUEST_CHECK_INTERVAL_SECONDS)
+# How often a delivery that waits after its push asks GitHub for the checks of the pushed
+# commit while they run, how long it waits for the first check to appear before it takes
+# the repository to have no CI, and how long it waits for them all to finish.
+CI_CHECK_INTERVAL = timedelta(minutes=2)
+CI_REGISTRATION_GRACE = timedelta(minutes=10)
+CI_CHECK_TIMEOUT = timedelta(hours=3)
+# How many fix rounds in a row a delivery starts on its own for failed CI checks, before
+# it only reports them; a push that passes CI, or one the user asked for, starts the
+# count over.
+MAX_CI_FIX_ROUNDS = 2
+# `pending` while the pushed commit's checks run or none has appeared yet; `passed` when
+# they all succeeded or were skipped; `failed` when one failed or timed out;
+# `inconclusive` when they finished otherwise, such as cancelled; `none` when no check
+# appeared within CI_REGISTRATION_GRACE; `timed_out` when they ran longer than
+# CI_CHECK_TIMEOUT; `unavailable` when the GitHub App may not read them.
+CiStatus = Literal['pending', 'passed', 'failed', 'inconclusive', 'none', 'timed_out',
+                   'unavailable']
 # How a delivery rejects a mention it already has; handing a mention over is idempotent.
 MENTION_HANDLED = 'This comment was already handled.'
 # How a delivery whose pull request was just merged or closed rejects a mention: it is
@@ -51,6 +68,34 @@ FOLLOW_UP_PREFIX = 'fix-session-'
 def delivery_id(session_id: str) -> str:
     """The workflow that delivers a session's task; manual retries are new runs of it."""
     return f'delivery-{session_id}'
+
+
+class CiCheck(TypedDict):
+    """One check of a pushed commit, such as a GitHub Actions job."""
+
+    name: str
+    # queued, in_progress or completed, as GitHub reports it.
+    status: str
+    # success, failure, timed_out, cancelled, skipped, neutral... once completed.
+    conclusion: str | None
+    url: str | None
+
+
+class CiChecks(TypedDict):
+    """The repository's CI on the commit the delivery last pushed: the GitHub checks
+    of the commit, which run what verification does not, such as the repository's own
+    unit tests."""
+
+    commit: str
+    status: CiStatus
+    # When the delivery began to watch them (ISO 8601), what the grace period and the
+    # timeout count from.
+    since: str
+    checks: list[CiCheck]
+    # Why the checks could not be read, while `unavailable`.
+    error: str | None
+    # The automatic fix round that pushed the commit, 0 for any other push.
+    fix_round: int
 
 
 class Brief(TypedDict):
@@ -203,6 +248,8 @@ class DeliveryProgress:
     # Whether an onboarding changed the repository's existing code, which it does only
     # after the user confirmed a bug in it; the commit and pull request then say so.
     existing_code_changed: bool = False
+    # The repository's CI on the last pushed commit, watched while the delivery waits.
+    ci: CiChecks | None = None
 
 
 @dataclass(frozen=True)
@@ -561,6 +608,12 @@ class DeliveryState:
     # Raised once the run has done its work and waits for the user's next decision; a
     # restart continues the delivery as a new run of the same workflow.
     waiting: bool = False
+    # The failed CI this run fixes on its own, with the failed checks' logs as its
+    # instructions: {'commit': the pushed commit whose checks failed, 'round': its
+    # number}. Cleared when the round ends.
+    ci_fix: dict[str, Any] | None = None
+    # How many automatic CI fix rounds ran in a row, up to MAX_CI_FIX_ROUNDS.
+    ci_fixes: int = 0
 
 
 def mention_key(item: Any) -> tuple[str | None, int]:
@@ -596,6 +649,11 @@ def interrupted(state: DeliveryState) -> DeliveryState:
                 mention[OUTCOME_OWED] = True
             mention['status'] = 'error'
             mention['error'] = STOPPED
+    if state.ci_fix is not None:
+        # A stopped automatic CI fix is not retried as such: the user retries the stage,
+        # or mentions the app with what to fix.
+        state.ci_fix = None
+        state.instructions = None
     if state.mention is not None:
         if state.spec.kind == 'docs' and state.instructions:
             # The stopped fix is what retrying the documentation stage carries out.

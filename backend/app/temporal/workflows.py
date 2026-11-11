@@ -60,6 +60,24 @@ FLOW_CANCELLED = "The flow's pull request was closed without being merged."
 # ended without anything delivered, rather than waiting for a fork or a new design.
 FLOW_ABANDONED_PATCH = "flow-ends-without-delivery"
 FLOW_ABANDONED = "The flow ended without a delivery."
+# Marks the workflow code that decides from the state a run started with whether it opens
+# by answering a user message, rather than from the messages as the run first reaches
+# that point: an update handed over with the start has appended its own message by then
+# and answers it itself, so the run answered it a second time.
+ANSWER_ONCE_PATCH = "answer-start-message-once"
+
+
+def _ends_with_user_message(state: RequirementsState | ApiDesignState) -> bool:
+    return bool(state.messages) and state.messages[-1]["role"] == "user"
+
+
+def _opens_with_answer(started_unanswered: bool,
+                       state: RequirementsState | ApiDesignState) -> bool:
+    """Whether the run opens by answering the user message its state started with, as a
+    session forked after that message, or continued as new after its turn failed, does."""
+    if workflow.patched(ANSWER_ONCE_PATCH):
+        return started_unanswered
+    return _ends_with_user_message(state)
 
 
 def _await_checkout(state: RequirementsState | ApiDesignState) -> str:
@@ -204,7 +222,8 @@ class RequirementsWorkflow(Interview, _Delivering):
     def __init__(self, state: RequirementsState | None = None) -> None:
         self.state = state or RequirementsState(messages=[opening_message()])
         # A session forked after a user message starts by answering it.
-        if self.state.messages[-1]["role"] == "user":
+        self._started_unanswered = _ends_with_user_message(self.state)
+        if self._started_unanswered:
             self.state.status = "turn_running"
         self._resume_status = _await_checkout(self.state)
         self._updates = 0
@@ -226,7 +245,7 @@ class RequirementsWorkflow(Interview, _Delivering):
     @workflow.run
     async def run(self, state: RequirementsState | None = None) -> dict[str, Any] | None:
         ready = await _check_out(self.state, self._resume_status)
-        if ready and self.state.messages[-1]["role"] == "user":
+        if ready and _opens_with_answer(self._started_unanswered, self.state):
             async with self._turn_lock:
                 await self._turn()
         while self.state.status not in {"completed", "failed"}:
@@ -658,7 +677,8 @@ class ApiDesignWorkflow(Interview, _Delivering):
         self.state = state
         # A new session starts with the draft; one forked after a user message
         # starts by answering it.
-        if not self.state.messages or self.state.messages[-1]["role"] == "user":
+        self._started_unanswered = _ends_with_user_message(self.state)
+        if not self.state.messages or self._started_unanswered:
             self.state.status = "turn_running"
         self._resume_status = _await_checkout(self.state)
         self._updates = 0
@@ -679,7 +699,7 @@ class ApiDesignWorkflow(Interview, _Delivering):
                 if not turned and not self.state.change_document:
                     self.state.messages.append(opening_fallback())
                     self.state.error = None
-        elif ready and self.state.messages[-1]["role"] == "user":
+        elif ready and _opens_with_answer(self._started_unanswered, self.state):
             async with self._turn_lock:
                 await self._turn()
         while self.state.status not in {"completed", "failed"}:

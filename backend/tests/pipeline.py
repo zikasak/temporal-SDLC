@@ -74,6 +74,14 @@ async def finished(env, session_id: str) -> DeliveryProgress:
 
 class FakeStages:
     def __init__(self) -> None:
+        # Answers of successive reads of the pushed commit's CI checks, the last one
+        # repeating: a dict as commit_checks returns it, or an exception to raise.
+        self.ci_results: list[Any] = [{'status': 'none', 'checks': []}]
+        self.ci_reads: list[str] = []
+        # The delivery whose CI the test answers; any other one has no checks.
+        self.ci_delivery: str | None = None
+        # The comments the delivery wrote in its pull request of its own.
+        self.comments: list[str] = []
         self.fail_implementation = False
         self.fail_tests = False
         self.implementation_started = asyncio.Event()
@@ -207,6 +215,28 @@ class FakeStages:
         self.published_components = components
         return {"branch": "generated/abc", "commit": "2" * 40,
                 "url": repository["html_url"] + "/tree/generated/abc"}
+
+    @activity.defn(name="commit_checks")
+    async def commit_checks(self, full_name: str, commit: str) -> dict[str, Any]:
+        if activity.info().workflow_id != self.ci_delivery:
+            # Another test's delivery, still waiting on the shared server.
+            return {'status': 'none', 'checks': []}
+        self.ci_reads.append(commit)
+        answer = self.ci_results[min(len(self.ci_reads), len(self.ci_results)) - 1]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    @activity.defn(name="ci_failure_report")
+    async def ci_failure_report(self, full_name: str, commit: str,
+                                checks: list[dict[str, Any]]) -> str:
+        return "### Backend tests (failure)\nFAILED tests/test_rooms.py::test_lists"
+
+    @activity.defn(name="comment_pull_request")
+    async def comment_pull_request(self, full_name: str, number: int, text: str) -> str:
+        if activity.info().workflow_id == self.ci_delivery:
+            self.comments.append(text)
+        return f"https://github.com/{full_name}/pull/{number}#issuecomment-{len(self.comments)}"
 
     @activity.defn(name="write_pull_request_text")
     async def write_pull_request_text(self, session_id: str, publication: dict[str, Any],

@@ -8,6 +8,7 @@ from temporalio.exceptions import ActivityError, ChildWorkflowError
 
 from app.delivery.flow.baseline import Baseline
 from app.delivery.flow.change import Change
+from app.delivery.flow.ci import CiWatch
 from app.delivery.flow.mention_rounds import MentionRounds
 from app.delivery.flow.publication import Publication
 from app.delivery.flow.review import ReviewRounds
@@ -41,8 +42,8 @@ def _same_mention(first: tuple[str | None, int | None],
 
 
 @workflow.defn
-class DeliveryWorkflow(Stages, PullRequestWait, MentionRounds, Change, Baseline, Verification,
-                       ReviewRounds, Publication):
+class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, Baseline,
+                       Verification, ReviewRounds, Publication):
     """Turns a specified task into verified, published sources: code generation, the
     parallel service and test authors, verification with its repair loop, and the push.
     A bugfix generates no code and goes red to green instead: regression tests, proof
@@ -92,6 +93,8 @@ class DeliveryWorkflow(Stages, PullRequestWait, MentionRounds, Change, Baseline,
         # Whether this run has been given something to do: a run that is not only a
         # recorded decision, or a mention handed to it.
         self._handed_over = not state.record_only
+        # The failed CI this run fixes on its own, if it is such a round.
+        self._ci_round: dict[str, Any] | None = state.ci_fix
 
     @workflow.run
     async def run(self, state: DeliveryState) -> DeliveryProgress:
@@ -105,6 +108,8 @@ class DeliveryWorkflow(Stages, PullRequestWait, MentionRounds, Change, Baseline,
         if not self.state.record_only:
             if self.state.mention is None:
                 await self._deliver()
+                if self._ci_round is not None:
+                    await self._ci_fix_finished()
             elif await self._mention_started():
                 await self._deliver()
                 await self._mention_finished()
