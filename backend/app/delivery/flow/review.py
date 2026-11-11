@@ -254,10 +254,11 @@ class ReviewRounds:
             # code-reviewed.
             await self._document(self.state.instructions)
             return
-        # A fix request in the pull request comes with the open findings only while the
-        # delivery has some.
+        # A fix request in the pull request, or of failed CI, comes with the open findings
+        # only while the delivery has some.
         findings = (open_review_findings(self.progress)
-                    if self.state.mention is None or self.progress.open_findings else [])
+                    if (self.state.mention is None and self.state.ci_fix is None)
+                    or self.progress.open_findings else [])
         number = len(self.progress.reviews) + 1
         instructions = self.state.instructions
         # Kept until the correction passes, so that retrying a failed author carries out

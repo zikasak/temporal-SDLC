@@ -24,6 +24,7 @@ from app.delivery.models import (
     STOPPED, DeliveryProgress, DeliveryState, TaskSpec,
     delivery_id,
 )
+from app.delivery.ci_activities import CHECKS_DENIED, CHECKS_UNAVAILABLE
 from app.github.checkout import SNAPSHOT_DIR
 from app.delivery.flow.baseline import MAX_BOUND_ROUNDS, MAX_REPRODUCE_ROUNDS
 from app.delivery.workflows import DeliveryWorkflow
@@ -194,6 +195,8 @@ async def workers(env, monkeypatch):
                     activities.checkout_repository, activities.update_repository_checkout,
                     activities.publish_repository, activities.publish_documentation,
                     activities.write_pull_request_text, activities.open_pull_request,
+                    activities.commit_checks, activities.ci_failure_report,
+                    activities.comment_pull_request,
                     activities.architecture_turn, activities.write_architecture_document,
                     activities.api_design_turn, activities.write_openapi_document],
     ), stage_workers(env, activities):
@@ -201,9 +204,9 @@ async def workers(env, monkeypatch):
 
 
 async def deliver(env, repository=None, language: str | None = "java",
-                  kind: str = "new_service"):
+                  kind: str = "new_service", session_id: str | None = None):
     """Start the delivery of a one-endpoint service, as a finished design does."""
-    session_id = f"api-design-session-{uuid.uuid4().hex}"
+    session_id = session_id or f"api-design-session-{uuid.uuid4().hex}"
     spec = TaskSpec(session_id=session_id, requirements=[],
                     requirements_document="# Requirements", api=API, document_id="0" * 32,
                     kind=kind, language=language, repository=repository,
@@ -1803,3 +1806,112 @@ async def test_histories_recorded_with_the_removed_patches_still_replay(
     await Replayer(workflows=[RequirementsWorkflow]).replay_workflow(session)
     for history in (delivery, changed):
         await Replayer(workflows=[DeliveryWorkflow]).replay_workflow(history)
+
+
+PUSHED = "2" * 40
+JOB_URL = "https://github.com/octocat/private-project/actions/runs/1/job/7"
+FAILED_CI = {"status": "failed", "checks": [
+    {"id": 7, "name": "Backend tests", "status": "completed", "conclusion": "failure",
+     "url": JOB_URL, "app": "github-actions", "summary": None, "text": None}]}
+PASSED_CI = {"status": "passed", "checks": [
+    {**FAILED_CI["checks"][0], "conclusion": "success"}]}
+
+
+async def ci_delivery(env, worker, repository) -> str:
+    """Start a delivery whose CI the worker answers; other tests' deliveries, still
+    waiting on the shared server, have no checks."""
+    session_id = f"api-design-session-{uuid.uuid4().hex}"
+    worker.ci_delivery = delivery_id(session_id)
+    return await deliver(env, repository, session_id=session_id)
+
+
+async def delivery_until(env, session_id: str, condition, what: str) -> DeliveryState:
+    """The delivery's state once `condition` holds of it, across its runs."""
+    handle = env.client.get_workflow_handle(delivery_id(session_id))
+    for _ in range(600):
+        try:
+            state = await handle.query('get_state', result_type=DeliveryState)
+        except RPCError:
+            pass
+        else:
+            if condition(state):
+                return state
+        await asyncio.sleep(0.05)
+    raise AssertionError(what)
+
+
+def ci_is(status: str):
+    return lambda state: (state.waiting and state.progress.ci is not None
+                          and state.progress.ci['status'] == status)
+
+
+async def test_failed_ci_is_fixed_by_a_round_of_its_own_from_the_failed_logs(
+        env, worker, repository_selection):
+    worker.ci_results = [FAILED_CI, PASSED_CI]
+    session_id = await ci_delivery(env, worker, repository_selection)
+    state = await delivery_until(env, session_id, lambda state: (
+        ci_is('passed')(state) and len(worker.comments) == 2), 'the CI never passed')
+    # The round's authors were given the end of the failed job's log, and its result
+    # was verified, reviewed and pushed again.
+    instructions = [repair['review']['instructions'] for _, repair in worker.repairs]
+    assert instructions and all(PUSHED in item and 'FAILED tests/test_rooms.py::test_lists'
+                                in item for item in instructions)
+    assert len(worker.published) == 2
+    assert state.progress.ci == {
+        'commit': PUSHED, 'status': 'passed', 'since': state.progress.ci['since'],
+        'checks': [{'name': 'Backend tests', 'status': 'completed', 'conclusion': 'success',
+                    'url': JOB_URL}],
+        'error': None, 'fix_round': 1}
+    assert state.ci_fixes == 0 and state.ci_fix is None and state.instructions is None
+    assert worker.comments == [
+        f'CI failed on commit `{PUSHED[:12]}`: [Backend tests]({JOB_URL}). Started automatic '
+        "fix round 1 of 2 from the failed checks' logs: the changes, then verification and "
+        'code review. The CI of what it pushes is reported here again.',
+        f'CI passes on commit `{PUSHED[:12]}`, pushed by automatic fix round 1.']
+
+
+async def test_failed_ci_is_only_reported_once_two_rounds_in_a_row_did_not_fix_it(
+        env, worker, repository_selection):
+    worker.ci_results = [FAILED_CI]
+    session_id = await ci_delivery(env, worker, repository_selection)
+    state = await delivery_until(env, session_id, lambda state: (
+        ci_is('failed')(state) and len(worker.comments) == 3), 'the CI was never reported')
+    assert len(worker.published) == 3 and state.ci_fixes == 2
+    assert 'Started automatic fix round 1 of 2' in worker.comments[0]
+    assert 'Started automatic fix round 2 of 2' in worker.comments[1]
+    assert worker.comments[2] == (
+        f'CI failed on commit `{PUSHED[:12]}`: [Backend tests]({JOB_URL}). 2 automatic fix '
+        'rounds in a row did not make the CI pass, so no further one starts on its own. '
+        'Mention me with what to fix to request a fix round.')
+
+
+async def test_a_ci_fix_that_does_not_pass_verification_pushes_nothing_and_says_so(
+        env, worker, repository_selection):
+    worker.ci_results = [FAILED_CI]
+    # The delivery passes; the fix round's correction never does.
+    worker.verification_results = ['passed', 'failed']
+    session_id = await ci_delivery(env, worker, repository_selection)
+    await delivery_until(env, session_id, lambda state: (
+        state.waiting and len(worker.comments) == 2), 'the fix round never ended')
+    state = await delivery_until(env, session_id, ci_is('failed'), 'the CI was forgotten')
+    assert len(worker.published) == 1
+    assert worker.comments[1].startswith(
+        f'Automatic fix round 1 for the CI failure on commit `{PUSHED[:12]}` ended without '
+        'a push: ')
+    assert worker.comments[1].endswith(
+        'The branch keeps its earlier push. Mention me with what to fix to request a fix '
+        'round.')
+    # The earlier push and its pull request stay; nothing else starts on its own.
+    assert state.progress.publication_status == 'completed' and state.progress.pull_request
+    assert state.ci_fix is None and state.instructions is None and len(worker.ci_reads) == 1
+
+
+async def test_ci_the_app_may_not_read_is_reported_in_the_progress(
+        env, worker, repository_selection):
+    worker.ci_results = [ApplicationError(CHECKS_DENIED, type=CHECKS_UNAVAILABLE,
+                                          non_retryable=True)]
+    session_id = await ci_delivery(env, worker, repository_selection)
+    state = await delivery_until(env, session_id, ci_is('unavailable'),
+                                 'the unreadable CI was never reported')
+    assert state.progress.ci['error'] == CHECKS_DENIED
+    assert worker.comments == [] and len(worker.published) == 1

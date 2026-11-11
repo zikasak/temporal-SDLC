@@ -134,7 +134,11 @@ export function createGitHubApp(name: string, organization: string) {
     // Mentions of the app in pull request comments arrive here, signed with the webhook
     // secret GitHub returns with the created app.
     hook_attributes: { url: `${origin}/api/connectors/github/events`, active: true },
-    default_permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "read" },
+    // Checks and Actions are read to watch the CI of each pushed commit and quote its failed logs.
+    default_permissions: {
+      contents: "write", metadata: "read", pull_requests: "write", issues: "read",
+      checks: "read", actions: "read",
+    },
     // Pull request events tell the app when a delivery's pull request is merged or closed.
     default_events: ["issue_comment", "pull_request_review_comment", "pull_request"],
   };

@@ -13,6 +13,9 @@ from app.temporal.lifecycle import run_worker
 with workflow.unsafe.imports_passed_through():
     from app.architecture.activities import architecture_turn, write_architecture_document
     from app.architecture.workflows import ArchitectureWorkflow
+    from app.delivery.ci_activities import (
+        ci_failure_report, comment_pull_request, commit_checks,
+    )
     from app.delivery.mention_activities import (
         answer_mention, classify_mention, mention_body, record_new_mention, reply_to_mention,
         save_mention,
@@ -83,7 +86,7 @@ async def main():
             revise_onboarding_architecture,
             classify_mention, answer_mention, reply_to_mention,
             record_new_mention, save_mention, mention_body,
-            pull_request_state,
+            pull_request_state, commit_checks, ci_failure_report, comment_pull_request,
         ],
     )
     logger.info("Worker started on task queue %s at %s", TASK_QUEUE, TEMPORAL_ADDRESS)

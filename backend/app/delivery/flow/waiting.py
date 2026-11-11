@@ -7,7 +7,8 @@ from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from app.delivery.models import (
-        FOLLOW_UP_PREFIX, PULL_REQUEST_CHECK_INTERVAL, TASK_IDLE_TIMEOUT, DeliveryProgress,
+        CI_CHECK_INTERVAL, FOLLOW_UP_PREFIX, PULL_REQUEST_CHECK_INTERVAL, TASK_IDLE_TIMEOUT,
+        DeliveryProgress,
     )
     from app.temporal.closing import end_cancelled
 
@@ -108,6 +109,12 @@ class PullRequestWait:
             if not await self._follow_up_continues():
                 return False
         deadline = workflow.now() + TASK_IDLE_TIMEOUT
+        # While the pushed commit's CI runs, its checks are read every CI_CHECK_INTERVAL,
+        # the first time at once, and the pull request's state every
+        # PULL_REQUEST_CHECK_INTERVAL as before.
+        watching = self._ci_watching()
+        next_ci = workflow.now()
+        next_pull_request = workflow.now() + PULL_REQUEST_CHECK_INTERVAL
         while True:
             if self._next is not None:
                 return True
@@ -115,6 +122,11 @@ class PullRequestWait:
             if merged is not None:
                 await self._close(merged)
                 return False
+            if watching and workflow.now() >= next_ci:
+                await self._check_ci()
+                watching = self._ci_pending()
+                next_ci = workflow.now() + CI_CHECK_INTERVAL
+                continue
             remaining = deadline - workflow.now()
             if remaining <= timedelta(0):
                 workflow.logger.info('Delivery idle, closing')
@@ -129,6 +141,10 @@ class PullRequestWait:
                 continue
             checking = self._checks_pull_request()
             timeout = min(remaining, PULL_REQUEST_CHECK_INTERVAL) if checking else remaining
+            if watching:
+                timeout = min(remaining, next_ci - workflow.now())
+                if checking:
+                    timeout = min(timeout, next_pull_request - workflow.now())
             try:
                 await workflow.wait_condition(
                     lambda: (self._next is not None or self._closing() is not None
@@ -137,6 +153,17 @@ class PullRequestWait:
             except asyncio.TimeoutError:
                 pass
             if self._next is not None or self._closing() is not None:
+                continue
+            if watching:
+                if self._check_requested:
+                    # A requested check reads the CI too.
+                    next_ci = workflow.now()
+                if self._check_requested or (checking
+                                             and workflow.now() >= next_pull_request):
+                    self._check_requested = False
+                    next_pull_request = workflow.now() + PULL_REQUEST_CHECK_INTERVAL
+                    if workflow.now() < deadline:
+                        await self._check_pull_request()
                 continue
             if self._check_requested or checking:
                 self._check_requested = False

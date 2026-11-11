@@ -11,7 +11,7 @@ from temporalio import activity
 from temporalio.client import WorkflowUpdateFailedError, WorkflowUpdateStage
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Replayer, Worker
+from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
 
 from app.api.routes.api_design import router
 from app.api_design import service
@@ -25,6 +25,7 @@ from app.requirements.document import render_requirements_markdown
 from app.requirements.models import RequirementsState
 from app.temporal import sessions
 from app.temporal.executions import ensure_search_attributes
+from app.temporal import workflows as session_workflows
 from app.temporal.workflows import ApiDesignWorkflow
 from tests.pipeline import (
     CODE, FakeCodegenWorkflow, FakeStages, abandoned, finished, legacy_patch_markers, patch_ids,
@@ -32,6 +33,8 @@ from tests.pipeline import (
 )
 
 TASK_QUEUE = "api-design-test"
+# How long a session waits for the user before it expires, in the tests that let it.
+IDLE_TIMEOUT = timedelta(seconds=3)
 DOCUMENT = {"document_id": "0" * 32, "filename": "openapi.yaml",
             "content_type": "application/yaml", "size_bytes": 10, "revision": 1}
 
@@ -105,7 +108,7 @@ async def server():
 
 
 @asynccontextmanager
-async def workers(env):
+async def workers(env, **options):
     activities = FakeActivities()
     async with Worker(
         env.client, task_queue=TASK_QUEUE, workflows=[ApiDesignWorkflow, DeliveryWorkflow],
@@ -113,6 +116,7 @@ async def workers(env):
                     activities.checkout_repository, activities.publish_repository,
                     activities.write_pull_request_text, activities.open_pull_request,
                     activities.read_repository_contract],
+        **options,
     ), stage_workers(env, activities):
         yield activities
 
@@ -126,6 +130,18 @@ async def worker(env):
 @pytest.fixture
 async def live(server):
     async with workers(server) as activities:
+        yield activities
+
+
+@pytest.fixture
+async def idle(server, monkeypatch):
+    """Workers on the dev server, whose sessions expire after IDLE_TIMEOUT. A session that
+    expires with nothing delivered ends by asking the server to cancel it, and a
+    time-skipping server skipping past the idle timeout with `env.sleep` can hang on that
+    request until the call fails, so the expiry is waited for in real time instead. The
+    workflows run unsandboxed so that they read the shortened timeout."""
+    monkeypatch.setattr(session_workflows, "SESSION_IDLE_TIMEOUT", IDLE_TIMEOUT)
+    async with workers(server, workflow_runner=UnsandboxedWorkflowRunner()) as activities:
         yield activities
 
 
@@ -565,14 +581,13 @@ async def test_idle_session_without_a_language_keeps_the_document_only(env, work
     assert (await delivery(env, handle).describe()).run_id == first_run
 
 
-async def test_idle_session_with_problems_fails(env, worker):
-    worker.draft_endpoints = [endpoint("/rooms", "Room")]
-    handle = await start(env)
+async def test_idle_session_with_problems_fails(server, idle):
+    idle.draft_endpoints = [endpoint("/rooms", "Room")]
+    handle = await start(server)
     await wait_for_status(handle, "interviewing")
-    await env.sleep(timedelta(hours=25))
     await abandoned(handle)
     state = await handle.query(ApiDesignWorkflow.get_state)
-    assert state.status == "failed" and worker.documents == []
+    assert state.status == "failed" and idle.documents == []
 
 
 async def test_fork_keeps_api_as_it_was_at_the_message(server, live, live_connected, repository_selection):

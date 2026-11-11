@@ -55,11 +55,12 @@ class Publication:
             # kept the repository's tests its service still passes.
             skip = True
         if skip:
-            if ((self.progress.open_findings or self.state.mention is not None)
-                    and self.progress.publication):
+            if ((self.progress.open_findings or self.state.mention is not None
+                 or self.state.ci_fix is not None) and self.progress.publication):
                 # A run started by the user's instructions that did not pass leaves the
                 # earlier unverified push on the branch, and the flag raised. So does a
-                # fix round a pull request comment asked for, with the earlier push.
+                # fix round a pull request comment asked for, with the earlier push, and
+                # an automatic fix round of failed CI.
                 self.progress.publication_status = 'completed'
                 if self.progress.pull_request_status in ('waiting', 'running'):
                     workflow.deprecate_patch('kept-push-pull-request')

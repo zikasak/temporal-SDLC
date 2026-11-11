@@ -457,3 +457,94 @@ async def reply_to_review_comment(token: str, full_name: str, number: int, comme
     except GitHubError as exc:
         raise _pull_request_denied(exc) from None
     return _comment_url(data, full_name, number)
+
+
+CHECK_RUNS_PAGE = 100
+# Where GitHub redirects the download of an Actions job's log: signed storage URLs, which
+# are fetched without the installation token.
+LOG_HOST_SUFFIXES = (".actions.githubusercontent.com", ".blob.core.windows.net")
+# How much of a job's log is downloaded at most; its end is what is kept.
+LOG_DOWNLOAD_BYTES = 20 * 1024 * 1024
+COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
+
+
+def _check_run(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or not _positive(value.get("id")):
+        return None
+    name = value.get("name")
+    app = value.get("app")
+    output = value.get("output") if isinstance(value.get("output"), dict) else {}
+
+    def text(item: Any, limit: int) -> str | None:
+        return item[:limit] if isinstance(item, str) and item else None
+
+    return {
+        "id": value["id"],
+        "name": name[:200] if isinstance(name, str) and name else f"check {value['id']}",
+        "status": text(value.get("status"), 40) or "queued",
+        "conclusion": text(value.get("conclusion"), 40),
+        "url": text(value.get("html_url"), 500),
+        "app": text(app.get("slug") if isinstance(app, dict) else None, 100),
+        "summary": text(output.get("summary"), 4000),
+        "text": text(output.get("text"), 4000),
+    }
+
+
+async def list_check_runs(token: str, full_name: str, commit: str) -> list[dict[str, Any]]:
+    """The latest check run of each check of `commit`, such as each GitHub Actions job.
+    Needs the installation's checks: read permission; GitHub answers 403 without it."""
+    validate_selection(full_name, "main")
+    if not COMMIT_PATTERN.fullmatch(commit):
+        raise GitHubError(422, "Choose a full commit SHA.")
+    data, _ = await _request(
+        "GET", token, f"{_repo_path(full_name)}/commits/{commit}/check-runs",
+        params={"per_page": CHECK_RUNS_PAGE, "filter": "latest"})
+    if not isinstance(data, dict) or not isinstance(data.get("check_runs"), list):
+        raise _invalid_response()
+    return [run for run in map(_check_run, data["check_runs"]) if run is not None]
+
+
+def _log_location(response: httpx.Response) -> str:
+    location = response.headers.get("location", "")
+    parsed = httpx.URL(location) if location else None
+    if (parsed is None or parsed.scheme != "https"
+            or not any(parsed.host.endswith(suffix) for suffix in LOG_HOST_SUFFIXES)):
+        raise GitHubError(502, "GitHub redirected the job log to an unexpected address.")
+    return location
+
+
+async def job_log_tail(token: str, full_name: str, job_id: int, limit: int) -> str:
+    """The last `limit` characters of the log of GitHub Actions job `job_id`. Needs the
+    installation's actions: read permission. GitHub answers with a redirect to a signed
+    download address, which is fetched without the installation token."""
+    validate_selection(full_name, "main")
+    if type(job_id) is not int or job_id <= 0:
+        raise GitHubError(422, "Choose a valid job.")
+    headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
+               "Authorization": f"Bearer {token}"}
+    timeout = httpx.Timeout(30, connect=5)
+    try:
+        async with httpx.AsyncClient(base_url=API_URL, timeout=timeout,
+                                     follow_redirects=False, headers=headers) as client:
+            response = await client.get(f"{_repo_path(full_name)}/actions/jobs/{job_id}/logs")
+        if response.status_code in (403, 404, 410):
+            raise GitHubError(response.status_code, "GitHub did not give the job's log.")
+        if response.status_code not in (301, 302, 303, 307, 308):
+            raise GitHubError(502, "GitHub could not give the job's log.")
+        location = _log_location(response)
+        tail = bytearray()
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            async with client.stream("GET", location) as download:
+                if download.status_code != 200:
+                    raise GitHubError(502, "The job's log could not be downloaded.")
+                read = 0
+                async for chunk in download.aiter_bytes():
+                    read += len(chunk)
+                    tail.extend(chunk)
+                    # Twice the characters asked for covers multi-byte text.
+                    del tail[:-limit * 2]
+                    if read >= LOG_DOWNLOAD_BYTES:
+                        break
+    except httpx.RequestError:
+        raise GitHubError(503, "Could not reach GitHub. Try again later.") from None
+    return bytes(tail).decode("utf-8", errors="replace")[-limit:]
