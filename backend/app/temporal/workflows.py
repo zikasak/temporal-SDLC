@@ -60,16 +60,13 @@ FLOW_CANCELLED = "The flow's pull request was closed without being merged."
 # ended without anything delivered, rather than waiting for a fork or a new design.
 FLOW_ABANDONED_PATCH = "flow-ends-without-delivery"
 FLOW_ABANDONED = "The flow ended without a delivery."
-# Marks the workflow code that ends a session which expired idle, with no other part of
-# its flow started, with its own status (completed or failed) rather than as cancelled:
-# its run returns at once, without requesting its own cancellation through the server.
-EXPIRED_SESSION_PATCH = "expired-session-ends-with-status"
 
 
 def expiry_ends_with_status(expired: bool) -> bool:
-    """True when a session that expired idle ends with its status instead of as
-    cancelled; runs recorded before that replay their cancellation."""
-    return expired and workflow.patched(EXPIRED_SESSION_PATCH)
+    """A session that expired idle delivered nothing, so its flow was abandoned and
+    ends as cancelled like any other flow that delivered nothing: never with its own
+    status. Its state still records why it expired."""
+    return False
 
 
 def _await_checkout(state: RequirementsState | ApiDesignState) -> str:
@@ -277,13 +274,13 @@ class RequirementsWorkflow(Interview, _Delivering):
                 await end_cancelled(FLOW_CANCELLED)
             if (not self._designs_delivered and workflow.patched(FLOW_ABANDONED_PATCH)
                     and not (not self._designs and expiry_ends_with_status(self._expired))):
-                # Nothing of the flow was delivered: it was abandoned. A session that
-                # expired and kept its document, starting nothing, ends completed.
+                # Nothing of the flow was delivered: it was abandoned, even a session
+                # that expired and kept its document, starting nothing.
                 await end_cancelled(FLOW_ABANDONED)
         elif (self.state.status == "failed" and workflow.patched(FLOW_ABANDONED_PATCH)
               and not expiry_ends_with_status(self._expired)):
-            # The session could not go on before anything was delivered; one that
-            # expired ends failed, with the reason in its state.
+            # The session could not go on, or expired, before anything was delivered:
+            # it was abandoned, with the reason in its state.
             await end_cancelled(FLOW_ABANDONED)
         return self.state.document
 
@@ -726,7 +723,7 @@ class ApiDesignWorkflow(Interview, _Delivering):
         elif (self.state.status == "failed" and workflow.patched(FLOW_ABANDONED_PATCH)
               and not expiry_ends_with_status(self._expired)):
             # The design could not start before anything was delivered: it was
-            # abandoned, and shows as cancelled. One that expired ends failed, with the
+            # abandoned, and shows as cancelled, as does one that expired, with the
             # reason in its state.
             await end_cancelled(FLOW_ABANDONED)
         return self.state.document

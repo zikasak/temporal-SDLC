@@ -102,7 +102,7 @@ class OnboardingWorkflow(Interview, _Delivering):
               and not expiry_ends_with_status(self._expired)):
             # The onboarding ended without running its delivery: it failed, was
             # declined or replaced by a fork. It was abandoned, and shows as cancelled.
-            # One that expired ends failed, with the reason in its state.
+            # So does one that expired, with the reason in its state.
             await end_cancelled(FLOW_ABANDONED)
         return None
 
