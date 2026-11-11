@@ -23,6 +23,7 @@ with workflow.unsafe.imports_passed_through():
     from app.temporal.interview import Interview, assistant_message
     from app.temporal.workflows import (
         FLOW_ABANDONED, FLOW_ABANDONED_PATCH, FLOW_CANCELLED, SESSION_IDLE_TIMEOUT, _Delivering,
+        expiry_ends_with_status,
     )
 
 REVIEW_TOO_LONG = "This review is too long to continue. Finalize the onboarding."
@@ -97,10 +98,11 @@ class OnboardingWorkflow(Interview, _Delivering):
             if self._delivery_cancelled:
                 # Its pull request was closed without merging: the onboarding is cancelled.
                 await end_cancelled(FLOW_CANCELLED)
-        elif workflow.patched(FLOW_ABANDONED_PATCH):
-            # The onboarding ended without running its delivery: it expired, failed,
-            # was declined or replaced by a fork. It was abandoned, and shows as
-            # cancelled.
+        elif (workflow.patched(FLOW_ABANDONED_PATCH)
+              and not expiry_ends_with_status(self._expired)):
+            # The onboarding ended without running its delivery: it failed, was
+            # declined or replaced by a fork. It was abandoned, and shows as cancelled.
+            # One that expired ends failed, with the reason in its state.
             await end_cancelled(FLOW_ABANDONED)
         return None
 
