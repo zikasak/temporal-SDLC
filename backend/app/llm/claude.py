@@ -28,6 +28,8 @@ PLUGIN = Path(__file__).with_name('plugins') / 'langfuse-observability'
 TRACE_EXPORT_TIMEOUT = 120
 # Tells the trace hook it runs the final export, after the CLI and its hooks.
 FINAL_EXPORT_ENV = 'APP_CLAUDE_FINAL_EXPORT'
+# Claude Code reports this in its User-Agent; the SDK would label every run 'sdk-py'.
+ENTRYPOINT = 'temporal-sdlc'
 
 
 class ClaudeTurnLimit(RuntimeError):
@@ -96,7 +98,7 @@ class ChatClaude(Runnable):
                 cwd = Path(await self._stack.enter_async_context(
                     async_context(tempfile.TemporaryDirectory, prefix='claude-native-')))
             env = claude_trace_environment()
-            env.update(APP_CLAUDE_HOOK_PYTHON=sys.executable,
+            env.update(CLAUDE_CODE_ENTRYPOINT=ENTRYPOINT, APP_CLAUDE_HOOK_PYTHON=sys.executable,
                        PYTHONPATH=os.pathsep.join(filter(None, [str(Path(__file__).parents[2]),
                                                                os.getenv('PYTHONPATH')])))
             env['CC_LANGFUSE_STATE_DIR'] = str((self.config_dir or cwd) / '.langfuse-state')
