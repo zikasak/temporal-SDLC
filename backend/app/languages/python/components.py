@@ -5,11 +5,16 @@ import ast
 import re
 from pathlib import Path, PurePosixPath
 
-from app.languages import RUNTIME_FILE, ComponentContract
+from app.languages import RUNTIME_FILE, TOOLS_DIR, ComponentContract
 
 # The version both the routing agent and the trusted conformance check run.
 MYPY = "mypy==1.18.2"
 MAX_REQUIREMENT_FILES = 10
+RUNNER = Path(__file__).parent / "component_contract"
+# The routing agent's tool that writes stubs from the code's signatures.
+MAKE_STUB = RUNNER / "make_stub.py"
+# The docstring make_stub gives a named symbol, as make_stub.py has it.
+STUB_PLACEHOLDER = "TODO: state the behaviour the brief or the existing contract asks for."
 PATH = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_./-]{0,200}")
 
 INSTRUCTIONS = """Component contract (Python). It lives in /workspace/routing/components/,
@@ -35,6 +40,15 @@ published stub, but never change or remove one of its statements.
   in the docstring of the method that runs them: the name, task queue, arguments and
   result shape, with the module constants that hold the names and queues stubbed as
   `NAME: Final = "…"`, so a test can register fakes under them.
+- Do not type signatures out. Write {runtime} first, then, from /workspace/routing,
+  generate each module's stub from the code: python {tools}/make_stub.py <module>
+  <symbol>… (symbols as `Name` or `Class.member`; run it again to add symbols, and stub
+  a collaborator's module before the modules whose signatures name its types). It
+  writes the exact signatures, decorators, `__init__` and the types they mention, and
+  only adds to a stub. Then replace every placeholder docstring it wrote with the
+  behaviour, using edit_file; the contract is rejected while one is left. Hand-write
+  only the symbols a seam lists in `added` or `added_elsewhere`, which the code does
+  not have yet.
 - Check the contract before you finish, from /workspace/routing:
   pip install --user {mypy} and the requirements files, then
   PYTHONPATH=repository/<source_root> MYPYPATH=components python -m mypy.stubtest
@@ -93,6 +107,9 @@ def _declarations(body: list[ast.stmt], scope: str, symbols: set[str]) -> None:
 
 
 def _read_stub(module: str, source: str) -> set[str]:
+    if STUB_PLACEHOLDER in source:
+        raise ValueError("a docstring still holds make_stub's placeholder: state the "
+                         "behaviour the symbol has to have")
     try:
         tree = ast.parse(source, type_comments=True)
     except (SyntaxError, ValueError) as exc:
@@ -148,13 +165,19 @@ def runner_build_args(runtime: dict) -> dict[str, str]:
             "REQUIREMENTS": " ".join(runtime["requirements"])}
 
 
+def _source_paths(module: str, runtime: dict) -> tuple[str, ...]:
+    """The repository paths that may hold the source of a dotted module."""
+    base = PurePosixPath(runtime["source_root"]).joinpath(*module.split("."))
+    return (f"{base.as_posix()}.py", (base / "__init__.py").as_posix())
+
+
 def _build_args(runtime: dict) -> dict[str, str]:
     return {"MYPY": MYPY, **runner_build_args(runtime)}
 
 
 COMPONENT_CONTRACT = ComponentContract(
-    instructions=INSTRUCTIONS.replace("{mypy}", MYPY),
+    instructions=INSTRUCTIONS.replace("{mypy}", MYPY).replace("{tools}", f"/workspace/{TOOLS_DIR}"),
     stub_suffix=".pyi", module=_module, read_stub=_read_stub, statements=_statements,
     read_runtime=_read_runtime, conformance=Path(__file__).parent / "component_contract",
-    build_args=_build_args,
+    build_args=_build_args, source_paths=_source_paths, tools=(MAKE_STUB,),
 )

@@ -391,6 +391,59 @@ async def keep_activity_alive(message: str):
         await asyncio.gather(pulse, return_exceptions=True)
 
 
+def _agent_image(role: str, session_id: str) -> str:
+    digest = hashlib.sha256(session_id.encode()).hexdigest()[:16]
+    return f"temporal-{role.replace('_', '-')}-agent:{digest}"
+
+
+async def _build_image(image_build: AgentImageBuild, tag: str, log_path: Path) -> None:
+    build_args = ['build', '-t', tag, '-f', str(image_build.dockerfile)]
+    for key, value in image_build.build_args.items():
+        build_args.extend(['--build-arg', f'{key}={value}'])
+    await docker(*build_args, str(image_build.context), log_path=log_path)
+
+
+MAX_TOOL_REPORT_BYTES = 8 * 1024 * 1024
+
+
+async def run_tool(role: str, session_id: str, workspace: Path, command: str, report: str,
+                   log_path: Path, *, image_build: AgentImageBuild, workdir: str = 'review',
+                   timeout: int = 600) -> str:
+    """Run a trusted shell command in the role's agent image over a copy of `workspace`,
+    in /workspace/<workdir>, without a network or any credential, and return the report
+    it wrote to the file `report` (given to it as $REPORT)."""
+    name = f"{role.replace('_', '-')}-tool-{uuid.uuid4().hex}"
+    image = _agent_image(role, session_id)
+    await _build_image(image_build, image, log_path.parent / 'agent-build.log')
+    try:
+        await docker(
+            'create', '--name', name, '--network=none', '--cap-drop=ALL',
+            '--security-opt=no-new-privileges', '--pids-limit=256', '--memory=2g',
+            '--cpus=2', '--user', '10001:10001', '-e', f'REPORT={report}',
+            '--workdir', f'/workspace/{workdir}', '--entrypoint', 'sh', image, '-c', command)
+        async with async_context(tempfile.TemporaryDirectory) as temporary:
+            archive = Path(temporary) / 'workspace.tar'
+            await run_sync(_archive_workspace, workspace, archive)
+            async with async_context(archive.open, 'rb') as stream:
+                await docker('cp', '-a', '-', name + ':/workspace', stdin=stream)
+            await docker('start', name)
+            exit_code = (await docker('wait', name, timeout=timeout)).strip().splitlines()[-1]
+            if exit_code != '0':
+                log = redact_output(await docker('logs', '--tail', '50', name, timeout=30))
+                await run_sync(log_path.write_text, log, encoding='utf-8')
+                raise RuntimeError(f'The tool exited with code {exit_code}. Log: {log_path}')
+            copied = Path(temporary) / 'report'
+            await docker('cp', f'{name}:{report}', str(copied))
+            if copied.is_symlink() or copied.stat().st_size > MAX_TOOL_REPORT_BYTES:
+                raise RuntimeError('The tool\'s report is missing or too large')
+            return await run_sync(copied.read_text, encoding='utf-8', errors='replace')
+    finally:
+        try:
+            await docker('rm', '-f', name, timeout=30)
+        except Exception:
+            logger.warning('Could not remove tool container %s', name)
+
+
 def _archive_workspace(workspace: Path, archive: Path) -> None:
     def owner(info: tarfile.TarInfo) -> tarfile.TarInfo:
         info.uid = info.gid = 10001
@@ -411,8 +464,7 @@ async def run_agent(role: str, session_id: str, workspace: Path,
     workspace is kept in `paused`; any other end discards what was kept there."""
     label = role.replace('_', '-')
     name = f'{label}-{uuid.uuid4().hex}'
-    digest = hashlib.sha256(session_id.encode()).hexdigest()[:16]
-    agent_image = f'temporal-{label}-agent:{digest}'
+    agent_image = _agent_image(role, session_id)
     settings = await get_workflow_settings(role)
     # The snapshot travels as input alongside the workspace, never as host selector env vars.
     await run_sync((workspace / SETTINGS_FILENAME).write_text, settings.model_dump_json())
@@ -438,11 +490,7 @@ async def run_agent(role: str, session_id: str, workspace: Path,
     logger.info('%s agent starting (session=%s, container=%s)', role, session_id, name)
     kept = False
     try:
-        build_args = ['build', '-t', agent_image, '-f', str(image_build.dockerfile)]
-        for key, value in image_build.build_args.items():
-            build_args.extend(['--build-arg', f'{key}={value}'])
-        await docker(*build_args, str(image_build.context),
-                     log_path=log_path.parent / 'agent-build.log')
+        await _build_image(image_build, agent_image, log_path.parent / 'agent-build.log')
         await docker(
             'create', '--name', name, '--cap-drop=ALL',
             '--security-opt=no-new-privileges', '--pids-limit=256',

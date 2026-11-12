@@ -8,6 +8,7 @@ from app.languages import (
     ComponentSuite, Implementation, Language, TestReports, TestSuite, register,
 )
 from app.languages.python.components import COMPONENT_CONTRACT, MYPY, runner_build_args
+from app.languages.static_checks import GITLEAKS, RUFF
 
 PACKAGE_NAME = "service"
 
@@ -227,6 +228,7 @@ PYTHON = register(Language(
     # The shared agent image has Python 3.12 and pip.
     agent_dockerfile=Path(__file__).resolve().parents[2] / "agent_workflows" / "Dockerfile",
     component_contract=COMPONENT_CONTRACT,
+    static_checks=(GITLEAKS, RUFF),
     component_suite=ComponentSuite(
         template=Path(__file__).parent / "component_suite",
         instructions=COMPONENT_SUITE_INSTRUCTIONS.replace("{mypy}", MYPY),

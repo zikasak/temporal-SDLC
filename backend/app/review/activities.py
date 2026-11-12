@@ -8,13 +8,14 @@ import re
 import shutil
 import tempfile
 import uuid
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from app import docker_agents
+from app import config, docker_agents
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import (
@@ -25,10 +26,11 @@ from app.github.checkout import (
     CHECKOUT_DIR, COMPONENT_SNAPSHOT, COMPONENT_TESTS_DIR, SNAPSHOT_DIR,
 )
 from app.implementation.activities import SEAM_DIR, checkout_parts, copy_service
-from app.languages import Language
+from app.languages import RUNTIME_FILE, Language
 from app.requirements.document import without_repeated_tables
 from app.routing.parts import component_suite, read_routed_parts
 from app.test_generation.activities import copy_test_suite
+from app.review import checks, settled
 from app.review.agent import FINDINGS
 from app.review.models import (
     MAX_FINDINGS, PATH_CHARS, PREVIOUS_SUMMARY_CHARS, REASON_CHARS, REVIEW_TARGETS,
@@ -54,6 +56,33 @@ PART_DIFF_CHARS = 60_000
 PART_KEY = 'review_part'
 # The findings earlier rounds of the same run had corrected, in the activity context.
 PREVIOUS_KEY = 'previous_findings'
+# The changed files an earlier round judged clean, which the run does not review, in its input.
+SETTLED_KEY = 'settled_changes'
+# The static tools' results on the changed lines, in the delivery review's input.
+STATIC_KEY = 'static_findings'
+# What the host decided in place of a review agent, in a run's result.
+CHECKED_BY = 'checked_by'
+# The report a static tool writes in its container.
+STATIC_REPORT = '/tmp/static-report.json'
+STATIC_TIMEOUT = 600
+
+
+@dataclasses.dataclass
+class PreparedReview:
+    """A review run as the host prepared it."""
+    # The changed files of each side that the run reviews.
+    changes: dict[str, list[str]]
+    # The parts the round's changes are reviewed in.
+    count: int
+    # The diff of each file the run reviews.
+    own: dict[str, str] = dataclasses.field(default_factory=dict)
+    # What the reviewer judges the files by besides their diffs (settled.judgement_key).
+    key: str = ''
+    # Findings a host check decided in place of the agent, which then does not run; an
+    # empty list when the check found the changes certainly right. None otherwise.
+    decided: list[ReviewFinding] | None = None
+    # The check that decided.
+    checked_by: str = ''
 
 
 def record_baseline(language: Language, session_dir: Path) -> Path:
@@ -250,13 +279,54 @@ def _regression_changes(language: Language, session_dir: Path, context: dict[str
     return diffs, sides, ({'contract_tests': contract} if component else {})
 
 
-def prepare_review(language: Language, session_dir: Path, context: dict[str, Any],
-                   workspace: Path, part: int = 0) -> tuple[dict[str, list[str]], int]:
+def _criteria_coverage(context: dict[str, Any], diffs: dict[str, str], sides: list[str],
+                       ) -> tuple[list[ReviewFinding], dict[str, list[str]]] | None:
+    """The requirement-tag check of a regression review; None without criteria."""
+    ids = [str(item.get('id')) for item in (context.get('brief') or {}).get('requirements', [])
+           if isinstance(item, dict) and item.get('id')]
+    if not ids:
+        return None
+    return checks.requirement_coverage(
+        diffs, ids, list(context.get('component_routes') or {}),
+        contract='tests' in sides, component=COMPONENT_TESTS_DIR in sides)
+
+
+def _seam_verdict(language: Language, session_dir: Path, context: dict[str, Any],
+                  review: Path, diffs: dict[str, str]) -> list[ReviewFinding] | None:
+    """The host's verdict on a seam of the service: its certain violations, or no finding
+    when it is certainly right. None when the agent has to judge it, as for a seam of
+    another part or of a language whose sources the host cannot locate."""
+    contract = language.component_contract
+    seam = context.get('seam')
+    if contract is None or contract.source_paths is None or not isinstance(seam, dict):
+        return None
+    routes = context.get('component_routes') or {}
+    if any(isinstance(route, dict) and (route.get('seam') or {}).get('part')
+           for route in routes.values()):
+        return None
+    try:
+        service = next(item for item in _routed(language, session_dir) if item.is_service)
+        runtime = json.loads(
+            (service.routed_contract(session_dir) / RUNTIME_FILE).read_text(encoding='utf-8'))
+        modules = {module: str(module) for module in seam}
+        allowed = {path: module for module in modules
+                   for path in contract.source_paths(module, runtime)}
+    except (StopIteration, ApplicationError, OSError, ValueError, KeyError, TypeError):
+        return None
+    findings, certain = checks.seam_check(
+        session_dir / BASELINE_DIR / 'service', review / 'service', diffs, allowed,
+        language.build_dirs)
+    return findings if findings else [] if certain else None
+
+
+def plan_review(language: Language, session_dir: Path, context: dict[str, Any],
+                workspace: Path, part: int = 0, *, record: list[dict[str, Any]] | None = None,
+                round_id: str = '') -> PreparedReview:
     """The trees under review, the changes of the given part and the contracts; nothing
-    else. Returns the changed files of each side in that part, and the number of parts.
-    By default the verified delivery is reviewed; a stage review (SCOPE_KEY in the
+    else. By default the verified delivery is reviewed; a stage review (SCOPE_KEY in the
     context) reviews the seam a change added first, or its regression tests before the
-    fix."""
+    fix. A later round (PREVIOUS_KEY in the context) leaves out the files `record` holds
+    as settled. The host's own checks may decide the round instead of the agent."""
     review = workspace / 'review'
     scope = context.get(SCOPE_KEY)
     if scope == 'seam':
@@ -265,31 +335,50 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
         diffs, sides, own_input = _regression_changes(language, session_dir, context, review)
     else:
         diffs, sides, own_input = _delivery_changes(language, session_dir, context, review)
-    parts = review_parts(diffs)
-    if part >= max(len(parts), 1):
-        raise ApplicationError(f'The changes have no review part {part}', non_retryable=True)
-    own = parts[part] if parts else []
-    diff = ''.join(diffs[path] for path in own)
-    if len(diff) > MAX_DIFF_CHARS:
-        diff = (diff[:MAX_DIFF_CHARS]
-                + '\n[The diff is cut here; read the remaining changed files directly.]\n')
-    (review / 'changes.diff').write_text(diff, encoding='utf-8')
+    contracts = without_repeated_tables(
+        {key: value for key, value in context.items()
+         if key not in ('instructions', 'repository', 'language', 'contract_tests',
+                        PREVIOUS_KEY, SCOPE_KEY, BASELINE_KEY)})
+    instructions = str(context.get('instructions') or '')[:REVIEW_INSTRUCTIONS_CHARS]
+    key = settled.judgement_key(scope, instructions, contracts)
 
     def by_side(paths: list[str]) -> dict[str, list[str]]:
         return {side: [path for path in paths if path.startswith(f'{side}/')][:LISTED_CHANGES]
                 for side in sides}
 
+    checked: dict[str, Any] = {}
+    if scope == 'regression' and config.REVIEW_REQUIREMENT_TAGS:
+        coverage = _criteria_coverage(context, diffs, sides)
+        if coverage and coverage[0] and part == 0:
+            # The tests are about to change: reviewing them now would be spent twice.
+            return PreparedReview(by_side(list(diffs)), 1, key=key, decided=coverage[0],
+                                  checked_by='requirement-tags')
+        if coverage:
+            checked['criteria_tests'] = coverage[1]
+    if scope == 'seam' and config.REVIEW_SEAM_CHECKS and part == 0:
+        verdict = _seam_verdict(language, session_dir, context, review, diffs)
+        if verdict is not None:
+            return PreparedReview(by_side(list(diffs)), 1, key=key, decided=verdict,
+                                  checked_by='seam')
+    done = (settled.settled_files(record or [], diffs, key, round_id)
+            if config.REVIEW_SKIP_SETTLED and context.get(PREVIOUS_KEY) else set())
+    reviewable = {path: diff for path, diff in diffs.items() if path not in done}
+    parts = review_parts(reviewable)
+    if part >= max(len(parts), 1):
+        raise ApplicationError(f'The changes have no review part {part}', non_retryable=True)
+    own = parts[part] if parts else []
+    diff = ''.join(reviewable[path] for path in own)
+    if len(diff) > MAX_DIFF_CHARS:
+        diff = (diff[:MAX_DIFF_CHARS]
+                + '\n[The diff is cut here; read the remaining changed files directly.]\n')
+    (review / 'changes.diff').write_text(diff, encoding='utf-8')
+
     changes = by_side(own)
-    others = [path for path in diffs if path not in own]
-    contracts = without_repeated_tables(
-        {key: value for key, value in context.items()
-         if key not in ('instructions', 'repository', 'language', 'contract_tests',
-                        PREVIOUS_KEY, SCOPE_KEY, BASELINE_KEY)})
+    others = [path for path in reviewable if path not in own]
     index, files = on_demand_contracts(contracts, len(json.dumps(contracts))) or (contracts, {})
     write_language(workspace, language, label=language.label)
     if files:
         write_contracts(workspace, files)
-    instructions = str(context.get('instructions') or '')[:REVIEW_INSTRUCTIONS_CHARS]
     # An onboarding changes no part of the repository but the service's Dockerfile.
     checkout = session_dir / CHECKOUT_DIR
     projects = (checkout_parts(language, checkout)
@@ -305,10 +394,22 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
          **({'repository_parts': projects} if projects else {}),
          **({PART_KEY: {'part': part + 1, 'of': len(parts), 'other_changes': by_side(others)}}
             if len(parts) > 1 else {}),
+         # Judged clean by an earlier round and unchanged since: there to read only.
+         **({SETTLED_KEY: by_side(sorted(done))} if done else {}),
+         **checked,
          **({'instructions': instructions} if instructions else {}),
          **({PREVIOUS_KEY: context[PREVIOUS_KEY]} if context.get(PREVIOUS_KEY) else {})},
         ensure_ascii=False))
-    return changes, max(len(parts), 1)
+    return PreparedReview(changes, max(len(parts), 1),
+                          own={path: reviewable[path] for path in own}, key=key)
+
+
+def prepare_review(language: Language, session_dir: Path, context: dict[str, Any],
+                   workspace: Path, part: int = 0) -> tuple[dict[str, list[str]], int]:
+    """`plan_review` without a record of settled files: the changed files of each side in
+    the part, and the number of parts."""
+    prepared = plan_review(language, session_dir, context, workspace, part)
+    return prepared.changes, prepared.count
 
 
 def _same(summary: str) -> str:
@@ -375,6 +476,47 @@ def read_findings(output: Path, changed: set[str],
     return findings
 
 
+def _round_id() -> str:
+    """The review round in progress: the child workflow running it, one per round."""
+    return activity.info().workflow_id if activity.in_activity() else ''
+
+
+async def _static_findings(language: Language, session_id: str, workspace: Path,
+                           own: dict[str, str], artifact_dir: Path) -> list[dict[str, Any]]:
+    """The language's static tools over the trees under review, in its agent image without
+    a network, cut to the lines the run's changes add. A tool that fails is left out: the
+    reviewer then looks for those problems itself, as without the tools."""
+    results: list[dict[str, Any]] = []
+    image = dataclasses.replace(docker_agents.default_agent_image('review', 'review'),
+                                dockerfile=language.agent_dockerfile)
+    for check in language.static_checks:
+        try:
+            report = await docker_agents.run_tool(
+                'review', session_id, workspace, check.command, STATIC_REPORT,
+                artifact_dir / f'static-{check.name}.log', image_build=image,
+                timeout=STATIC_TIMEOUT)
+        except Exception:
+            logger.warning('The static check %s could not run (session=%s)', check.name,
+                           session_id, exc_info=True)
+            continue
+        results += [{**item, 'tool': check.name} for item in check.parse(report)]
+    return checks.changed_static_findings(results, own)
+
+
+async def _add_input(workspace: Path, values: dict[str, Any]) -> None:
+    file = workspace / 'input.json'
+    inputs = json.loads(await run_sync(file.read_text))
+    await run_sync(file.write_text, json.dumps({**inputs, **values}, ensure_ascii=False))
+
+
+async def _save_result(artifact_dir: Path, name: str, result: dict[str, Any]) -> None:
+    manifest = artifact_dir / f'{uuid.uuid4().hex}.json'
+    await run_sync(
+        manifest.write_text, json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8'
+    )
+    await run_sync(os.replace, manifest, artifact_dir / name)
+
+
 async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]:
     """The findings, or `questions` the agent asked: then it is paused, and the same call
     with ANSWERS_KEY in the context continues it."""
@@ -393,6 +535,7 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
         raise ApplicationError(f'Unknown review scope {scope!r}', non_retryable=True)
     artifact_dir = session_dir / ('review' if scope is None else f'review-{scope}')
     paused = artifact_dir / docker_agents.PAUSED_DIR
+    target = SCOPE_TARGETS.get(scope) if scope else None
     await run_sync(artifact_dir.mkdir, parents=True, exist_ok=True)
     async with async_context(tempfile.TemporaryDirectory) as temporary:
         work = Path(temporary)
@@ -406,9 +549,34 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
             count = int((inputs.get(PART_KEY) or {}).get('of') or 1)
         else:
             await run_sync(workspace.mkdir)
-            changes, count = await run_sync(
-                prepare_review, language, session_dir, context, workspace, part)
             previous = context.get(PREVIOUS_KEY) or []
+            prepared = await run_sync(
+                partial(plan_review, record=await run_sync(settled.read_record, artifact_dir),
+                        round_id=_round_id()),
+                language, session_dir, context, workspace, part)
+            if prepared.decided is not None:
+                # A host check decided the round: no agent runs, and no other part.
+                findings = [{**item, **({'target': target} if target else {})}
+                            for item in prepared.decided]
+                for finding in findings:
+                    repeats = _repeated({}, finding, previous)
+                    if repeats is not None:
+                        finding['repeats'] = repeats
+                result = {'session_id': session_id, 'findings': findings[:MAX_FINDINGS],
+                          'path': str(artifact_dir), CHECKED_BY: prepared.checked_by}
+                await _save_result(artifact_dir, FINDINGS, result)
+                logger.info('Review decided by the %s check (session=%s, findings=%d)',
+                            prepared.checked_by, session_id, len(findings))
+                return result
+            changes, count = prepared.changes, prepared.count
+            await run_sync(settled.write_pending, artifact_dir, part, _round_id(),
+                           prepared.key, prepared.own)
+            if (scope is None and config.REVIEW_STATIC_CHECKS and language.static_checks
+                    and prepared.own):
+                static = await _static_findings(language, session_id, workspace,
+                                                prepared.own, artifact_dir)
+                if static:
+                    await _add_input(workspace, {STATIC_KEY: static})
         changed = {path for paths in changes.values() for path in paths}
         # The workflow runs the next part's review with this in its context.
         following = {'next_part': part + 1} if part + 1 < count else {}
@@ -428,15 +596,11 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
                         dockerfile=language.agent_dockerfile))
             except docker_agents.AgentPaused as exc:
                 return paused_result(session_id, exc)
-        findings = await run_sync(read_findings, output, changed, previous,
-                                  SCOPE_TARGETS.get(scope) if scope else None)
+        findings = await run_sync(read_findings, output, changed, previous, target)
+    await run_sync(settled.record_run, artifact_dir, part, findings)
     result = {'session_id': session_id, 'findings': findings, 'path': str(artifact_dir)}
-    manifest = artifact_dir / f'{uuid.uuid4().hex}.json'
-    await run_sync(
-        manifest.write_text, json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8'
-    )
-    name = FINDINGS if count == 1 else f'findings-part-{part + 1}.json'
-    await run_sync(os.replace, manifest, artifact_dir / name)
+    await _save_result(artifact_dir, FINDINGS if count == 1 else f'findings-part-{part + 1}.json',
+                       result)
     logger.info('Code review finished (session=%s, part=%d/%d, findings=%d)',
                 session_id, part + 1, count, len(findings))
     return {**result, **following}
@@ -444,9 +608,11 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
 
 @activity.defn
 async def review_changes(session_id: str, context: dict[str, Any]) -> dict[str, Any]:
+    # The scope and part let traces be grouped by them (plans/deterministic-checks.md).
+    metadata = {**activity_metadata(), 'review_scope': str(context.get(SCOPE_KEY) or 'review'),
+                'review_part': str(int(context.get(PART_KEY) or 0) + 1)}
     with trace_operation('review-changes', session_id=session_id, feature='review',
-                         input=context.get('instructions'),
-                         metadata=activity_metadata()) as span:
+                         input=context.get('instructions'), metadata=metadata) as span:
         result = await run_review(session_id, context)
         if span is not None:
             span.update(output=result)

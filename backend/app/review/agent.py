@@ -210,6 +210,30 @@ files in `changes` and their diff in changes.diff. `review_part.other_changes` l
 files the other parts review: read them where your files depend on them, but report only
 problems in your own part's changes.
 """
+SETTLED_PROMPT = """
+An earlier round of this review already judged some changed files and found nothing in
+them, and no correction has changed them since: the `settled_changes` entry of the input
+lists them. They are not in `changes` or changes.diff. Read them where your files depend on
+them, but do not review them or report anything about them.
+"""
+
+CRITERIA_TESTS_PROMPT = """
+The `criteria_tests` entry of the input maps each acceptance criterion to the places
+(file:line) where an added or changed test names it in a `requirement:` line; the host has
+checked that every criterion has one. Start from those places to judge whether each test
+proves its criterion, instead of searching for which test proves what.
+"""
+
+STATIC_PROMPT = """
+Trusted static tools (a secrets scanner, and for some languages a linter limited to errors,
+likely bugs and security rules) ran over the changes; the `static_findings` entry of the
+input lists what they reported on the lines the delivery added, each with the tool, rule,
+file, line and message. Judge each one: report those that are real problems of the
+delivery, as your own findings, and leave out those that are not, such as test data, a
+fixture or a placeholder value. Do not search for leaked secrets, undefined names, unused
+imports or the other problems these rules cover yourself.
+"""
+
 CHANGE_PROMPT = """
 The service existed before this delivery and was changed for the task in the `brief` entry
 of the input: the problem, the expected behaviour and the acceptance criteria. The brief has
@@ -300,19 +324,22 @@ def prompt(inputs: dict, label: str) -> str:
     scope = inputs.get('review_scope')
     part = PART_PROMPT if inputs.get('review_part') else ''
     previous = PREVIOUS_PROMPT if inputs.get('previous_findings') else ''
+    settled = SETTLED_PROMPT if inputs.get('settled_changes') else ''
     if scope == 'seam':
         work = WORK_PROMPT.format(readonly='service/ or contracts/',
                                   findings_format=FINDINGS_FORMAT)
-        return SEAM_PROMPT.format(label=label, work=work) + part + previous
+        return SEAM_PROMPT.format(label=label, work=work) + part + settled + previous
     if scope == 'regression':
         work = WORK_PROMPT.format(readonly='service/, tests/, component-tests/ or contracts/',
                                   findings_format=FINDINGS_FORMAT)
-        return (REGRESSION_PROMPT.format(label=label, work=work) + part
+        return (REGRESSION_PROMPT.format(label=label, work=work) + part + settled
                 + (REGRESSION_COMPONENT_PROMPT if inputs.get('component_routes') else '')
+                + (CRITERIA_TESTS_PROMPT if inputs.get('criteria_tests') else '')
                 + previous)
     work = WORK_PROMPT.format(readonly='service/ or tests/', findings_format=FINDINGS_FORMAT)
     return (PROMPT.format(label=label, work=work)
-            + part
+            + part + settled
+            + (STATIC_PROMPT if inputs.get('static_findings') else '')
             + (CHANGE_PROMPT if inputs.get('brief') else '')
             + (BUGFIX_PROMPT if inputs.get('regression') else '')
             + (PARTS_PROMPT if inputs.get('repository_parts') else '')

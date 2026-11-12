@@ -9,6 +9,7 @@ from app.languages import (
     TestSuite, register,
 )
 from app.config import CODEGEN_BASE_PACKAGE
+from app.languages.static_checks import GITLEAKS
 from app.languages.java.components import (
     COMPONENT_CONTRACT, DEPENDENCY_PLUGIN, STUBS_TOOL, runner_build_args,
 )
@@ -214,6 +215,7 @@ JAVA = register(Language(
         required=("pom.xml",),
     ),
     agent_dockerfile=Path(__file__).resolve().parents[2] / "agent_workflows" / "Dockerfile",
+    static_checks=(GITLEAKS,),
     component_contract=COMPONENT_CONTRACT,
     component_suite=ComponentSuite(
         template=Path(__file__).parent / "component_suite",

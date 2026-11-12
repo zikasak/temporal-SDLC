@@ -282,6 +282,40 @@ turn budget. The review stage ends as soon as it writes a valid `findings.json`,
 on the final allowed tool turn; it needs no additional model reply. Native Claude reviews
 also stop after this file is written. Missing or malformed findings still fail the review.
 
+Host checks may skip or decide a review run, each only where it is certain and each behind
+its own setting, off by default until compared with reviews without it
+(`plans/deterministic-checks.md`; `app/review/checks.py`, `app/review/settled.py`).
+Every review trace carries `review_scope` (`review`, `seam` or `regression`) and
+`review_part` in its metadata, so runs, rounds and parts can be grouped in Langfuse.
+- `REVIEW_SKIP_SETTLED`: after every completed run the host records in the scope's
+  artifact directory (`reviewed.json`) each reviewed file's diff hash, the findings
+  reported on it and the run's judgement key (scope, instructions, contracts and brief,
+  and the reviewer's prompts). A later round of the same run (with `previous_findings`)
+  leaves out a file whose diff and key are unchanged and on which the run that last
+  covered it reported nothing, provided that run reported no finding without a path. Such
+  files are listed in `settled_changes` for the reviewer to read only; a file with a
+  finding is always reviewed again. With no file left, no agent runs and the round is
+  clean.
+- `REVIEW_REQUIREMENT_TAGS`: the test authors name the criteria each added test proves in
+  a `requirement: FR-…` line. Before a regression review the host reads these lines from
+  the added lines of the suites' diffs: a criterion routed to a suite that no such line
+  names, and a line naming no requirement of the brief, are findings for the test
+  authors, returned without running the reviewer (`checked_by: requirement-tags`).
+  Otherwise the reviewer gets `criteria_tests`, the places naming each criterion.
+- `REVIEW_SEAM_CHECKS`: for a seam of a Python service, a changed file that is not the
+  source of a module the seam lists (`ComponentContract.source_paths`) and an existing
+  line changed or removed are findings returned without the reviewer. A seam that only
+  inserts minimal symbols (a docstring and `pass`, `...`, `raise NotImplementedError` or
+  the return of a constant, name or attribute; plain decorators; typing imports;
+  constants) whose names occur nowhere else in the code is not reviewed. Anything else,
+  and every seam of another part or language, goes to the reviewer.
+- `REVIEW_STATIC_CHECKS`: before the delivery review, the language's `static_checks`
+  (gitleaks, and ruff limited to rules `F`, `B` and `S` for Python, pinned in the agent
+  image) run over the review workspace in the agent image without a network
+  (`docker_agents.run_tool`). Their results on the lines the run's diff adds reach the
+  reviewer as `static_findings` (never a matched secret), and it judges each one; a tool
+  that fails is left out.
+
 Contracts whose embedded form exceeds `CONTRACT_EMBED_CHARS` (default 60000 characters)
 are supplied on demand instead. `/workspace/input.json` then holds an index of every
 requirement (ID, category, priority, title), endpoint (operation, summary, requirement
@@ -549,6 +583,13 @@ flowchart LR
    `stubtest --ignore-missing-stub` must find every stubbed symbol in the code with the
    stubbed signature (`Literal` type aliases, which stubtest cannot compare, are compared
    by the runner's `literals.py`). A failed check fails the routing.
+   The agent does not type the signatures: the trusted `make_stub.py`, given to it in
+   `/workspace/tools/`, writes or extends a module's stub from the code's syntax tree
+   with the named symbols' exact signatures, decorators, `__init__`, the types and
+   constants they mention (names of the repository without a stub as `Any`), and a
+   placeholder docstring that the agent replaces with the behaviour; the host rejects a
+   stub that still holds it. The tool only appends to a stub and refuses to add a member
+   to a published class. Symbols a seam lists in `added` are hand-written.
    In Java (`app/languages/java/components.py`) a stub is the source of one stubbed type at
    its path (`com/example/flows/FlowWorkflow.java`), whose fully qualified name is the
    seam's `module`, and its symbols are named from the type's simple name
