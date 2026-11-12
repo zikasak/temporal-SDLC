@@ -85,6 +85,31 @@ async def test_stubs_conform_to_the_code_they_describe_and_nothing_else(tmp_path
             await check
 
 
+
+async def test_a_stub_generated_by_make_stub_conforms(tmp_path):
+    import subprocess
+    import sys
+
+    from app.languages.python.components import MAKE_STUB, STUB_PLACEHOLDER
+
+    repository = tmp_path / 'repository'
+    (repository / 'src/service').mkdir(parents=True)
+    (repository / 'src/service/flows.py').write_text(SERVICE)
+    (repository / 'requirements.txt').write_text('pyyaml\n')
+    components = tmp_path / 'components'
+    components.mkdir()
+    (components / 'runtime.json').write_text(json.dumps(
+        {'source_root': 'src', 'requirements': ['requirements.txt']}))
+    subprocess.run([sys.executable, str(MAKE_STUB), 'service.flows', 'Flow.close', 'Flow.fork',
+                    'State'], cwd=tmp_path, check=True)
+    stub = components / 'service/flows.pyi'
+    stub.write_text(stub.read_text().replace(STUB_PLACEHOLDER, 'Closes the flow.'))
+    work = tmp_path / 'work'
+    work.mkdir()
+    await check_conformance(CONTRACT, repository, components, ['service.flows'], work,
+                            tmp_path / 'logs')
+
+
 JAVA = get_language('java')
 JAVA_SERVICE = '''package com.example.flows;
 

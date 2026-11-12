@@ -14,6 +14,14 @@ RUN pip install --no-cache-dir langchain==1.4.2 langchain-openai==1.6.6 langchai
 # The Claude Agent SDK bundles the Claude Code CLI that serves the Claude adapter; its
 # credentials arrive as environment variables at run time.
 RUN pip install --no-cache-dir claude-agent-sdk==0.2.164
+# Static tools the host runs over a delivery before its review, without a network
+# (app/languages/static_checks.py): a secrets scanner and Python's linter.
+RUN arch="$(uname -m | sed 's/x86_64/x64/; s/aarch64/arm64/')" \
+    && python -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], '/tmp/gitleaks.tgz')" \
+        "https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_${arch}.tar.gz" \
+    && tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks && rm /tmp/gitleaks.tgz \
+    && gitleaks version
+RUN pip install --no-cache-dir ruff==0.8.4
 ARG AGENT_ROLE
 ARG WORKSPACE_NAME
 COPY app/__init__.py app/asyncio_utils.py app/tracing.py /opt/app/

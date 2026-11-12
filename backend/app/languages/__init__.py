@@ -120,6 +120,25 @@ class ComponentContract:
     build_args: Callable[[dict], dict[str, str]]
     # Trusted files the routing agent checks the contract with, given to it in TOOLS_DIR.
     tools: tuple[Path, ...] = ()
+    # The inverse of `module`: the repository paths, by the normalized runtime file, that
+    # may hold the source of a dotted module. None where the language cannot tell, so that
+    # the host checks of a seam leave it to the review agent.
+    source_paths: Callable[[str, dict], tuple[str, ...]] | None = None
+
+
+@dataclass(frozen=True)
+class StaticCheck:
+    """A trusted tool run over the review workspace before the delivery review, whose
+    results on the lines the delivery changed the reviewer judges."""
+    # What the reviewer is told the result comes from.
+    name: str
+    # Shell command run in the language's agent image, without a network, in the
+    # directory of the trees under review (`service/`, `tests/`, ...). It writes its
+    # report to the file $REPORT and exits 0 whatever it found.
+    command: str
+    # The report as findings: dicts of `rule`, `path` (relative to that directory),
+    # `line` and `message`, never the matched text itself.
+    parse: Callable[[str], list[dict]]
 
 
 # The contract's file that says how to import the code the stubs describe.
@@ -151,6 +170,8 @@ class Language:
     component_contract: ComponentContract | None = None
     # The suite of the criteria routed to a seam; given with `component_contract`.
     component_suite: ComponentSuite | None = None
+    # Trusted tools whose results on the changed lines the delivery review is given.
+    static_checks: tuple[StaticCheck, ...] = ()
 
 
 @dataclass(frozen=True)

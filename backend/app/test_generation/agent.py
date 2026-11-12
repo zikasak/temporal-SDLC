@@ -81,6 +81,10 @@ in place: one for each acceptance criterion, asserting the expected behaviour th
 HTTP exactly as the brief states it. The suite is first run against the service as it is
 today, where every test you add must fail and every existing test must pass; a new test
 that passes there does not reproduce the problem and stops the task.
+Inside each test you add, name the criteria it proves in a comment line of their own
+(or a line of the test's docstring) such as `requirement: FR-3`, or `requirement: FR-3,
+FR-4` for several, with the `id` the brief gives each; the review checks every
+criterion of this suite against these lines.
 Add each test where it belongs: in the existing test class that covers the behaviour, or
 in a new class. Do not change, rename or delete any existing test: they keep protecting
 the rest of the service, and the outer worker rejects a suite in which one of them
@@ -162,6 +166,10 @@ states. Never use anything of the service's code the stubs do not
 declare. The suite is first run against the code as it is today, where every test you add
 must fail and every existing test must pass; a new test that passes there does not
 reproduce the problem and stops the task.
+Inside each test you add, name the criteria of `routes` it proves in a comment line of
+their own (or a line of the test's docstring) such as `requirement: FR-3`, or
+`requirement: FR-3, FR-4` for several, with the `id` the brief gives each; the review
+checks every criterion of `routes` against these lines.
 Add each test where it belongs: in the existing test class that covers the behaviour, or
 in a new class. Do not change, rename or delete any existing test: the outer worker
 rejects a suite in which one of them differs. Follow the structure, helpers and

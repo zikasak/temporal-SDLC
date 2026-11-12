@@ -67,6 +67,26 @@ PI_CREDENTIALS_SHARED = os.getenv('PI_CREDENTIALS_SHARED', '').lower() in {'1', 
 CONTRACT_EMBED_CHARS = int(os.getenv("CONTRACT_EMBED_CHARS", "32000"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
+
+def _flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes"}
+
+
+# Deterministic checks that skip a review agent's run or emit a finding in its place
+# where they are certain (plans/deterministic-checks.md). Each is off until compared with
+# the reviews without it.
+# A later review round does not review again a file an earlier round judged clean and no
+# correction changed since.
+REVIEW_SKIP_SETTLED = _flag("REVIEW_SKIP_SETTLED")
+# A regression review is answered by the host when an acceptance criterion has no added
+# test tagged with it, or a tag names no requirement of the brief.
+REVIEW_REQUIREMENT_TAGS = _flag("REVIEW_REQUIREMENT_TAGS")
+# A Python seam's diff is checked by the host: changes beyond inserted symbols of its
+# modules are findings, and a seam of minimal, unreferenced symbols is not reviewed.
+REVIEW_SEAM_CHECKS = _flag("REVIEW_SEAM_CHECKS")
+# Secrets scanner and linter results on the changed lines reach the delivery review.
+REVIEW_STATIC_CHECKS = _flag("REVIEW_STATIC_CHECKS")
+
 # Shared GitHub connector: encrypts the saved GitHub App private key. Persist it
 # separately from the database.
 GITHUB_TOKEN_ENCRYPTION_KEY = os.getenv("GITHUB_TOKEN_ENCRYPTION_KEY", "")

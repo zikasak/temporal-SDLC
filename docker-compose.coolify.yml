@@ -46,6 +46,11 @@ x-app: &app
     DIAGNOSIS_MAX_TURNS: ${DIAGNOSIS_MAX_TURNS:-}
     DOCUMENTATION_MAX_TURNS: ${DOCUMENTATION_MAX_TURNS:-}
     ROUTING_MAX_TURNS: ${ROUTING_MAX_TURNS:-}
+    # Deterministic checks in place of parts of the code review; each off unless "true".
+    REVIEW_SKIP_SETTLED: ${REVIEW_SKIP_SETTLED:-false}
+    REVIEW_REQUIREMENT_TAGS: ${REVIEW_REQUIREMENT_TAGS:-false}
+    REVIEW_SEAM_CHECKS: ${REVIEW_SEAM_CHECKS:-false}
+    REVIEW_STATIC_CHECKS: ${REVIEW_STATIC_CHECKS:-false}
     GITHUB_TOKEN_ENCRYPTION_KEY: ${GITHUB_TOKEN_ENCRYPTION_KEY:-}
     GITHUB_ALLOWED_ORIGINS: ${GITHUB_ALLOWED_ORIGINS:-}
     # Optional, such as https://app.example.com/api/connectors/github/events; derived
