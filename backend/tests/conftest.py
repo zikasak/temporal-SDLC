@@ -65,6 +65,8 @@ def claude_http(monkeypatch, tmp_path):
                 self.end_headers()
                 self.wfile.write(b'{"input_tokens":100}')
                 return
+            # Not part of the API body; tests read which client sent the request.
+            body['user_agent'] = self.headers['User-Agent']
             requests.append(body)
             blocks = replies.pop(0) if replies else [{'type': 'text', 'text': 'Unexpected request'}]
             if isinstance(blocks, tuple):

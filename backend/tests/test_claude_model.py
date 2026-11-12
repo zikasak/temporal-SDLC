@@ -33,6 +33,7 @@ async def test_native_reply_and_thinking_options(claude_http, thinking_level, mo
     # Known models get CLI system reminders before the prompt; the prompt stays verbatim.
     assert (content if isinstance(content, str) else content[-1]['text']) == '@notes.md /help question'
     assert not request.get('tools')
+    assert '(external, temporal-sdlc,' in request['user_agent']
     assert not list((tmp_path / 'claude-config' / 'projects').rglob('*.jsonl'))
     if thinking_level == 'high':
         assert request['thinking']['type'] == 'adaptive'
