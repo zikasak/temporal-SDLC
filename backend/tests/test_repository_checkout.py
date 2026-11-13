@@ -1,6 +1,7 @@
 """Checkout and publication against a real Git remote on disk; only GitHub is replaced."""
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -49,6 +50,8 @@ def git(*args, cwd):
 @pytest.fixture
 def remote(tmp_path, monkeypatch, repository_selection, github_connection):
     """A bare repository standing in for github.com, and a saved connection."""
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
     bare = tmp_path / "remote" / (repository_selection["full_name"] + ".git")
     bare.mkdir(parents=True)
     git("init", "--quiet", "--bare", "--initial-branch", repository_selection["branch"], cwd=bare)

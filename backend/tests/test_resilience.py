@@ -2,6 +2,7 @@
 and their excerpts, decisions about further rounds of fixes, and failure causes."""
 
 import json
+import shutil
 import subprocess
 import tarfile
 from datetime import timedelta
@@ -208,6 +209,8 @@ def _git(*args, cwd):
 @pytest.fixture
 def session(tmp_path):
     """A session whose checkout is a clone of a local origin, with its manifest."""
+    if shutil.which('git') is None:
+        pytest.skip('git is not installed')
     origin = tmp_path / 'origin.git'
     seed = tmp_path / 'seed'
     seed.mkdir()
