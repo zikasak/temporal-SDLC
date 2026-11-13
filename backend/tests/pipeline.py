@@ -144,8 +144,10 @@ class FakeStages:
         self.checks_runs: list[str] = []
         self.checks_after: list[list[str]] = []
         self.analysed: list[str] = []
-        # How often the analysis is refused for the provider's limits before it answers.
+        # How often the analysis is refused for the provider's limits before it answers,
+        # and the cause it gives.
         self.analysis_limits = 0
+        self.analysis_cause = 'code'
         # How many contract tests the repository has.
         self.repository_tests = 3
         self.fail_snapshot = False
@@ -402,7 +404,8 @@ class FakeStages:
             raise ApplicationError('limits', {'retry_after': 0}, type='ProviderLimitReached',
                                    non_retryable=True)
         self.analysed.append(excerpt)
-        return {'summary': 'A test patches a removed attribute.', 'files': ['tests/test_x.py'],
+        return {'cause': self.analysis_cause,
+                'summary': 'A test patches a removed attribute.', 'files': ['tests/test_x.py'],
                 'instructions': 'Stop patching TASK_QUEUE in tests/test_x.py.',
                 'analysed': True}
 

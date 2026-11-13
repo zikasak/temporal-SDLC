@@ -1325,7 +1325,7 @@ Once the contract tests (and component tests) pass, `run_repository_checks`
 (`app/verification/checks.py`, on the verification queue) assembles the repository as the
 delivery would push it (the checkout with the published `implementation/service` and
 `tests/suite` in place) and runs the script in the sandbox's agent image (Python, Java
-with Maven, Node.js), as a non-root user with a network but no credential, host mount or
+with Maven, Node.js, Git), as a non-root user with a network but no credential, host mount or
 Docker, for at most 40 minutes. `verification_status` is `checking` meanwhile. The script's output is
 read as it arrives and only its last 20,000 lines, within 4 MiB, are kept. The result
 is `progress.checks`: `passed`, `failed`, `missing` (no script: only the contract tests
@@ -1342,7 +1342,11 @@ of context, each distinct failure once (two failures are the same when they stat
 same errors, whichever test they are of); and the end of the output is kept. Only that
 excerpt (at most 12,000 characters) goes to the LLM (`analyze_checks_failure`, with the
 diagnosis model), which answers where the problem is: a `summary`, the `files` to look at
-and `instructions`. Without the LLM, the excerpt's first error is the summary.
+and `instructions`, and its `cause`: `code`, or `environment` when the sandbox is at fault
+and no change to the repository could fix it (a program the checks call is not installed,
+or a registry could not be reached). Without the LLM, the excerpt's first error is the
+summary and the cause is `code`. A run failed for the environment is not repaired: it
+becomes an `error`, reported with the analysis's summary, like a run that did not finish.
 
 A failed run is repaired like failed tests, without a diagnosis: the repository's own
 checks are the code's, so the implementation's author gets a `repair` with the analysis as

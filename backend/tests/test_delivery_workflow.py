@@ -250,6 +250,20 @@ async def test_failing_checks_are_repaired_from_their_analysis_before_the_push(
     assert state.publication_status == 'completed' and worker.published
 
 
+async def test_checks_failed_by_the_sandbox_are_reported_not_repaired(
+        env, worker, repository_selection):
+    worker.checks_results = ['failed']
+    worker.analysis_cause = 'environment'
+    state = await delivered(env, await deliver(env, repository_selection))
+    # No author can install what the sandbox lacks: no repair round, and the delivery goes on.
+    assert worker.checks_runs == ['failed'] and not worker.repairs
+    assert state.checks['status'] == 'error'
+    assert state.checks['error'] == ("The repository's checks could not run in the sandbox: "
+                                     'A test patches a removed attribute.')
+    assert state.verification_error is None
+    assert state.publication_status == 'completed' and worker.published
+
+
 async def test_checks_that_keep_failing_the_same_way_end_the_rounds_unpushed(
         env, worker, repository_selection):
     worker.checks_results = ['failed']
