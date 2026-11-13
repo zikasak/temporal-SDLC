@@ -196,6 +196,35 @@ async def save_stage_work(stage: StageSpec, session_dir: Path, context: dict[str
                        session_dir.name, exc)
 
 
+def runtime_state() -> str:
+    """The file in which a stopped agent saved where it was."""
+    from app.agent_workflows.runtime import STATE_FILENAME
+    return STATE_FILENAME
+
+
+async def restore_stage_project(stage: StageSpec, session_dir: Path, context: dict[str, Any],
+                                project: Path) -> bool:
+    """Lay what the stage's last run left, as its `latest` work ref holds it, over the
+    agent's freshly populated `project`; true when it was restored."""
+    from app.github import work_refs
+    try:
+        target = stage.work(context) if stage.work else None
+        if target is None:
+            return False
+        async with async_context(tempfile.TemporaryDirectory, dir=session_dir) as temporary:
+            saved = Path(temporary) / 'saved'
+            if not await work_refs.restore_work(
+                    session_dir, session_dir.name, target.stage, saved, target.include,
+                    prefix=target.prefix, token=_work_token, kind=work_refs.LATEST):
+                return False
+            await run_sync(copy_regular_files, saved, project, include=lambda relative: True)
+        return True
+    except Exception as exc:
+        logger.warning('The %s work of session %s was not restored: %s', stage.role,
+                       session_dir.name, exc)
+        return False
+
+
 async def restore_stage_output(stage: StageSpec, session_dir: Path,
                                context: dict[str, Any]) -> bool:
     """Restore the stage's published output from the repository's work refs when it is
@@ -249,7 +278,22 @@ async def _run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
         async with async_context(tempfile.TemporaryDirectory, dir=artifact_dir) as temporary:
             work = Path(temporary)
             workspace = work / 'workspace'
-            if answers or resume:
+            if resume and not answers and not await run_sync(
+                    (paused / runtime_state()).is_file):
+                # The workspace the provider's limits stopped the agent in was kept on
+                # another worker's disk, now lost: a new run starts over, from the
+                # project as the stage's latest work ref saved it when it stopped.
+                logger.warning('%s stage lost the workspace its agent stopped in; starting '
+                               'over from its saved work (session=%s)', stage.role, session_id)
+                await run_sync(workspace.mkdir)
+                await run_sync(inputs.populate, workspace)
+                await run_sync(
+                    (workspace / 'input.json').write_text,
+                    json.dumps(inputs.context, ensure_ascii=False),
+                )
+                await restore_stage_project(stage, session_dir, context,
+                                            workspace / stage.workspace_name)
+            elif answers or resume:
                 # The paused agent continues in the workspace it left, inputs included.
                 await run_sync(docker_agents.resume_workspace, paused, workspace,
                                answers if answers else None)

@@ -478,6 +478,8 @@ async def run_tool(role: str, session_id: str, workspace: Path, command: str, re
 
 
 CHECKS_LOG_LINES = 20000
+# At most this much of the end of a script's output is kept, however long its lines.
+CHECKS_LOG_BYTES = 4 * 1024 * 1024
 
 
 async def run_script(role: str, session_id: str, workspace: Path, command: str,
@@ -523,14 +525,26 @@ async def _save_logs(name: str, log_path: Path) -> None:
     process = await asyncio.create_subprocess_exec(
         'docker', 'logs', '--tail', str(CHECKS_LOG_LINES), name,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    output = bytearray()
+    cut = False
     try:
-        output, _ = await asyncio.wait_for(process.communicate(), 120)
+        async with asyncio.timeout(120):
+            # Read as it arrives, keeping only the end: the output is the repository's
+            # script's, as large as it likes.
+            while chunk := await process.stdout.read(65536):
+                output.extend(chunk)
+                if len(output) > CHECKS_LOG_BYTES:
+                    del output[:len(output) - CHECKS_LOG_BYTES]
+                    cut = True
+            await process.wait()
     except BaseException:
         if process.returncode is None:
             process.kill()
             await process.wait()
         raise
     text = redact_output(output.decode('utf-8', 'replace'))
+    if cut:
+        text = '… (the start of the output was cut)\n' + text.split('\n', 1)[-1]
     await run_sync(log_path.write_text, text, encoding='utf-8')
 
 

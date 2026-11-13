@@ -224,16 +224,18 @@ async def checkout_moved(session_dir: Path) -> bool:
 
 async def restore_work(session_dir: Path, session_id: str, stage: str, target: Path,
                        include: Callable[[Path], bool], *, prefix: str = '',
-                       token: Callable[[], Awaitable[tuple[str, str]]]) -> bool:
-    """Write the stage's published output, as its `published` work ref holds it, to the
-    missing directory `target`: the files `include` selects under `prefix`. False when it
-    could not be restored, such as when no output was published there."""
+                       token: Callable[[], Awaitable[tuple[str, str]]],
+                       kind: str = PUBLISHED) -> bool:
+    """Write the stage's published output, as its `published` work ref holds it, or with
+    `kind` LATEST what its last run left, to the missing directory `target`: the files
+    `include` selects under `prefix`. False when it could not be restored, such as when
+    nothing was saved there."""
     manifest = await run_sync(_manifest, session_dir)
     checkout = session_dir / CHECKOUT_DIR
     if (manifest is None or await run_sync(target.exists)
             or not await run_sync((checkout / '.git').is_dir)):
         return False
-    ref = work_ref(session_id, stage, PUBLISHED)
+    ref = work_ref(session_id, stage, kind)
     try:
         secret, _ = await token()
         await _git('fetch', '--quiet', '--no-tags', '--depth', '1', 'origin',
