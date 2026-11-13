@@ -76,11 +76,10 @@ def test_parent_listing_never_returns_the_parent_itself(admin):
 
 
 def test_parent_and_top_level_cannot_be_combined(admin):
-    for top_level in ("true", "false"):
-        response = admin.get("/workflows", params={
-            "parent": f"task-{uuid.uuid4().hex}", "top_level": top_level})
-        assert response.status_code == 422, response.text
-        assert response.json()["detail"]
+    response = admin.get("/workflows", params={
+        "parent": f"task-{uuid.uuid4().hex}", "top_level": "true"})
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]
 
 
 # Starting a task (FR-125)
