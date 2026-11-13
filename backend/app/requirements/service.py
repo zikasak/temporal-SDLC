@@ -54,7 +54,8 @@ async def start_task(
     session_id = new_session_id()
     task_flow_id, _ = await start_task_flow(TaskFlowState(
         kind=state.kind, repository=state.repository, task=task.strip(),
-        first_stage="requirements", first_session_id=session_id, requirements=state))
+        first_stage="requirements", first_session_id=session_id, requirements=state),
+        client=await connect_temporal())
     await register(session_id)
     logger.info("Started requirements session %s in task flow %s", session_id, task_flow_id)
     return session_id, task_flow_id
@@ -97,7 +98,9 @@ async def fork_task(session_id: str, message_index: int) -> tuple[str, str]:
     )
     fork_id = new_session_id()
     task_flow_id = await start_fork(source.task_flow_id, "requirements", fork_id, forked,
-                                    kind=forked.kind, repository=forked.repository)
+                                    kind=forked.kind, repository=forked.repository,
+                                    client=await connect_temporal(),
+                                    source_session_id=session_id)
     await register(fork_id)
     logger.info("Forked requirements session %s after message %d as %s in task flow %s",
                 session_id, message_index, fork_id, task_flow_id)
@@ -173,7 +176,7 @@ async def get_session(session_id: str) -> dict[str, Any]:
     del session["contract"], session["api_design_session_id"]
     if state.task_flow_id:
         # The task flow starts the architecture session; it says which, once it has.
-        task = await get_task_state(state.task_flow_id)
+        task = await get_task_state(state.task_flow_id, await connect_temporal())
         session["architecture_session_id"] = (
             started_id(task, "architecture") if task and state.status == "completed"
             else None)

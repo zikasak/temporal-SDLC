@@ -31,11 +31,27 @@ def new_task_flow_id() -> str:
     return f"{ID_PREFIX}{uuid.uuid4().hex}"
 
 
+async def task_queue_of(client: Client, workflow_id: str | None) -> str | None:
+    """The task queue `workflow_id` runs on, where a flow started from it runs too; None
+    when it cannot be told, such as when it does not exist."""
+    if not workflow_id:
+        return None
+    try:
+        description = await client.get_workflow_handle(workflow_id).describe()
+    except RPCError as exc:
+        if exc.status != RPCStatusCode.NOT_FOUND:
+            raise
+        return None
+    return description.task_queue or None
+
+
 async def start_task_flow(state: TaskFlowState, workflow_id: str | None = None,
-                          client: Client | None = None) -> tuple[str, bool]:
+                          client: Client | None = None,
+                          task_queue: str | None = None) -> tuple[str, bool]:
     """Start the task flow and wait until it created its first children, so that the
     session it starts with can be reached. A `workflow_id` already started, such as by a
-    handover tried again, is waited for instead. Its ID, and whether this call started it."""
+    handover tried again, is waited for instead. Its ID, and whether this call started it.
+    It runs on `task_queue`, by default the service's own."""
     client = client or await connect_temporal()
     workflow_id = workflow_id or new_task_flow_id()
     if not state.name:
@@ -45,7 +61,7 @@ async def start_task_flow(state: TaskFlowState, workflow_id: str | None = None,
     started = True
     try:
         handle = await client.start_workflow(
-            WORKFLOW_TYPE, state, id=workflow_id, task_queue=TASK_QUEUE,
+            WORKFLOW_TYPE, state, id=workflow_id, task_queue=task_queue or TASK_QUEUE,
             id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
             id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
             **execution_fields(state.repository, memo_fields=memo),
@@ -71,11 +87,12 @@ async def start_task_flow(state: TaskFlowState, workflow_id: str | None = None,
     return workflow_id, started
 
 
-async def get_task_state(task_flow_id: str | None) -> TaskFlowState | None:
+async def get_task_state(task_flow_id: str | None,
+                         client: Client | None = None) -> TaskFlowState | None:
     """The task flow's state; None without a task flow or when it does not exist."""
     if not task_flow_id:
         return None
-    client = await connect_temporal()
+    client = client or await connect_temporal()
     try:
         return await client.get_workflow_handle(task_flow_id).query(
             "get_state", result_type=TaskFlowState)
@@ -104,11 +121,16 @@ def earlier_stages(original: TaskFlowState | None, before: Stage | None) -> list
 
 async def start_fork(source_task_flow_id: str | None, stage: Stage, session_id: str,
                      state: Any, *, kind: Any, repository: Any,
-                     task: str = "") -> str:
+                     task: str = "", client: Client | None = None,
+                     source_session_id: str | None = None) -> str:
     """Start the task flow of a fork of the `stage` session: named after the original with
     a " (fork)" suffix, holding the forked session `session_id`, linking to the original
-    task's earlier stages and with pending children for the stages after it. Its ID."""
-    original = await get_task_state(source_task_flow_id)
+    task's earlier stages and with pending children for the stages after it. It runs on
+    the task queue of the original task flow, or of the forked `source_session_id`. Its ID."""
+    client = client or await connect_temporal()
+    original = await get_task_state(source_task_flow_id, client)
+    task_queue = (await task_queue_of(client, source_task_flow_id)
+                  or await task_queue_of(client, source_session_id))
     name = with_suffix(original.name, FORK_SUFFIX) if original and original.name else ""
     flow = TaskFlowState(
         kind=kind, repository=repository, task=task or (original.task if original else ""),
@@ -116,7 +138,7 @@ async def start_fork(source_task_flow_id: str | None, stage: Stage, session_id: 
         suffix=FORK_SUFFIX, first_stage=stage, first_session_id=session_id,
         linked=earlier_stages(original, stage))
     setattr(flow, stage, state)
-    task_flow_id, _ = await start_task_flow(flow)
+    task_flow_id, _ = await start_task_flow(flow, client=client, task_queue=task_queue)
     return task_flow_id
 
 
@@ -127,11 +149,14 @@ def fix_task_flow_id(follow_up_session_id: str) -> str:
 
 
 async def start_fix(original_task_flow_id: str | None, follow_up_session_id: str,
-                    delivery: Any, client: Client | None = None) -> tuple[str, bool]:
+                    delivery: Any, client: Client | None = None,
+                    task_queue: str | None = None) -> tuple[str, bool]:
     """Start the task flow of a fix round of a closed task's delivery: named after the
     original with a " (fix)" suffix, holding the fix delivery as its child and linking to
     the original task's stages. Its ID, and whether this call started it."""
-    original = await get_task_state(original_task_flow_id)
+    client = client or await connect_temporal()
+    original = await get_task_state(original_task_flow_id, client)
+    task_queue = task_queue or await task_queue_of(client, original_task_flow_id)
     name = with_suffix(original.name, FIX_SUFFIX) if original and original.name else ""
     spec = delivery.spec
     flow = TaskFlowState(
@@ -142,4 +167,5 @@ async def start_fix(original_task_flow_id: str | None, follow_up_session_id: str
         suffix=FIX_SUFFIX, first_stage="delivery", first_session_id=follow_up_session_id,
         delivery=delivery, delivery_session_id=follow_up_session_id,
         linked=earlier_stages(original, None))
-    return await start_task_flow(flow, fix_task_flow_id(follow_up_session_id), client)
+    return await start_task_flow(flow, fix_task_flow_id(follow_up_session_id), client,
+                                 task_queue)

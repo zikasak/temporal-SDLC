@@ -390,8 +390,8 @@ async def _follow_up(finished: _Finished, session_id: str,
     """The open flow that carries on the closed delivery of `session_id`, as its session
     ID, started when there is none: the earliest of its follow-ups whose workflow does
     not exist yet or still runs. A task's delivery is carried on as the delivery child of
-    a new top-level task flow that links to the original task's stages; an onboarding's
-    as a new top-level DeliveryWorkflow. `prepare(state)` changes the state a new one
+    a new top-level task flow that links to the original task's stages; an onboarding's,
+    and one that belongs to no task flow, as a new top-level DeliveryWorkflow. `prepare(state)` changes the state a new one
     starts from. Also true when this call started it."""
     client = finished.client
     for number in range(1, MAX_FOLLOW_UPS + 1):
@@ -410,10 +410,12 @@ async def _follow_up(finished: _Finished, session_id: str,
         if prepare is not None:
             prepare(state)
         await _copy_workspace(session_id, follow_up)
-        if not state.spec.onboarding:
+        original_task_flow = _task_flow_of(finished)
+        if not state.spec.onboarding and original_task_flow:
             from app.tasks.service import start_fix
             task_flow_id, started = await start_fix(
-                _task_flow_of(finished), follow_up, state, client)
+                original_task_flow, follow_up, state, client,
+                finished.description.task_queue)
             if started:
                 await registry.register(workflow_id)
                 logger.info('Delivery of session %s closed; carried on in the task flow %s',

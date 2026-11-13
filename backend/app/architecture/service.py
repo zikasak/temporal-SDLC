@@ -114,7 +114,9 @@ async def fork_task(session_id: str, message_index: int) -> tuple[str, str | Non
     # The fork starts a task flow of its own, linking to the original's requirements.
     fork_id = new_session_id()
     task_flow_id = await start_fork(source.task_flow_id, "architecture", fork_id, forked,
-                                    kind=source.kind, repository=source.repository)
+                                    kind=source.kind, repository=source.repository,
+                                    client=await connect_temporal(),
+                                    source_session_id=session_id)
     await register(fork_id)
     logger.info("Forked architecture session %s after message %d as %s in task flow %s",
                 session_id, message_index, fork_id, task_flow_id)
