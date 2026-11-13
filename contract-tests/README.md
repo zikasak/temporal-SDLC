@@ -150,6 +150,23 @@ Contract ambiguities and how the suite reads them:
   that every requirements and API design session action requires sign-in. The contract does
   not say how an invalid `page_token` is reported before Temporal is contacted, so it is not
   tested.
+- Task flows (FR-125 to FR-143, `tests/test_task_flows.py`): starting one, forking, the
+  stage children with `pending`/`skipped`, `linked`, fix flows (`fix_flow_ids`) and the
+  unresolved-findings marker all need Temporal, an LLM and GitHub. Without them the suite
+  checks that `POST /requirements/sessions` rejects an incomplete intake with 422, and,
+  when `GET /workflows` answers 200, the shape of what comes back: `TaskWorkflow` lists
+  only top-level, non-linked flows with a name and repository; the always-present fields
+  `name`, `linked`, `waiting_for_user`, `unresolved_findings`; `pending`/`skipped` only on
+  stages that have a parent; `top_level=true` lists no architecture or API design
+  stage (a top-level delivery is valid: a fix round on a closed flow's pull request runs as
+  its own top-level flow, FR-141/FR-142); `parent=<task flow>` lists only stages (a linked stage keeps its own task flow as
+  parent); an unknown `parent` lists nothing. With 503 (no Temporal) these only verify the
+  503 body. The ID format of a task flow is not specified, so tests only assume it is not
+  a session ID. The architecture stage's `parent_workflow_id` is the task flow (FR-125), not
+  the requirements session; `test_workflow_listing_accepts_the_architecture_type` therefore
+  only asserts that an architecture stage's parent is not a requirements-session ID.
+  The suite does not assume which refusal (404, 409, 422, 503) `POST /requirements/sessions`
+  gives for an unreachable repository, so it does not test it.
 - Unknown IDs are well formed (prefix and 32 hex digits) so that they are treated as
   unknown rather than malformed.
 
