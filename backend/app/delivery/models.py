@@ -37,8 +37,10 @@ CI_REGISTRATION_GRACE = timedelta(minutes=10)
 CI_CHECK_TIMEOUT = timedelta(hours=3)
 # How many fix rounds in a row a delivery starts on its own for failed CI checks, before
 # it only reports them; a push that passes CI, or one the user asked for, starts the
-# count over.
-MAX_CI_FIX_ROUNDS = 2
+# count over. Within the ceiling each round has to be earned by progress
+# (app.delivery.rounds); runs that began before that keep the old, fixed limit.
+MAX_CI_FIX_ROUNDS = 6
+LEGACY_CI_FIX_ROUNDS = 2
 # `pending` while the pushed commit's checks run or none has appeared yet; `passed` when
 # they all succeeded or were skipped; `failed` when one failed or timed out;
 # `inconclusive` when they finished otherwise, such as cancelled; `none` when no check
@@ -117,6 +119,17 @@ class AgentQuestions(TypedDict):
     # Which agent asked: implementation, tests, documentation or diagnosis.
     stage: str
     questions: list[Question]
+
+
+class ProviderWait(TypedDict):
+    """A coding agent stopped by its model provider's limits (rate, quota or usage): its
+    stage waits, then continues it where it stopped."""
+
+    workflow_id: str
+    stage: str
+    # When it goes on (ISO 8601), and what the provider said, without credentials.
+    until: str
+    message: str | None
 
 
 @dataclass
@@ -220,6 +233,15 @@ class DeliveryProgress:
     publication_status: PublicationStatus = 'not_applicable'
     # Open questions of the coding agents, which wait for their answers.
     agent_questions: list[AgentQuestions] = field(default_factory=list)
+    # Agents waiting for their model provider's limits, which go on by themselves.
+    provider_waits: list[ProviderWait] = field(default_factory=list)
+    # The last run of the repository's checks script over the delivered repository
+    # (app.verification.checks): its status, the excerpt of a failed run's output and the
+    # LLM's `analysis` of it; None while it has not run.
+    checks: dict[str, Any] | None = None
+    # Why automatic repair rounds stopped (app.delivery.rounds), and whether they would
+    # have gone on; None while none was decided.
+    repair_decision: dict[str, Any] | None = None
     # Every code review round of the delivery, oldest first.
     reviews: list[ReviewRound] = field(default_factory=list)
     # Why the last code review failed to run; cleared when a review completes.
@@ -614,6 +636,10 @@ class DeliveryState:
     ci_fix: dict[str, Any] | None = None
     # How many automatic CI fix rounds ran in a row, up to MAX_CI_FIX_ROUNDS.
     ci_fixes: int = 0
+    # What the CI left failing on each pushed commit of the automatic fix rounds in a
+    # row, the failure before the first round included (app.delivery.rounds): whether
+    # another round is worth it is decided from it.
+    ci_history: list[dict[str, Any]] = field(default_factory=list)
 
 
 def mention_key(item: Any) -> tuple[str | None, int]:
@@ -642,6 +668,7 @@ def interrupted(state: DeliveryState) -> DeliveryState:
     progress = state.progress
     state.waiting = False
     progress.agent_questions = []
+    progress.provider_waits = []
     for mention in progress.mentions:
         if mention['status'] in ('classifying', 'running'):
             if mention['status'] == 'running':

@@ -176,11 +176,15 @@ Each authoring stage preserves bounded Docker build output in its artifact direc
 
 Build logs are saved on success, failure, timeout and cancellation. Verification logs
 also identify session/container/network names and report collection/result summaries.
-These are diagnostics, not an automatic retry or repair mechanism. The UI's test-stage
-failure label covers generation **or** build failure: provider rejection, connectivity
-and agent termination can fail the stage before compilation. Inspect `agent.log` first
-in that case. A host-side image build failure is not fed back into the completed coding
-agent, and automatic Temporal/model retries remain disabled.
+These are diagnostics, not an automatic retry or repair mechanism. A stage's error in the
+progress (such as `tests_error`) names its cause after the generic sentence
+(`app/delivery/causes.py`): the first line of the innermost failure and the last line of
+the output it quotes that reads as an error, with anything like a credential masked.
+Provider rejection, connectivity and agent termination can fail the stage before
+compilation; inspect `agent.log` for the whole story. A host-side image build failure is
+not fed back into the completed coding agent, and automatic Temporal/model retries remain
+disabled, except that a provider's limits are waited for (see
+[the model provider's limits](#the-model-providers-limits)).
 
 ## Shared execution machinery
 
@@ -472,9 +476,18 @@ a new service or an API change asks what changes in such parts too. Dependency a
 directories of the other toolchains (`node_modules`, `dist`, `.venv` and others) are build
 output in every language, so they are never published.
 
+The implementation author in a checkout also sees the repository's own unit tests (the
+language's test directories, such as `backend/tests`; never `contract-tests/` or any
+`component-tests/`) and maintains them with the code: a change that renames or removes
+what a test uses updates that test, and a test is never deleted, skipped or weakened only
+to pass. It runs [the repository's checks](#the-repositorys-checks) before it finishes. An
+onboarding's author leaves them, as all existing code, as they are.
+
 The checkout itself is untouched until verification passes. Then the main worker makes the
 files the implementation author could see equal to `implementation/service` (files it
-removed are deleted; tests it never saw stay), replaces `contract-tests/` with
+removed are deleted; tests it never saw stay; the unit tests only when the published tree
+carries them, so a tree published before authors maintained them never removes them),
+replaces `contract-tests/` with
 `tests/suite`, writes the contract to `contracts/`, commits and pushes the new
 `generated/…` branch.
 
@@ -1274,8 +1287,11 @@ passing when:
 - diagnosis fails (`verification_error` is set);
 - the repair stage fails: the previous image stays published, the stage's error is
   recorded and the existing manual retry for that stage is offered;
-- `MAX_REPAIR_ROUNDS` (5, in `app/delivery/flow/verification.py`) rounds did not produce a pass
-  (`verification_error` is set and the last failed result is kept).
+- a further round is not worth it, as [further rounds of fixes](#further-rounds-of-fixes)
+  decides, at the latest after `MAX_REPAIR_ROUNDS` (12, in
+  `app/delivery/flow/verification.py`) rounds (`verification_error` says why and the last
+  failed result is kept; `progress.repair_decision` holds the decision). Runs that began
+  before the decision existed keep their fixed five rounds.
 
 To exercise real Docker networking, the trusted runner and Surefire collection without
 an LLM, run from `backend`:
@@ -1287,6 +1303,116 @@ RUN_DOCKER_VERIFICATION_TESTS=1 python -m pytest tests/test_verification_docker.
 These opt-in tests build disposable HTTP service and Maven test images, cover passing,
 failing, delayed and unavailable services, and verify resource cleanup. Normal backend
 tests do not require Docker.
+
+## The repository's checks
+
+Contract and component tests prove the API and the criteria; they do not run what the
+repository's own CI runs, such as its unit tests and the builds of its other parts. A
+change could pass verification and still fail CI only after its push. So the repository
+carries its own checks script, `.sdlc/checks.sh`, and verification runs it.
+
+The script is the whole interface between the pipeline and the repository: nothing here
+reads the repository's CI configuration, languages or tools, and the repository's CI can
+call the same script or not. It is a POSIX shell script that a clean container runs from
+the repository root: it installs each part's dependencies, builds each part and runs its
+own tests, and exits non-zero when anything fails. It must not run the contract tests,
+need a running service, external services, Docker or secrets, or change tracked files.
+An onboarding's implementation author writes it from the build files and any CI
+configuration and makes sure it passes on the existing code; every implementation author
+of a later task can run it. This repository's own is `.sdlc/checks.sh`.
+
+Once the contract tests (and component tests) pass, `run_repository_checks`
+(`app/verification/checks.py`, on the verification queue) assembles the repository as the
+delivery would push it (the checkout with the published `implementation/service` and
+`tests/suite` in place) and runs the script in the sandbox's agent image (Python, Java
+with Maven, Node.js), as a non-root user with a network but no credential, host mount or
+Docker, for at most 40 minutes. `verification_status` is `checking` meanwhile. The result
+is `progress.checks`: `passed`, `failed`, `missing` (no script: only the contract tests
+verify the delivery), `not_applicable` (no repository) or `error` (the script did not
+finish, or could not be run, which is reported and does not stop the delivery, since it
+says nothing about the code). The whole output is kept as
+`<session>/checks/<run>/output.log`.
+
+A failed run's output is mostly noise for whoever fixes it. `failure_excerpt` cuts it down
+without the LLM, for any toolchain: colours, timestamps, dependency downloads, progress
+bars, passing tests and captured output of passing setup are dropped; runs of the same
+line are shown once; the lines that report errors and failures are kept with a few lines
+of context, each distinct failure once (two failures are the same when they state the
+same errors, whichever test they are of); and the end of the output is kept. Only that
+excerpt (at most 12,000 characters) goes to the LLM (`analyze_checks_failure`, with the
+diagnosis model), which answers where the problem is: a `summary`, the `files` to look at
+and `instructions`. Without the LLM, the excerpt's first error is the summary.
+
+A failed run is repaired like failed tests, without a diagnosis: the repository's own
+checks are the code's, so the implementation's author gets a `repair` with the analysis as
+`instructions` and the excerpt as `checks`, and fixes the code, or a unit test whose
+assertion the change rightly altered. Then the contract tests and the checks run again.
+Checks that still fail stop the delivery before its push, with the reason in
+`verification_error`, just as failing tests do.
+
+## Further rounds of fixes
+
+A round of fixes (a repair after failed tests or checks, or an automatic fix of failed CI)
+costs an agent run and a verification. The ceilings on rounds are high (12 repair rounds,
+6 CI fix rounds in a row), so that a long but converging repair is not cut short; within
+them each further round has to be earned by progress. `app/delivery/rounds.py` decides it
+from what the rounds left failing (how many, and what: the failing tests, or the error
+lines of the checks' or CI's output with what varies between runs taken out), without the
+LLM, so that a replay of the workflow decides the same:
+
+- the same failures after three rounds in a row: the fixes go round in circles, stop;
+- failures that grew in each of the last two rounds: the fixes make it worse, stop;
+- over the last four rounds, never fewer failures than before them and never other ones:
+  no progress, stop;
+- anything else, fewer or other failures than before, is progress: go on.
+
+The reason is shown with the error (`verification_error`, or the CI comment in the pull
+request), and `progress.repair_decision` holds the last decision.
+
+## Work kept in the repository
+
+Every stage that changes the project, whatever became of its run, commits what its
+author left to a hidden ref of the session's repository (`app/github/work_refs.py`):
+`refs/sdlc/<session-id>/<stage>/latest` after every run (published, failed, rejected or
+stopped by the provider's limits), and `refs/sdlc/<session-id>/<stage>/published` for the
+output the stage published. The stages are `implementation` (and `seam`), `tests`,
+`component-tests` and `documentation`; each commit holds the repository as the session
+started from it with the stage's files in place, as a publication would write them, and
+the commits of a stage are chained. Such refs are no branch: GitHub lists them in no
+branch list, runs no CI for them, and they never touch the pull request. Fetch one with
+`git fetch origin refs/sdlc/<session-id>/<stage>/latest`.
+
+The commit is made without the LLM, so a stage whose agent failed is saved too. Its
+message is written by the stage's model when it answers within a minute; otherwise, and
+never waiting for a provider's limits, it is composed from the change itself. A
+`Sdlc-Status:` trailer says what became of the run. Saving never fails a stage: what could
+not be saved is logged.
+
+A worker that lost a stage's published output (such as `implementation/service` or
+`tests/suite`, after a redeploy with a new disk) restores it from the `published` ref
+before the stage runs again, so a repair continues the work instead of failing with
+"Generated tests are unavailable". The record of the repository's tests is taken again
+from the commit the session started from, never from a checkout the delivery already
+pushed to.
+
+## The model provider's limits
+
+A model provider that refuses requests for its limits (a rate limit, an exhausted quota or
+usage limit, an overloaded service: HTTP 429 or 529, or a message saying so;
+`app/llm/limits.py`) says nothing about the work, so the work waits instead of failing:
+
+- Inside a coding agent's container, the request is repeated twice after the wait the
+  provider asks for (at most a minute). Then the agent saves where it stopped, as a run
+  paused for the user's answers does, and exits with code 76; the host keeps its workspace
+  and returns `provider_limit` (the wait asked for and the provider's message, without
+  credentials). Native Claude sessions are resumed by their session ID.
+- The stage's workflow (`AgentWorkflow`) waits, as a timer that holds no worker: the wait
+  the provider asked for (plus 30 seconds), else 5 minutes doubling, between 1 minute and 2
+  hours. Then a new container goes on from the kept workspace. After 7 days without the
+  provider the stage fails with that reason.
+- While it waits the delivery shows it in `progress.provider_waits`, with the time it goes
+  on, and the page says so.
+- The analysis of failed checks waits the same way; a commit message never waits.
 
 ## Run the generated tests manually
 

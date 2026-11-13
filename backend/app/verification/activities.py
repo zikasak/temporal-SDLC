@@ -22,6 +22,7 @@ from temporalio.exceptions import ApplicationError
 from app import docker_agents
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.host import build_image, publish_manifest, session_language
+from app.github import work_refs
 from app.github.checkout import (
     CHECKOUT_DIR, COMPONENT_SNAPSHOT, COMPONENT_TESTS_DIR, SNAPSHOT_DIR, TESTS_DIR,
 )
@@ -415,6 +416,26 @@ async def snapshot_repository_tests(session_id: str, language: str) -> dict[str,
     if not await run_sync(checkout.is_dir):
         raise ApplicationError('The repository checkout is unavailable', non_retryable=True)
     snapshot = session_dir / SNAPSHOT_DIR
+    async with async_context(tempfile.TemporaryDirectory, dir=session_dir) as temporary:
+        source = checkout
+        if (not await run_sync((snapshot / 'suite').is_dir)
+                and await work_refs.checkout_moved(session_dir)):
+            # The record was lost, such as with this worker's disk, after the delivery
+            # pushed to the checkout: it is taken again from the commit it started from.
+            base = Path(temporary) / 'base'
+            if not await work_refs.base_files(session_dir, base):
+                raise ApplicationError(
+                    "The repository's tests were not recorded, and the commit the session "
+                    'started from is no longer available to record them from.',
+                    non_retryable=True)
+            logger.warning('Recording the repository tests of session %s again from the '
+                           'commit it started from', session_id)
+            source = base
+        return await _record_suites(registered, session_id, source, snapshot)
+
+
+async def _record_suites(registered: Language, session_id: str, checkout: Path,
+                         snapshot: Path) -> dict[str, int]:
     # Each suite with where the checkout holds it, its count's key, its record and whether
     # it is counted only when it has tests, so a repository with no other part's tests is
     # recorded as before.

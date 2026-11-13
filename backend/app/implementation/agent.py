@@ -12,6 +12,9 @@ CONTRACTS = Path('/workspace/contracts')
 
 # The language's authoring instructions, written by the host.
 LANGUAGE = Path('/workspace/language.json')
+# The repository's checks script: builds every part of the repository and runs its own
+# tests; verification runs it too (app/verification/checks.py names the same path).
+CHECKS_SCRIPT = '.sdlc/checks.sh'
 
 PROMPT = """Implement the service in /workspace/service using the supplied
 requirements and OpenAPI design. Generated interfaces and models are the API contract.
@@ -199,7 +202,7 @@ requirements and OpenAPI design are the contract drafted from that code; indepen
 written HTTP contract tests run against the service built with your Dockerfile.
 {instructions}
 Do not change the existing code. Write only the Dockerfile at the project root and its
-.dockerignore, replacing any the repository has. Read the build files, configuration and
+.dockerignore, replacing any the repository has, and the checks script described below. Read the build files, configuration and
 entry point before writing them. The Dockerfile builds the service as a self-contained
 image that the contract tests can run against alone: a multi-stage build that skips
 tests, with everything the service needs to start (such as its own database inside the
@@ -236,10 +239,71 @@ serving the service, and change nothing else of the existing code.
 """
 
 
+UNIT_TESTS_PROMPT = """
+An exception to what is said about tests above: the repository's own unit and integration
+tests in the checkout (its test files and test directories; not the contract tests or the
+component tests, which stay unavailable) are part of the code you maintain, and they are
+pushed with it. Read those your change concerns. When your change alters behaviour that a
+test asserts on purpose, or removes or renames something a test uses, update that test with
+the change; leave every other test as it is. Never delete, skip or weaken a test only to
+make it pass.
+The repository's checks script, {script}, builds every part of the repository and runs
+these tests; verification runs it after you finish and sends its failures back to you. When
+the checkout holds it, run it with shell (`sh {script}` from the project root) before you
+finish and fix what fails. Without it, build each part you changed and run its tests with
+its own tool.
+""".format(script=CHECKS_SCRIPT)
+
+CHECKS_REPAIR_PROMPT = """
+This is a repair run. /workspace/service already holds your previous implementation, which
+builds and passes the contract tests, but the repository's checks script failed against it:
+its own builds or tests. The `repair` entry of the input holds `instructions`, an analysis of
+the failure, and `checks`, the relevant part of the script's output. Fix the cause with
+targeted edits: the code when it broke what a test rightly asserts, or a test of the
+repository when your change rightly altered what it asserts. Run the checks script again
+before you finish. Do not delete, skip or weaken tests to make them pass.
+"""
+
+ONBOARDING_CHECKS_PROMPT = """
+Write the repository's checks script as well: {script}, a POSIX shell script that a clean
+container (Python 3.12, Java 21 with Maven, Node.js with npm, network access, not root, no
+Docker) runs from the project root to check the whole repository as its CI would. It
+installs each part's dependencies, builds each part and runs its own unit tests with that
+part's tool, and exits with a non-zero status when any of it fails (start it with
+`set -eu`). Base it on the repository's build files and any CI configuration; it must not
+run the contract tests in contract-tests/ or the component tests, need a running service,
+external services or secrets, or change tracked files. Keep any existing checks script and
+only correct it. Run it with shell before you finish and make sure it passes on the
+existing code; when an existing test fails on the existing code, leave it as it is and say
+so in a comment at the top of the script.
+""".format(script=CHECKS_SCRIPT)
+
+
+ONBOARDING_CHECKS_REPAIR_PROMPT = """
+This is a repair run. /workspace/service already holds your previous Dockerfile and checks
+script, and the service passes the contract tests, but the checks script failed. The
+`repair` entry of the input holds `instructions`, an analysis of the failure, and `checks`,
+the relevant part of the script's output. The existing code is right and stays exactly as
+it is: correct only the checks script (or the Dockerfile and its .dockerignore), and run it
+again before you finish. When an existing test fails on the existing code, do not run it from
+the script; say so in a comment at the top of the script.
+"""
+
+
+def unit_tests_prompt(inputs: dict) -> str:
+    """The repository's own tests and checks script, for an author working in its checkout;
+    an onboarding's author leaves the existing code, its tests included, as it is."""
+    if not inputs.get('repository') or inputs.get('onboarding'):
+        return ''
+    return UNIT_TESTS_PROMPT
+
+
 def repair_prompt(inputs: dict) -> str:
     repair = inputs.get('repair')
     if not repair:
         return ''
+    if repair.get('checks') is not None:
+        return ONBOARDING_CHECKS_REPAIR_PROMPT if inputs.get('onboarding') else CHECKS_REPAIR_PROMPT
     if inputs.get('seam'):
         return SEAM_REVIEW_PROMPT
     if inputs.get('onboarding'):
@@ -251,7 +315,7 @@ def repair_prompt(inputs: dict) -> str:
 
 def base_prompt(inputs: dict, instructions: str) -> str:
     if inputs.get('onboarding'):
-        return ONBOARDING_PROMPT.format(instructions=instructions)
+        return ONBOARDING_PROMPT.format(instructions=instructions) + ONBOARDING_CHECKS_PROMPT
     # A change to an existing service is told about its checkout by its own prompt.
     if inputs.get('brief'):
         if inputs.get('seam'):
@@ -289,7 +353,8 @@ async def main() -> None:
     inputs = json.loads(context)
     language = json.loads(await run_sync(LANGUAGE.read_text))
     await run_agent(AgentProfile(
-        root=ROOT, prompt=base_prompt(inputs, language['instructions']) + repair_prompt(inputs),
+        root=ROOT, prompt=(base_prompt(inputs, language['instructions'])
+                           + unit_tests_prompt(inputs) + repair_prompt(inputs)),
         initial_messages=[context],
         max_turns_env='IMPLEMENTATION_MAX_TURNS', default_max_turns=200,
         validate_completion=validate_completion,

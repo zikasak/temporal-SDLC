@@ -1,9 +1,12 @@
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError, ChildWorkflowError
+from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflowError
+
+from app.agent_workflows.workflows import PROVIDER_WAIT_TOTAL, provider_wait
 
 from app.delivery.flow.stages import (
     COMPONENT_REPAIRS_PATCH, MAX_TRACKED, RESTORE_KEPT_PATCH, VERIFICATION_ATTEMPTS,
@@ -11,6 +14,10 @@ from app.delivery.flow.stages import (
 )
 
 with workflow.unsafe.imports_passed_through():
+    from app.delivery.causes import with_cause
+    from app.delivery.rounds import decide, outcome
+    from app.llm.limits import PROVIDER_LIMIT_ERROR
+    from app.verification.checks import fallback_analysis
     from app.config import DIAGNOSIS_TASK_QUEUE, VERIFICATION_TASK_QUEUE
     from app.delivery.models import judge_kept, kept_tests, restorable_tests, unproven_green
     from app.diagnosis.models import repair_request
@@ -18,8 +25,15 @@ with workflow.unsafe.imports_passed_through():
     from app.requirements.models import CHANGE_KINDS
     from app.review.models import review_request
 
-# Each round is a diagnosis, a repair of one side and a new verification.
-MAX_REPAIR_ROUNDS = 5
+# Each round is a diagnosis, a repair of one side and a new verification. Within the
+# ceiling each round has to be earned by progress (app.delivery.rounds); runs that began
+# before that keep the old, fixed number of rounds.
+MAX_REPAIR_ROUNDS = 12
+LEGACY_REPAIR_ROUNDS = 5
+# Marks the workflow code that runs the repository's checks script once the tests pass,
+# repairs what it reports, and decides each further repair round from progress.
+REPOSITORY_CHECKS_PATCH = 'repository-checks'
+CHECKS_UNREPAIRED = "The repository's checks still fail"
 # Rounds in which the test author of an API change puts back the repository's tests the
 # changed service still passes, each verified again.
 MAX_RESTORE_ROUNDS = 2
@@ -69,6 +83,7 @@ class Verification:
                     and not self.progress.verification_error
                     and not self.progress.implementation_error
                     and not self.progress.tests_error
+                    and not self._checks_failed()
                     and (self.spec.kind != 'bugfix'
                          or self.progress.baseline_status == 'reproduced'))
 
@@ -85,6 +100,7 @@ class Verification:
                     and not self.progress.implementation_error
                     and not self.progress.tests_error
                     and not self.progress.component_tests_error
+                    and not self._checks_failed()
                     and self.progress.baseline_status == 'reproduced')
 
     def _component_tests_failed(self) -> bool:
@@ -99,17 +115,23 @@ class Verification:
         """Verify a change with component tests; while tests of either suite fail, repair
         the side the diagnosis condemns, and only the suite it names of the tests, then
         verify again."""
+        if workflow.patched(REPOSITORY_CHECKS_PATCH):
+            await self._judged_rounds(
+                self._verify_components, self._component_tests_failed,
+                lambda: self._components_passed(findings_open=True)
+                or self._components_green())
+            return
         await self._verify_components()
         if not self._component_tests_failed():
             return
-        for attempt in range(1, MAX_REPAIR_ROUNDS + 1):
+        for attempt in range(1, LEGACY_REPAIR_ROUNDS + 1):
             if not await self._repair(attempt):
                 return
             await self._verify_components(attempt)
             if not self._component_tests_failed():
                 return
         self.progress.verification_error = (
-            f'Tests still fail after {MAX_REPAIR_ROUNDS} automatic repair rounds.')
+            f'Tests still fail after {LEGACY_REPAIR_ROUNDS} automatic repair rounds.')
 
     async def _verify_components(self, repair: int = 0) -> None:
         """Verify a change with component tests: the changed code must still conform to its
@@ -157,7 +179,8 @@ class Verification:
                 runner['image_id'], self.progress.component_tests['added_tests'][:MAX_TRACKED])
         except (ActivityError, ChildWorkflowError) as exc:
             workflow.logger.warning('Verification of the change failed: %s', exc.cause or exc)
-            self.progress.verification_error = 'Service verification could not complete.'
+            self.progress.verification_error = with_cause(
+                    'Service verification could not complete.', exc)
             self.progress.verification_status = 'error'
             return
         self.progress.verification_status = 'completed'
@@ -196,17 +219,174 @@ class Verification:
         if self.progress.component_tests:
             await self._verify_components_and_repair()
             return
+        if workflow.patched(REPOSITORY_CHECKS_PATCH):
+            await self._judged_rounds(self._verify_service, self._tests_failed,
+                                      self._service_green)
+            return
         await self._verify_service()
         if not self._tests_failed():
             return
-        for attempt in range(1, MAX_REPAIR_ROUNDS + 1):
+        for attempt in range(1, LEGACY_REPAIR_ROUNDS + 1):
             if not await self._repair(attempt):
                 return
             await self._verify_service(attempt)
             if not self._tests_failed():
                 return
         self.progress.verification_error = (
-            f'Tests still fail after {MAX_REPAIR_ROUNDS} automatic repair rounds.')
+            f'Tests still fail after {LEGACY_REPAIR_ROUNDS} automatic repair rounds.')
+
+    def _service_green(self) -> bool:
+        """Whether the contract tests passed against the service: the repository's checks
+        run then."""
+        verification = self.progress.verification
+        return bool(self.progress.verification_status == 'completed' and verification
+                    and verification['status'] == 'passed'
+                    and not self.progress.implementation_error
+                    and not self.progress.tests_error)
+
+    def _components_green(self) -> bool:
+        contract, component = self.progress.verification, self.progress.component_verification
+        return bool(self.progress.verification_status == 'completed'
+                    and (contract is None or contract['status'] == 'passed')
+                    and component and component['status'] == 'passed'
+                    and not self.progress.implementation_error)
+
+    async def _judged_rounds(self, verify: Callable[..., Awaitable[None]],
+                             tests_failed: Callable[[], bool],
+                             green: Callable[[], bool]) -> None:
+        """Verify; once the tests pass, run the repository's checks. While either fails,
+        repair what failed and verify again, as long as each round shows progress
+        (app.delivery.rounds), up to MAX_REPAIR_ROUNDS."""
+        self.progress.repair_decision = None
+        self.progress.checks = None
+        history: list[dict[str, Any]] = []
+        attempt = 0
+        await verify()
+        while True:
+            failing = None
+            if tests_failed():
+                failing = 'tests'
+            elif green():
+                await self._run_checks()
+                if self._checks_failed():
+                    failing = 'checks'
+            if failing is None:
+                return
+            history.append(self._round_outcome(failing))
+            decision = decide(history, MAX_REPAIR_ROUNDS)
+            self.progress.repair_decision = {**decision, 'rounds': attempt}
+            if not decision['go']:
+                workflow.logger.info('No further repair round: %s', decision['reason'])
+                what = (f'{CHECKS_UNREPAIRED} ({self._checks_summary().rstrip(".")})'
+                        if failing == 'checks' else 'Tests still fail')
+                self.progress.verification_error = (
+                    f'{what} after {attempt} automatic repair rounds. {decision["reason"]}'
+                    if attempt else f'{what}. {decision["reason"]}')
+                return
+            attempt += 1
+            repaired = await (self._repair(attempt) if failing == 'tests'
+                              else self._repair_checks(attempt))
+            if not repaired:
+                return
+            await verify(attempt)
+
+    def _round_outcome(self, failing: str) -> dict[str, Any]:
+        """What is failing now, for the decision whether to go on repairing."""
+        if failing == 'checks':
+            signature = (self.progress.checks or {}).get('signature') or ['checks failed']
+            return outcome(len(signature), [f'checks: {item}' for item in signature])
+        runs = [run for run in (self.progress.verification,
+                                self.progress.component_verification) if run]
+        failures = sum(run['failures'] + run['errors'] for run in runs)
+        return outcome(failures, [f'test: {item["class_name"]}#{item["name"]}'
+                                  for run in runs for item in run.get('test_failures') or []])
+
+    def _checks_failed(self) -> bool:
+        checks = self.progress.checks
+        return bool(checks and checks.get('status') == 'failed')
+
+    def _checks_summary(self) -> str:
+        checks = self.progress.checks or {}
+        analysis = checks.get('analysis') or {}
+        return (analysis.get('summary') or next(iter(checks.get('signature') or []), '')
+                or f'the checks script exited with status {checks.get("exit_code")}')
+
+    async def _run_checks(self) -> None:
+        """Run the repository's checks script over the repository as it would be pushed;
+        when it fails, have the LLM say where the problem is, from the excerpt of its
+        output. A run that could not complete is recorded and does not stop the delivery:
+        it says nothing about the code."""
+        if not self.spec.checkout or not self.spec.language:
+            return
+        self.progress.verification_status = 'checking'
+        try:
+            checks = await workflow.execute_activity(
+                'run_repository_checks', args=[self.spec.session_id, self.spec.language],
+                task_queue=VERIFICATION_TASK_QUEUE, result_type=dict,
+                start_to_close_timeout=timedelta(minutes=55),
+                heartbeat_timeout=timedelta(minutes=2),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except ActivityError as exc:
+            workflow.logger.warning("The repository's checks did not run: %s", exc.cause or exc)
+            checks = {'status': 'error', 'exit_code': None, 'excerpt': '', 'signature': [],
+                      'log': None,
+                      'error': with_cause("The repository's checks could not be run.", exc)}
+        if checks['status'] == 'failed':
+            checks['analysis'] = await self._analyze_checks(checks['excerpt'])
+        self.progress.checks = checks
+        self.progress.verification_status = 'completed'
+        workflow.logger.info("The repository's checks: %s", checks['status'])
+
+    async def _analyze_checks(self, excerpt: str) -> dict[str, Any]:
+        """The LLM's analysis of a failure of the repository's checks. While the
+        provider's limits are spent it waits, as the coding agents do; any other failure
+        gives the analysis made without the LLM."""
+        waited, attempt = timedelta(), 0
+        while True:
+            try:
+                return await workflow.execute_activity(
+                    'analyze_checks_failure', args=[self.spec.session_id, excerpt],
+                    task_queue=VERIFICATION_TASK_QUEUE, result_type=dict,
+                    start_to_close_timeout=timedelta(minutes=10),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except ActivityError as exc:
+                cause = exc.cause
+                if not (isinstance(cause, ApplicationError)
+                        and cause.type == PROVIDER_LIMIT_ERROR):
+                    workflow.logger.warning('The checks failure was not analysed: %s',
+                                            cause or exc)
+                    return fallback_analysis(excerpt)
+                details = cause.details[0] if cause.details else {}
+                attempt += 1
+                wait = provider_wait(attempt, (details or {}).get('retry_after'))
+                if waited + wait > PROVIDER_WAIT_TOTAL:
+                    return fallback_analysis(excerpt)
+                workflow.logger.warning('The checks analysis waits %s for its provider', wait)
+                await workflow.sleep(wait)
+                waited += wait
+
+    async def _repair_checks(self, attempt: int) -> bool:
+        """Have the implementation's author fix what the repository's checks reported,
+        from the analysis and the excerpt of their output."""
+        checks = self.progress.checks or {}
+        analysis = checks.get('analysis') or fallback_analysis(checks.get('excerpt') or '')
+        files = analysis.get('files') or []
+        instructions = analysis['instructions'] + (
+            f'\nFiles to look at first: {", ".join(files)}.' if files else '')
+        workflow.logger.info('Repair round %d: the repository\'s checks', attempt)
+        self.progress.repairs.append({
+            'attempt': attempt, 'target': 'implementation', 'tests': [],
+            'summary': f"The repository's checks failed: {self._checks_summary()}"})
+        self.progress.verification_status = 'repairing'
+        await self._implement_service({
+            'attempt': attempt, 'instructions': instructions,
+            'checks': checks.get('excerpt') or '', 'test_failures': []})
+        if self.progress.implementation_error:
+            self.progress.verification_status = 'completed'
+            return False
+        return True
 
     async def _prove_kept(self) -> None:
         """An API change may rewrite the repository's tests, but only those its service
@@ -232,8 +412,8 @@ class Verification:
                 image['image_id'], self.spec.language, touched, SNAPSHOT_DIR)
         except (ActivityError, ChildWorkflowError) as exc:
             workflow.logger.warning('Run of the repository tests failed: %s', exc.cause or exc)
-            self.progress.verification_error = (
-                "The repository's tests could not be run against the changed service.")
+            self.progress.verification_error = with_cause(
+                "The repository's tests could not be run against the changed service.", exc)
         else:
             self.progress.verification_error = judge_kept(self.progress.existing_tests, touched)
             # Once seen passing as the repository holds them, they stay so for every
@@ -280,7 +460,8 @@ class Verification:
                     self.progress.tests['added_tests'][:MAX_TRACKED] if change else None)
             except ChildWorkflowError as exc:
                 workflow.logger.warning('Service verification failed: %s', exc.cause or exc)
-                self.progress.verification_error = 'Service verification could not complete.'
+                self.progress.verification_error = with_cause(
+                    'Service verification could not complete.', exc)
                 self.progress.verification_status = 'error'
                 return
             if self.progress.verification['status'] != 'error':
@@ -307,7 +488,8 @@ class Verification:
                 self._child_id('diagnosis', attempt), context)
         except ChildWorkflowError as exc:
             workflow.logger.warning('Verification diagnosis failed: %s', exc.cause or exc)
-            self.progress.verification_error = 'The failed tests could not be diagnosed.'
+            self.progress.verification_error = with_cause(
+                'The failed tests could not be diagnosed.', exc)
             self.progress.verification_status = 'completed'
             return False
         target = diagnosis['target']

@@ -137,6 +137,15 @@ class FakeStages:
         self.published_documentation: list[tuple[str, str, bool]] = []
         # What had already run each time the repository's tests were recorded.
         self.snapshots: list[list[str]] = []
+        # Outcomes of successive runs of the repository's checks script: 'passed',
+        # 'failed', 'missing' or 'error'; the last one repeats. Each run's context, and
+        # the excerpts the LLM was asked to analyse.
+        self.checks_results: list[str] = ['missing']
+        self.checks_runs: list[str] = []
+        self.checks_after: list[list[str]] = []
+        self.analysed: list[str] = []
+        # How often the analysis is refused for the provider's limits before it answers.
+        self.analysis_limits = 0
         # How many contract tests the repository has.
         self.repository_tests = 3
         self.fail_snapshot = False
@@ -372,6 +381,31 @@ class FakeStages:
         self.snapshots.append(list(self.stages))
         return {'tests': self.repository_tests, 'component_tests': 0}
 
+    @activity.defn(name='run_repository_checks')
+    async def run_repository_checks(self, session_id: str, language: str) -> dict[str, Any]:
+        # Kept apart from `stages`: what had run before each run of the checks.
+        self.checks_after.append(list(self.stages))
+        status = self.checks_results[min(len(self.checks_runs), len(self.checks_results) - 1)]
+        self.checks_runs.append(status)
+        if status == 'failed':
+            excerpt = 'E   AttributeError: module has no attribute TASK_QUEUE'
+            return {'status': 'failed', 'exit_code': 1, 'excerpt': excerpt,
+                    'signature': [excerpt], 'log': '/checks/output.log', 'error': None}
+        return {'status': status, 'exit_code': 0 if status == 'passed' else None,
+                'excerpt': '', 'signature': [], 'log': None,
+                'error': 'did not finish' if status == 'error' else None}
+
+    @activity.defn(name='analyze_checks_failure')
+    async def analyze_checks_failure(self, session_id: str, excerpt: str) -> dict[str, Any]:
+        if self.analysis_limits:
+            self.analysis_limits -= 1
+            raise ApplicationError('limits', {'retry_after': 0}, type='ProviderLimitReached',
+                                   non_retryable=True)
+        self.analysed.append(excerpt)
+        return {'summary': 'A test patches a removed attribute.', 'files': ['tests/test_x.py'],
+                'instructions': 'Stop patching TASK_QUEUE in tests/test_x.py.',
+                'analysed': True}
+
     @activity.defn(name='build_repository_tests')
     async def build_repository_tests(self, session_id: str, language: str) -> dict[str, Any]:
         return {'image_id': REPOSITORY_TESTS_IMAGE, 'session_id': session_id}
@@ -548,6 +582,7 @@ async def stage_workers(env, stages: FakeStages):
         activities=[stages.verify_service, stages.build_baseline,
                     stages.snapshot_repository_tests, stages.build_repository_tests,
                     stages.build_component_runner, stages.run_component_suite,
+                    stages.run_repository_checks, stages.analyze_checks_failure,
                     verify_documentation],
     ), Worker(
         env.client, task_queue=DOCUMENTATION_TASK_QUEUE,

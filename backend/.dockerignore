@@ -18,6 +18,7 @@
 !app/llm/pi.py
 !app/llm/pi_extension.ts
 !app/llm/questions.py
+!app/llm/limits.py
 !app/settings/
 !app/settings/__init__.py
 !app/settings/models.py

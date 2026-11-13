@@ -6,8 +6,10 @@ import re
 import shutil
 import tempfile
 import uuid
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,15 @@ logger = logging.getLogger(__name__)
 class StageInputs:
     context: dict[str, Any]
     populate: Callable[[Path], None]
+
+
+@dataclass(frozen=True)
+class WorkTarget:
+    """Where a stage's output belongs in the repository, for its work refs: the files
+    `include` selects of it, placed at `prefix`."""
+    stage: str
+    include: Callable[[Path], bool]
+    prefix: str = ''
 
 
 @dataclass(frozen=True)
@@ -50,12 +61,19 @@ class StageSpec:
     # returns its ID, in place of building the output as it is: for a runner that needs
     # more than the output, such as the code its tests run in-process.
     build_output: Callable[[Path, Path], Awaitable[str]] | None = None
+    # Where the output belongs in the session's repository, given the stage's context:
+    # every run's output is saved to the repository's work refs (app.github.work_refs),
+    # and a published output missing on this worker is restored from them. None for a
+    # stage that changes nothing of the project.
+    work: Callable[[dict[str, Any]], WorkTarget | None] | None = None
 
 
 # The language's authoring instructions, placed beside the agent's project.
 LANGUAGE_FILENAME = 'language.json'
 # Context entry with the user's answers, which continues the stage's paused agent.
 ANSWERS_KEY = 'answers'
+# Context entry that continues the stage's agent that its provider's limits stopped.
+RESUME_KEY = 'resume_after_limit'
 
 
 def session_language(name: str | None) -> Language:
@@ -121,6 +139,82 @@ def paused_result(session_id: str, paused: docker_agents.AgentPaused) -> dict[st
     return {'session_id': session_id, 'questions': paused.questions}
 
 
+def limited_result(session_id: str, limited: docker_agents.AgentLimited) -> dict[str, Any]:
+    """What a stage returns when its agent's provider refused it for its limits: the stage
+    workflow waits, then continues the agent with RESUME_KEY in the context."""
+    return {'session_id': session_id, 'provider_limit': limited.report}
+
+
+async def _work_token() -> tuple[str, str]:
+    """The GitHub token, and the commit author, of the work refs."""
+    from app.temporal.activities import _github_token
+    token, connection = await _github_token()
+    bot = f"{connection['app_slug']}[bot]"
+    return token, f"{bot}\n{connection['bot_user_id']}+{bot}@users.noreply.github.com"
+
+
+WORK_MESSAGE_PROMPT = """Write the Git commit message of a work-in-progress commit of a
+code-generating pipeline's {stage} stage ({status}), from its diff below. The first line is
+the subject: at most 72 characters, imperative mood, naming what changed. Then an empty
+line and at most five short lines on what changed and why. Plain text only, nothing else.
+
+{diff}"""
+WORK_MESSAGE_SECONDS = 60
+
+
+async def _work_message(role: str, stage: str, status: str, diff: str) -> str | None:
+    """The LLM's commit message of the stage's work; None when it could not write one in
+    time. Never waits for a provider's limits: the fallback message is used instead."""
+    from langchain_core.messages import HumanMessage
+    from app.llm.graph import native_session
+    from app.llm.model import get_model
+    try:
+        model = await get_model(role)
+    except Exception:
+        model = await get_model('review')
+    async with asyncio.timeout(WORK_MESSAGE_SECONDS):
+        async with native_session(model):
+            reply = await model.ainvoke([HumanMessage(content=WORK_MESSAGE_PROMPT.format(
+                stage=stage, status=status, diff=diff))])
+    return str(getattr(reply, 'text', None) or getattr(reply, 'content', '') or '') or None
+
+
+async def save_stage_work(stage: StageSpec, session_dir: Path, context: dict[str, Any],
+                          tree: Path, status: str, published: bool = False) -> None:
+    """Save `tree`, the stage's output, to the session repository's work refs; never fails."""
+    from app.github import work_refs
+    try:
+        target = stage.work(context) if stage.work else None
+        if target is None:
+            return
+        await work_refs.save_work(
+            session_dir, session_dir.name, target.stage, tree, target.include,
+            prefix=target.prefix, status=status, published=published, token=_work_token,
+            write_message=partial(_work_message, stage.role))
+    except Exception as exc:
+        logger.warning('The %s work of session %s was not saved: %s', stage.role,
+                       session_dir.name, exc)
+
+
+async def restore_stage_output(stage: StageSpec, session_dir: Path,
+                               context: dict[str, Any]) -> bool:
+    """Restore the stage's published output from the repository's work refs when it is
+    missing on this worker, such as after a redeploy; true when it was restored."""
+    from app.github import work_refs
+    destination = session_dir / stage.artifact_subdir / stage.output_subdir
+    try:
+        target = stage.work(context) if stage.work else None
+        if target is None or await run_sync(destination.exists):
+            return False
+        return await work_refs.restore_work(
+            session_dir, session_dir.name, target.stage, destination, target.include,
+            prefix=target.prefix, token=_work_token)
+    except Exception as exc:
+        logger.warning('The %s output of session %s was not restored: %s', stage.role,
+                       session_dir.name, exc)
+        return False
+
+
 async def run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
                     generated_code_dir: Path) -> dict[str, Any]:
     """The stage's published output, or `questions` the agent asked: then it is paused, and
@@ -139,9 +233,14 @@ async def _run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
         raise ApplicationError('Invalid session ID', non_retryable=True)
     answers = context.get(ANSWERS_KEY)
-    context = {key: value for key, value in context.items() if key != ANSWERS_KEY}
+    resume = bool(context.get(RESUME_KEY))
+    context = {key: value for key, value in context.items()
+               if key not in (ANSWERS_KEY, RESUME_KEY)}
     logger.info('%s stage preparing inputs (session=%s)', stage.role, session_id)
     session_dir = generated_code_dir / session_id
+    # A repair, or any run continuing the stage's published output, finds it again after
+    # this worker lost it.
+    await restore_stage_output(stage, session_dir, context)
     inputs = await run_sync(stage.prepare_inputs, session_dir, context)
     artifact_dir = session_dir / stage.artifact_subdir
     await run_sync(artifact_dir.mkdir, parents=True, exist_ok=True)
@@ -150,9 +249,10 @@ async def _run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
         async with async_context(tempfile.TemporaryDirectory, dir=artifact_dir) as temporary:
             work = Path(temporary)
             workspace = work / 'workspace'
-            if answers:
+            if answers or resume:
                 # The paused agent continues in the workspace it left, inputs included.
-                await run_sync(docker_agents.resume_workspace, paused, workspace, answers)
+                await run_sync(docker_agents.resume_workspace, paused, workspace,
+                               answers if answers else None)
             else:
                 await run_sync(workspace.mkdir)
                 await run_sync(inputs.populate, workspace)
@@ -168,30 +268,62 @@ async def _run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
                 )
             except docker_agents.AgentPaused as exc:
                 return paused_result(session_id, exc)
-            if stage.declined_result:
-                declined = await run_sync(stage.declined_result, output)
-                if declined is not None:
-                    logger.info('%s stage declined to publish an output (session=%s)',
-                                stage.role, session_id)
-                    return {**declined, 'session_id': session_id}
-            logger.info('%s stage sanitizing agent output (session=%s)', stage.role, session_id)
-            clean = work / 'build'
-            await run_sync(stage.sanitize_output, output, clean)
-            await run_sync(stage.validate_output, clean)
-            image = {}
-            if stage.image_label:
-                build_log = artifact_dir / 'image-build.log'
-                logger.info('%s stage building %s image (session=%s, log=%s)',
-                            stage.role, stage.image_label, session_id, build_log)
-                image = {'image_id': await (
-                    stage.build_output(clean, build_log) if stage.build_output
-                    else build_image(clean, stage.image_label, build_log))}
-            destination = artifact_dir / stage.output_subdir
-            if await run_sync(destination.exists):
-                await run_sync(shutil.rmtree, destination)
-            await run_sync(os.replace, clean, destination)
-            result = {**image, 'path': str(destination), 'session_id': session_id}
-            await run_sync(publish_manifest, artifact_dir, result)
-            logger.info('%s stage published its output (session=%s, image=%s, path=%s)',
-                        stage.role, session_id, image.get('image_id'), destination)
-            return result
+            except docker_agents.AgentLimited as exc:
+                logger.warning('%s stage waits for its provider (session=%s): %s',
+                               stage.role, session_id, exc.report.get('message'))
+                await save_stage_work(stage, session_dir, context,
+                                      paused / stage.workspace_name,
+                                      'stopped by the provider\'s limits')
+                return limited_result(session_id, exc)
+            except Exception as exc:
+                await save_stage_work(stage, session_dir, context, output,
+                                      f'agent failed: {_first_line(exc)}')
+                raise
+            try:
+                return await _publish_output(stage, session_id, session_dir, context,
+                                             artifact_dir, work, output)
+            except Exception as exc:
+                await save_stage_work(stage, session_dir, context, output,
+                                      f'not published: {_first_line(exc)}')
+                raise
+
+
+def _first_line(exc: BaseException) -> str:
+    text = next((line.strip() for line in str(exc).splitlines() if line.strip()),
+                type(exc).__name__)
+    return text[:200]
+
+
+async def _publish_output(stage: StageSpec, session_id: str, session_dir: Path,
+                          context: dict[str, Any], artifact_dir: Path, work: Path,
+                          output: Path) -> dict[str, Any]:
+    """Sanitize, validate, build and publish the agent's output."""
+    if stage.declined_result:
+        declined = await run_sync(stage.declined_result, output)
+        if declined is not None:
+            logger.info('%s stage declined to publish an output (session=%s)',
+                        stage.role, session_id)
+            return {**declined, 'session_id': session_id}
+    logger.info('%s stage sanitizing agent output (session=%s)', stage.role, session_id)
+    clean = work / 'build'
+    await run_sync(stage.sanitize_output, output, clean)
+    await run_sync(stage.validate_output, clean)
+    image = {}
+    if stage.image_label:
+        build_log = artifact_dir / 'image-build.log'
+        logger.info('%s stage building %s image (session=%s, log=%s)',
+                    stage.role, stage.image_label, session_id, build_log)
+        image = {'image_id': await (
+            stage.build_output(clean, build_log) if stage.build_output
+            else build_image(clean, stage.image_label, build_log))}
+    destination = artifact_dir / stage.output_subdir
+    if await run_sync(destination.exists):
+        await run_sync(shutil.rmtree, destination)
+    await run_sync(os.replace, clean, destination)
+    result = {**image, 'path': str(destination), 'session_id': session_id}
+    await run_sync(publish_manifest, artifact_dir, result)
+    logger.info('%s stage published its output (session=%s, image=%s, path=%s)',
+                stage.role, session_id, image.get('image_id'), destination)
+    await save_stage_work(stage, session_dir, context, destination, 'built',
+                          published=True)
+    return result

@@ -17,11 +17,12 @@ from app.delivery.flow.verification import Verification
 from app.delivery.flow.waiting import PullRequestWait
 
 with workflow.unsafe.imports_passed_through():
+    from app.delivery.causes import with_cause
     from app.config import (
         CODEGEN_TASK_QUEUE, DOCUMENTATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
     )
     from app.delivery.models import (
-        DELIVERY_CLOSING, TASK_IDLE_TIMEOUT, AgentQuestions,
+        DELIVERY_CLOSING, TASK_IDLE_TIMEOUT, AgentQuestions, ProviderWait,
         DeliveryProgress, DeliveryState, mention_key, open_review_findings,
     )
     from app.review.models import review_request
@@ -227,6 +228,15 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
               if item['workflow_id'] != asked['workflow_id']), asked]
 
     @workflow.signal
+    def agent_waiting(self, waiting: ProviderWait) -> None:
+        """A stage's agent waits for its model provider's limits until `until`; a wait
+        without `until` has ended."""
+        self.progress.provider_waits = [
+            *(item for item in self.progress.provider_waits
+              if item['workflow_id'] != waiting['workflow_id']),
+            *([waiting] if waiting.get('until') else [])]
+
+    @workflow.signal
     def agent_answered(self, workflow_id: str) -> None:
         self.progress.agent_questions = [item for item in self.progress.agent_questions
                                          if item['workflow_id'] != workflow_id]
@@ -248,7 +258,7 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
             )
         except ActivityError as exc:
             workflow.logger.warning('Repository tests not recorded: %s', exc.cause or exc)
-            error = "The repository's tests could not be recorded."
+            error = with_cause("The repository's tests could not be recorded.", exc)
             # Reported on the stage whose retry starts the delivery over.
             if self.spec.kind == 'bugfix':
                 self.progress.tests_error = error
@@ -276,7 +286,7 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
             )
         except ChildWorkflowError as exc:
             workflow.logger.warning("Code generation failed: %s", exc.cause or exc)
-            self.progress.code_error = "The server code could not be generated."
+            self.progress.code_error = with_cause("The server code could not be generated.", exc)
             self.progress.verification_status = 'skipped'
             return
         workflow.logger.info("Server code generated")
@@ -313,7 +323,8 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
                 self._child_id('documentation'), context)
         except ChildWorkflowError as exc:
             workflow.logger.warning('Documentation failed: %s', exc.cause or exc)
-            self.progress.documentation_error = 'The documentation could not be written.'
+            self.progress.documentation_error = with_cause(
+                'The documentation could not be written.', exc)
             self.progress.verification_status = 'skipped'
             return
         self.progress.verification_status = 'running'
@@ -326,7 +337,8 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
             )
         except ActivityError as exc:
             workflow.logger.warning('Documentation verification failed: %s', exc.cause or exc)
-            self.progress.verification_error = 'Documentation verification could not complete.'
+            self.progress.verification_error = with_cause(
+                'Documentation verification could not complete.', exc)
             self.progress.verification_status = 'error'
         else:
             self.progress.verification_status = 'completed'

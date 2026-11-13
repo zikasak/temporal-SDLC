@@ -14,8 +14,8 @@ from app import docker_agents
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import (
-    StageInputs, StageSpec, build_image, copy_regular_files, run_stage, session_language,
-    write_language,
+    StageInputs, StageSpec, WorkTarget, build_image, copy_regular_files, run_stage,
+    session_language, write_language,
 )
 from app.agent_workflows.parts import repository_parts
 from app.config import GENERATED_CODE_DIR
@@ -35,14 +35,38 @@ SEAM_DIR = 'seam'
 BARE_REPOSITORY = re.compile(r'(readme|licen[cs]e|copying)(\..*)?|\.git.*|\.github', re.I)
 
 
-def is_service_file(language: Language, relative: Path) -> bool:
-    """Source files only: never tests, build metadata, agent logs or the repository's
-    contract tests, published contracts (of every part, under contracts/) and component
-    tests, the service's at the root and each other part's inside it."""
-    excluded = EXCLUDED | set(language.implementation.test_dirs) | set(language.build_dirs)
+def is_service_file(language: Language, relative: Path, unit_tests: bool = False) -> bool:
+    """Source files only: never build metadata, agent logs or the repository's contract
+    tests, published contracts (of every part, under contracts/) and component tests, the
+    service's at the root and each other part's inside it. The project's own unit tests
+    (in the language's test directories) only with `unit_tests`."""
+    excluded = (EXCLUDED | set(language.build_dirs)
+                | (set() if unit_tests else set(language.implementation.test_dirs)))
     return (relative.parts[0] not in (TESTS_DIR, CONTRACTS_DIR)
             and COMPONENT_TESTS_DIR not in relative.parts
             and not any(part.lower() in excluded for part in relative.parts))
+
+
+def is_unit_test_file(language: Language, relative: Path) -> bool:
+    """A file of the project's own unit tests: one is_service_file shows only with them."""
+    return (is_service_file(language, relative, unit_tests=True)
+            and not is_service_file(language, relative))
+
+
+def has_unit_tests(language: Language, tree: Path) -> bool:
+    """Whether a service tree carries the project's unit tests: a tree published before
+    authors maintained them carries none, and must not remove the repository's."""
+    if not tree.is_dir():
+        return False
+    return any(item.is_file() and not item.is_symlink()
+               and is_unit_test_file(language, item.relative_to(tree))
+               for item in tree.rglob('*'))
+
+
+def published_files(language: Language, service: Path):
+    """The filter of the repository files that the published `service` tree replaces:
+    with the unit tests when it carries them."""
+    return partial(is_service_file, language, unit_tests=has_unit_tests(language, service))
 
 
 def takes_generated_code(language: Language, checkout: Path) -> bool:
@@ -61,9 +85,17 @@ def checkout_parts(language: Language, checkout: Path) -> list[dict[str, Any]]:
     return parts if len(parts) > 1 else []
 
 
-def copy_service(language: Language, source: Path, target: Path) -> None:
-    """Copy regular source files only: never tests, symlinks, build metadata or agent logs."""
-    copy_regular_files(source, target, include=partial(is_service_file, language))
+def copy_service(language: Language, source: Path, target: Path,
+                 unit_tests: bool = False) -> None:
+    """Copy regular source files only: never symlinks, build metadata or agent logs, and the
+    project's own unit tests only with `unit_tests`."""
+    copy_regular_files(source, target,
+                       include=partial(is_service_file, language, unit_tests=unit_tests))
+
+
+def copy_project(language: Language, source: Path, target: Path) -> None:
+    """An implementation author's output: its sources with the unit tests it maintains."""
+    copy_service(language, source, target, unit_tests=True)
 
 
 def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any]) -> StageInputs:
@@ -105,10 +137,14 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
     stubs = (_routed_contracts(language, session_dir) if context.get('component_routes')
              else [])
 
+    # An author in a checkout maintains the repository's own unit tests with the code; an
+    # onboarding's author leaves the existing code, tests included, as it is.
+    unit_tests = bool(checkout) and not context.get('onboarding')
+
     def populate(workspace: Path) -> None:
         project = workspace / 'service'
         if checkout and not repair and not change:
-            copy_service(language, checkout, project)
+            copy_service(language, checkout, project, unit_tests=unit_tests)
             if generated:
                 # Generated sources are the contract and replace the repository's; any
                 # other generated file only fills a gap, so an existing build file is kept.
@@ -117,7 +153,12 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
                     and (relative.parts[0] in contract_paths
                          or not (project / relative).exists())))
         else:
-            copy_service(language, source, project)
+            copy_service(language, source, project, unit_tests=unit_tests)
+            if unit_tests and source != checkout and not has_unit_tests(language, source):
+                # A tree published before its authors maintained the unit tests: they
+                # are the repository's, as the checkout holds them.
+                copy_regular_files(checkout, project, include=partial(
+                    is_unit_test_file, language))
         write_language(workspace, language,
                        instructions=language.implementation.instructions)
         if files:
@@ -157,12 +198,24 @@ def stage(language: Language, artifact_subdir: str = 'implementation') -> StageS
         image_build=dataclasses.replace(default_agent_image('implementation', 'service'),
                                         dockerfile=language.agent_dockerfile),
         prepare_inputs=partial(prepare_inputs, language),
-        sanitize_output=partial(copy_service, language), validate_output=validate_output,
+        sanitize_output=partial(copy_project, language), validate_output=validate_output,
+        work=partial(_work_target, language, artifact_subdir),
     )
 
 
-# What an onboarding's author writes of its own: the root Dockerfile and its ignore file.
-ONBOARDING_FILES = (Path('Dockerfile'), Path('.dockerignore'))
+def _work_target(language: Language, artifact_subdir: str,
+                 context: dict[str, Any]) -> WorkTarget | None:
+    """The implementation's place in the repository: the whole checkout, as published."""
+    if not context.get('repository'):
+        return None
+    return WorkTarget(stage=artifact_subdir.replace('/', '-'),
+                      include=partial(is_service_file, language, unit_tests=True))
+
+
+# What an onboarding's author writes of its own: the root Dockerfile, its ignore file and
+# the repository's checks script.
+CHECKS_SCRIPT = Path('.sdlc/checks.sh')
+ONBOARDING_FILES = (Path('Dockerfile'), Path('.dockerignore'), CHECKS_SCRIPT)
 
 
 def code_change_allowed(context: dict[str, Any]) -> bool:
@@ -180,7 +233,7 @@ def keep_existing_code(language: Language, source: Path, output: Path, clean: Pa
         written = output / relative
         if written.is_file() and not written.is_symlink():
             copy_regular_files(output, clean, include=lambda item, name=relative: item == name)
-        elif relative != Path('Dockerfile') and (clean / relative).is_file():
+        elif relative == Path('.dockerignore') and (clean / relative).is_file():
             (clean / relative).unlink()
 
 
@@ -261,7 +314,7 @@ async def prepare_seam(language: Language, session_id: str,
         # What the agent or its provider said is in the stage's agent.log, not shown.
         raise seam_error(f'The seam agent did not finish ({type(exc).__name__}): what it said '
                          'is in agent.log of the session\'s seam stage.') from exc
-    if 'questions' in result:
+    if 'questions' in result or 'provider_limit' in result:
         return result
     try:
         async with docker_agents.keep_activity_alive('Checking the seam against its contract'):
@@ -296,7 +349,7 @@ async def implement_service(session_id: str, context: dict[str, Any]) -> dict[st
             spec, sanitize_output=lambda output, clean: keep_existing_code(
                 language, source, output, clean))
     result = await run_stage(spec, session_id, context, GENERATED_CODE_DIR)
-    if 'questions' in result:
+    if 'questions' in result or 'provider_limit' in result:
         return result
     changed = await run_sync(existing_code_changed, language, checkout, Path(result['path']))
     return {**result, 'code_changed': changed}

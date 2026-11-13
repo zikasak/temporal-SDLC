@@ -14,8 +14,19 @@ type Documentation = { changed_files: string[] };
 type TestSuite = ImageArtifact & { added_tests: string[]; changed_tests: string[]; removed_tests: string[] };
 type TestRef = { class_name: string; name: string };
 // `findings_open`: review findings remained after the last review round.
-type VerificationStatus = "not_applicable" | "waiting" | "running" | "diagnosing" | "repairing" |
-  "reviewing" | "completed" | "findings_open" | "skipped" | "error";
+// `checking`: the repository's checks script runs over the verified delivery.
+type VerificationStatus = "not_applicable" | "waiting" | "running" | "checking" | "diagnosing" |
+  "repairing" | "reviewing" | "completed" | "findings_open" | "skipped" | "error";
+// The last run of the repository's checks script, and the LLM's analysis of a failure.
+type ChecksRun = {
+  status: "passed" | "failed" | "missing" | "not_applicable" | "error";
+  exit_code: number | null;
+  excerpt: string;
+  error: string | null;
+  analysis: { summary: string; files: string[] } | null;
+};
+// An agent waiting, until `until`, for its model provider's limits.
+type ProviderWait = { workflow_id: string; stage: string; until: string; message: string | null };
 // How the tests a change added fared against the service as the repository holds it.
 type BaselineStatus = "not_applicable" | "waiting" | "running" | "reproduced" | "not_reproduced" |
   "skipped" | "error";
@@ -116,6 +127,8 @@ export type DeliveryProgress = {
   publication_error: string | null;
   publication_status: PublicationStatus;
   agent_questions: AgentQuestions[];
+  provider_waits: ProviderWait[];
+  checks: ChecksRun | null;
   reviews: ReviewRound[];
   review_error: string | null;
   // The correction of a review round's findings did not pass verification.
@@ -218,8 +231,8 @@ function pullRequestMentions(value: unknown): PullRequestMention[] {
 }
 
 const verificationStatuses: VerificationStatus[] = [
-  "not_applicable", "waiting", "running", "diagnosing", "repairing", "reviewing", "completed",
-  "findings_open", "skipped", "error",
+  "not_applicable", "waiting", "running", "checking", "diagnosing", "repairing", "reviewing",
+  "completed", "findings_open", "skipped", "error",
 ];
 const baselineStatuses: BaselineStatus[] = [
   "not_applicable", "waiting", "running", "reproduced", "not_reproduced", "skipped", "error",
@@ -315,6 +328,34 @@ function imageArtifact(value: unknown): ImageArtifact | null {
   return isObject(value) && typeof value.image_id === "string" ? { image_id: value.image_id } : null;
 }
 
+function providerWaits(value: unknown): ProviderWait[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item) => isObject(item) && typeof item.workflow_id === "string" &&
+    typeof item.stage === "string" && typeof item.until === "string").map((item) => ({
+    workflow_id: item.workflow_id, stage: item.stage, until: item.until,
+    message: typeof item.message === "string" ? item.message : null,
+  }));
+}
+
+const checksStatuses: ChecksRun["status"][] = ["passed", "failed", "missing", "not_applicable", "error"];
+
+function checksRun(value: unknown): ChecksRun | null {
+  if (!isObject(value) || !checksStatuses.includes(value.status as ChecksRun["status"])) return null;
+  const analysis = isObject(value.analysis) && typeof value.analysis.summary === "string"
+    ? {
+      summary: value.analysis.summary,
+      files: Array.isArray(value.analysis.files)
+        ? value.analysis.files.filter((item): item is string => typeof item === "string") : [],
+    } : null;
+  return {
+    status: value.status as ChecksRun["status"],
+    exit_code: typeof value.exit_code === "number" ? value.exit_code : null,
+    excerpt: typeof value.excerpt === "string" ? value.excerpt : "",
+    error: typeof value.error === "string" ? value.error : null,
+    analysis,
+  };
+}
+
 function agentQuestions(value: unknown): AgentQuestions[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item) => isObject(item) && typeof item.workflow_id === "string" &&
@@ -378,6 +419,8 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     publication_status: publicationStatuses.includes(value.publication_status as PublicationStatus)
       ? value.publication_status as PublicationStatus : "not_applicable",
     agent_questions: agentQuestions(value.agent_questions),
+    provider_waits: providerWaits(value.provider_waits),
+    checks: checksRun(value.checks),
     reviews: reviewRounds(value.reviews),
     review_error: text(value.review_error),
     correction_failed: value.correction_failed === true,
@@ -427,9 +470,49 @@ function AgentQuestionsPanel({ progress, answering, onAnswer }: {
   );
 }
 
+/** Agents stopped by their model provider's limits; each goes on by itself. */
+function ProviderWaitsPanel({ progress }: { progress: DeliveryProgress }) {
+  if (progress.provider_waits.length === 0) return null;
+  return (
+    <section className="verification-results" aria-label="Waiting for the model provider">
+      {progress.provider_waits.map((item) => <p role="status" key={item.workflow_id}>
+        {agentLabels[item.stage] ?? "An agent"} waits for the model provider's limits and goes on
+        by itself at {new Date(item.until).toLocaleString()}.
+        {item.message && <span className="verification-builds"> The provider said: {item.message}</span>}
+      </p>)}
+    </section>
+  );
+}
+
+/** The last run of the repository's checks script, when it says something. */
+function ChecksResult({ checks }: { checks: DeliveryProgress["checks"] }) {
+  if (!checks || checks.status === "not_applicable") return null;
+  if (checks.status === "passed") return <p>The repository's checks script passes.</p>;
+  if (checks.status === "missing") {
+    return <p>The repository has no checks script (.sdlc/checks.sh), so only the contract tests verified it.</p>;
+  }
+  if (checks.status === "error") {
+    return <p role="alert">{checks.error ?? "The repository's checks script could not be run."}</p>;
+  }
+  return (
+    <div>
+      <p role="alert">
+        The repository's checks script failed (exit status {checks.exit_code ?? "unknown"})
+        {checks.analysis?.summary ? `: ${checks.analysis.summary}` : "."}
+      </p>
+      {checks.analysis && checks.analysis.files.length > 0 &&
+        <p>Files to look at: {checks.analysis.files.join(", ")}</p>}
+      {checks.excerpt && <details>
+        <summary>What the checks reported</summary>
+        <pre>{checks.excerpt}</pre>
+      </details>}
+    </div>
+  );
+}
+
 /** Whether the delivery is still working, so its session should be polled again. */
 export function deliveryPending(progress: DeliveryProgress) {
-  return ["waiting", "running", "diagnosing", "repairing", "reviewing"].includes(progress.verification_status) ||
+  return ["waiting", "running", "checking", "diagnosing", "repairing", "reviewing"].includes(progress.verification_status) ||
     ["waiting", "running"].includes(progress.publication_status) ||
     ["waiting", "running"].includes(progress.pull_request_status);
 }
@@ -939,7 +1022,10 @@ export function DeliveryResults({ progress, kind = null, documentation = false, 
   // The user's decision about open review findings: instructions, or null to accept them.
   onFindings: (instructions: string | null) => Promise<boolean>;
 }) {
-  const questions = <AgentQuestionsPanel progress={progress} answering={answering} onAnswer={onAnswer} />;
+  const questions = <>
+    <AgentQuestionsPanel progress={progress} answering={answering} onAnswer={onAnswer} />
+    <ProviderWaitsPanel progress={progress} />
+  </>;
   if (documentation) {
     return <>
       {questions}
@@ -991,6 +1077,10 @@ export function DeliveryResults({ progress, kind = null, documentation = false, 
           </p>}
         </div>
       )}
+      {stage === "checking" && <p role="status">
+        The tests pass. Running the repository's checks script over the delivered code…
+      </p>}
+      <ChecksResult checks={progress.checks} />
       {stage === "diagnosing" && <p role="status">
         Tests failed. Deciding whether the implementation or the tests are wrong…
       </p>}

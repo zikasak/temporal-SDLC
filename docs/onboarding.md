@@ -22,9 +22,11 @@ lock).
    Forking ends the original as **superseded**.
 5. **finalize** turns the drafts into the contract and starts a `DeliveryWorkflow` with
    `TaskSpec.onboarding`. No code is generated. The implementation agent writes only the
-   root `Dockerfile` and `.dockerignore`, and the host keeps the existing code as it was.
-   The test agent writes a new contract-test suite. Verification, repair rounds (at most
-   5), code review rounds (at most 5), the push to `onboarding/<branch>-<short id>` and the
+   root `Dockerfile` and `.dockerignore` and the repository's checks script
+   `.sdlc/checks.sh` (see [the repository's checks](service-implementation.md#the-repositorys-checks)),
+   and the host keeps the existing code as it was.
+   The test agent writes a new contract-test suite. Verification with the checks script,
+   repair rounds (while they make progress, at most 12), code review rounds (at most 5), the push to `onboarding/<branch>-<short id>` and the
    pull request work as for any delivery, and so do mentions on the pull request. The
    contract includes `contracts/architecture.md` and `contracts/architecture.json`.
    An architecture-only onboarding starts a delivery with `TaskSpec.architecture_only`,

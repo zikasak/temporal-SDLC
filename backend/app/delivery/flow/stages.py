@@ -5,6 +5,7 @@ from temporalio import workflow
 from temporalio.exceptions import ChildWorkflowError
 
 with workflow.unsafe.imports_passed_through():
+    from app.delivery.causes import with_cause
     from app.config import (
         COMPONENT_TEST_GENERATION_TASK_QUEUE, IMPLEMENTATION_TASK_QUEUE,
         TEST_GENERATION_TASK_QUEUE,
@@ -148,7 +149,8 @@ class Stages:
                     self.progress.implementation.get('code_changed'))
         except ChildWorkflowError as exc:
             workflow.logger.warning("Service implementation failed: %s", exc.cause or exc)
-            self.progress.implementation_error = "The service could not be implemented or built."
+            self.progress.implementation_error = with_cause(
+                "The service could not be implemented or built.", exc)
 
     async def _generate_tests(self, repair: dict[str, Any] | None = None,
                               suite: str | None = None) -> None:
@@ -215,9 +217,9 @@ class Stages:
                 {**self._stage_context(repair), 'routes': routes})
         except ChildWorkflowError as exc:
             workflow.logger.warning('Component test generation failed: %s', exc.cause or exc)
-            self.progress.component_tests_error = (
+            self.progress.component_tests_error = with_cause(
                 'The component tests could not be repaired or built with the code.' if repair
-                else 'The component tests could not be generated or built with the code.')
+                else 'The component tests could not be generated or built with the code.', exc)
             return
         if 'unobservable' in tests:
             self._declined(tests['unobservable'])
@@ -243,7 +245,8 @@ class Stages:
                 self._author_id('test-generation', repair), context)
         except ChildWorkflowError as exc:
             workflow.logger.warning("Service test generation failed: %s", exc.cause or exc)
-            self.progress.tests_error = "The service tests could not be generated or built."
+            self.progress.tests_error = with_cause(
+                "The service tests could not be generated or built.", exc)
             return
         if 'unobservable' in tests:
             # No suite was written: the delivery stops, as when the routing found these.

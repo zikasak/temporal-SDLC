@@ -85,9 +85,11 @@ def _environment(token: str | None) -> dict[str, str]:
     return environment
 
 
-async def _git(*args: str, cwd: Path, token: str | None = None) -> str:
+async def _git(*args: str, cwd: Path, token: str | None = None,
+               env: dict[str, str] | None = None) -> str:
     process = await asyncio.create_subprocess_exec(
-        'git', *args, cwd=cwd, env=_environment(token), stdin=asyncio.subprocess.DEVNULL,
+        'git', *args, cwd=cwd, env={**_environment(token), **(env or {})},
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
     )
     try:
