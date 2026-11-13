@@ -115,6 +115,8 @@ def _stage(tmp_path, populated, work=None):
         def populate(workspace):
             populated.append(workspace)
             (workspace / 'notes').mkdir()
+            # A file of the inputs the agent may delete, as a checkout's file.
+            (workspace / 'notes/obsolete.md').write_text('# Obsolete')
         return StageInputs(context={}, populate=populate)
 
     return StageSpec(
@@ -467,12 +469,16 @@ async def test_stage_whose_stopped_workspace_was_lost_starts_over_from_its_saved
         return ''
 
     monkeypatch.setattr(docker_agents, 'docker', docker)
-    stage = _stage(tmp_path, populated, work=lambda context: WorkTarget('docs', lambda _: True))
+    # The work covers Markdown files only; anything else of the project is the inputs'.
+    stage = _stage(tmp_path, populated, work=lambda context: WorkTarget(
+        'docs', lambda relative: relative.suffix == '.md'))
     # No paused workspace on this worker's disk: the run is not refused.
     result = await ActivityEnvironment().run(run_stage, stage, 'session',
                                              {host.RESUME_KEY: True}, tmp_path)
     assert len(populated) == 1 and restored == ['docs']
     assert sent[0]['notes/draft.md'] == b'# Saved when the provider stopped it'
+    # The stopped agent had deleted it: the saved work has it no more, nor the project.
+    assert 'notes/obsolete.md' not in sent[0]
     assert 'input.json' in sent[0]
     assert (Path(result['path']) / 'index.md').read_text() == '# Published'
 
