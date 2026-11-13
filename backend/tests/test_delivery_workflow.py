@@ -228,6 +228,49 @@ async def test_unverified_sources_are_not_pushed(env, worker, outcome, repositor
     assert state.publication_status == "skipped" and not worker.published
 
 
+async def test_failing_checks_are_repaired_from_their_analysis_before_the_push(
+        env, worker, repository_selection):
+    worker.checks_results = ['failed', 'passed']
+    state = await delivered(env, await deliver(env, repository_selection))
+    # The checks run once the contract tests pass, and again after the repair.
+    assert worker.checks_runs == ['failed', 'passed']
+    assert worker.checks_after[0][-1] == 'verification'
+    # Only the excerpt of the failed run reached the LLM, and its analysis the author.
+    assert worker.analysed == ['E   AttributeError: module has no attribute TASK_QUEUE']
+    [(target, repair)] = worker.repairs
+    assert target == 'implementation'
+    assert repair['checks'] == 'E   AttributeError: module has no attribute TASK_QUEUE'
+    assert repair['instructions'].startswith('Stop patching TASK_QUEUE in tests/test_x.py.')
+    assert 'tests/test_x.py' in repair['instructions']
+    assert state.repairs[0]['summary'] == (
+        "The repository's checks failed: A test patches a removed attribute.")
+    # No diagnosis: the checks are the repository's own, and its code is what failed.
+    assert not worker.diagnosed
+    assert state.checks['status'] == 'passed' and state.verification_error is None
+    assert state.publication_status == 'completed' and worker.published
+
+
+async def test_checks_that_keep_failing_the_same_way_end_the_rounds_unpushed(
+        env, worker, repository_selection):
+    worker.checks_results = ['failed']
+    state = await delivered(env, await deliver(env, repository_selection))
+    assert len(worker.repairs) == 3 and len(worker.checks_runs) == 4
+    assert state.verification_error == (
+        "The repository's checks still fail (A test patches a removed attribute) after 3 "
+        'automatic repair rounds. The same failures remained after 3 rounds of fixes in a '
+        'row.')
+    assert state.checks['status'] == 'failed'
+    assert state.publication_status == 'skipped' and not worker.published
+
+
+async def test_checks_that_could_not_run_do_not_hold_the_delivery_back(
+        env, worker, repository_selection):
+    worker.checks_results = ['error']
+    state = await delivered(env, await deliver(env, repository_selection))
+    assert state.checks['status'] == 'error' and not worker.repairs
+    assert state.publication_status == 'completed'
+
+
 async def test_failed_tests_send_the_diagnosed_side_back_until_verification_passes(env, worker):
     worker.verification_results = ['failed', 'failed', 'passed']
     worker.diagnoses = ['tests', 'implementation']
@@ -258,13 +301,18 @@ async def test_failed_tests_send_the_diagnosed_side_back_until_verification_pass
     assert state.baseline_status == 'not_applicable' and not worker.baselines
 
 
-async def test_repair_stops_after_the_round_limit_with_the_last_failure(env, worker):
+async def test_repair_stops_once_rounds_leave_the_same_failures(env, worker):
     worker.verification_result = 'failed'
     state = await delivered(env, await deliver(env))
-    assert len(state.repairs) == len(worker.repairs) == 5
-    assert len(worker.verified_images) == 6
+    # Each round left the very failure it was to fix: the third such round ends them,
+    # well below the ceiling of rounds.
+    assert len(state.repairs) == len(worker.repairs) == 3
+    assert len(worker.verified_images) == 4
     assert state.verification['status'] == 'failed' and state.verification_status == 'completed'
-    assert state.verification_error == 'Tests still fail after 5 automatic repair rounds.'
+    assert state.verification_error == (
+        'Tests still fail after 3 automatic repair rounds. The same failures remained after '
+        '3 rounds of fixes in a row.')
+    assert state.repair_decision['go'] is False and state.repair_decision['rounds'] == 3
 
 
 async def test_a_run_that_could_not_complete_runs_once_more(env, worker):
@@ -400,10 +448,10 @@ async def test_failed_diagnosis_or_repair_keeps_the_published_images(env, worker
     assert state.verification['status'] == 'failed' and state.verification_status == 'completed'
     assert state.implementation['image_id'] == ORIGINAL[0]
     if broken == 'diagnosis':
-        assert state.verification_error == 'The failed tests could not be diagnosed.'
+        assert state.verification_error == 'The failed tests could not be diagnosed. Cause: no verdict.'
         assert state.repairs == [] and state.implementation_error is None
         return
-    assert state.implementation_error == 'The service could not be implemented or built.'
+    assert state.implementation_error.startswith('The service could not be implemented or built.')
 
     # The failed repair is recoverable through the existing manual retry, which
     # rebuilds the service and resumes verification with a clean repair history.
@@ -424,13 +472,13 @@ async def test_failed_coding_branches_preserve_other_artifacts(env, worker, fail
     assert not worker.verification_started.is_set()
     if 'implementation' in failed:
         assert state.implementation is None
-        assert state.implementation_error == "The service could not be implemented or built."
+        assert state.implementation_error.startswith("The service could not be implemented or built. Cause: ")
     else:
         assert state.implementation["image_id"] == ORIGINAL[0]
         assert state.implementation_error is None
     if 'tests' in failed:
         assert state.tests is None
-        assert state.tests_error == "The service tests could not be generated or built."
+        assert state.tests_error.startswith("The service tests could not be generated or built. Cause: ")
     else:
         assert state.tests["image_id"] == ORIGINAL[1]
         assert state.tests_error is None
@@ -521,7 +569,7 @@ async def test_failed_code_generation_can_be_retried(env, worker):
     session_id = await deliver(env)
     state = await delivered(env, session_id)
     assert state.code is None
-    assert state.code_error == "The server code could not be generated."
+    assert state.code_error == "The server code could not be generated. Cause: generator failed."
     assert not worker.implementation_started.is_set() and not worker.tests_started.is_set()
     assert state.verification_status == 'skipped'
     assert not worker.verification_started.is_set()
@@ -1273,8 +1321,10 @@ async def test_component_tests_that_keep_failing_end_the_repairs(env, worker,
     worker.routes = [{'FR-2': 'component'}]
     worker.component_results = ['failed']
     _, state = await fixed(env, repository_selection)
-    assert len(state.repairs) == 5 and state.verification_status == 'completed'
-    assert state.verification_error == 'Tests still fail after 5 automatic repair rounds.'
+    assert len(state.repairs) == 3 and state.verification_status == 'completed'
+    assert state.verification_error == (
+        'Tests still fail after 3 automatic repair rounds. The same failures remained after '
+        '3 rounds of fixes in a row.')
     # The contract tests are the repository's own, which no author of this change wrote.
     assert worker.diagnosed[0]['contract_suite'] == 'repository-tests'
     assert worker.reviewed == [] and not worker.published
@@ -1536,7 +1586,7 @@ async def test_nothing_is_authored_when_the_repository_tests_cannot_be_recorded(
     worker.fail_snapshot = True
     session_id = await deliver(env, repository_selection)
     state = await delivered(env, session_id)
-    assert state.code_error == "The repository's tests could not be recorded."
+    assert state.code_error.startswith("The repository's tests could not be recorded.")
     assert not worker.stages and FakeCodegenWorkflow.languages == []
     assert state.verification_status == "skipped" and state.publication_status == "skipped"
     worker.fail_snapshot = False
@@ -1865,24 +1915,27 @@ async def test_failed_ci_is_fixed_by_a_round_of_its_own_from_the_failed_logs(
     assert state.ci_fixes == 0 and state.ci_fix is None and state.instructions is None
     assert worker.comments == [
         f'CI failed on commit `{PUSHED[:12]}`: [Backend tests]({JOB_URL}). Started automatic '
-        "fix round 1 of 2 from the failed checks' logs: the changes, then verification and "
+        "fix round 1 of 6 from the failed checks' logs: the changes, then verification and "
         'code review. The CI of what it pushes is reported here again.',
         f'CI passes on commit `{PUSHED[:12]}`, pushed by automatic fix round 1.']
 
 
-async def test_failed_ci_is_only_reported_once_two_rounds_in_a_row_did_not_fix_it(
+async def test_failed_ci_is_only_reported_once_rounds_leave_the_same_failure(
         env, worker, repository_selection):
     worker.ci_results = [FAILED_CI]
     session_id = await ci_delivery(env, worker, repository_selection)
     state = await delivery_until(env, session_id, lambda state: (
-        ci_is('failed')(state) and len(worker.comments) == 3), 'the CI was never reported')
-    assert len(worker.published) == 3 and state.ci_fixes == 2
-    assert 'Started automatic fix round 1 of 2' in worker.comments[0]
-    assert 'Started automatic fix round 2 of 2' in worker.comments[1]
-    assert worker.comments[2] == (
-        f'CI failed on commit `{PUSHED[:12]}`: [Backend tests]({JOB_URL}). 2 automatic fix '
-        'rounds in a row did not make the CI pass, so no further one starts on its own. '
-        'Mention me with what to fix to request a fix round.')
+        ci_is('failed')(state) and len(worker.comments) == 4), 'the CI was never reported')
+    # The same failure after each of three rounds: no fourth one is worth starting.
+    assert len(worker.published) == 4 and state.ci_fixes == 3
+    for number in (1, 2, 3):
+        assert f'Started automatic fix round {number} of 6' in worker.comments[number - 1]
+    assert worker.comments[3] == (
+        f'CI failed on commit `{PUSHED[:12]}`: [Backend tests]({JOB_URL}). After 3 automatic '
+        'fix rounds in a row no further one starts on its own: The same failures remained '
+        'after 3 rounds of fixes in a row. Mention me with what to fix to request a fix '
+        'round.')
+    assert len(state.ci_history) == 4
 
 
 async def test_a_ci_fix_that_does_not_pass_verification_pushes_nothing_and_says_so(

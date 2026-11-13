@@ -8,12 +8,18 @@ from temporalio.exceptions import ActivityError, ApplicationError
 with workflow.unsafe.imports_passed_through():
     from app.delivery.ci_activities import CHECKS_UNAVAILABLE, FAILED
     from app.delivery.models import (
-        CI_CHECK_TIMEOUT, CI_REGISTRATION_GRACE, MAX_CI_FIX_ROUNDS, CiChecks,
+        CI_CHECK_TIMEOUT, CI_REGISTRATION_GRACE, LEGACY_CI_FIX_ROUNDS, MAX_CI_FIX_ROUNDS,
+        CiChecks,
     )
+    from app.delivery.rounds import decide, outcome
+    from app.verification.checks import failure_signature
 
 # Marks the workflow code that watches the repository's CI on the commit a delivery
 # pushed while it waits, and starts a fix round of its own when the CI fails.
 CI_CHECKS_PATCH = 'ci-checks'
+# Marks the workflow code that decides each further automatic CI fix round from the
+# progress the rounds made (app.delivery.rounds), up to MAX_CI_FIX_ROUNDS.
+JUDGED_CI_PATCH = 'judged-ci-rounds'
 CI_FIX_INSTRUCTIONS = """The repository's CI failed on the commit this delivery pushed
 ({commit}). Its checks run what this pipeline's verification does not, such as the
 repository's own unit tests and builds, so the tests you can run do not show these
@@ -50,6 +56,7 @@ class CiWatch:
             if fix is None:
                 # A push the user asked for starts the count of automatic rounds over.
                 self.state.ci_fixes = 0
+                self.state.ci_history = []
             self.progress.ci = CiChecks(
                 commit=publication['commit'], status='pending',
                 since=workflow.now().isoformat(), checks=[], error=None,
@@ -95,13 +102,14 @@ class CiWatch:
             await self._ci_failed(result['checks'])
         elif status == 'passed':
             workflow.logger.info('CI passed on %s', _short(ci['commit']))
+            self.state.ci_history = []
             if ci['fix_round']:
                 self.state.ci_fixes = 0
                 await self._ci_comment(
                     f'CI passes on commit `{_short(ci["commit"])}`, pushed by automatic fix '
                     f'round {ci["fix_round"]}.')
 
-    def _ci_fix_refused(self) -> str | None:
+    def _ci_fix_refused(self, report: str = '') -> str | None:
         """Why the failed CI is only reported, not fixed by a round of the delivery's own."""
         if self.spec.architecture_only:
             return 'Only the architecture was pushed, which the delivery does not fix on its own.'
@@ -111,8 +119,18 @@ class CiWatch:
         if self._next is not None or self._fix_pending() or any(
                 item['status'] == 'classifying' for item in self.progress.mentions):
             return 'A fix requested in a comment runs first.'
-        if self.state.ci_fixes >= MAX_CI_FIX_ROUNDS:
-            return (f'{MAX_CI_FIX_ROUNDS} automatic fix rounds in a row did not make the CI '
+        if workflow.patched(JUDGED_CI_PATCH):
+            # What fails now, after the rounds before: another round has to be worth it.
+            signature = failure_signature(report) or [report[-200:]]
+            self.state.ci_history = [*self.state.ci_history,
+                                     outcome(len(signature), signature)]
+            decision = decide(self.state.ci_history, MAX_CI_FIX_ROUNDS)
+            if not decision['go']:
+                return (f'After {self.state.ci_fixes} automatic fix rounds in a row no further '
+                        f'one starts on its own: {decision["reason"]}')
+            return None
+        if self.state.ci_fixes >= LEGACY_CI_FIX_ROUNDS:
+            return (f'{LEGACY_CI_FIX_ROUNDS} automatic fix rounds in a row did not make the CI '
                     'pass, so no further one starts on its own.')
         return None
 
@@ -132,13 +150,15 @@ class CiWatch:
             workflow.logger.warning('CI failure not reported: %s', exc.cause or exc)
             report = 'The failed checks: ' + ', '.join(check['name'] for check in failed)
         failure = f'CI failed on commit `{_short(commit)}`: {names}.'
-        refused = self._ci_fix_refused()
+        refused = self._ci_fix_refused(report)
         if refused:
             await self._ci_comment(f'{failure} {refused} {CI_NO_FIX}')
             return
         round_ = self.state.ci_fixes + 1
+        limit = (MAX_CI_FIX_ROUNDS if workflow.patched(JUDGED_CI_PATCH)
+                 else LEGACY_CI_FIX_ROUNDS)
         await self._ci_comment(
-            f'{failure} {CI_FIX_STARTED.format(round=round_, limit=MAX_CI_FIX_ROUNDS)}')
+            f'{failure} {CI_FIX_STARTED.format(round=round_, limit=limit)}')
         progress = self.progress
         progress.agent_questions = []
         progress.review_error = None
@@ -164,14 +184,36 @@ class CiWatch:
         if self._pushed and self.progress.publication_status == 'completed':
             return
         error = (self.progress.documentation_error or self.progress.implementation_error
-                 or self.progress.tests_error or self.progress.baseline_error
+                 or self.progress.tests_error or self.progress.component_tests_error
+                 or self.progress.baseline_error
                  or self.progress.verification_error or self.progress.review_error
                  or self.progress.publication_error
-                 or 'The fix did not pass verification, so nothing was pushed.')
+                 or self._unpushed_reason())
         await self._ci_comment(
             f'Automatic fix round {fix["round"]} for the CI failure on commit '
             f'`{_short(fix["commit"])}` ended without a push: {error} The branch keeps its '
             f'earlier push. {CI_NO_FIX}')
+
+    def _unpushed_reason(self) -> str:
+        """Why a round that recorded no error of a stage pushed nothing, as far as its
+        progress says."""
+        checks = self.progress.checks or {}
+        if checks.get('status') == 'failed':
+            analysis = checks.get('analysis') or {}
+            return ("The repository's checks still fail: "
+                    f"{analysis.get('summary') or 'see the delivery'}.")
+        verification = self.progress.verification or {}
+        if verification.get('status') == 'failed':
+            named = ', '.join(f'{item["class_name"]}#{item["name"]}'
+                              for item in (verification.get('test_failures') or [])[:5])
+            return (f'{verification.get("failures", 0) + verification.get("errors", 0)} '
+                    'contract tests still fail' + (f' ({named})' if named else '') + '.')
+        if verification.get('status') == 'error':
+            return f'Verification could not complete: {verification.get("error") or "unknown"}.'
+        if self.progress.open_findings:
+            return 'Code review findings remained open.'
+        return (f'The fix did not pass verification (status: '
+                f'{self.progress.verification_status}), so nothing was pushed.')
 
     async def _ci_comment(self, text: str) -> None:
         """Comment in the delivery's pull request; a comment that could not be posted is

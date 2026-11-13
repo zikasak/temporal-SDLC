@@ -54,6 +54,10 @@ class Publication:
             # bugfix's must have been red without the fix, and an API change must have
             # kept the repository's tests its service still passes.
             skip = True
+        checks = self.progress.checks
+        if checks and checks.get('status') == 'failed':
+            # The repository's own checks fail on what would be pushed.
+            skip = True
         if skip:
             if ((self.progress.open_findings or self.state.mention is not None
                  or self.state.ci_fix is not None) and self.progress.publication):

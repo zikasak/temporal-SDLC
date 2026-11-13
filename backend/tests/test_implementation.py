@@ -191,14 +191,16 @@ async def test_session_with_a_repository_is_implemented_inside_its_checkout(tmp_
     assert json.loads(sent.pop('input.json'))['repository'] == context['repository']
     # A checked-in build helper stays runnable for the agent and the image build.
     assert sent.pop('service/mvnw') == '#!/bin/sh' and executable['agent'] and executable['build']
-    # The repository's own code, with the generated contract replacing its sources and
-    # filling gaps only; never Git metadata or either kind of tests.
+    # The repository's own code and its own unit tests, which the author maintains, with
+    # the generated contract replacing its sources and filling gaps only; never Git
+    # metadata or the contract tests.
     # The stack is the registered language's, not the author's choice.
     assert json.loads(sent.pop('language.json')) == {
         'name': 'java', 'build_dirs': ['target', *OTHER_PARTS_BUILD_DIRS], 'instructions': get_language('java').implementation.instructions}
     sent.pop('llm-settings.json')
     assert sent == {'service/src/main/Api.java': 'generated contract',
                     'service/src/main/Orders.java': 'existing code',
+                    'service/src/test/OrdersTest.java': 'project tests',
                     'service/pom.xml': 'project pom', 'service/README.md': 'generated readme'}
     # The checkout itself changes only when verified sources are pushed.
     assert (checkout / 'src/main/Api.java').read_text() == 'outdated contract'
@@ -294,8 +296,10 @@ async def test_change_edits_the_checkout_without_generated_code(tmp_path, monkey
     assert json.loads(sent.pop('input.json'))['brief'] == brief
     del sent['language.json']
     sent.pop('llm-settings.json')
-    # The repository's service as it is; never either kind of tests or the contract.
+    # The repository's service as it is, with its own unit tests; never the contract tests
+    # or the contract.
     assert sent == {'service/src/main/Api.java': 'published contract code',
+                    'service/src/test/OrdersTest.java': 'project tests',
                     'service/Dockerfile': 'FROM scratch'}
 
 

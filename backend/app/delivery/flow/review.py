@@ -7,6 +7,7 @@ from temporalio.exceptions import ChildWorkflowError
 from app.delivery.flow.stages import restore_finding
 
 with workflow.unsafe.imports_passed_through():
+    from app.delivery.causes import with_cause
     from app.config import REVIEW_TASK_QUEUE
     from app.delivery.models import (
         kept_tests, open_review_findings, reproduce_request, unproven_green,
@@ -86,7 +87,7 @@ class ReviewRounds:
                 'ReviewWorkflow', REVIEW_TASK_QUEUE, self._child_id('review', number), context)
         except ChildWorkflowError as exc:
             workflow.logger.warning('Code review failed: %s', exc.cause or exc)
-            self.progress.review_error = 'The code review could not run.'
+            self.progress.review_error = with_cause('The code review could not run.', exc)
             self.progress.verification_status = 'error'
             return None
         self.progress.review_error = None

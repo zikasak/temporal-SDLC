@@ -12,7 +12,8 @@ from temporalio.exceptions import ApplicationError
 from app.asyncio_utils import run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import (
-    StageInputs, StageSpec, copy_regular_files, run_stage, session_language, write_language,
+    StageInputs, StageSpec, WorkTarget, copy_regular_files, run_stage, session_language,
+    write_language,
 )
 from app.config import GENERATED_CODE_DIR
 from app.docker_agents import default_agent_image
@@ -86,6 +87,8 @@ def stage(language: Language, checkout: Path) -> StageSpec:
         prepare_inputs=partial(prepare_inputs, language),
         sanitize_output=partial(copy_documentation, language),
         validate_output=partial(validate_output, language, checkout),
+        work=lambda context: WorkTarget('documentation',
+                                        partial(is_documentation_file, language)),
     )
 
 
@@ -94,7 +97,7 @@ async def write_documentation(session_id: str, context: dict[str, Any]) -> dict[
     language = session_language(context.get('language'))
     checkout = GENERATED_CODE_DIR / session_id / CHECKOUT_DIR
     result = await run_stage(stage(language, checkout), session_id, context, GENERATED_CODE_DIR)
-    if 'questions' in result:
+    if 'questions' in result or 'provider_limit' in result:
         return result
     return {**result,
             'changed_files': (await run_sync(changed_files, language, checkout, Path(result['path'])))}

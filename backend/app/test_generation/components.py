@@ -21,13 +21,13 @@ from temporalio.exceptions import ApplicationError
 
 from app import docker_agents
 from app.agent_workflows.host import (
-    StageInputs, StageSpec, build_image, copy_file, copy_regular_files, run_stage,
-    session_language, write_language,
+    StageInputs, StageSpec, WorkTarget, build_image, copy_file, copy_regular_files,
+    restore_stage_output, run_stage, session_language, write_language,
 )
 from app.asyncio_utils import run_sync
 from app.config import GENERATED_CODE_DIR
 from app.docker_agents import default_agent_image
-from app.github.checkout import COMPONENT_SNAPSHOT, SNAPSHOT_DIR
+from app.github.checkout import COMPONENT_TESTS_DIR, COMPONENT_SNAPSHOT, SNAPSHOT_DIR
 from app.implementation.activities import SEAM_DIR
 from app.languages import RUNTIME_FILE, TOOLS_DIR, ComponentSuite, Language
 from app.languages.composite import CompositeSuite, SuiteMember, suite_members
@@ -346,6 +346,10 @@ def stage(language: Language, parts: list[ComponentPart], suite: ComponentSuite,
         declined_result=(partial(read_unobservable, requirement_ids)
                          if requirement_ids is not None else None),
         build_output=partial(build_runner, language, session_dir, repository=repository),
+        # Kept as the suite is: its parts go to their own directories when it is pushed.
+        work=lambda context: (WorkTarget('component-tests', lambda relative: True,
+                                         prefix=COMPONENT_TESTS_DIR)
+                              if context.get('repository') else None),
     )
 
 
@@ -399,6 +403,10 @@ async def generate_component_tests(session_id: str, context: dict[str, Any]) -> 
     continued = bool(context.get('repository'))
     repository = await run_sync(suite.test_cases, snapshot) if continued else {}
     repair = context.get('repair')
+    if repair:
+        # The suite a repair continues, after this worker lost it.
+        await restore_stage_output(stage(language, parts, suite, session_dir, {}, None),
+                                   session_dir, context)
     frozen = await run_sync(frozen_tests, suite, repository,
                             session_dir / ARTIFACT_DIR / 'suite', repair)
     # A change that added its seam first is run against the code with the seam.
@@ -409,7 +417,7 @@ async def generate_component_tests(session_id: str, context: dict[str, Any]) -> 
     result = await run_stage(stage(language, parts, suite, session_dir, frozen,
                                    None if repair else list(routes), prepared),
                              session_id, context, GENERATED_CODE_DIR)
-    if 'questions' in result or 'unobservable' in result:
+    if 'questions' in result or 'unobservable' in result or 'provider_limit' in result:
         return result
     cases = await run_sync(suite.test_cases, Path(result['path']))
     return {**result,

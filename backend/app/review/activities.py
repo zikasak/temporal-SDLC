@@ -19,7 +19,7 @@ from app import config, docker_agents
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import (
-    ANSWERS_KEY, copy_regular_files, paused_result, session_language, write_language,
+    ANSWERS_KEY, RESUME_KEY, limited_result, copy_regular_files, paused_result, session_language, write_language,
 )
 from app.config import GENERATED_CODE_DIR
 from app.github.checkout import (
@@ -523,9 +523,11 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
         raise ApplicationError('Invalid session ID', non_retryable=True)
     answers = context.get(ANSWERS_KEY)
+    # An agent its provider's limits stopped continues where it was, as a paused one does.
+    resume = bool(context.get(RESUME_KEY))
     part = int(context.get(PART_KEY) or 0)
     context = {key: value for key, value in context.items()
-               if key not in (ANSWERS_KEY, PART_KEY)}
+               if key not in (ANSWERS_KEY, RESUME_KEY, PART_KEY)}
     language = session_language(context.get('language'))
     session_dir = GENERATED_CODE_DIR / session_id
     # A stage review keeps its findings and paused agent apart from the delivery's review;
@@ -540,9 +542,10 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
     async with async_context(tempfile.TemporaryDirectory) as temporary:
         work = Path(temporary)
         workspace = work / 'workspace'
-        if answers:
+        if answers or resume:
             # The paused review continues in the workspace it left.
-            await run_sync(docker_agents.resume_workspace, paused, workspace, answers)
+            await run_sync(docker_agents.resume_workspace, paused, workspace,
+                           answers or None)
             inputs = json.loads(await run_sync((workspace / 'input.json').read_text))
             changes = inputs.get('changes') or {}
             previous = inputs.get(PREVIOUS_KEY) or []
@@ -596,6 +599,8 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
                         dockerfile=language.agent_dockerfile))
             except docker_agents.AgentPaused as exc:
                 return paused_result(session_id, exc)
+            except docker_agents.AgentLimited as exc:
+                return limited_result(session_id, exc)
         findings = await run_sync(read_findings, output, changed, previous, target)
     await run_sync(settled.record_run, artifact_dir, part, findings)
     result = {'session_id': session_id, 'findings': findings, 'path': str(artifact_dir)}

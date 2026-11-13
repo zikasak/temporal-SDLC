@@ -9,6 +9,7 @@ from temporalio.exceptions import ActivityError, ChildWorkflowError
 from app.delivery.flow.stages import MAX_TRACKED, VERIFICATION_ATTEMPTS
 
 with workflow.unsafe.imports_passed_through():
+    from app.delivery.causes import with_cause
     from app.config import VERIFICATION_TASK_QUEUE
     from app.delivery.models import (
         bound_request, component_run, hung_tests, judge_baseline, reproduce_request,
@@ -56,8 +57,9 @@ class Baseline:
                 self.progress.tests['image_id'], self.spec.language, [*added, *changed])
         except (ActivityError, ChildWorkflowError) as exc:
             workflow.logger.warning('Baseline run failed: %s', exc.cause or exc)
-            self.progress.baseline_error = ('The tests could not be run against the service as '
-                                            'the repository holds it.')
+            self.progress.baseline_error = with_cause(
+                'The tests could not be run against the service as the repository holds it.',
+                exc)
             self.progress.baseline_status = 'error'
             return False
         self.progress.baseline_status, self.progress.baseline_error = judge_baseline(
@@ -229,8 +231,9 @@ class Baseline:
                 components['image_id'], tracked)
         except (ActivityError, ChildWorkflowError) as exc:
             workflow.logger.warning('Baseline run failed: %s', exc.cause or exc)
-            self.progress.baseline_error = ('The tests could not be run against the code as '
-                                            'the repository holds it.')
+            self.progress.baseline_error = with_cause(
+                'The tests could not be run against the code as the repository holds it.',
+                exc)
             self.progress.baseline_status = 'error'
             return False
         self.progress.baseline_status, self.progress.baseline_error = judge_baseline(

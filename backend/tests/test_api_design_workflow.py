@@ -401,7 +401,8 @@ async def test_finalize_writes_document_and_delivers_it(env, worker, verificatio
     if verification == 'child_error':
         assert state.verification is None
         assert state.verification_status == 'error'
-        assert state.verification_error == 'Service verification could not complete.'
+        assert state.verification_error == (
+            'Service verification could not complete. Cause: verification worker failed.')
     else:
         assert state.verification['status'] == verification
         assert state.verification_status == 'completed'

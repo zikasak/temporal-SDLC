@@ -9,8 +9,10 @@ COMPONENT_TESTS_ARTIFACT = 'component-tests'
 
 # `reviewing` while the code review runs; `findings_open` when the tests pass but review
 # findings remained after the last review round.
-VerificationStatus = Literal['not_applicable', 'waiting', 'running', 'diagnosing', 'repairing',
-                             'reviewing', 'completed', 'findings_open', 'skipped', 'error']
+# `checking` while the repository's checks script runs over the verified delivery.
+VerificationStatus = Literal['not_applicable', 'waiting', 'running', 'checking', 'diagnosing',
+                             'repairing', 'reviewing', 'completed', 'findings_open', 'skipped',
+                             'error']
 
 
 class TestFailure(TypedDict):

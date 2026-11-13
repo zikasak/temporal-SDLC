@@ -46,7 +46,7 @@ from app.github.errors import GitHubError
 from app.github.models import (
     PullRequest, RepositoryCheckout, RepositoryPublication, RepositorySelection,
 )
-from app.implementation.activities import is_service_file
+from app.implementation.activities import is_service_file, published_files
 from app.onboarding.models import onboarding_branch
 from app.llm.graph import get_message_graph, interview, native_session
 from app.llm.model import get_model
@@ -239,9 +239,10 @@ async def publish_repository(
     repository's only when an author of the change wrote them (`contract_tests`); otherwise
     the repository's suite, which the change was verified to keep passing, stays."""
     registered = session_language(contract['language'])
-    service_files = partial(is_service_file, registered)
     target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
     service = target.parent / 'implementation/service'
+    # The unit tests too, when the service's author maintained them.
+    service_files = await run_sync(published_files, registered, service)
     suite = target.parent / 'tests/suite'
     contract_tests = components is None or bool(components.get('contract_tests'))
     sources = [target, service, *([suite] if contract_tests else [])]

@@ -23,6 +23,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from app.asyncio_utils import async_context, run_sync
 from app.llm.factory import create_adapter
+from app.llm.limits import LIMIT_FILENAME, PROVIDER_LIMIT_EXIT, is_limit_error, limit_report
 from app.settings.models import ModelSettings, SETTINGS_FILENAME
 from app.llm.questions import (
     ASK_USER, DESCRIPTION, AskUserInput, answers_result, asks_directly, normalize_questions,
@@ -133,6 +134,10 @@ DIRECT_QUESTION_NOTICE = ('[System] Your last message asked a question in its te
                           'ask the user, call ask_user. Otherwise decide yourself, finish the '
                           'work, and end with a summary that asks nothing.')
 FINISHING_TURNS = 10
+# What a native session that the provider's limits stopped is told when it goes on.
+LIMIT_CONTINUE = ('[System] The model provider was unavailable for a while and the run was '
+                  'stopped. Continue the task where you left off; check the files you were '
+                  'working on before you change them.')
 TURN_BUDGET = """
 You have {turns} model turns for this task; each reply of yours is one, however many tool
 calls it makes. Plan the work to fit, and batch independent tool calls into one turn.
@@ -413,6 +418,51 @@ def note_tool(notes: list[str]) -> BaseTool:
     return StructuredTool.from_function(note, name=NOTE)
 
 
+# How often, and how long at most each time, a request the provider refused for its limits
+# is repeated inside the container before the run stops and the host waits instead.
+LIMIT_RETRIES = 2
+LIMIT_RETRY_SECONDS = 60
+# What a run of the agent ended with.
+DONE, PAUSED, LIMITED = 'done', 'paused', 'limited'
+
+
+class ProviderLimit(Exception):
+    """The provider refused requests for its limits, also after the retries: the run saves
+    where it stopped and ends for the host to continue it once the provider is available."""
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.report = limit_report(cause)
+
+
+async def _request(call: Callable[[], Any]) -> Any:
+    """Make a model request; one refused for the provider's limits is repeated a few
+    times after the wait it asks for, then raised as ProviderLimit."""
+    for attempt in range(LIMIT_RETRIES + 1):
+        try:
+            return await call()
+        except Exception as exc:
+            if not is_limit_error(exc):
+                raise
+            if attempt == LIMIT_RETRIES:
+                raise ProviderLimit(exc) from exc
+            wait = limit_report(exc)['retry_after']
+            wait = min(LIMIT_RETRY_SECONDS, 15 * 2 ** attempt if wait is None else wait)
+            if wait >= LIMIT_RETRY_SECONDS and attempt:
+                # A long wait is the host's: it frees the worker meanwhile.
+                raise ProviderLimit(exc) from exc
+            print(f'Provider limit reached; retrying in {wait:.0f} seconds', flush=True)
+            await asyncio.sleep(wait)
+
+
+def _stop_for_limit(directory: Path, state: dict[str, Any], limit: ProviderLimit) -> None:
+    """Save where the run stopped, as a pause does but with no question pending, and what
+    the provider said, for the host."""
+    _pause(directory, {**state, 'pending': None})
+    (directory / LIMIT_FILENAME).write_text(json.dumps(limit.report, ensure_ascii=False))
+    print(f'Stopped until the provider is available: {limit.report["message"]}', flush=True)
+
+
 def _pause(directory: Path, state: dict[str, Any]) -> None:
     """Save where the run stopped, for the run that continues it once the user answers."""
     temporary = directory / f'{STATE_FILENAME}.tmp'
@@ -421,19 +471,22 @@ def _pause(directory: Path, state: dict[str, Any]) -> None:
 
 
 def _resume(directory: Path) -> dict[str, Any] | None:
-    """The saved state of a paused run, its ask_user call answered; None for a new run."""
+    """The saved state of a paused run, its ask_user call answered, or of a run its
+    provider's limits stopped; None for a new run."""
     state_file, answers_file = directory / STATE_FILENAME, directory / ANSWERS_FILENAME
     if not state_file.is_file():
         return None
     state = json.loads(state_file.read_text())
-    answers = json.loads(answers_file.read_text())['answers']
-    state_file.unlink()
-    answers_file.unlink()
     pending = state['pending']
     history = messages_from_dict(state['history'])
-    history.insert(pending['position'], ToolMessage(
-        content=answers_result(pending['questions'], answers),
-        tool_call_id=pending['call_id'], name=ASK_USER))
+    if pending is not None:
+        answers = json.loads(answers_file.read_text())['answers']
+        answers_file.unlink()
+        history.insert(pending['position'], ToolMessage(
+            content=answers_result(pending['questions'], answers),
+            tool_call_id=pending['call_id'], name=ASK_USER))
+    state_file.unlink()
+    (directory / LIMIT_FILENAME).unlink(missing_ok=True)
     return {**state, 'history': history, 'checkpoint': messages_from_dict(state['checkpoint'])}
 
 
@@ -456,24 +509,29 @@ def configure_container_logging() -> None:
 
 async def run_agent(profile: AgentProfile) -> None:
     role = os.getenv('APP_TRACE_AGENT_ROLE', profile.root.name).replace('_', '-')
-    paused = False
+    outcome = DONE
     try:
         with trace_operation(f'author-{role}', as_type='agent', feature=role,
                              session_id=os.getenv('APP_TRACE_SESSION_ID'),
                              input=list(profile.initial_messages),
                              trace_context=container_trace_context()) as span:
-            paused = await _run_agent(profile)
+            outcome = await _run_agent(profile)
             if span is not None:
-                span.update(output='Paused for the user\'s answers' if paused
-                            else profile.completion_message)
+                span.update(output={
+                    PAUSED: 'Paused for the user\'s answers',
+                    LIMITED: 'Stopped until the provider is available',
+                }.get(outcome, profile.completion_message))
     finally:
         await run_sync(shutdown_tracing)
-    if paused:
+    if outcome == PAUSED:
         sys.exit(PAUSE_EXIT)
+    if outcome == LIMITED:
+        sys.exit(PROVIDER_LIMIT_EXIT)
 
 
-async def _run_agent(profile: AgentProfile) -> bool:
-    """Work until the profile's task is done; True when the run paused for answers."""
+async def _run_agent(profile: AgentProfile) -> str:
+    """Work until the profile's task is done: DONE, PAUSED for the user's answers, or
+    LIMITED by the provider's limits."""
     settings = ModelSettings.model_validate_json(
         await run_sync((profile.root.parent / SETTINGS_FILENAME).read_text))
     provider = create_adapter(settings, api_key=os.getenv('OPENAI_API_KEY', ''),
@@ -483,7 +541,7 @@ async def _run_agent(profile: AgentProfile) -> bool:
     return await _run_with_provider(profile, provider)
 
 
-async def _run_claude(profile: AgentProfile, provider) -> bool:
+async def _run_claude(profile: AgentProfile, provider) -> str:
     """Let the native SDK execute the stage through MCP and resume its real session."""
     from app.llm.claude import ClaudeTurnLimit
 
@@ -514,7 +572,18 @@ async def _run_claude(profile: AgentProfile, provider) -> bool:
     provider.config_dir = directory / '.claude-native'
     provider.resume = state['session_id'] if state else None
     head = [SystemMessage(profile.prompt + ASK_GUIDANCE)]
-    if state:
+    if state and state.get('pending') is None:
+        # Stopped by the provider's limits: the native session goes on where it stopped.
+        await run_sync(state_file.unlink)
+        await run_sync((directory / LIMIT_FILENAME).unlink, missing_ok=True)
+        if state.get('session_id'):
+            messages = [*head, HumanMessage(LIMIT_CONTINUE)]
+        else:
+            provider.resume = None
+            messages = [*head, *(HumanMessage(text) for text in profile.initial_messages)]
+        print('Resumed after the provider\'s limits', flush=True)
+        state = None
+    elif state:
         answers = json.loads(await run_sync(answers_file.read_text))['answers']
         from app.llm.questions import answer_problem
         problem = answer_problem(state['pending']['questions'], answers)
@@ -531,11 +600,22 @@ async def _run_claude(profile: AgentProfile, provider) -> bool:
                 raise RuntimeError(profile.exhaustion_message)
             # The SDK fixes max_turns at client startup. Resume the native transcript
             # in a fresh client for each correction, with only the remaining budget.
-            async with provider.async_session():
-                reply = await provider.ainvoke(
-                    messages, tools=tools,
-                    until=lambda: bool(pending) or _completion_written(profile),
-                    max_turns=turns)
+            # Counted per session; one that failed to start used none.
+            provider.turns_used = 0
+            try:
+                async with provider.async_session():
+                    reply = await provider.ainvoke(
+                        messages, tools=tools,
+                        until=lambda: bool(pending) or _completion_written(profile),
+                        max_turns=turns)
+            except Exception as exc:
+                if not is_limit_error(exc):
+                    raise
+                turns -= provider.turns_used
+                await run_sync(_stop_for_limit, directory, {
+                    'adapter': 'claude', 'session_id': provider.session_id,
+                    'turns': turns, 'nudges': nudges}, ProviderLimit(exc))
+                return LIMITED
             turns -= provider.turns_used
             if pending:
                 await run_sync(
@@ -551,7 +631,7 @@ async def _run_claude(profile: AgentProfile, provider) -> bool:
                 )
                 await run_sync(answers_file.unlink, missing_ok=True)
                 print(f'Paused for answers to {len(pending["questions"])} questions', flush=True)
-                return True
+                return PAUSED
             if (not await run_sync(_completion_written, profile)
                     and nudges < DIRECT_QUESTION_NUDGES and asks_directly(reply.text)):
                 nudges += 1
@@ -562,12 +642,12 @@ async def _run_claude(profile: AgentProfile, provider) -> bool:
             await run_sync(state_file.unlink, missing_ok=True)
             await run_sync(answers_file.unlink, missing_ok=True)
             print(profile.completion_message, flush=True)
-            return False
+            return DONE
     except ClaudeTurnLimit as exc:
         raise RuntimeError(profile.exhaustion_message) from exc
 
 
-async def _run_with_provider(profile: AgentProfile, provider) -> bool:
+async def _run_with_provider(profile: AgentProfile, provider) -> str:
     working: list[str] = []
     tools = [*(await run_sync(workspace_tools, profile.root, profile.contracts, profile.build_dirs)),
              ask_user_tool(), *([note_tool(working)] if profile.working_notes else [])]
@@ -585,7 +665,7 @@ async def _run_with_provider(profile: AgentProfile, provider) -> bool:
         changed = dict.fromkeys(resumed['changed'])
         turns, nudges = resumed['turns'], resumed['nudges']
         working += resumed.get('working', [])
-        print('Resumed with the user\'s answers', flush=True)
+        print('Resumed where the run stopped', flush=True)
     # The instructions and authoritative inputs are never compacted.
     head = [SystemMessage(content=profile.prompt + ASK_GUIDANCE + TURN_BUDGET.format(turns=turns)),
             *(HumanMessage(content=text) for text in profile.initial_messages)]
@@ -608,7 +688,16 @@ async def _run_with_provider(profile: AgentProfile, provider) -> bool:
                 'Do not start new investigations. The run fails if the required outputs '
                 'are missing when the turn limit is reached.'))]
         # Keep the current budget outside compacted history and recompute it on resume.
-        response = await model.ainvoke([*head, *checkpoint, *history, *notice], **traced_config)
+        try:
+            response = await _request(lambda: model.ainvoke(
+                [*head, *checkpoint, *history, *notice], **traced_config))
+        except ProviderLimit as exc:
+            await run_sync(_stop_for_limit, profile.root.parent, {
+                'history': messages_to_dict(history),
+                'checkpoint': messages_to_dict(checkpoint), 'notes': notes,
+                'changed': list(changed), 'working': working, 'turns': turns - turn,
+                'nudges': nudges}, exc)
+            return LIMITED
         history.append(response)
         usage = getattr(response, 'usage_metadata', None) or {}
         if usage.get('input_tokens'):
@@ -621,7 +710,7 @@ async def _run_with_provider(profile: AgentProfile, provider) -> bool:
                 continue
             await run_sync(profile.validate_completion, profile.root)
             print(profile.completion_message, flush=True)
-            return False
+            return DONE
         asked = None
         for call in response.tool_calls:
             if call['name'] == ASK_USER:
@@ -655,11 +744,11 @@ async def _run_with_provider(profile: AgentProfile, provider) -> bool:
                 'changed': list(changed), 'working': working, 'turns': turns - turn - 1,
                 'nudges': nudges})
             print(f'Paused for answers to {len(asked["questions"])} questions', flush=True)
-            return True
+            return PAUSED
         if await run_sync(_completion_written, profile):
             await run_sync(profile.validate_completion, profile.root)
             print(profile.completion_message, flush=True)
-            return False
+            return DONE
         # There is no following turn to benefit from another compaction request.
         if remaining == 1:
             break
@@ -671,9 +760,17 @@ async def _run_with_provider(profile: AgentProfile, provider) -> bool:
                                  + CLIP_NOTICE), HumanMessage(content=(
             (f'Previous checkpoint:\n{notes}\n\n' if notes else '')
             + 'History being removed:\n' + _transcript(history[:start])))]
-        notes = (await provider.ainvoke(request, **(
-            {'config': {**config, 'run_name': 'compact-history'}} if traced_config else {}
-        ))).text.strip()
+        try:
+            notes = (await _request(lambda: provider.ainvoke(request, **(
+                {'config': {**config, 'run_name': 'compact-history'}} if traced_config else {}
+            )))).text.strip()
+        except ProviderLimit as exc:
+            await run_sync(_stop_for_limit, profile.root.parent, {
+                'history': messages_to_dict(history),
+                'checkpoint': messages_to_dict(checkpoint), 'notes': notes,
+                'changed': list(changed), 'working': working, 'turns': turns - turn - 1,
+                'nudges': nudges}, exc)
+            return LIMITED
         files = f'\nFiles written or edited so far: {", ".join(changed)}' if changed else ''
         left = f'\nModel turns remaining: {remaining - 1}.'
         checkpoint = [HumanMessage(
@@ -684,8 +781,16 @@ async def _run_with_provider(profile: AgentProfile, provider) -> bool:
               flush=True)
     if not (profile.wrap_up_prompt and profile.completion_file):
         raise RuntimeError(profile.exhaustion_message)
-    await _wrap_up(profile, provider, notes, working, history, traced_config)
-    return False
+    try:
+        await _wrap_up(profile, provider, notes, working, history, traced_config)
+    except ProviderLimit as exc:
+        # Resumed with no turn left, the run goes straight to its wrap-up again.
+        await run_sync(_stop_for_limit, profile.root.parent, {
+            'history': messages_to_dict(history), 'checkpoint': messages_to_dict(checkpoint),
+            'notes': notes, 'changed': list(changed), 'working': working, 'turns': 0,
+            'nudges': nudges}, exc)
+        return LIMITED
+    return DONE
 
 
 def _noted(working: Sequence[str]) -> str:
@@ -702,8 +807,8 @@ async def _wrap_up(profile: AgentProfile, provider, notes: str, working: Sequenc
         + (f'Checkpoint:\n{notes}\n\n' if notes else '')
         + 'Latest history:\n' + _transcript(history)))]
     config = traced_config.get('config')
-    reply = await provider.ainvoke(request, **(
-        {'config': {**config, 'run_name': 'wrap-up'}} if config else {}))
+    reply = await _request(lambda: provider.ainvoke(request, **(
+        {'config': {**config, 'run_name': 'wrap-up'}} if config else {})))
     content = re.sub(r'^```\w*\n|\n?```$', '', reply.text.strip())
     target = profile.root / profile.completion_file
     await run_sync(target.write_text, content)

@@ -35,6 +35,7 @@ from app.verification.activities import (
     build_baseline, build_component_runner, build_repository_tests, run_component_suite,
     snapshot_repository_tests, verify_documentation, verify_service,
 )
+from app.verification.checks import analyze_checks_failure, run_repository_checks
 from app.verification.workflows import VerificationWorkflow
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,8 @@ STAGES = (
      ComponentTestGenerationWorkflow, [generate_component_tests]),
     ('Verification', VERIFICATION_TASK_QUEUE, VerificationWorkflow,
      [verify_service, build_baseline, snapshot_repository_tests, build_repository_tests,
-      verify_documentation, build_component_runner, run_component_suite]),
+      verify_documentation, build_component_runner, run_component_suite,
+      run_repository_checks, analyze_checks_failure]),
     ('Diagnosis', DIAGNOSIS_TASK_QUEUE, DiagnosisWorkflow, [diagnose_failure]),
     ('Code review', REVIEW_TASK_QUEUE, ReviewWorkflow, [review_changes]),
     ('Documentation', DOCUMENTATION_TASK_QUEUE, DocumentationWorkflow, [write_documentation]),

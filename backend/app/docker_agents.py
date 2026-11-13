@@ -23,6 +23,7 @@ from temporalio.exceptions import ApplicationError
 
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.runtime import ANSWERS_FILENAME, PAUSE_EXIT, STATE_FILENAME
+from app.llm.limits import LIMIT_FILENAME, MESSAGE_CHARS, PROVIDER_LIMIT_EXIT
 from app.config import OPENAI_API_KEY, OPENAI_BASE_URL, PI_CREDENTIALS_DIR, PI_CREDENTIALS_SHARED
 from app.llm.questions import Question, normalize_questions
 from app.settings.models import ModelSettings, SETTINGS_FILENAME, WORKFLOW_LABELS
@@ -75,41 +76,73 @@ class AgentPaused(Exception):
         self.questions = questions
 
 
-def resume_workspace(paused: Path, workspace: Path, answers: list[str]) -> None:
-    """Fill `workspace` with the one a paused agent left, and the answers it waits for."""
+class AgentLimited(Exception):
+    """The agent's provider refused its requests for its limits (rate, quota or usage); its
+    workspace is kept, as a paused agent's is, until a new container continues from it
+    once the provider is available."""
+
+    def __init__(self, report: dict[str, Any]) -> None:
+        super().__init__(f'Agent stopped by its provider\'s limits: {report.get("message")}')
+        self.report = report
+
+
+def resume_workspace(paused: Path, workspace: Path, answers: list[str] | None) -> None:
+    """Fill `workspace` with the one a paused agent left, and the answers it waits for;
+    without `answers`, the one an agent stopped by its provider's limits left."""
     if not (paused / STATE_FILENAME).is_file():
         raise ApplicationError('The paused agent run is unavailable', non_retryable=True)
     shutil.copytree(paused, workspace, symlinks=True)
-    (workspace / ANSWERS_FILENAME).write_text(json.dumps({'answers': answers},
-                                                         ensure_ascii=False))
+    if answers is not None:
+        (workspace / ANSWERS_FILENAME).write_text(json.dumps({'answers': answers},
+                                                             ensure_ascii=False))
 
 
-async def _keep_paused(name: str, paused: Path) -> list[Question]:
-    """Copy the paused container's workspace to `paused`; the questions it asked."""
+def _read_small(path: Path, what: str) -> str:
+    """A file the agent wrote, read as untrusted: regular and bounded."""
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_STATE_BYTES:
+        raise RuntimeError(f'The agent stopped without saving its {what}')
+    return path.read_text()
+
+
+async def _keep_workspace(name: str, paused: Path, read: Any) -> Any:
+    """Copy the stopped container's workspace to `paused`, once `read` accepted what the
+    agent saved in it; returns what `read` returned."""
     staging = paused.parent / f'.{paused.name}-{uuid.uuid4().hex}'
     await run_sync(staging.mkdir, parents=True)
     try:
         await docker('cp', name + ':/workspace/.', str(staging))
-        # The state is the agent's own output and is read as untrusted.
-        state = staging / STATE_FILENAME
-        if (
-            await run_sync(state.is_symlink)
-            or not await run_sync(state.is_file)
-            or (await run_sync(state.stat)).st_size > MAX_STATE_BYTES
-        ):
-            raise RuntimeError('The agent paused without saving its state')
-        try:
-            pending = json.loads(await run_sync(state.read_text))['pending']
-            questions = normalize_questions(pending['questions'])
-        except (ValueError, KeyError, TypeError) as exc:
-            raise RuntimeError(f'The agent paused with an unusable state: {exc}') from exc
+        result = await run_sync(read, staging)
         if await run_sync(paused.exists):
             await run_sync(shutil.rmtree, paused)
         await run_sync(os.replace, staging, paused)
     except BaseException:
         await run_sync(shutil.rmtree, staging, ignore_errors=True)
         raise
-    return questions
+    return result
+
+
+def _paused_questions(staging: Path) -> list[Question]:
+    try:
+        pending = json.loads(_read_small(staging / STATE_FILENAME, 'state'))['pending']
+        return normalize_questions(pending['questions'])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(f'The agent paused with an unusable state: {exc}') from exc
+
+
+def _limit_report(staging: Path) -> dict[str, Any]:
+    _read_small(staging / STATE_FILENAME, 'state')
+    try:
+        report = json.loads(_read_small(staging / LIMIT_FILENAME, 'limit report'))
+        wait = report.get('retry_after')
+        return {'retry_after': float(wait) if isinstance(wait, (int, float)) else None,
+                'message': str(report.get('message') or '')[:MESSAGE_CHARS]}
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise RuntimeError(f'The agent stopped with an unusable limit report: {exc}') from exc
+
+
+async def _keep_paused(name: str, paused: Path) -> list[Question]:
+    """Copy the paused container's workspace to `paused`; the questions it asked."""
+    return await _keep_workspace(name, paused, _paused_questions)
 
 
 @dataclass(frozen=True)
@@ -444,6 +477,73 @@ async def run_tool(role: str, session_id: str, workspace: Path, command: str, re
             logger.warning('Could not remove tool container %s', name)
 
 
+CHECKS_LOG_LINES = 20000
+
+
+async def run_script(role: str, session_id: str, workspace: Path, command: str,
+                     log_path: Path, *, image_build: AgentImageBuild, workdir: str,
+                     timeout: int) -> int | None:
+    """Run a trusted shell command over a copy of `workspace` in the role's agent image,
+    in /workspace/<workdir>, with a network (to install dependencies) but no credential, no
+    host mount and no Docker. Its output, redacted, goes to `log_path`; returns its exit
+    status, or None when it ran out of `timeout` seconds."""
+    name = f"{role.replace('_', '-')}-script-{uuid.uuid4().hex}"
+    image = _agent_image(role, session_id)
+    await _build_image(image_build, image, log_path.parent / 'agent-build.log')
+    try:
+        await docker(
+            'create', '--name', name, '--cap-drop=ALL', '--security-opt=no-new-privileges',
+            '--pids-limit=1024', '--memory=6g', '--cpus=2', '--user', '10001:10001',
+            '-e', 'HOME=/home/agent', '-e', 'CI=true',
+            '--workdir', f'/workspace/{workdir}', '--entrypoint', 'sh', image, '-c', command)
+        async with async_context(tempfile.TemporaryDirectory) as temporary:
+            archive = Path(temporary) / 'workspace.tar'
+            await run_sync(_archive_workspace, workspace, archive)
+            async with async_context(archive.open, 'rb') as stream:
+                await docker('cp', '-a', '-', name + ':/workspace', stdin=stream)
+        await docker('start', name)
+        exit_code: int | None
+        try:
+            exit_code = int((await docker('wait', name, timeout=timeout)).strip().splitlines()[-1])
+        except TimeoutError:
+            exit_code = None
+            await docker('kill', name, timeout=30)
+        await _save_logs(name, log_path)
+        return exit_code
+    finally:
+        try:
+            await docker('rm', '-f', name, timeout=30)
+        except Exception:
+            logger.warning('Could not remove script container %s', name)
+
+
+async def _save_logs(name: str, log_path: Path) -> None:
+    """Write the container's whole output, its last CHECKS_LOG_LINES lines, redacted, to
+    `log_path`: docker() keeps only the end of what a command prints."""
+    process = await asyncio.create_subprocess_exec(
+        'docker', 'logs', '--tail', str(CHECKS_LOG_LINES), name,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    try:
+        output, _ = await asyncio.wait_for(process.communicate(), 120)
+    except BaseException:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        raise
+    text = redact_output(output.decode('utf-8', 'replace'))
+    await run_sync(log_path.write_text, text, encoding='utf-8')
+
+
+async def _salvage_output(name: str, output: Path, output_name: str) -> None:
+    """Copy a failed agent's project out, if it can be; a failure here is only logged."""
+    try:
+        await run_sync(output.mkdir, exist_ok=True)
+        await docker('cp', name + f':/workspace/{output_name}/.', str(output), timeout=300)
+    except Exception as exc:
+        logger.warning('Could not copy the failed agent\'s project out of %s: %s', name, exc)
+        await run_sync(shutil.rmtree, output, ignore_errors=True)
+
+
 def _archive_workspace(workspace: Path, archive: Path) -> None:
     def owner(info: tarfile.TarInfo) -> tarfile.TarInfo:
         info.uid = info.gid = 10001
@@ -520,7 +620,14 @@ async def run_agent(role: str, session_id: str, workspace: Path,
             questions = await _keep_paused(name, paused)
             kept = True
             raise AgentPaused(questions)
+        if state['ExitCode'] == PROVIDER_LIMIT_EXIT:
+            report = await _keep_workspace(name, paused, _limit_report)
+            kept = True
+            raise AgentLimited(report)
         if state['ExitCode'] != 0:
+            # What the agent wrote before it failed is kept for the stage to save, as the
+            # repository's work in progress; nothing of it is published.
+            await _salvage_output(name, output, output_name)
             detail = ' (OOM killed)' if state.get('OOMKilled') else ''
             raise RuntimeError(
                 f"{label.capitalize()} agent exited with code {state['ExitCode']}{detail}. "
@@ -528,7 +635,7 @@ async def run_agent(role: str, session_id: str, workspace: Path,
             )
         await run_sync(output.mkdir)
         await docker('cp', name + f':/workspace/{output_name}/.', str(output))
-    except AgentPaused as exc:
+    except (AgentPaused, AgentLimited) as exc:
         logger.info('%s agent paused (session=%s): %s', role, session_id, exc)
         raise
     except Exception:

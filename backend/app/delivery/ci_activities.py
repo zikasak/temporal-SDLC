@@ -11,6 +11,7 @@ from temporalio.exceptions import ApplicationError
 from app.github import client as github_client
 from app.github.errors import GitHubError
 from app.temporal.activities import _github_token
+from app.verification.checks import failure_excerpt
 
 # The error type of a check read the GitHub App is not allowed: the delivery stops
 # watching the commit's CI and says why.
@@ -92,7 +93,8 @@ def log_excerpt(log: str, limit: int = LOG_CHARS) -> str:
         if cut is not None:
             lines = lines[:cut]
     text = '\n'.join(line for line in lines if line.strip())
-    return text[-limit:]
+    # Downloads, passing tests and repeated failures left out, so that what failed fits.
+    return failure_excerpt(text, limit) or text[-limit:]
 
 
 async def _check_report(token: str, full_name: str, check: dict[str, Any]) -> str:

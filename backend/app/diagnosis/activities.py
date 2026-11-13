@@ -17,7 +17,7 @@ from app import docker_agents
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import (
-    ANSWERS_KEY, copy_regular_files, paused_result, session_language, write_language,
+    ANSWERS_KEY, RESUME_KEY, limited_result, copy_regular_files, paused_result, session_language, write_language,
 )
 from app.config import GENERATED_CODE_DIR
 from app.diagnosis.agent import VERDICT
@@ -202,7 +202,10 @@ async def run_diagnosis(session_id: str, context: dict[str, Any]) -> dict[str, A
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
         raise ApplicationError('Invalid session ID', non_retryable=True)
     answers = context.get(ANSWERS_KEY)
-    context = {key: value for key, value in context.items() if key != ANSWERS_KEY}
+    # An agent its provider's limits stopped continues where it was, as a paused one does.
+    resume = bool(context.get(RESUME_KEY))
+    context = {key: value for key, value in context.items()
+               if key not in (ANSWERS_KEY, RESUME_KEY)}
     language = session_language(context.get('language'))
     session_dir = GENERATED_CODE_DIR / session_id
     artifact_dir = session_dir / 'diagnosis'
@@ -211,9 +214,10 @@ async def run_diagnosis(session_id: str, context: dict[str, Any]) -> dict[str, A
         work = Path(temporary)
         workspace = work / 'workspace'
         await run_sync(artifact_dir.mkdir, exist_ok=True)
-        if answers:
+        if answers or resume:
             # The paused review continues in the workspace it left.
-            await run_sync(docker_agents.resume_workspace, paused, workspace, answers)
+            await run_sync(docker_agents.resume_workspace, paused, workspace,
+                           answers or None)
         else:
             await run_sync(workspace.mkdir)
             await run_sync(prepare_review, language, session_dir, context, workspace)
@@ -228,6 +232,8 @@ async def run_diagnosis(session_id: str, context: dict[str, Any]) -> dict[str, A
                         dockerfile=language.agent_dockerfile))
             except docker_agents.AgentPaused as exc:
                 return paused_result(session_id, exc)
+            except docker_agents.AgentLimited as exc:
+                return limited_result(session_id, exc)
         component = context.get('component_verification')
         # A component test of a part other than the service is named after its part.
         component_case_id = ((await run_sync(delivery_suite, language, session_dir))[1].case_id

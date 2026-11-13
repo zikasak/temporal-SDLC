@@ -12,8 +12,10 @@ from temporalio.exceptions import ApplicationError
 from app.asyncio_utils import run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
 from app.agent_workflows.host import (
-    StageInputs, StageSpec, copy_regular_files, run_stage, session_language, write_language,
+    StageInputs, StageSpec, WorkTarget, copy_regular_files, restore_stage_output, run_stage,
+    session_language, write_language,
 )
+from app.github.checkout import TESTS_DIR as REPOSITORY_TESTS_DIR
 from app.api_design.openapi import render_openapi
 from app.config import GENERATED_CODE_DIR
 from app.docker_agents import default_agent_image
@@ -164,7 +166,15 @@ def stage(language: Language, frozen: dict[str, str] | None = None,
         validate_output=partial(validate_output, suite, frozen, must_add),
         declined_result=(partial(read_unobservable, requirement_ids)
                          if requirement_ids is not None else None),
+        work=_work_target,
     )
+
+
+def _work_target(context: dict[str, Any]) -> WorkTarget | None:
+    """The contract tests' place in the repository, as a publication writes them."""
+    if not context.get('repository'):
+        return None
+    return WorkTarget('tests', lambda relative: True, prefix=REPOSITORY_TESTS_DIR)
 
 
 @activity.defn
@@ -174,6 +184,9 @@ async def generate_service_tests(session_id: str, context: dict[str, Any]) -> di
     session_dir = GENERATED_CODE_DIR / session_id
     repair = context.get('repair')
     change = bool(context.get('brief'))
+    if repair:
+        # The suite a repair continues, read below, after this worker lost it.
+        await restore_stage_output(stage(language), session_dir, context)
     # The repository's tests as they were before any author ran. A change that leaves the
     # API as it is adds to them and leaves them alone.
     continued = bool(context.get('repository')) and not context.get('onboarding')
@@ -225,7 +238,8 @@ async def generate_service_tests(session_id: str, context: dict[str, Any]) -> di
     result = await run_stage(stage(language, frozen, must_add=change and not repair,
                                    requirement_ids=requirement_ids),
                              session_id, context, GENERATED_CODE_DIR)
-    if not continued or 'questions' in result or 'unobservable' in result:
+    if (not continued or 'questions' in result or 'unobservable' in result
+            or 'provider_limit' in result):
         return result
     # What the suite now differs in from the repository's, for the runs that judge it.
     cases = await run_sync(suite.test_cases, Path(result['path']))
