@@ -150,6 +150,19 @@ Contract ambiguities and how the suite reads them:
   that every requirements and API design session action requires sign-in. The contract does
   not say how an invalid `page_token` is reported before Temporal is contacted, so it is not
   tested.
+- Task flows (FR-125 to FR-143, `tests/test_task_flows.py`): a task flow, its pending and
+  skipped children, forks and fix rounds need Temporal, GitHub and an LLM. Without Temporal
+  the suite checks that `type=TaskWorkflow` is accepted, that the new fields (`name`,
+  `linked`, `waiting_for_user`, `unresolved_findings`) are present with the documented
+  types on whatever executions come back, that stages are never top-level, that `parent`
+  combined with `top_level` answers 422, and that starting a task on an unreachable
+  repository is refused (404, 409 or 503; the contract lists no more precise rule). With no
+  executions or without Temporal those checks verify nothing more.
+  The older `test_workflow_listing_accepts_the_architecture_type` still expects an
+  architecture session's `parent_workflow_id` to start with `requirements-session-`. Under
+  task flows (FR-127) a stage's parent is the task flow, so that assertion is outdated; it
+  only runs on a service that has architecture executions, and the new contract-aligned
+  checks are in `test_task_flows.py`.
 - Unknown IDs are well formed (prefix and 32 hex digits) so that they are treated as
   unknown rather than malformed.
 
