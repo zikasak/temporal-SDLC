@@ -6,7 +6,10 @@
 
 - React and TypeScript single-page app in frontend/, built with Vite and served by nginx in deployment
 - Sign-in, registration of the first account and user administration
-- Flows page: lists top-level flows and their child flows, and opens chats, requirements, architecture, API design and onboarding sessions in a panel
+- Flows page: lists top-level task flows (by their current name), onboardings and chats, and a task flow's requirements, architecture, API design and delivery children with pending, skipped and linked-from-another-task marks; opens chats and sessions in a panel; the Requirements filter lists task flows only, and old-shape requirements flows from before this change are shown only in the All view
+- Shows an open task flow as running and highlights it, and each of its children, as waiting for the user and with the unresolved findings marker as GET /workflows reports them, instead of deriving them from the children's sessions; opens the waiting child's questions from the highlight
+- Old-shape requirements flows from before this change and their stages are only listed and opened, with no waiting-for-user highlight and no unresolved findings marker
+- Opens the next stage from a session's returned IDs: the architecture session, the API design session, or the delivery of a bugfix or documentation change
 - Repository and branch picker and GitHub connection settings
 - Shows delivery progress, agent questions, review findings and pull request links, and sends the user's answers and decisions
 
@@ -28,18 +31,29 @@
 ### Session services
 
 - Per-flow services (app.requirements, app.architecture, app.api_design, app.onboarding, app.conversations, app.delivery service modules) that turn API calls into Temporal workflow starts, queries, signals and updates
-- Read session state, conversation, drafts and delivery progress from workflow queries for the API responses
+- Start a TaskWorkflow for every new requirements interview, for every fork of a requirements, architecture or API design session (linked to the original task's earlier stages) and for every fix round on a closed task's delivery; onboardings keep their own top-level OnboardingWorkflow
+- Read session state, conversation, drafts, delivery progress and the task flow's ID and next stage's ID (architecture session, API design session, or the delivery of a bugfix or documentation change) from workflow queries for the API responses
 - Hand authorised pull request mentions to the delivery or onboarding workflow they belong to
-- List workflow executions with their repository, branch and onboarding search attributes and the workflow registry (app.temporal.executions, app.temporal.registry)
+- List workflow executions with their repository, branch, onboarding, task name, pending/skipped state, linked-task, waiting-for-user and unresolved-findings search attributes and the workflow registry (app.temporal.executions, app.temporal.registry): top_level lists task flows, onboardings, chats and the old-shape requirements flows started before this change; parent lists a flow's direct children plus stages linked to it, and an old-shape requirements flow's children as before
+- For closed deliveries, onboardings and task flows, clear the listed unresolved findings marker when a findings acceptance record (app.delivery.acceptances) exists for the closed delivery run, since a closed workflow can no longer update its own search attributes
+- The workflow_type filter for task flows lists only TaskWorkflow executions, so old-shape RequirementsWorkflow executions appear only in the unfiltered (All) listing
 
 ### Orchestration worker
 
 - Temporal worker on the main task queue (app.temporal.worker)
-- Runs LLMRequestWorkflow, RequirementsWorkflow, ArchitectureWorkflow, ApiDesignWorkflow, OnboardingWorkflow and DeliveryWorkflow
-- Activities for LLM interviewer turns and drafting, and writing the requirements, architecture and OpenAPI documents
+- Runs LLMRequestWorkflow, TaskWorkflow, RequirementsWorkflow, ArchitectureWorkflow, ApiDesignWorkflow, OnboardingWorkflow and DeliveryWorkflow
+- TaskWorkflow (new, top-level per task): creates its stage children up front per task kind (requirements, architecture, API design and delivery for a new service or API change; requirements and delivery for a bugfix or documentation), holds each one pending until the stages it depends on have finished, then starts it, and closes skipped stages; it stays running (its Temporal status) for as long as any child is pending or running
+- TaskWorkflow starts the pending delivery of a bugfix or documentation change as soon as its requirements are finalized, the architecture of a new service or API change when its requirements are finalized, and the API design when the architecture is finalized or skipped
+- TaskWorkflow keeps the task's short name: written by an LLM from the intake at start and rewritten from the finalized requirements; a task flow started by a fork or a fix round on a closed delivery copies the original task's name with a '(fork)' or '(fix)' suffix, and a fork's name is still rewritten when its requirements are finalized
+- TaskWorkflow closes with its delivery child's status (cancelled when the delivery was skipped) once every child, including the earlier stages it links to from a fork or fix round, has closed
+- Stage and onboarding workflows keep their own waiting-for-user state (unanswered interviewer questions, coding agent questions, open review findings, a skip proposal or a contract decision) and unresolved-findings state as search attributes, cleared when the flow closes so a closed flow is never waiting (FR-110)
+- Stages report every change of their waiting-for-user and unresolved-findings state to their TaskWorkflow, which aggregates its children's states into its own WaitingForUser and UnresolvedFindings search attributes
+- Stage workflows report their hand-off (requirements finalized or idle-written, architecture finalized or skip confirmed, API design finalized, pull request merged or closed) to their TaskWorkflow instead of starting the next stage themselves, and on closing signal every task flow they are linked into
+- Activities for LLM interviewer turns and drafting, writing the requirements, architecture and OpenAPI documents, and naming task flows
 - Activities for repository checkout and contract reading, pushing deliveries, documentation and onboardings, and opening or updating pull requests with LLM-written text
 - Classifies mentions of the GitHub App, replies to them and answers clarifications
 - DeliveryWorkflow runs code generation, implementation, test generation, verification with diagnosis and repair rounds, code review rounds and the push as child workflows on the other task queues
+- Executions started before this change keep running in their old shape (stages under a RequirementsWorkflow) and are not migrated
 
 ### Codegen worker
 
@@ -98,6 +112,8 @@
 
 - Persists workflow state and dispatches workflow and activity tasks to the workers by task queue
 - Keeps the Repository, Branch and OnboardingId search attributes used to list executions
+- Keeps the new FlowState (pending or skipped, overriding the Temporal status in listings), TaskName and LinkedTaskFlows (keyword list of task flows a stage is linked into by a fork or fix round) search attributes, upserted by the workflows
+- Keeps the new WaitingForUser and UnresolvedFindings boolean search attributes, upserted by stages, onboardings and task flows, so listings carry the backend-computed highlight and marker
 
 ### GitHub
 
@@ -121,17 +137,17 @@
 - **HTTP API → Auth module**: In-process calls: credentials for registration and sign-in, and the bearer token or cookie of every protected request to resolve the signed-in user.
 - **Auth module → PostgreSQL**: Users with their scrypt password hashes and creation times, read and written with psycopg.
 - **HTTP API → Session services**: In-process calls with validated session actions: messages, answers, forks, finalize, skip, checkout, contract decisions, agent answers, findings decisions, stage retries and workflow list filters.
-- **Session services → Temporal server**: Temporal client gRPC calls: start workflows with search attributes, send signals and updates, run queries for session state and list executions by visibility queries.
+- **Session services → Temporal server**: Temporal client gRPC calls: start TaskWorkflows (and chats and onboardings) with search attributes, send signals and updates to the task flow and its stages, run queries for session state and list executions by visibility queries over ParentWorkflowId, LinkedTaskFlows, FlowState and the other search attributes.
 - **Session services → PostgreSQL**: Workflow registry entries, onboarding sessions and delivery mentions, read and written with psycopg.
 - **HTTP API → GitHub connector**: In-process calls: connect, check and remove the app, list repositories and branches, and hand over raw webhook deliveries with their signature for verification and mention admission.
 - **GitHub connector → PostgreSQL**: The connection with its Fernet-encrypted private key and webhook secret, the app's pull requests, handled webhook deliveries and comments, and mention admissions.
 - **HTTP API → Document storage**: In-process calls: chat attachments to store, and document IDs to stream back as downloads.
 - **Document storage → PostgreSQL**: Document metadata and parsed session passages; the originals are written to files on disk.
 - **Model settings → PostgreSQL**: The workflow_settings row with the model settings of every LLM workflow type.
-- **Temporal server → Orchestration worker**: Workflow and activity tasks of the main task queue over gRPC; the worker returns results and starts child workflows on the codegen and sandboxed stage queues.
+- **Temporal server → Orchestration worker**: Workflow and activity tasks of the main task queue over gRPC; the worker returns results, starts TaskWorkflow stage children (pending ones wait for a start signal from their task flow) and starts child workflows on the codegen and sandboxed stage queues; stage workflows signal their task flow at each hand-off and on every change of their waiting-for-user and unresolved-findings state, and, when they close, every task flow in their LinkedTaskFlows; the task flow signals pending stages to start or close as skipped; workflows upsert their search attributes.
 - **Temporal server → Codegen worker**: CodegenWorkflow tasks with the OpenAPI document and language over gRPC; the result names the generated code directory.
 - **Temporal server → Sandbox worker**: Implementation, test generation, verification, diagnosis, review and documentation workflow tasks over gRPC, each on its own task queue; results carry workspaces, verdicts, findings or agent questions.
-- **Orchestration worker → LLM adapters**: In-process calls with the conversation, session tools and the workflow's model settings for interviewer turns, drafting, chat answers, pull request text and mention classification and replies.
+- **Orchestration worker → LLM adapters**: In-process calls with the conversation, session tools and the workflow's model settings for interviewer turns, drafting, chat answers, task flow names, pull request text and mention classification and replies.
 - **Orchestration worker → GitHub connector**: In-process calls to check out the session's branch and read its contract, push deliveries and onboardings to new branches, open or update pull requests and post mention replies.
 - **Orchestration worker → Document storage**: Parses uploads into passages and writes generated requirements, architecture and OpenAPI documents.
 - **Orchestration worker → Model settings**: Reads the model settings of the workflow type an LLM activity runs for.
@@ -163,3 +179,5 @@
 | Authentication and secrets | HS256 JWTs via PyJWT, scrypt password hashes from hashlib, Fernet (cryptography) encryption of the GitHub App key and webhook secret | NFR-2 and NFR-3. |
 | Observability | Optional Langfuse tracing of LLM calls and stage operations, also from inside agent containers | Active only when the Langfuse keys and base URL are set (LANGFUSE_TRACING_ENABLED defaults to true but can turn it off); secrets are redacted from traces. |
 | Deployment | Docker Compose (Coolify): frontend with nginx, api, worker, codegen-worker, sandbox-worker, sandbox daemon, PostgreSQL, Temporal and Temporal UI; the root Dockerfile builds the API alone with its own PostgreSQL on port 8080 as a non-root user | TR-3: the root image is a self-contained service for contract tests; deployments use backend/Dockerfile. |
+| Task flow hierarchy | A TaskWorkflow per task on the main queue starts every stage as its Temporal child at once; a stage not yet allowed to work waits for a start signal and carries FlowState=pending, a stage that will never run closes with FlowState=skipped; links of forked or fix-round task flows to earlier stages are the LinkedTaskFlows keyword-list search attribute on those stages | FR-125 to FR-140: Temporal has no not-yet-started executions or second parents, so pending, skipped and linked are expressed with search attributes GET /workflows can filter on, keeping NFR-7's existing fields and Temporal statuses underneath. |
+| Waiting highlight and findings marker | Computed in the backend: each stage and onboarding upserts WaitingForUser and UnresolvedFindings search attributes as its state changes and clears WaitingForUser when it closes; the TaskWorkflow aggregates its children's states, signalled by them, into its own attributes; for closed flows the listing clears UnresolvedFindings when the existing findings acceptance record exists for the delivery run; GET /workflows returns both as new fields. Executions started before this change carry neither attribute and are listed without highlight or marker (the fields are null for them) | User's choice to compute the highlight in the backend; search attributes let the listing show it without querying every child, the acceptance record already holds acceptances given after a flow closed (FR-142, FR-143), closed flows are never waiting (FR-110), and the listing only gains fields (NFR-7). User chose not to backfill old-shape flows: they are only listed. |

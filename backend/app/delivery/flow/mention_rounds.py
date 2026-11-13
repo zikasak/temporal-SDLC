@@ -28,6 +28,42 @@ ARCHITECTURE_FIX_STARTED = ('Started a fix round of the architecture from your c
                             'contracts/architecture.md and contracts/architecture.json are '
                             'changed as it asks and pushed to this pull request, without '
                             'tests or code review. I will reply here again with the outcome.')
+# Set by a handover on a mention already classified as a fix request, such as one made
+# on the pull request of a delivery whose flow closed: the delivery does not classify it
+# again. Never kept with the mention.
+CLASSIFIED_AS = 'classified_as'
+
+
+def fix_unavailable(spec: Any, progress: Any) -> str | None:
+    """Why a delivery of `spec` with `progress` cannot take a fix round, if it cannot."""
+    if spec.architecture_only:
+        # The architecture takes fixes without tests, verification or code review.
+        if not progress.publication or not spec.checkout:
+            return 'The architecture has not been pushed yet.'
+        return None
+    # A documentation delivery takes fixes of its documentation, without code review.
+    if spec.kind != 'docs' and not spec.language:
+        return 'No implementation language was chosen for this delivery.'
+    if not progress.publication or not spec.checkout:
+        return 'The delivery has not been pushed yet.'
+    return None
+
+
+def mention_context(spec: Any, progress: Any) -> dict[str, Any]:
+    """What a reply to a question about the delivery is based on, besides its code."""
+    brief = spec.brief
+    return {
+        'kind': spec.kind,
+        'language': spec.language,
+        'requirements': brief['requirements'] if brief else spec.requirements,
+        'retired': brief['retired'] if brief else [],
+        # The pushed commit the answer reads the code of.
+        'repository': spec.repository,
+        'publication': progress.publication,
+        'verification_status': progress.verification_status,
+        'reviews': progress.reviews[-3:],
+        'open_findings': progress.open_findings,
+    }
 
 
 class MentionRounds:
@@ -41,9 +77,11 @@ class MentionRounds:
         that runs after the current one, in the order the requests arrived. Its full text
         is kept in the mention history, never in the workflow's state."""
         body = mention['body']
+        classified = mention.get(CLASSIFIED_AS)
         self._handed_over = True
         entry: PullRequestMention = {
-            **{key: value for key, value in mention.items() if key != 'body'},
+            **{key: value for key, value in mention.items()
+               if key not in ('body', CLASSIFIED_AS)},
             'classification': 'pending', 'status': 'classifying'}
         self.progress.mentions.append(entry)
         # Its place in the queue is taken as it arrives: a fix request whose
@@ -74,22 +112,27 @@ class MentionRounds:
                                         if not is_mention(entry, mention_key(item))]
             self._start_queued()
             raise ApplicationError(MENTION_HANDLED, non_retryable=True)
-        await self._handle_mention(entry, body)
+        await self._handle_mention(entry, body, classified)
         if entry['status'] in MENTION_ENDED:
             await self._settle(entry)
 
-    async def _handle_mention(self, entry: PullRequestMention, body: str) -> None:
-        try:
-            classification = await workflow.execute_activity(
-                'classify_mention', args=[self.spec.session_id, body],
-                result_type=str, start_to_close_timeout=timedelta(minutes=5),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-        except ActivityError as exc:
-            workflow.logger.warning('Mention not classified: %s', exc.cause or exc)
-            await self._mention_failed(entry, 'The comment could not be classified.')
-            self._start_queued()
-            return
+    async def _handle_mention(self, entry: PullRequestMention, body: str,
+                              classified: Any = None) -> None:
+        if classified == 'fix':
+            # Classified before it was handed over, which is why this flow started.
+            classification = 'fix'
+        else:
+            try:
+                classification = await workflow.execute_activity(
+                    'classify_mention', args=[self.spec.session_id, body],
+                    result_type=str, start_to_close_timeout=timedelta(minutes=5),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            except ActivityError as exc:
+                workflow.logger.warning('Mention not classified: %s', exc.cause or exc)
+                await self._mention_failed(entry, 'The comment could not be classified.')
+                self._start_queued()
+                return
         if classification not in MENTION_CLASSES:
             classification = 'unclear'
         entry['classification'] = classification
@@ -135,16 +178,7 @@ class MentionRounds:
         """Why the delivery cannot take a fix round, if it cannot."""
         if self.spec.architecture_only:
             workflow.deprecate_patch('architecture-fixes')
-            # The architecture takes fixes without tests, verification or code review.
-            if not self.progress.publication or not self.spec.checkout:
-                return 'The architecture has not been pushed yet.'
-            return None
-        # A documentation delivery takes fixes of its documentation, without code review.
-        if self.spec.kind != 'docs' and not self.spec.language:
-            return 'No implementation language was chosen for this delivery.'
-        if not self.progress.publication or not self.spec.checkout:
-            return 'The delivery has not been pushed yet.'
-        return None
+        return fix_unavailable(self.spec, self.progress)
 
     def _queued_entry(self, key: tuple[str | None, int | None]) -> PullRequestMention | None:
         """The fix request of the comment `key`, as (comment type, comment ID)."""
@@ -195,19 +229,7 @@ class MentionRounds:
 
     def _mention_context(self) -> dict[str, Any]:
         """What a reply to a question about the delivery is based on, besides its code."""
-        brief = self.spec.brief
-        return {
-            'kind': self.spec.kind,
-            'language': self.spec.language,
-            'requirements': brief['requirements'] if brief else self.spec.requirements,
-            'retired': brief['retired'] if brief else [],
-            # The pushed commit the answer reads the code of.
-            'repository': self.spec.repository,
-            'publication': self.progress.publication,
-            'verification_status': self.progress.verification_status,
-            'reviews': self.progress.reviews[-3:],
-            'open_findings': self.progress.open_findings,
-        }
+        return mention_context(self.spec, self.progress)
 
     async def _reply(self, entry: PullRequestMention, text: str) -> bool:
         """Reply to the mention in the pull request it was made on, even when the delivery

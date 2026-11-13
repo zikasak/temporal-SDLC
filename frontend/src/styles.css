@@ -2106,6 +2106,39 @@ h2 {
   white-space: nowrap;
 }
 
+/* A task flow is listed by its name. */
+.flow-name {
+  min-width: 0;
+  max-width: 48ch;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* An earlier stage of another task that a forked or fix-round task flow links to. */
+.flow-linked {
+  border: 1px dashed #8a9a90;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.8em;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
+.status-pending .status-dot {
+  border: 1px solid #9aa39d;
+  background: transparent;
+}
+
+.status-skipped .status-dot {
+  background: #c7ccc8;
+}
+
+.status-cancelled .status-dot {
+  background: var(--red);
+}
+
 .flow-body {
   padding: 4px 14px 14px 32px;
   border-top: 1px dashed #e2e6e0;

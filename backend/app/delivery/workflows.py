@@ -25,6 +25,7 @@ with workflow.unsafe.imports_passed_through():
         DeliveryProgress, DeliveryState, mention_key, open_review_findings,
     )
     from app.review.models import review_request
+    from app.task_flow.stage import FLAGS_PATCH, FlowFlags, PendingStage
     from app.temporal.execution_fields import task_fields
 
 # Marks the workflow code that waits for its pull request to be merged or closed,
@@ -43,7 +44,7 @@ def _same_mention(first: tuple[str | None, int | None],
 
 @workflow.defn
 class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, Baseline,
-                       Verification, ReviewRounds, Publication):
+                       Verification, ReviewRounds, Publication, PendingStage, FlowFlags):
     """Turns a specified task into verified, published sources: code generation, the
     parallel service and test authors, verification with its repair loop, and the push.
     A bugfix generates no code and goes red to green instead: regression tests, proof
@@ -57,7 +58,12 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
     child of the session the task belongs to.
 
     The run and its pipelines are here; each stage's rounds are a mixin of
-    app.delivery.flow, all working on the one `state`, `spec` and `progress`."""
+    app.delivery.flow, all working on the one `state`, `spec` and `progress`.
+
+    The delivery of a task flow (`task_flow_id`) is created pending by its task flow and
+    begins with the state the finalized stage before it hands on; it keeps whether it
+    waits for the user and whether it has open review findings for its task flow, as an
+    onboarding's delivery does for its onboarding."""
 
     @workflow.init
     def __init__(self, state: DeliveryState) -> None:
@@ -95,9 +101,45 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
         self._handed_over = not state.record_only
         # The failed CI this run fixes on its own, if it is such a round.
         self._ci_round: dict[str, Any] | None = state.ci_fix
+        self._init_pending()
+        self._init_flags()
+
+    @workflow.signal
+    def begin(self, state: DeliveryState) -> None:
+        """Begin the pending delivery from `state`, once the stage before it handed on."""
+        if self.state.pending and self._begun is None:
+            self._begun = state
+
+    def _waiting_for_user(self) -> bool:
+        return bool(self.progress.agent_questions) or bool(
+            self.state.waiting and self.progress.open_findings and self._closing() is None)
+
+    def _unresolved_findings(self) -> bool | None:
+        return bool(self.progress.open_findings)
 
     @workflow.run
     async def run(self, state: DeliveryState) -> DeliveryProgress:
+        if self.state.pending:
+            begun = await self._wait_until_begun()
+            if begun is None:
+                return self.progress
+            begun.pending = False
+            begun.task_flow_id = begun.task_flow_id or self.state.task_flow_id
+            workflow.continue_as_new(begun)
+        parent = workflow.info().parent
+        if self.state.task_flow_id:
+            self._mark_begun()
+            self._start_flags(parent.workflow_id if parent else self.state.task_flow_id)
+        elif self.spec.onboarding and workflow.patched(FLAGS_PATCH):
+            # An onboarding's delivery reports to its onboarding; the fix round of a
+            # closed onboarding is a top-level flow of its own.
+            self._start_flags(parent.workflow_id if parent else None)
+        try:
+            return await self._run()
+        finally:
+            self._close_flags()
+
+    async def _run(self) -> DeliveryProgress:
         # Mentions that ended before this run, such as in a stopped one, are kept in the
         # mention history and leave the workflow's state, once a fix round that was
         # stopped has had its outcome replied.

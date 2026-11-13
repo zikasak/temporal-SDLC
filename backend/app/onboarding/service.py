@@ -55,7 +55,8 @@ async def _unfinished(session_id: str) -> bool:
 async def _start(session_id: str, state: OnboardingState) -> None:
     client = await connect_temporal()
     await client.start_workflow(WORKFLOW_TYPE, state, id=session_id, task_queue=TASK_QUEUE,
-                                **execution_fields(state.repository, session_id))
+                                **execution_fields(state.repository, session_id, flags=True,
+                                                   findings=True))
     await register(session_id)
 
 
