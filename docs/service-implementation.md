@@ -1326,7 +1326,8 @@ Once the contract tests (and component tests) pass, `run_repository_checks`
 delivery would push it (the checkout with the published `implementation/service` and
 `tests/suite` in place) and runs the script in the sandbox's agent image (Python, Java
 with Maven, Node.js), as a non-root user with a network but no credential, host mount or
-Docker, for at most 40 minutes. `verification_status` is `checking` meanwhile. The result
+Docker, for at most 40 minutes. `verification_status` is `checking` meanwhile. The script's output is
+read as it arrives and only its last 20,000 lines, within 4 MiB, are kept. The result
 is `progress.checks`: `passed`, `failed`, `missing` (no script: only the contract tests
 verify the delivery), `not_applicable` (no repository) or `error` (the script did not
 finish, or could not be run, which is reported and does not stop the delivery, since it
@@ -1408,8 +1409,11 @@ usage limit, an overloaded service: HTTP 429 or 529, or a message saying so;
   credentials). Native Claude sessions are resumed by their session ID.
 - The stage's workflow (`AgentWorkflow`) waits, as a timer that holds no worker: the wait
   the provider asked for (plus 30 seconds), else 5 minutes doubling, between 1 minute and 2
-  hours. Then a new container goes on from the kept workspace. After 7 days without the
-  provider the stage fails with that reason.
+  hours. Then a new container goes on from the kept workspace. When the worker that
+  continues it no longer has that workspace (such as after a redeploy with a new disk), the
+  run starts over instead, from a fresh workspace with the project as the stage's `latest`
+  [work ref](#work-kept-in-the-repository) saved it when the agent stopped. After 7 days
+  without the provider the stage fails with that reason.
 - While it waits the delivery shows it in `progress.provider_waits`, with the time it goes
   on, and the page says so.
 - The analysis of failed checks waits the same way; a commit message never waits.

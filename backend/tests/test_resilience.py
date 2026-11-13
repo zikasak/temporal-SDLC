@@ -14,7 +14,9 @@ from temporalio.testing import ActivityEnvironment
 
 from app import docker_agents
 from app.agent_workflows import host, runtime
-from app.agent_workflows.host import StageInputs, StageSpec, copy_regular_files, run_stage
+from app.agent_workflows.host import (
+    StageInputs, StageSpec, WorkTarget, copy_regular_files, run_stage,
+)
 from app.agent_workflows.workflows import PROVIDER_WAIT_MAX, PROVIDER_WAIT_MIN, provider_wait
 from app.delivery.causes import failure_cause, with_cause
 from app.delivery.rounds import decide, outcome
@@ -430,3 +432,63 @@ def test_failures_name_their_cause_without_credentials():
     assert with_cause('The tests could not be written.', activity).startswith(
         'The tests could not be written. Cause: Test-generation agent exited')
     assert with_cause('Nothing.', None) == 'Nothing.'
+
+
+async def test_stage_whose_stopped_workspace_was_lost_starts_over_from_its_saved_work(
+        tmp_path, monkeypatch):
+    populated: list[Path] = []
+    restored: list[str] = []
+
+    async def save(stage, session_dir, context, tree, status, published=False):
+        pass
+
+    async def restore_work(session_dir, session_id, stage, target, include, *, prefix='',
+                           token, kind=work_refs.PUBLISHED):
+        if kind != work_refs.LATEST:
+            return False
+        restored.append(stage)
+        target.mkdir(parents=True)
+        (target / 'draft.md').write_text('# Saved when the provider stopped it')
+        return True
+
+    monkeypatch.setattr(host, 'save_stage_work', save)
+    monkeypatch.setattr(work_refs, 'restore_work', restore_work)
+    sent: list[dict[str, bytes]] = []
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'cp' and args[1] == '-a':
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.append({item.name: archive.extractfile(item).read()
+                             for item in archive.getmembers() if item.isfile()})
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': 0})
+        if args[0] == 'cp' and args[1].endswith(':/workspace/notes/.'):
+            (Path(args[2]) / 'index.md').write_text('# Published')
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    stage = _stage(tmp_path, populated, work=lambda context: WorkTarget('docs', lambda _: True))
+    # No paused workspace on this worker's disk: the run is not refused.
+    result = await ActivityEnvironment().run(run_stage, stage, 'session',
+                                             {host.RESUME_KEY: True}, tmp_path)
+    assert len(populated) == 1 and restored == ['docs']
+    assert sent[0]['notes/draft.md'] == b'# Saved when the provider stopped it'
+    assert 'input.json' in sent[0]
+    assert (Path(result['path']) / 'index.md').read_text() == '# Published'
+
+
+async def test_checks_output_is_kept_to_its_end_within_a_byte_bound(tmp_path, monkeypatch):
+    fake = tmp_path / 'bin'
+    fake.mkdir()
+    # One huge line and the end of the run: no line count bounds it.
+    (fake / 'docker').write_text('#!/bin/sh\nhead -c 300000 /dev/zero | tr "\\0" x\n'
+                                 'printf "\\nE   AssertionError: the end\\n"\n')
+    (fake / 'docker').chmod(0o755)
+    monkeypatch.setenv('PATH', f'{fake}:/usr/bin:/bin')
+    monkeypatch.setattr(docker_agents, 'CHECKS_LOG_BYTES', 1000)
+    log = tmp_path / 'output.log'
+    await docker_agents._save_logs('checks-container', log)
+    text = log.read_text()
+    assert len(text) < 1100
+    assert text.startswith('… (the start of the output was cut)')
+    assert text.rstrip().endswith('E   AssertionError: the end')
