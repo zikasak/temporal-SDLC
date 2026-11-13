@@ -111,3 +111,9 @@ class ApiDesignState:
     architecture_session_id: str | None = None
     architecture: str | None = None
     architecture_structure: dict[str, Any] | None = None
+    # The top-level task flow (TaskWorkflow) the design is a stage of; None for designs
+    # started before task flows existed, which deliver their task themselves.
+    task_flow_id: str | None = None
+    # Created by its task flow but waiting for the stages it depends on: the run waits
+    # for the state it begins with, or to be skipped.
+    pending: bool = False

@@ -20,7 +20,8 @@ with workflow.unsafe.imports_passed_through():
     from app.requirements.document import render_requirements_markdown
     from app.temporal.activities import checkout_repository, update_repository_checkout
     from app.temporal.closing import end_cancelled
-    from app.temporal.interview import Interview, assistant_message
+    from app.task_flow.stage import FLAGS_PATCH, FlowFlags
+    from app.temporal.interview import Interview, assistant_message, pending_questions
     from app.temporal.workflows import (
         FLOW_ABANDONED, FLOW_ABANDONED_PATCH, FLOW_CANCELLED, SESSION_IDLE_TIMEOUT, _Delivering,
         expiry_ends_with_status,
@@ -42,7 +43,7 @@ CONTRACT_UNKNOWN = ("The existing contract could not be read, so only replacing 
 
 
 @workflow.defn
-class OnboardingWorkflow(Interview, _Delivering):
+class OnboardingWorkflow(Interview, _Delivering, FlowFlags):
     """One onboarding of an existing repository: the branch is checked out, the user
     confirms replacing a contract, contract tests or Dockerfile it already has, the LLM
     drafts the requirements, the API and the language from the code, and the user reviews
@@ -65,9 +66,39 @@ class OnboardingWorkflow(Interview, _Delivering):
         self._init_delivery()
         # Set when the onboarding expired without activity.
         self._expired = False
+        self._init_flags()
+        # Whether its delivery waits for the user and has unresolved review findings, as
+        # the delivery last reported them.
+        self._delivery_waiting = False
+        self._delivery_unresolved = False
+
+    def _waiting_for_user(self) -> bool:
+        if self.state.status == "awaiting_confirmation":
+            return True
+        if self.state.status == "interviewing" and pending_questions(self.state.messages):
+            return True
+        return self._delivering and self._delivery_waiting
+
+    def _unresolved_findings(self) -> bool | None:
+        return self._delivery_unresolved
+
+    @workflow.signal
+    def stage_flags(self, workflow_id: str, waiting: bool, unresolved: bool | None) -> None:
+        """Its delivery reports whether it waits for the user and has open findings."""
+        self._delivery_waiting = bool(waiting)
+        if unresolved is not None:
+            self._delivery_unresolved = bool(unresolved)
 
     @workflow.run
     async def run(self, state: OnboardingState) -> dict[str, Any] | None:
+        if workflow.patched(FLAGS_PATCH):
+            self._start_flags(None)
+        try:
+            return await self._run()
+        finally:
+            self._close_flags()
+
+    async def _run(self) -> dict[str, Any] | None:
         if not self.state.checkout:
             await self._check_out()
             if self.state.status == "preparing":

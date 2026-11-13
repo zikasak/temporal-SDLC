@@ -1703,24 +1703,23 @@ async def test_a_task_is_one_workflow_tree_open_until_its_delivery_closes(server
     # The session starts the architecture itself once the document is written.
     state = await wait_until(requirements, lambda state: state.architecture_session_id)
     architecture = server.client.get_workflow_handle(state.architecture_session_id)
-    assert (await architecture.describe()).parent_id == requirements.id
     for _ in range(100):
         if (await architecture.query(ArchitectureWorkflow.get_state)).status == "interviewing":
             break
         await asyncio.sleep(0.05)
     await architecture.execute_update(ArchitectureWorkflow.finalize)
-    # Finalized, it hands the design on to the requirements session, whose child it is.
+    # Finalized, it hands the design on.
     design_id = (await architecture.query(ArchitectureWorkflow.get_state)).api_design_session_id
     design = server.client.get_workflow_handle(design_id)
     for _ in range(100):
         try:
-            if (await design.describe()).parent_id == requirements.id:
-                break
+            await design.describe()
+            break
         except RPCError:
             pass
         await asyncio.sleep(0.05)
     else:
-        raise AssertionError("the API design was never started under the requirements")
+        raise AssertionError("the API design was never started")
     for _ in range(100):
         if (await design.query(ApiDesignWorkflow.get_state)).status == "interviewing":
             break

@@ -134,6 +134,8 @@ export type DeliveryProgress = {
   existing_code_changed: boolean;
   // The repository's CI on the last pushed commit.
   ci: CiChecks | null;
+  // The new top-level flows of fix rounds started after the flow closed, oldest first.
+  fix_flow_ids: string[];
 };
 
 const ciStatuses = ["pending", "passed", "failed", "inconclusive", "none", "timed_out", "unavailable"] as const;
@@ -187,6 +189,8 @@ export type PullRequestMention = {
   round: number | null;
   reply_url: string | null;
   error: string | null;
+  // The new top-level flow the fix request started after the flow closed.
+  fix_flow_id: string | null;
 };
 
 function githubLink(value: unknown): string | null {
@@ -213,6 +217,7 @@ function pullRequestMentions(value: unknown): PullRequestMention[] {
       round: Number.isSafeInteger(record.round) ? record.round as number : null,
       reply_url: githubLink(record.reply_url),
       error: typeof record.error === "string" ? record.error : null,
+      fix_flow_id: typeof record.fix_flow_id === "string" ? record.fix_flow_id : null,
     } satisfies PullRequestMention];
   });
 }
@@ -390,7 +395,22 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     mentions: pullRequestMentions(value.mentions),
     existing_code_changed: value.existing_code_changed === true,
     ci: ciChecks(value.ci),
+    fix_flow_ids: Array.isArray(value.fix_flow_ids)
+      ? value.fix_flow_ids.filter((item): item is string => typeof item === "string") : [],
   };
+}
+
+/** Where a fix round's flow is shown: the delivery of an onboarding's fix round in its own
+ * view; a task's fix round in its task flow on the Flows page. */
+function fixFlowLink(workflowId: string): string | null {
+  const session = workflowId.replace(/^delivery-/, "");
+  return session.startsWith("fix-session-")
+    ? `?mode=requirements&session_id=${encodeURIComponent(session)}` : null;
+}
+
+function FixFlow({ id }: { id: string }) {
+  const link = fixFlowLink(id);
+  return link ? <a href={link}><code>{id}</code></a> : <code>{id}</code>;
 }
 
 /** What the page shows at once after answering an agent, until the next poll. */
@@ -812,8 +832,17 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
           {mention.classification === "pending" ? "being classified" : mention.classification}, {mention.status}
           {mention.round !== null && <> — review round {mention.round}</>}
           {mention.reply_url && <> — <a href={mention.reply_url} target="_blank" rel="noreferrer">reply</a></>}
+          {mention.fix_flow_id && <> — fixed in the new flow <FixFlow id={mention.fix_flow_id} /></>}
           {mention.error && <p role="alert">{mention.error}</p>}
         </li>)}
+      </ul>
+    </section>}
+    {progress.fix_flow_ids.length > 0 && <section aria-label="Fix rounds after the flow closed">
+      <h3>Fix rounds after the flow closed</h3>
+      <p>Each runs as a new flow, pushed to a new branch with a new pull request; task flows
+        are listed on the Flows page with a “(fix)” name.</p>
+      <ul>
+        {progress.fix_flow_ids.map((id) => <li key={id}><FixFlow id={id} /></li>)}
       </ul>
     </section>}
   </>;

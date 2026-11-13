@@ -96,8 +96,7 @@ class ArchitectureContext:
         raise ValueError(f"Unknown component {name!r}.")
 
     def _component(self, name: str) -> str:
-        assert self.structure is not None
-        for item in self.structure["components"]:
+        for item in self._draft()["components"]:
             if _key(item["name"]) == _key(name):
                 return item["name"]
         raise ValueError(f"Unknown component {name!r}; record it with record_component first.")

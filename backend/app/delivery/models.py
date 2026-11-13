@@ -250,6 +250,10 @@ class DeliveryProgress:
     existing_code_changed: bool = False
     # The repository's CI on the last pushed commit, watched while the delivery waits.
     ci: CiChecks | None = None
+    # The new top-level flows that fix rounds started after the delivery's flow closed,
+    # oldest first: a task flow per fix round of a task's delivery, the fix round's own
+    # flow for an onboarding. Filled in by the session API, never by the workflow.
+    fix_flow_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -614,6 +618,12 @@ class DeliveryState:
     ci_fix: dict[str, Any] | None = None
     # How many automatic CI fix rounds ran in a row, up to MAX_CI_FIX_ROUNDS.
     ci_fixes: int = 0
+    # The top-level task flow (TaskWorkflow) the delivery is a stage of; None for an
+    # onboarding's delivery and for deliveries started before task flows existed.
+    task_flow_id: str | None = None
+    # Created by its task flow but waiting for the stages it depends on: the run waits
+    # for the state it begins with, or to be skipped, and `spec` is only a placeholder.
+    pending: bool = False
 
 
 def mention_key(item: Any) -> tuple[str | None, int]:
