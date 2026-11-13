@@ -1,6 +1,9 @@
 FROM maven:3.9.9-eclipse-temurin-21 AS java
 FROM node:24-slim AS node
 FROM python:3.12-slim
+# Git: repositories' own tests and checks scripts may call it, and so may the agents.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=java /opt/java/openjdk /opt/java/openjdk
 COPY --from=java /usr/share/maven /usr/share/maven
 ENV JAVA_HOME=/opt/java/openjdk

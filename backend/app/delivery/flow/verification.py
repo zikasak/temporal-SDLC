@@ -314,8 +314,9 @@ class Verification:
     async def _run_checks(self) -> None:
         """Run the repository's checks script over the repository as it would be pushed;
         when it fails, have the LLM say where the problem is, from the excerpt of its
-        output. A run that could not complete is recorded and does not stop the delivery:
-        it says nothing about the code."""
+        output. A run that could not complete, or that failed for the sandbox rather than
+        the code, is recorded and does not stop the delivery: it says nothing about the
+        code."""
         if not self.spec.checkout or not self.spec.language:
             return
         self.progress.verification_status = 'checking'
@@ -334,6 +335,14 @@ class Verification:
                       'error': with_cause("The repository's checks could not be run.", exc)}
         if checks['status'] == 'failed':
             checks['analysis'] = await self._analyze_checks(checks['excerpt'])
+            if checks['analysis'].get('cause') == 'environment':
+                # The sandbox, not the code, failed them: no author could repair that, so
+                # it counts as a run that could not complete.
+                workflow.logger.warning("The repository's checks failed for the sandbox: %s",
+                                        checks['analysis'].get('summary'))
+                checks['status'] = 'error'
+                checks['error'] = ("The repository's checks could not run in the sandbox: "
+                                   f"{checks['analysis'].get('summary') or 'see their log'}")
         self.progress.checks = checks
         self.progress.verification_status = 'completed'
         workflow.logger.info("The repository's checks: %s", checks['status'])

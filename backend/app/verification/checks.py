@@ -8,7 +8,7 @@ tools: the script is the whole interface, so the repository, its implementation 
 infrastructure stay independent of each other.
 
 Verification runs the script over the repository as the delivery would push it, in the
-sandbox's agent image (Python, Java with Maven, Node.js), with a network but no
+sandbox's agent image (Python, Java with Maven, Node.js, Git), with a network but no
 credentials. Its output is mostly noise for whoever has to fix a failure: dependency
 downloads, passing tests, progress bars, the same traceback many times over. A failure is
 cut down to what matters without the LLM (failure_excerpt), and only that excerpt is given
@@ -282,10 +282,16 @@ CI runs them) failed after a coding agent changed the code. Below is the relevan
 the script's output; passing tests, downloads and repeated failures were left out.
 
 Say where the problem is, for the agent that will fix it. Answer with a JSON object and
-nothing else: {{"summary": "<one sentence: what fails and why>", "files": ["<path of a file
-to look at>", ...], "instructions": "<what to change, concretely: which code or which test
-and how; say whether the code broke what a test rightly asserts, or a test asserts what the
-change rightly altered>"}}.
+nothing else: {{"cause": "code" or "environment", "summary": "<one sentence: what fails and
+why>", "files": ["<path of a file to look at>", ...], "instructions": "<what to change,
+concretely: which code or which test and how; say whether the code broke what a test rightly
+asserts, or a test asserts what the change rightly altered>"}}.
+
+The cause is "environment" only when the failure is the sandbox's, not the repository's:
+a program the checks call is not installed (such as `git` not found), or the network or a
+package registry could not be reached, so that no change to the repository's code or tests
+would fix it. Anything the repository's code, tests, build files or checks script could fix
+is "code".
 
 {excerpt}"""
 
@@ -294,7 +300,7 @@ def fallback_analysis(excerpt: str) -> dict[str, Any]:
     """What the fixing agent is told when the LLM could not analyse the failure."""
     first = next((line.strip() for line in excerpt.splitlines()
                   if _SIGNAL.search(line)), 'The checks script failed.')
-    return {'summary': first[:300], 'files': [],
+    return {'cause': 'code', 'summary': first[:300], 'files': [],
             'instructions': ("The repository's checks script failed. Find the cause in its "
                              'output in `checks` and fix it; run the script again before you '
                              'finish.'),
@@ -312,7 +318,8 @@ def parse_analysis(text: str) -> dict[str, Any] | None:
     if not isinstance(data, dict) or not isinstance(data.get('instructions'), str):
         return None
     files = data.get('files') if isinstance(data.get('files'), list) else []
-    return {'summary': str(data.get('summary') or '')[:500],
+    return {'cause': 'environment' if data.get('cause') == 'environment' else 'code',
+            'summary': str(data.get('summary') or '')[:500],
             'files': [str(item)[:300] for item in files[:20]],
             'instructions': data['instructions'][:ANALYSIS_CHARS], 'analysed': True}
 
@@ -321,8 +328,9 @@ def parse_analysis(text: str) -> dict[str, Any] | None:
 @trace_activity('analyze-checks-failure', feature='verification', input_parameter='session_id')
 async def analyze_checks_failure(session_id: str, excerpt: str) -> dict[str, Any]:
     """Activity 'analyze_checks_failure': the LLM's analysis of where a failure of the
-    repository's checks is, from the excerpt of their output: `summary`, `files` and
-    `instructions`. A provider whose limits are spent raises a PROVIDER_LIMIT_ERROR, for
+    repository's checks is, from the excerpt of their output: its `cause` (`code`, or
+    `environment` when the sandbox, not the repository, is at fault), `summary`, `files`
+    and `instructions`. A provider whose limits are spent raises a PROVIDER_LIMIT_ERROR, for
     the workflow to wait and ask again; any other failure gives the fallback analysis."""
     from langchain_core.messages import HumanMessage
     from app.llm.graph import native_session

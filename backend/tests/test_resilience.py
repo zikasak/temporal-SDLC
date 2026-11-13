@@ -386,10 +386,15 @@ def test_failure_excerpt_reads_other_toolchains():
 def test_analysis_is_parsed_or_falls_back_to_what_the_output_says():
     assert parse_analysis('```json\n{"summary": "s", "files": ["a.py"], '
                           '"instructions": "Fix a.py"}\n```') == {
-        'summary': 's', 'files': ['a.py'], 'instructions': 'Fix a.py', 'analysed': True}
+        'cause': 'code', 'summary': 's', 'files': ['a.py'], 'instructions': 'Fix a.py',
+        'analysed': True}
+    assert parse_analysis('{"cause": "environment", "summary": "git is not installed", '
+                          '"instructions": "None"}')['cause'] == 'environment'
+    assert parse_analysis('{"cause": "weather", "instructions": "x"}')['cause'] == 'code'
     assert parse_analysis('no JSON here') is None
     fallback = fallback_analysis('noise\nE   KeyError: x\nmore')
     assert fallback['summary'] == 'E   KeyError: x' and not fallback['analysed']
+    assert fallback['cause'] == 'code'
 
 
 # Further rounds of fixes.
