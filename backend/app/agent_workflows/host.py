@@ -204,9 +204,12 @@ def runtime_state() -> str:
 
 async def restore_stage_project(stage: StageSpec, session_dir: Path, context: dict[str, Any],
                                 project: Path) -> bool:
-    """Lay what the stage's last run left, as its `latest` work ref holds it, over the
-    agent's freshly populated `project`; true when it was restored."""
+    """Make the agent's freshly populated `project` what the stage's last run left, as its
+    `latest` work ref holds it: the files the stage's work covers are those saved, files it
+    had deleted are deleted again, and files outside it stay as populated. True when it was
+    restored."""
     from app.github import work_refs
+    from app.github.checkout import replace_files
     try:
         target = stage.work(context) if stage.work else None
         if target is None:
@@ -217,7 +220,7 @@ async def restore_stage_project(stage: StageSpec, session_dir: Path, context: di
                     session_dir, session_dir.name, target.stage, saved, target.include,
                     prefix=target.prefix, token=_work_token, kind=work_refs.LATEST):
                 return False
-            await run_sync(copy_regular_files, saved, project, include=lambda relative: True)
+            await run_sync(replace_files, saved, project, target.include)
         return True
     except Exception as exc:
         logger.warning('The %s work of session %s was not restored: %s', stage.role,
