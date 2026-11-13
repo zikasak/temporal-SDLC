@@ -147,7 +147,17 @@ export type DeliveryProgress = {
   existing_code_changed: boolean;
   // The repository's CI on the last pushed commit.
   ci: CiChecks | null;
+  // The new top-level flows that fix rounds started after the delivery's flow closed,
+  // oldest first: task flows for a task's delivery, fix deliveries for an onboarding.
+  fix_flow_ids: string[];
 };
+
+/** The view of a flow a fix round of a closed delivery started: the session its fix
+ * delivery runs as (fix-session-<hex>), whose task flow is task-flow-<hex>. */
+export function fixFlowLink(flowId: string): string | null {
+  const match = /^(?:task-flow-|delivery-fix-session-)([0-9a-f]{32})$/.exec(flowId);
+  return match ? `?mode=requirements&session_id=fix-session-${match[1]}` : null;
+}
 
 const ciStatuses = ["pending", "passed", "failed", "inconclusive", "none", "timed_out", "unavailable"] as const;
 type CiStatus = typeof ciStatuses[number];
@@ -433,6 +443,9 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     mentions: pullRequestMentions(value.mentions),
     existing_code_changed: value.existing_code_changed === true,
     ci: ciChecks(value.ci),
+    fix_flow_ids: Array.isArray(value.fix_flow_ids)
+      ? value.fix_flow_ids.filter((item): item is string => typeof item === "string" && item !== "")
+      : [],
   };
 }
 
@@ -897,6 +910,20 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
           {mention.reply_url && <> — <a href={mention.reply_url} target="_blank" rel="noreferrer">reply</a></>}
           {mention.error && <p role="alert">{mention.error}</p>}
         </li>)}
+      </ul>
+    </section>}
+    {progress.fix_flow_ids.length > 0 && <section aria-label="Fix rounds after the flow closed">
+      <h3>Fix rounds after the flow closed</h3>
+      <p>
+        Each ran as a flow of its own on a new branch, with a new pull request.
+      </p>
+      <ul>
+        {progress.fix_flow_ids.map((flowId) => {
+          const link = fixFlowLink(flowId);
+          return <li key={flowId}>
+            {link ? <a href={link}><code>{flowId}</code></a> : <code>{flowId}</code>}
+          </li>;
+        })}
       </ul>
     </section>}
   </>;

@@ -167,6 +167,9 @@ class TaskSpec:
     # An onboarding that adds only the architecture to the repository's contract: nothing
     # is written, verified or reviewed, the two files are pushed with a pull request.
     architecture_only: bool = False
+    # The top-level task flow (TaskWorkflow) the delivery is a child of; None for an
+    # onboarding's delivery and for one started before task flows existed.
+    task_flow_id: str | None = None
 
 
 @dataclass
@@ -272,6 +275,10 @@ class DeliveryProgress:
     existing_code_changed: bool = False
     # The repository's CI on the last pushed commit, watched while the delivery waits.
     ci: CiChecks | None = None
+    # The new top-level flows that fix rounds started after the delivery's flow closed,
+    # oldest first: a task flow for a task's delivery, the fix round's own delivery for an
+    # onboarding. Found by the session API, never recorded by the workflow.
+    fix_flow_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -640,6 +647,18 @@ class DeliveryState:
     # row, the failure before the first round included (app.delivery.rounds): whether
     # another round is worth it is decided from it.
     ci_history: list[dict[str, Any]] = field(default_factory=list)
+    # The delivery child of a task flow created before the stages it depends on finished:
+    # it waits for its task flow to begin it with its state.
+    pending: bool = False
+
+
+def pending_delivery(session_id: str, task_flow_id: str) -> DeliveryState:
+    """The state a task flow's delivery child is created with while it is pending."""
+    return DeliveryState(spec=TaskSpec(
+        session_id=session_id, requirements=[], requirements_document='',
+        api={'info': {'title': 'API', 'version': '1.0.0', 'description': '', 'auth': 'none'},
+             'schemas': [], 'endpoints': []},
+        task_flow_id=task_flow_id), pending=True)
 
 
 def mention_key(item: Any) -> tuple[str | None, int]:

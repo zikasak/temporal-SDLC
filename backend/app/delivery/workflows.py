@@ -15,6 +15,7 @@ from app.delivery.flow.review import ReviewRounds
 from app.delivery.flow.stages import RESTORE_KEPT_PATCH, Stages, restore_finding
 from app.delivery.flow.verification import Verification
 from app.delivery.flow.waiting import PullRequestWait
+from app.temporal.flags import FlowFlags, PendingStage
 
 with workflow.unsafe.imports_passed_through():
     from app.delivery.causes import with_cause
@@ -26,7 +27,7 @@ with workflow.unsafe.imports_passed_through():
         DeliveryProgress, DeliveryState, mention_key, open_review_findings,
     )
     from app.review.models import review_request
-    from app.temporal.execution_fields import task_fields
+    from app.temporal.execution_fields import FINDINGS_MEMO, WAITING_MEMO, task_fields
 
 # Marks the workflow code that waits for its pull request to be merged or closed,
 # checking it every PULL_REQUEST_CHECK_INTERVAL; runs that began to wait before it only
@@ -44,7 +45,7 @@ def _same_mention(first: tuple[str | None, int | None],
 
 @workflow.defn
 class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, Baseline,
-                       Verification, ReviewRounds, Publication):
+                       Verification, ReviewRounds, Publication, FlowFlags, PendingStage):
     """Turns a specified task into verified, published sources: code generation, the
     parallel service and test authors, verification with its repair loop, and the push.
     A bugfix generates no code and goes red to green instead: regression tests, proof
@@ -96,9 +97,26 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
         self._handed_over = not state.record_only
         # The failed CI this run fixes on its own, if it is such a round.
         self._ci_round: dict[str, Any] | None = state.ci_fix
+        self._init_pending()
+
+    @workflow.signal
+    def begin_stage(self, state: DeliveryState) -> None:
+        """The task flow begins its pending delivery child with the task to deliver."""
+        self._begin(state)
+
+    def _flags(self) -> dict[str, Any]:
+        progress = self.progress
+        return {WAITING_MEMO: bool(progress.agent_questions)
+                or bool(progress.open_findings and self.state.waiting),
+                FINDINGS_MEMO: bool(progress.open_findings)}
 
     @workflow.run
     async def run(self, state: DeliveryState) -> DeliveryProgress:
+        if self.state.pending:
+            # Created by its task flow before the stages it depends on finished.
+            await self._wait_to_begin()
+            return self.progress
+        self._start_flags()
         # Mentions that ended before this run, such as in a stopped one, are kept in the
         # mention history and leave the workflow's state, once a fix round that was
         # stopped has had its outcome replied.

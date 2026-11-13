@@ -3,8 +3,9 @@
 A new service or an API change goes from its requirements to an architecture session and
 only then to its API design (`backend/app/architecture/`).
 
-1. Finalizing the requirements session of such a task on a repository starts an
-   `ArchitectureWorkflow` as its child (`architecture_session_id`). The session checks the
+1. Finalizing the requirements session of such a task on a repository has its task flow
+   ([task-flow.md](task-flow.md)) begin its pending `ArchitectureWorkflow` child
+   (`architecture_session_id`). The session checks the
    repository out and the LLM drafts the architecture at once: components with their
    responsibilities, the data flow between them and the key technology choices, recorded
    with the tools of `app/tools/architecture.py`. An API change starts from the
@@ -17,10 +18,11 @@ only then to its API design (`backend/app/architecture/`).
    which are refused once the API design started). Finalizing writes `architecture.md` and
    `architecture.json` (`write_architecture_document`), downloadable with
    `GET …/document?format=md|json`.
-4. Finalized or skipped, the session ends and hands an `ArchitectureResult` to the
-   requirements session, which starts the API design as its own child, next to the
-   architecture session (`api_design_session_id`). A session whose requirements session has
-   closed starts the design itself.
+4. Finalized or skipped, the session ends and hands an `ArchitectureResult` to its task
+   flow, which begins its pending API design child, next to the architecture session
+   (`api_design_session_id`); a confirmed skip lists the session as skipped. A session from
+   before task flows existed hands it to its requirements session instead, or starts the
+   design itself once that has closed.
 
 The API design receives the architecture (`architecture`, `architecture_structure`) in its
 prompt and passes it to the delivery's `TaskSpec`: the coding agents get it as context, and

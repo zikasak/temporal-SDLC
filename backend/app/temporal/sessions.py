@@ -52,6 +52,9 @@ async def _turn_history(
     client = await connect_temporal()
     runs: list[list[dict[str, Any]]] = []
     run_id: str | None = None
+    # The input of the earliest run that was the session itself: a stage of a task flow
+    # created pending began as a run of its own from the state it was begun with.
+    earliest: Any = None
     while True:
         handle = client.get_workflow_handle(session_id, run_id=run_id)
         scheduled: dict[int, str] = {}
@@ -77,8 +80,10 @@ async def _turn_history(
                     )
                     results.append(result)
         runs.append(results)
+        if not getattr(first_input, "pending", False):
+            earliest = first_input
         if not previous_run_id:
-            return first_input, [item for run in reversed(runs) for item in run]
+            return earliest, [item for run in reversed(runs) for item in run]
         run_id = previous_run_id
 
 

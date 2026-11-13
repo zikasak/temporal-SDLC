@@ -28,6 +28,7 @@ def architecture_state(session_id: str, source: RequirementsState,
         existing_structure=contract.get("architecture_structure"),
         repository=source.repository,
         design=design,
+        task_flow_id=source.task_flow_id,
     )
 
 
@@ -38,6 +39,8 @@ def handed_design(state: ArchitectureState, session_id: str) -> ApiDesignState:
         requirements_document=state.requirements_document, kind=state.kind,
         repository=state.repository))
     design.architecture_session_id = session_id
+    # The design is a sibling of the session under its task flow, a fork's included.
+    design.task_flow_id = state.task_flow_id
     if state.status == "skipped":
         # The repository's architecture stays as it is.
         design.architecture = state.existing_architecture

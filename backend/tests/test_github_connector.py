@@ -224,7 +224,8 @@ def test_requirements_creation_requires_a_repository(http, monkeypatch, body):
     async def start(*, repository=None):
         pytest.fail("A session must not start without a repository")
 
-    monkeypatch.setattr(requirements, "start_session", start)
+    # The route starts the session as the requirements child of a new task flow.
+    monkeypatch.setattr(requirements, "start_task", start)
     assert http.post("/requirements/sessions", json=body).status_code == 422
 
 
@@ -242,7 +243,7 @@ def test_requirements_creation_requires_the_intake(http, monkeypatch, change):
     async def start(**kwargs):
         pytest.fail("A session must not start without the intake")
 
-    monkeypatch.setattr(requirements, "start_session", start)
+    monkeypatch.setattr(requirements, "start_task", start)
     body = {"repository": {"full_name": "octocat/private-project", "branch": "main"},
             **INTAKE, **change}
     assert http.post("/requirements/sessions", json=body).status_code == 422

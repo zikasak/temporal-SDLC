@@ -15,8 +15,9 @@ with workflow.unsafe.imports_passed_through():
     from app.architecture.source import handed_design
     from app.temporal.activities import register_session
     from app.temporal.closing import end_cancelled
-    from app.temporal.execution_fields import execution_fields
-    from app.temporal.interview import Interview, assistant_message
+    from app.temporal.execution_fields import WAITING_MEMO, execution_fields
+    from app.temporal.flags import FlowFlags, PendingStage
+    from app.temporal.interview import Interview, assistant_message, pending_questions
     from app.temporal.workflows import FLOW_ABANDONED, FLOW_ABANDONED_PATCH, _check_out
 
 DISCUSSION_TOO_LONG = "This discussion is too long to continue. Finalize the architecture."
@@ -27,7 +28,7 @@ NO_SKIP = ("A new service always goes through the architecture stage; only the s
 
 
 @workflow.defn
-class ArchitectureWorkflow(Interview):
+class ArchitectureWorkflow(Interview, FlowFlags, PendingStage):
     """One architecture session of a task: the LLM drafts the top-level architecture from
     the requirements (an API change starting from the repository's existing one, or
     proposing to skip the stage instead), and the user reviews it in a conversation of
@@ -54,6 +55,20 @@ class ArchitectureWorkflow(Interview):
             self.state.status = "preparing"
         self._updates = 0
         self._turn_lock = asyncio.Lock()
+        self._init_pending()
+
+    @workflow.signal
+    def begin_stage(self, state: ArchitectureState) -> None:
+        """The task flow begins its pending architecture child with the finalized
+        requirements."""
+        self._begin(state)
+
+    def _flags(self) -> dict[str, Any]:
+        # Unanswered questions, or a skip proposal to confirm or decline.
+        waiting = self.state.status == "interviewing" and (
+            self.state.skip_proposal is not None
+            or bool(pending_questions(self.state.messages)))
+        return {WAITING_MEMO: waiting}
 
     def _needs_draft(self) -> bool:
         """Whether the session waits for its first draft (or the proposal made instead)."""
@@ -62,6 +77,11 @@ class ArchitectureWorkflow(Interview):
 
     @workflow.run
     async def run(self, state: ArchitectureState) -> ArchitectureResult | None:
+        if self.state.pending:
+            # Created by its task flow before the requirements were finalized.
+            await self._wait_to_begin()
+            return None
+        self._start_flags()
         ready = await _check_out(self.state, self._resume_status)
         if ready and self.state.status in ("drafting", "turn_running"):
             async with self._turn_lock:
@@ -85,6 +105,9 @@ class ArchitectureWorkflow(Interview):
                 await end_cancelled(FLOW_ABANDONED)
             return None
         design = handed_design(self.state, workflow.info().workflow_id)
+        if self.state.status == "skipped":
+            # The user confirmed skipping the stage: listed as skipped.
+            self._mark_skipped()
         if workflow.info().parent is None:
             # Without a requirements session to follow it, the session starts the design
             # itself, which outlives it.
@@ -114,7 +137,9 @@ class ArchitectureWorkflow(Interview):
         return self.state
 
     def _hand_over(self) -> None:
-        self.state.api_design_session_id = f"api-design-session-{workflow.uuid4().hex}"
+        # A stage of a task flow hands on to the task flow's pending API design child.
+        self.state.api_design_session_id = (self.state.next_session_id
+                                            or f"api-design-session-{workflow.uuid4().hex}")
 
     async def _turn(self) -> bool:
         drafting = self.state.structure is None

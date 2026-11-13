@@ -30,6 +30,8 @@ with workflow.unsafe.imports_passed_through():
     )
     from app.onboarding.workflows import OnboardingWorkflow
     from app.settings.storage import ensure_schema as ensure_settings_schema
+    from app.tasks.activities import name_task_flow
+    from app.tasks.workflows import TaskWorkflow
     from app.temporal.activities import (
         api_design_turn,
         checkout_repository,
@@ -70,11 +72,11 @@ async def main():
         client,
         task_queue=TASK_QUEUE,
         workflows=[
-            LLMRequestWorkflow, RequirementsWorkflow, ArchitectureWorkflow, ApiDesignWorkflow,
-            DeliveryWorkflow, OnboardingWorkflow,
+            LLMRequestWorkflow, TaskWorkflow, RequirementsWorkflow, ArchitectureWorkflow,
+            ApiDesignWorkflow, DeliveryWorkflow, OnboardingWorkflow,
         ],
         activities=[
-            parse_document, send_llm_message,
+            parse_document, send_llm_message, name_task_flow,
             requirements_turn, write_requirements_document,
             architecture_turn, write_architecture_document,
             api_design_turn, write_openapi_document,

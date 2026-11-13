@@ -20,7 +20,9 @@ with workflow.unsafe.imports_passed_through():
     from app.requirements.document import render_requirements_markdown
     from app.temporal.activities import checkout_repository, update_repository_checkout
     from app.temporal.closing import end_cancelled
-    from app.temporal.interview import Interview, assistant_message
+    from app.temporal.execution_fields import FINDINGS_MEMO, WAITING_MEMO
+    from app.temporal.flags import FlowFlags
+    from app.temporal.interview import Interview, assistant_message, pending_questions
     from app.temporal.workflows import (
         FLOW_ABANDONED, FLOW_ABANDONED_PATCH, FLOW_CANCELLED, SESSION_IDLE_TIMEOUT, _Delivering,
         expiry_ends_with_status,
@@ -42,7 +44,7 @@ CONTRACT_UNKNOWN = ("The existing contract could not be read, so only replacing 
 
 
 @workflow.defn
-class OnboardingWorkflow(Interview, _Delivering):
+class OnboardingWorkflow(Interview, _Delivering, FlowFlags):
     """One onboarding of an existing repository: the branch is checked out, the user
     confirms replacing a contract, contract tests or Dockerfile it already has, the LLM
     drafts the requirements, the API and the language from the code, and the user reviews
@@ -65,9 +67,28 @@ class OnboardingWorkflow(Interview, _Delivering):
         self._init_delivery()
         # Set when the onboarding expired without activity.
         self._expired = False
+        # The fields its delivery last reported (app.temporal.flags).
+        self._delivery_flags: dict[str, Any] = {}
+
+    @workflow.signal
+    def child_flags(self, workflow_id: str, fields: dict[str, Any]) -> None:
+        """The onboarding's delivery reports whether it waits for the user and whether it
+        has unresolved review findings."""
+        self._delivery_flags = dict(fields)
+
+    def _flags(self) -> dict[str, Any]:
+        waiting = (self.state.status == "awaiting_confirmation"
+                   or self.state.status == "interviewing"
+                   and bool(pending_questions(self.state.messages)))
+        delivery_waiting = bool(self._delivery_flags.get(WAITING_MEMO)) and self._delivering
+        fields: dict[str, Any] = {WAITING_MEMO: waiting or delivery_waiting}
+        if FINDINGS_MEMO in self._delivery_flags:
+            fields[FINDINGS_MEMO] = bool(self._delivery_flags[FINDINGS_MEMO])
+        return fields
 
     @workflow.run
     async def run(self, state: OnboardingState) -> dict[str, Any] | None:
+        self._start_flags()
         if not self.state.checkout:
             await self._check_out()
             if self.state.status == "preparing":

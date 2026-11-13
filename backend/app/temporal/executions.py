@@ -4,6 +4,7 @@ import base64
 import binascii
 import logging
 import re
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,24 +15,38 @@ from temporalio.api.operatorservice.v1 import (
     ListSearchAttributesRequest,
 )
 from temporalio.api.workflowservice.v1 import DeleteWorkflowExecutionRequest
-from temporalio.client import Client, WorkflowExecution
+from temporalio.client import Client, WorkflowExecution, WorkflowExecutionStatus
+from temporalio.service import RPCError, RPCStatusCode
 
 from app.db import connect
+from app.delivery import acceptances
 from app.delivery.acceptances import RECORD_TYPE as ACCEPTANCE_RECORD_TYPE
 from app.delivery.models import FOLLOW_UP_PREFIX, delivery_id
 from app.github.client import NAME_PATTERN as REPOSITORY_PATTERN
 from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import (
     BRANCH_ATTRIBUTE,
+    DELIVERY_MEMO,
+    FINDINGS_MEMO,
+    FLOW_STATUS_MEMO,
+    LINKED_MEMO,
+    NAME_MEMO,
     ONBOARDING_ATTRIBUTE,
+    PENDING,
     REPOSITORY_ATTRIBUTE,
     REPOSITORY_MEMO,
     SEARCH_ATTRIBUTES,
+    SKIPPED,
+    WAITING_MEMO,
 )
 
 logger = logging.getLogger(__name__)
 
+TASK_FLOW_TYPE = "TaskWorkflow"
+# How the workflow IDs of task flows begin (app.tasks.models.ID_PREFIX).
+TASK_FLOW_PREFIX = "task-flow-"
 WORKFLOW_TYPES = (
+    TASK_FLOW_TYPE,
     "LLMRequestWorkflow",
     "RequirementsWorkflow",
     "ArchitectureWorkflow",
@@ -88,21 +103,41 @@ def check_filters(repository: str | None, branch: str | None,
             "onboarding_id must be onboarding-session- followed by 32 hex digits.")
 
 
+def _parent_clause(parent: str, description: Any | None, children: list[str]) -> str:
+    """The executions listed under `parent`: its direct children and the executions named
+    in `children`, such as a task flow's delivery started again on its own and the earlier
+    stages of another task that a forked or fix-round task flow links to. A session from
+    before task flows existed also lists its delivery started again on its own, which a
+    stage of a task flow never does: that delivery is a stage of the task itself."""
+    clause = f"ParentWorkflowId = {_quote(parent)}"
+    named = list(children)
+    stage_of_task = bool(description is not None and description.parent_id
+                         and description.parent_id.startswith(TASK_FLOW_PREFIX))
+    if not stage_of_task and (description is None
+                              or description.workflow_type != TASK_FLOW_TYPE):
+        named.append(delivery_id(parent))
+    if not named:
+        return clause
+    listed = ", ".join(_quote(item) for item in dict.fromkeys(named))
+    return f"({clause} OR WorkflowId IN ({listed}))"
+
+
 def _query(workflow_type: str | None, repository: str | None, branch: str | None,
            onboarding_id: str | None, parent: str | None = None,
-           top_level: bool = False) -> str | None:
+           top_level: bool = False, parent_clause: str | None = None) -> str | None:
     # Records of acceptances of closed deliveries' findings are not flows.
     clauses = [f"WorkflowType != '{ACCEPTANCE_RECORD_TYPE}'"]
     # A session's delivery is its child, except for a run started again on its own after
     # the session closed: it is listed under the session by its ID, never at the top. A
-    # flow that carries on a closed delivery, such as a fix a pull request comment asked
-    # for after the pull request was merged, is a top-level flow of its own.
+    # flow that carries on a closed onboarding's delivery, such as a fix a pull request
+    # comment asked for after the pull request was merged, is a top-level flow of its own;
+    # a task's is the child of a task flow of its own. No stage of a task flow is ever
+    # top-level.
     if top_level:
         clauses.append("ParentWorkflowId IS NULL AND (WorkflowType != 'DeliveryWorkflow' "
                        f"OR WorkflowId STARTS_WITH '{delivery_id(FOLLOW_UP_PREFIX)}')")
     if parent is not None:
-        clauses.append(f"(ParentWorkflowId = {_quote(parent)} "
-                       f"OR WorkflowId = {_quote(delivery_id(parent))})")
+        clauses.append(parent_clause or _parent_clause(parent, None, []))
     # workflow_type is checked against WORKFLOW_TYPES, so it is safe to inline.
     if workflow_type:
         clauses.append(f"WorkflowType = '{workflow_type}'")
@@ -133,15 +168,83 @@ async def _repository(item: WorkflowExecution) -> dict[str, Any] | None:
     }
 
 
-async def _execution(item: WorkflowExecution) -> dict[str, Any]:
+async def _memo(item: Any) -> dict[str, Any]:
+    try:
+        memo = await item.memo()
+    except Exception:  # noqa: BLE001 - an unreadable memo lists without its fields
+        logger.warning("Unreadable memo of execution %s", item.id, exc_info=True)
+        return {}
+    return dict(memo) if isinstance(memo, Mapping) else {}
+
+
+def _flag(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+async def _accepted_after_close(client: Client, delivery_workflow_id: str,
+                                run_id: str | None = None) -> bool:
+    """Whether the open findings of a closed delivery were accepted after it closed: its
+    workflow could not record that, so the acceptance is kept apart (app.delivery
+    .acceptances). The delivery's latest run when `run_id` is None."""
+    session_id = delivery_workflow_id.removeprefix("delivery-")
+    try:
+        if run_id is None:
+            description = await client.get_workflow_handle(delivery_workflow_id).describe()
+            if description.status == WorkflowExecutionStatus.RUNNING:
+                return False
+            run_id = description.run_id
+        if not run_id:
+            return False
+        return await acceptances.find(client, session_id, run_id) is not None
+    except RPCError as exc:
+        logger.warning("Acceptance of the findings of %s not read: %s",
+                       delivery_workflow_id, exc)
+        return False
+
+
+async def _unresolved(client: Client, item: WorkflowExecution, memo: dict[str, Any],
+                      running: bool) -> bool | None:
+    """Whether the flow's delivery has open review findings that were not accepted; None
+    for an execution without a delivery or from before it was reported."""
+    value = _flag(memo.get(FINDINGS_MEMO))
+    if not value or running:
+        return value
+    # Closed with findings raised: the user may have accepted them since.
+    if item.workflow_type == "DeliveryWorkflow":
+        accepted = await _accepted_after_close(client, item.id, item.run_id)
+    elif item.workflow_type == TASK_FLOW_TYPE and isinstance(memo.get(DELIVERY_MEMO), str):
+        accepted = await _accepted_after_close(client, memo[DELIVERY_MEMO])
+    elif item.workflow_type == "OnboardingWorkflow":
+        accepted = await _accepted_after_close(client, delivery_id(item.id))
+    else:
+        accepted = False
+    return not accepted
+
+
+async def _execution(item: WorkflowExecution, client: Client | None = None,
+                     linked: frozenset[str] = frozenset()) -> dict[str, Any]:
     attributes = item.typed_search_attributes
     repository = await _repository(item)
     branch = repository["branch"] if repository else None
+    memo = await _memo(item)
+    running = item.status == WorkflowExecutionStatus.RUNNING
+    status = item.status.name.lower() if item.status else "unknown"
+    flow_status = memo.get(FLOW_STATUS_MEMO)
+    # A stage of a task flow that waits for the stages before it, or will never run.
+    if flow_status == PENDING and running:
+        status = PENDING
+    elif flow_status == SKIPPED and item.status == WorkflowExecutionStatus.COMPLETED:
+        status = SKIPPED
+    waiting = _flag(memo.get(WAITING_MEMO))
+    if waiting is not None and not running:
+        # A closed flow waits for nothing.
+        waiting = False
+    name = memo.get(NAME_MEMO) if item.workflow_type == TASK_FLOW_TYPE else None
     return {
         "workflow_id": item.id,
         "run_id": item.run_id,
         "workflow_type": item.workflow_type,
-        "status": item.status.name.lower() if item.status else "unknown",
+        "status": status,
         "task_queue": item.task_queue,
         "parent_workflow_id": item.parent_id,
         "start_time": item.start_time.isoformat(),
@@ -149,7 +252,35 @@ async def _execution(item: WorkflowExecution) -> dict[str, Any]:
         "repository": repository,
         "branch": branch or (attributes.get(BRANCH_ATTRIBUTE) if repository else None),
         "onboarding_id": attributes.get(ONBOARDING_ATTRIBUTE),
+        "name": name if isinstance(name, str) and name else None,
+        "linked": item.id in linked,
+        "waiting_for_user": waiting,
+        "unresolved_findings": (await _unresolved(client, item, memo, running)
+                                if client is not None else _flag(memo.get(FINDINGS_MEMO))),
     }
+
+
+async def _listed_under(client: Client, parent: str) -> tuple[str, frozenset[str]]:
+    """The query clause of the executions listed under `parent`, and those of them that are
+    earlier stages of another task that the task flow `parent` links to."""
+    try:
+        description = await client.get_workflow_handle(parent).describe()
+    except RPCError as exc:
+        if exc.status not in (RPCStatusCode.NOT_FOUND, RPCStatusCode.INVALID_ARGUMENT):
+            raise
+        return _parent_clause(parent, None, []), frozenset()
+    if description.workflow_type != TASK_FLOW_TYPE:
+        return _parent_clause(parent, description, []), frozenset()
+    try:
+        linked = await description.memo_value(LINKED_MEMO, [])
+        delivery = await description.memo_value(DELIVERY_MEMO, None)
+    except Exception:  # noqa: BLE001 - an unreadable memo lists only the children
+        logger.warning("Unreadable memo of task flow %s", parent, exc_info=True)
+        linked, delivery = [], None
+    linked_ids = [item for item in linked or [] if isinstance(item, str) and item]
+    # A task flow's delivery started again on its own is no longer its child, but listed.
+    named = [*([delivery] if isinstance(delivery, str) and delivery else []), *linked_ids]
+    return _parent_clause(parent, description, named), frozenset(linked_ids)
 
 
 async def list_executions(
@@ -162,13 +293,17 @@ async def list_executions(
         token = base64.b64decode(page_token, altchars=b"-_", validate=True) if page_token else None
     except (binascii.Error, ValueError) as exc:
         raise InvalidPageToken("Invalid page token.") from exc
-    query = _query(workflow_type, repository, branch, onboarding_id, parent, top_level)
     client = await connect_temporal()
+    parent_clause, linked = (await _listed_under(client, parent) if parent is not None
+                             else (None, frozenset()))
+    query = _query(workflow_type, repository, branch, onboarding_id, parent, top_level,
+                   parent_clause)
     executions = client.list_workflows(query, page_size=PAGE_SIZE, next_page_token=token)
     await executions.fetch_next_page()
     next_token = executions.next_page_token
     return {
-        "workflows": [await _execution(item) for item in executions.current_page or []],
+        "workflows": [await _execution(item, client, linked)
+                      for item in executions.current_page or []],
         "next_page_token": base64.urlsafe_b64encode(next_token).decode() if next_token else None,
     }
 

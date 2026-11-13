@@ -16,6 +16,8 @@ def design_state(session_id: str, source: RequirementsState,
         requirements_document=requirements_document,
         kind=source.kind,
         repository=source.repository,
+        # A design of a task flow is its sibling there.
+        task_flow_id=source.task_flow_id,
     )
     if source.contract:
         # A change to the service the repository holds: the design goes on from that

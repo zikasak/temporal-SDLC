@@ -82,10 +82,18 @@ async def skip(session_id: str):
 async def fork(session_id: str, body: ForkBody):
     _check_session_id(session_id)
     try:
-        fork_id = await service.fork_session(session_id, body.message_index)
+        fork_id, task_flow_id = await service.fork_task(session_id, body.message_index)
     except Exception as exc:
         raise http_error(exc) from exc
-    return {"session_id": fork_id}
+    return _created(fork_id, task_flow_id)
+
+
+def _created(session_id: str, task_flow_id: str | None) -> dict:
+    """A started session, with the task flow that holds it when it has one."""
+    created = {"session_id": session_id}
+    if task_flow_id:
+        created["task_flow_id"] = task_flow_id
+    return created
 
 
 @router.get("/{session_id}/document")

@@ -14,12 +14,13 @@ from app.architecture.models import (
 )
 from app.config import TASK_QUEUE
 from app.requirements.lookup import source_session_lookup
+from app.tasks.service import start_fork
 from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import execution_fields
 from app.temporal.registry import register
 from app.temporal.sessions import (
-    FLOW_CLOSED, SessionBusy, flow_closed, fork_messages, is_running, start_update,
-    state_at_message,
+    FLOW_CLOSED, SessionBusy, SessionNotFound, flow_closed, fork_messages, is_running,
+    start_update, state_at_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,9 +37,14 @@ def new_session_id() -> str:
 
 
 async def get_state(session_id: str) -> ArchitectureState:
+    """The session's state; SessionNotFound for a stage of a task flow that has not begun,
+    which is not a session yet."""
     client = await connect_temporal()
     handle = client.get_workflow_handle(session_id)
-    return await handle.query("get_state", result_type=ArchitectureState)
+    state = await handle.query("get_state", result_type=ArchitectureState)
+    if state.pending:
+        raise SessionNotFound("Session not found: the architecture stage has not started.")
+    return state
 
 
 async def _start(state: ArchitectureState) -> str:
@@ -61,10 +67,18 @@ async def fork_session(session_id: str, message_index: int) -> str:
     """A new architecture session of the same requirements session with the conversation
     up to the message, and the draft as it was at that point; 409 once this session's API
     design has started."""
+    fork_id, _ = await fork_task(session_id, message_index)
+    return fork_id
+
+
+async def fork_task(session_id: str, message_index: int) -> tuple[str, str | None]:
+    """fork_session, also returning the new task flow's ID; None for a session started
+    before task flows existed, whose fork is a child of its requirements session."""
     source = await get_state(session_id)
     if source.api_design_session_id:
         raise SessionBusy(DESIGN_STARTED)
-    if source.source_session_id and await flow_closed(source.source_session_id):
+    flow = source.task_flow_id or source.source_session_id
+    if flow and await flow_closed(flow):
         raise SessionBusy(FLOW_CLOSED)
     messages = fork_messages(source.messages, message_index)
     structure = await state_at_message(
@@ -77,7 +91,7 @@ async def fork_session(session_id: str, message_index: int) -> str:
     if proposals and proposals[-1] == len(messages) - 1:
         open_proposal = {"reason": str(messages[-1][SKIP_PROPOSAL_KEY]),  # type: ignore[literal-required]
                          "message_index": proposals[-1]}
-    fork_id = await _start(dataclasses.replace(
+    forked = dataclasses.replace(
         source,
         messages=messages,
         structure=structure,
@@ -90,10 +104,21 @@ async def fork_session(session_id: str, message_index: int) -> str:
         forked_from={"session_id": session_id, "message_index": message_index},
         checkout=None,
         api_design_session_id=None,
-    ))
-    logger.info("Forked architecture session %s after message %d as %s",
-                session_id, message_index, fork_id)
-    return fork_id
+        next_session_id=None,
+    )
+    if not source.task_flow_id:
+        fork_id = await _start(forked)
+        logger.info("Forked architecture session %s after message %d as %s",
+                    session_id, message_index, fork_id)
+        return fork_id, None
+    # The fork starts a task flow of its own, linking to the original's requirements.
+    fork_id = new_session_id()
+    task_flow_id = await start_fork(source.task_flow_id, "architecture", fork_id, forked,
+                                    kind=source.kind, repository=source.repository)
+    await register(fork_id)
+    logger.info("Forked architecture session %s after message %d as %s in task flow %s",
+                session_id, message_index, fork_id, task_flow_id)
+    return fork_id, task_flow_id
 
 
 async def send_message(session_id: str, message: str) -> None:
@@ -138,7 +163,7 @@ async def get_session(session_id: str) -> dict[str, Any]:
     session = dataclasses.asdict(state)
     # The design's start and the repository's architecture are internal hand-over state.
     for key in ("design", "requirements_document", "change_document",
-                "existing_architecture", "existing_structure"):
+                "existing_architecture", "existing_structure", "next_session_id", "pending"):
         del session[key]
     structure = session.pop("structure")
     return {

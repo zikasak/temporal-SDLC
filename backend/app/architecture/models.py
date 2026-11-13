@@ -192,6 +192,15 @@ class ArchitectureState:
     # The start of the task's API design, without the architecture: what the session
     # hands on once finalized or skipped.
     design: ApiDesignState | None = None
+    # The top-level task flow the session is a child of; None for a session started
+    # before task flows existed.
+    task_flow_id: str | None = None
+    # The pending API design child of the task flow that this session hands on to, which
+    # becomes api_design_session_id once finalized or skipped.
+    next_session_id: str | None = None
+    # A stage of a task flow created before its requirements were finalized: it waits for
+    # its task flow to begin it with its state.
+    pending: bool = False
 
 
 @dataclass
