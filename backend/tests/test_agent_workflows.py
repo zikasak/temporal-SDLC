@@ -546,6 +546,17 @@ async def test_cancelled_shell_stops_its_descendants(tmp_path, tools):
     assert not leaked.exists()
 
 
+async def test_shell_command_ends_what_it_left_running_in_the_background(tmp_path, tools):
+    leaked = tmp_path / 'leaked'
+    script = f'import time; from pathlib import Path; time.sleep(0.4); Path({str(leaked)!r}).touch()'
+    result = await tools['shell'].ainvoke({
+        'command': f'{shlex.quote(sys.executable)} -c {shlex.quote(script)} >/dev/null &',
+    })
+    assert result.startswith('Exit code: 0')
+    await asyncio.sleep(0.8)
+    assert not leaked.exists()
+
+
 async def test_long_shell_output_is_summarized_and_remains_retrievable(tmp_path, tools):
     script = ('for n in range(1, 2001):\n'
               '    print("[ERROR] Service.java:[12,5] cannot find symbol" if n == 700'

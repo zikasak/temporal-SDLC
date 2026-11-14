@@ -41,6 +41,9 @@ DIFF_CHARS = 20000
 SUBJECT_CHARS = 72
 BODY_CHARS = 2000
 SAVE_TIMEOUT = 300
+# Larger files stay out of the commit: GitHub refuses a push with any file over 100 MB,
+# and such a file, like a crashed process's core dump, is no source.
+MAX_FILE_BYTES = 50 * 1024 * 1024
 STATUS_TRAILER = 'Sdlc-Status'
 _NAME = re.compile(r'[A-Za-z0-9_-]{1,200}')
 
@@ -129,6 +132,12 @@ async def save_work(session_dir: Path, session_id: str, stage: str, tree: Path,
         return None
 
 
+def _large_files(tree: Path) -> set[Path]:
+    return {item.relative_to(tree) for item in tree.rglob('*')
+            if not item.is_symlink() and item.is_file()
+            and item.stat().st_size > MAX_FILE_BYTES}
+
+
 async def _save(session_dir: Path, session_id: str, stage: str, tree: Path,
                 include: Callable[[Path], bool], prefix: str, status: str, published: bool,
                 manifest: dict[str, Any], token: Callable[[], Awaitable[tuple[str, str]]],
@@ -148,7 +157,13 @@ async def _save(session_dir: Path, session_id: str, stage: str, tree: Path,
         await _git('read-tree', base, cwd=checkout, env=env)
         await _git('checkout-index', '--all', f'--prefix={work}/', cwd=checkout, env=env)
         target = work / prefix if prefix else work
-        await run_sync(replace_files, tree, target, include)
+        large = await run_sync(_large_files, tree)
+        if large:
+            logger.warning('The %s work of session %s is saved without its files over %d '
+                           'bytes: %s', stage, session_id, MAX_FILE_BYTES,
+                           ', '.join(sorted(item.as_posix() for item in large)))
+        await run_sync(replace_files, tree, target,
+                       lambda relative: relative not in large and include(relative))
         # Run inside the tree, so that its own .gitignore files apply to what is added.
         await _git('add', '--all', '.', cwd=work, env={
             **env, 'GIT_DIR': str((checkout / '.git').resolve()), 'GIT_WORK_TREE': str(work)})
