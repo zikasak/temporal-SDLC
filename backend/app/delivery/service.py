@@ -460,7 +460,7 @@ async def _follow_up(finished: _Finished, session_id: str,
                 task_queue=finished.description.task_queue,
                 id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
                 id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
-                **task_fields(state.spec),
+                **delivery_fields(state.spec),
             )
         except WorkflowAlreadyStartedError:
             # Started concurrently, such as by another handover: that one is the flow.

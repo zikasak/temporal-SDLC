@@ -19,12 +19,36 @@ from app.requirements.models import RequirementsState
 from app.task_flow.models import (
     FIX_SUFFIX, FORK_SUFFIX, TASK_FLOW_PREFIX, WORKFLOW_TYPE, TaskFlowState,
 )
-from app.temporal.client import connect_temporal
+from app.temporal import sessions
 from app.temporal.execution_fields import execution_fields, task_name
 from app.temporal.registry import register
 from app.temporal.sessions import FLOW_CLOSED, SessionBusy, flow_closed
 
 logger = logging.getLogger(__name__)
+
+
+async def connect_temporal():
+    """The Temporal client the session helpers reach, so that task flows run on the same
+    server as the sessions and deliveries they hold."""
+    return await sessions.connect_temporal()
+
+
+async def _queue_of(workflow_id: str | None) -> str:
+    """The task queue the workflow runs on, which a flow carrying it on keeps; the
+    service's own when it cannot be read."""
+    if not workflow_id:
+        return TASK_QUEUE
+    try:
+        client = await connect_temporal()
+        description = await client.get_workflow_handle(workflow_id).describe()
+    except RPCError:
+        return TASK_QUEUE
+    return description.task_queue or TASK_QUEUE
+
+
+def _fork_source(state: Any) -> str | None:
+    origin = getattr(state, "forked_from", None)
+    return origin.get("session_id") if isinstance(origin, dict) else None
 
 # The name of a task flow whose task said nothing to name it from.
 UNNAMED = "Untitled task"
@@ -64,13 +88,13 @@ async def get_task_flow(task_flow_id: str) -> TaskFlowState | None:
 
 
 async def _start(state: TaskFlowState, task_flow_id: str, *,
-                 existing_ok: bool = False) -> str:
+                 existing_ok: bool = False, task_queue: str | None = None) -> str:
     """Start the task flow and wait until it has created its children, so that its first
     stage can be served at once."""
     client = await connect_temporal()
     try:
         handle = await client.start_workflow(
-            WORKFLOW_TYPE, state, id=task_flow_id, task_queue=TASK_QUEUE,
+            WORKFLOW_TYPE, state, id=task_flow_id, task_queue=task_queue or TASK_QUEUE,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
             id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
             **execution_fields(state.repository, name=state.name, linked=state.linked))
@@ -124,7 +148,7 @@ async def fork_requirements(source: RequirementsState, state: RequirementsState,
         origin="fork", source_task_flow_id=source.task_flow_id,
         first_stage="requirements", requirements=state, first_id=session_id,
         requirements_session_id=session_id,
-    ), task_flow_id)
+    ), task_flow_id, task_queue=await _queue_of(_fork_source(state)))
     return session_id, task_flow_id
 
 
@@ -143,7 +167,7 @@ async def fork_architecture(source: ArchitectureState, state: ArchitectureState)
         origin="fork", source_task_flow_id=source.task_flow_id,
         first_stage="architecture", architecture=state, first_id=session_id,
         requirements_session_id=source.source_session_id or None, linked=linked,
-    ), task_flow_id)
+    ), task_flow_id, task_queue=await _queue_of(_fork_source(state)))
     return session_id, task_flow_id
 
 
@@ -163,7 +187,7 @@ async def fork_design(source: ApiDesignState, state: ApiDesignState) -> tuple[st
         origin="fork", source_task_flow_id=source.task_flow_id,
         first_stage="api_design", design=state, first_id=session_id,
         requirements_session_id=source.source_session_id or None, linked=linked,
-    ), task_flow_id)
+    ), task_flow_id, task_queue=await _queue_of(_fork_source(state)))
     return session_id, task_flow_id
 
 
@@ -196,7 +220,8 @@ async def start_fix_flow(original_task_flow_id: str, closed_session_id: str,
         linked=_stages_of(original, delivery_id(closed_session_id)),
     )
     try:
-        await _start(flow, task_flow_id)
+        await _start(flow, task_flow_id,
+                     task_queue=await _queue_of(delivery_id(closed_session_id)))
     except WorkflowAlreadyStartedError:
         client = await connect_temporal()
         await client.get_workflow_handle(task_flow_id).execute_update("children_started")
