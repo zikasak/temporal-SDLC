@@ -50,9 +50,12 @@ def test_parent_cannot_be_combined_with_top_level(admin):
 @pytest.mark.parametrize("kind", ("new_service", "api_change", "bugfix", "docs"))
 def test_requirements_session_on_an_unreachable_repository_is_refused(admin, kind):
     # No GitHub App is connected to the service under test, so no task flow can start.
+    intake = admin.get("/requirements/intake").json()
+    answers = [(item["options"][0] if item["options"] else "Not applicable")
+               for item in intake["questions"][kind]]
     response = admin.post("/requirements/sessions", json={
         "repository": {"full_name": f"owner/none-{uuid.uuid4().hex[:10]}", "branch": "main"},
-        "kind": kind, "answers": [], "task": "Add a health endpoint."})
+        "kind": kind, "answers": answers, "task": "Add a health endpoint."})
     assert response.status_code in (404, 409, 503), response.text
     assert isinstance(response.json()["detail"], str) and response.json()["detail"]
 
