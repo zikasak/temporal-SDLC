@@ -15,8 +15,11 @@ with workflow.unsafe.imports_passed_through():
     from app.architecture.source import handed_design
     from app.temporal.activities import register_session
     from app.temporal.closing import end_cancelled
-    from app.temporal.execution_fields import execution_fields
-    from app.temporal.interview import Interview, assistant_message
+    from app.temporal.execution_fields import SKIPPED, execution_fields
+    from app.temporal.flow_markers import (
+        START_STAGE_SIGNAL, PendingStage, StageHandOff, TaskStage,
+    )
+    from app.temporal.interview import Interview, assistant_message, pending_questions
     from app.temporal.workflows import FLOW_ABANDONED, FLOW_ABANDONED_PATCH, _check_out
 
 DISCUSSION_TOO_LONG = "This discussion is too long to continue. Finalize the architecture."
@@ -27,13 +30,19 @@ NO_SKIP = ("A new service always goes through the architecture stage; only the s
 
 
 @workflow.defn
-class ArchitectureWorkflow(Interview):
+class ArchitectureWorkflow(Interview, TaskStage, PendingStage):
     """One architecture session of a task: the LLM drafts the top-level architecture from
     the requirements (an API change starting from the repository's existing one, or
     proposing to skip the stage instead), and the user reviews it in a conversation of
     updates. Finalizing writes architecture.md and architecture.json; finalizing or
     confirming the skip of an API change ends the session and hands the task's API design
-    to the requirements session, whose child it becomes. The session has no idle timeout."""
+    to the requirements session, whose child it becomes. The session has no idle timeout.
+
+    In a task flow (`state.task_flow_id`) the session is created pending and started by
+    the task flow once the requirements are finalized; finalizing or confirming the skip
+    hands the API design to the task flow, which starts its pending API design child
+    (`state.next_session_id`). A finalized session stays open until the task flow closes
+    it with the task's outcome; a skipped one closes at once as skipped."""
 
     INTERVIEWER = "architect"
     TOO_LONG = DISCUSSION_TOO_LONG
@@ -54,6 +63,18 @@ class ArchitectureWorkflow(Interview):
             self.state.status = "preparing"
         self._updates = 0
         self._turn_lock = asyncio.Lock()
+        self._init_stage()
+        self._init_pending()
+
+    def _waiting_for_user(self) -> bool:
+        return self.state.status == "interviewing" and (
+            self.state.skip_proposal is not None
+            or bool(pending_questions(self.state.messages)))
+
+    @workflow.signal(name=START_STAGE_SIGNAL)
+    def start_stage(self, state: ArchitectureState) -> None:
+        """The task flow starts this pending session from `state`."""
+        self._started_with(state)
 
     def _needs_draft(self) -> bool:
         """Whether the session waits for its first draft (or the proposal made instead)."""
@@ -62,6 +83,10 @@ class ArchitectureWorkflow(Interview):
 
     @workflow.run
     async def run(self, state: ArchitectureState) -> ArchitectureResult | None:
+        if self.state.pending:
+            await self._wait_pending()
+            return None
+        self._start_markers()
         ready = await _check_out(self.state, self._resume_status)
         if ready and self.state.status in ("drafting", "turn_running"):
             async with self._turn_lock:
@@ -78,6 +103,8 @@ class ArchitectureWorkflow(Interview):
                 workflow.logger.info("Continuing as new")
                 workflow.continue_as_new(self.state)
         await workflow.wait_condition(workflow.all_handlers_finished)
+        if self._in_task():
+            return await self._run_in_task()
         if self.state.status == "failed" or not self.state.api_design_session_id:
             if workflow.patched(FLOW_ABANDONED_PATCH):
                 # The session ended without handing the task on, so nothing of it will be
@@ -92,6 +119,24 @@ class ArchitectureWorkflow(Interview):
             return None
         return ArchitectureResult(api_design_session_id=self.state.api_design_session_id,
                                   design=design)
+
+    async def _run_in_task(self) -> None:
+        """Hand the API design to the task flow, then close: at once as skipped when the
+        user skipped the stage, otherwise when the task flow closes the session."""
+        session_id = workflow.info().workflow_id
+        handed = self.state.status != "failed" and bool(self.state.api_design_session_id)
+        skipped = self.state.status == "skipped"
+        handoff = StageHandOff(stage="architecture", workflow_id=session_id, handed=handed,
+                               kind=self.state.kind, skipped=skipped)
+        if handed:
+            handoff.design = handed_design(self.state, session_id)
+            handoff.design.task_flow_id = self.state.task_flow_id
+        await self._hand_off(handoff)
+        if skipped:
+            await self._close_stage(SKIPPED)
+            return None
+        await self._close_stage(await self._stay_until_closed())
+        return None
 
     async def _start_design_alone(self, design: Any) -> None:
         session_id = self.state.api_design_session_id
@@ -114,7 +159,9 @@ class ArchitectureWorkflow(Interview):
         return self.state
 
     def _hand_over(self) -> None:
-        self.state.api_design_session_id = f"api-design-session-{workflow.uuid4().hex}"
+        # In a task flow, the design is its pending child created for this task.
+        self.state.api_design_session_id = (self.state.next_session_id
+                                            or f"api-design-session-{workflow.uuid4().hex}")
 
     async def _turn(self) -> bool:
         drafting = self.state.structure is None

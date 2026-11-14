@@ -30,6 +30,8 @@ with workflow.unsafe.imports_passed_through():
     )
     from app.onboarding.workflows import OnboardingWorkflow
     from app.settings.storage import ensure_schema as ensure_settings_schema
+    from app.task_flow.activities import name_task_flow
+    from app.task_flow.workflows import TaskWorkflow
     from app.temporal.activities import (
         api_design_turn,
         checkout_repository,
@@ -70,8 +72,8 @@ async def main():
         client,
         task_queue=TASK_QUEUE,
         workflows=[
-            LLMRequestWorkflow, RequirementsWorkflow, ArchitectureWorkflow, ApiDesignWorkflow,
-            DeliveryWorkflow, OnboardingWorkflow,
+            LLMRequestWorkflow, TaskWorkflow, RequirementsWorkflow, ArchitectureWorkflow,
+            ApiDesignWorkflow, DeliveryWorkflow, OnboardingWorkflow,
         ],
         activities=[
             parse_document, send_llm_message,
@@ -87,6 +89,7 @@ async def main():
             classify_mention, answer_mention, reply_to_mention,
             record_new_mention, save_mention, mention_body,
             pull_request_state, commit_checks, ci_failure_report, comment_pull_request,
+            name_task_flow,
         ],
     )
     logger.info("Worker started on task queue %s at %s", TASK_QUEUE, TEMPORAL_ADDRESS)

@@ -16,22 +16,37 @@ from temporalio.api.operatorservice.v1 import (
 from temporalio.api.workflowservice.v1 import DeleteWorkflowExecutionRequest
 from temporalio.client import Client, WorkflowExecution
 
+from temporalio.client import WorkflowExecutionStatus
+from temporalio.common import SearchAttributeKey
+from temporalio.service import RPCError, RPCStatusCode
+
 from app.db import connect
+from app.delivery import acceptances
 from app.delivery.acceptances import RECORD_TYPE as ACCEPTANCE_RECORD_TYPE
 from app.delivery.models import FOLLOW_UP_PREFIX, delivery_id
 from app.github.client import NAME_PATTERN as REPOSITORY_PATTERN
 from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import (
     BRANCH_ATTRIBUTE,
+    FLOW_STATE_ATTRIBUTE,
+    LINKED_ATTRIBUTE,
+    LINKED_MEMO,
     ONBOARDING_ATTRIBUTE,
+    PENDING,
     REPOSITORY_ATTRIBUTE,
     REPOSITORY_MEMO,
     SEARCH_ATTRIBUTES,
+    SKIPPED,
+    TASK_FLOW_ATTRIBUTE,
+    TASK_NAME_ATTRIBUTE,
+    UNRESOLVED_ATTRIBUTE,
+    WAITING_ATTRIBUTE,
 )
 
 logger = logging.getLogger(__name__)
 
 WORKFLOW_TYPES = (
+    "TaskWorkflow",
     "LLMRequestWorkflow",
     "RequirementsWorkflow",
     "ArchitectureWorkflow",
@@ -44,6 +59,11 @@ PAGE_SIZE = 50
 ONBOARDING_ID_PATTERN = re.compile(r"onboarding-session-[0-9a-f]{32}")
 MAX_BRANCH_LENGTH = 255
 MAX_WORKFLOW_ID_LENGTH = 1000
+# How many earlier stages of another task a task flow's listing links to at most.
+MAX_LINKED = 20
+CLOSED_STATUSES = (WorkflowExecutionStatus.COMPLETED, WorkflowExecutionStatus.CANCELED,
+                   WorkflowExecutionStatus.FAILED, WorkflowExecutionStatus.TERMINATED,
+                   WorkflowExecutionStatus.TIMED_OUT)
 # The one-time removal of executions started before they recorded these fields.
 UNTRACKED_MIGRATION = "delete-executions-without-repository-fields"
 _MIGRATION_LOCK = 0x5EA2C4A7
@@ -90,19 +110,31 @@ def check_filters(repository: str | None, branch: str | None,
 
 def _query(workflow_type: str | None, repository: str | None, branch: str | None,
            onboarding_id: str | None, parent: str | None = None,
-           top_level: bool = False) -> str | None:
+           top_level: bool = False, linked: list[str] | None = None) -> str | None:
     # Records of acceptances of closed deliveries' findings are not flows.
     clauses = [f"WorkflowType != '{ACCEPTANCE_RECORD_TYPE}'"]
-    # A session's delivery is its child, except for a run started again on its own after
-    # the session closed: it is listed under the session by its ID, never at the top. A
-    # flow that carries on a closed delivery, such as a fix a pull request comment asked
-    # for after the pull request was merged, is a top-level flow of its own.
+    # A stage of a task flow is never top-level, even a delivery started again on its
+    # own. Before task flows, a session's delivery was its child, except for a run started
+    # again on its own after the session closed: it is listed under the session by its ID,
+    # never at the top. A flow that carries on a closed delivery without a task flow, such
+    # as an onboarding's fix a pull request comment asked for after the pull request was
+    # merged, is a top-level flow of its own.
     if top_level:
-        clauses.append("ParentWorkflowId IS NULL AND (WorkflowType != 'DeliveryWorkflow' "
+        clauses.append(f"ParentWorkflowId IS NULL AND {TASK_FLOW_ATTRIBUTE.name} IS NULL "
+                       "AND (WorkflowType != 'DeliveryWorkflow' "
                        f"OR WorkflowId STARTS_WITH '{delivery_id(FOLLOW_UP_PREFIX)}')")
     if parent is not None:
-        clauses.append(f"(ParentWorkflowId = {_quote(parent)} "
-                       f"OR WorkflowId = {_quote(delivery_id(parent))})")
+        # A task flow's stages, a delivery of it started again on its own included, and the
+        # earlier stages of another task a fork or fix round links to; a session's own
+        # delivery started again on its own only for sessions without a task flow.
+        options = [f"ParentWorkflowId = {_quote(parent)}",
+                   f"{TASK_FLOW_ATTRIBUTE.name} = {_quote(parent)}",
+                   f"{LINKED_ATTRIBUTE.name} = {_quote(parent)}",
+                   f"(WorkflowId = {_quote(delivery_id(parent))} "
+                   f"AND {TASK_FLOW_ATTRIBUTE.name} IS NULL)"]
+        if linked:
+            options.append("WorkflowId IN (" + ", ".join(_quote(item) for item in linked) + ")")
+        clauses.append("(" + " OR ".join(options) + ")")
     # workflow_type is checked against WORKFLOW_TYPES, so it is safe to inline.
     if workflow_type:
         clauses.append(f"WorkflowType = '{workflow_type}'")
@@ -133,23 +165,104 @@ async def _repository(item: WorkflowExecution) -> dict[str, Any] | None:
     }
 
 
-async def _execution(item: WorkflowExecution) -> dict[str, Any]:
+def _attribute(item: WorkflowExecution, key: SearchAttributeKey) -> Any:
+    try:
+        return item.typed_search_attributes.get(key)
+    except Exception:  # noqa: BLE001 - an attribute of another type counts as absent
+        return None
+
+
+def _status(item: WorkflowExecution) -> str:
+    """The Temporal status, or pending or skipped for a stage of a task flow that has not
+    started yet or never will."""
+    status = item.status.name.lower() if item.status else "unknown"
+    state = _attribute(item, FLOW_STATE_ATTRIBUTE)
+    if state == SKIPPED and item.status == WorkflowExecutionStatus.COMPLETED:
+        return SKIPPED
+    if state == PENDING and item.status == WorkflowExecutionStatus.RUNNING:
+        return PENDING
+    if state == SKIPPED and item.status == WorkflowExecutionStatus.RUNNING:
+        # Closing as skipped.
+        return SKIPPED
+    return status
+
+
+async def _accepted(client: Client, item: WorkflowExecution) -> bool:
+    """Whether the open review findings of the closed flow `item` were accepted after it
+    closed: the acceptance record of its delivery's closed run exists."""
+    try:
+        if item.workflow_type == "DeliveryWorkflow":
+            session_id = item.id.removeprefix("delivery-")
+            return await acceptances.find(client, session_id, item.run_id) is not None
+        if item.workflow_type == "OnboardingWorkflow":
+            description = await client.get_workflow_handle(delivery_id(item.id)).describe()
+            return await acceptances.find(client, item.id, description.run_id) is not None
+        if item.workflow_type == "TaskWorkflow":
+            query = (f"{TASK_FLOW_ATTRIBUTE.name} = {_quote(item.id)} "
+                     "AND WorkflowType = 'DeliveryWorkflow' "
+                     f"AND {UNRESOLVED_ATTRIBUTE.name} = true")
+            async for delivery in client.list_workflows(query, limit=5):
+                session_id = delivery.id.removeprefix("delivery-")
+                if await acceptances.find(client, session_id, delivery.run_id) is None:
+                    return False
+            return True
+    except RPCError as exc:
+        if exc.status != RPCStatusCode.NOT_FOUND:
+            logger.warning("Acceptance of the findings of %s not read: %s", item.id, exc)
+    return False
+
+
+async def _execution(client: Client, item: WorkflowExecution,
+                     parent: str | None = None) -> dict[str, Any]:
     attributes = item.typed_search_attributes
     repository = await _repository(item)
     branch = repository["branch"] if repository else None
+    # A stage of a task flow, such as a delivery started again on its own, belongs to it.
+    parent_id = item.parent_id or _attribute(item, TASK_FLOW_ATTRIBUTE)
+    closed = item.status in CLOSED_STATUSES
+    waiting = _attribute(item, WAITING_ATTRIBUTE)
+    unresolved = _attribute(item, UNRESOLVED_ATTRIBUTE)
+    if waiting is not None and closed:
+        # A closed flow never waits for the user.
+        waiting = False
+    if unresolved and closed and await _accepted(client, item):
+        unresolved = False
     return {
         "workflow_id": item.id,
         "run_id": item.run_id,
         "workflow_type": item.workflow_type,
-        "status": item.status.name.lower() if item.status else "unknown",
+        "status": _status(item),
         "task_queue": item.task_queue,
-        "parent_workflow_id": item.parent_id,
+        "parent_workflow_id": parent_id,
         "start_time": item.start_time.isoformat(),
         "close_time": item.close_time.isoformat() if item.close_time else None,
         "repository": repository,
         "branch": branch or (attributes.get(BRANCH_ATTRIBUTE) if repository else None),
         "onboarding_id": attributes.get(ONBOARDING_ATTRIBUTE),
+        "name": (_attribute(item, TASK_NAME_ATTRIBUTE)
+                 if item.workflow_type == "TaskWorkflow" else None),
+        # Listed under a fork's or fix round's task flow as an earlier stage it links to.
+        "linked": parent is not None and parent_id != parent and item.id != delivery_id(parent),
+        "waiting_for_user": None if waiting is None else bool(waiting),
+        "unresolved_findings": None if unresolved is None else bool(unresolved),
     }
+
+
+async def _linked(client: Client, parent: str) -> list[str]:
+    """The earlier stages of another task the task flow `parent` links to."""
+    try:
+        description = await client.get_workflow_handle(parent).describe()
+        linked = await description.memo_value(LINKED_MEMO, None)
+    except RPCError as exc:
+        if exc.status != RPCStatusCode.NOT_FOUND:
+            raise
+        return []
+    except Exception:  # noqa: BLE001 - an unreadable memo links to nothing
+        logger.warning("Unreadable links of %s", parent, exc_info=True)
+        return []
+    if not isinstance(linked, list):
+        return []
+    return [str(item) for item in linked if isinstance(item, str) and item][:MAX_LINKED]
 
 
 async def list_executions(
@@ -162,22 +275,45 @@ async def list_executions(
         token = base64.b64decode(page_token, altchars=b"-_", validate=True) if page_token else None
     except (binascii.Error, ValueError) as exc:
         raise InvalidPageToken("Invalid page token.") from exc
-    query = _query(workflow_type, repository, branch, onboarding_id, parent, top_level)
     client = await connect_temporal()
+    await _ensure_once(client)
+    linked = await _linked(client, parent) if parent is not None else []
+    query = _query(workflow_type, repository, branch, onboarding_id, parent, top_level,
+                   linked)
     executions = client.list_workflows(query, page_size=PAGE_SIZE, next_page_token=token)
     await executions.fetch_next_page()
     next_token = executions.next_page_token
     return {
-        "workflows": [await _execution(item) for item in executions.current_page or []],
+        "workflows": [await _execution(client, item, parent)
+                      for item in executions.current_page or []],
         "next_page_token": base64.urlsafe_b64encode(next_token).decode() if next_token else None,
     }
+
+
+# The namespaces whose search attributes this process has made sure of.
+_ENSURED: set[str] = set()
+
+
+async def _ensure_once(client: Client) -> None:
+    """Make sure, once per namespace, that the search attributes the listing queries
+    exist, as the workers register them when they start: a query naming an unknown one
+    fails. A failure is tried again with the next listing."""
+    if client.namespace in _ENSURED:
+        return
+    try:
+        await ensure_search_attributes(client)
+    except RPCError as exc:
+        logger.warning("Search attributes not registered: %s", exc)
+        return
+    _ENSURED.add(client.namespace)
 
 
 async def ensure_search_attributes(client: Client) -> None:
     """Register the custom search attributes the executions are started with."""
     listed = await client.operator_service.list_search_attributes(
         ListSearchAttributesRequest(namespace=client.namespace))
-    missing = {key.name: IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD
+    # The SDK's indexed value types are numbered as the API's.
+    missing = {key.name: IndexedValueType.ValueType(int(key.indexed_value_type))
                for key in SEARCH_ATTRIBUTES if key.name not in listed.custom_attributes}
     if missing:
         await client.operator_service.add_search_attributes(

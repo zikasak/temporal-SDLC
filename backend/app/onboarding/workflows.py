@@ -20,7 +20,8 @@ with workflow.unsafe.imports_passed_through():
     from app.requirements.document import render_requirements_markdown
     from app.temporal.activities import checkout_repository, update_repository_checkout
     from app.temporal.closing import end_cancelled
-    from app.temporal.interview import Interview, assistant_message
+    from app.temporal.flow_markers import CHILD_MARKERS_SIGNAL, ChildMarkers, FlowMarkers
+    from app.temporal.interview import Interview, assistant_message, pending_questions
     from app.temporal.workflows import (
         FLOW_ABANDONED, FLOW_ABANDONED_PATCH, FLOW_CANCELLED, SESSION_IDLE_TIMEOUT, _Delivering,
         expiry_ends_with_status,
@@ -42,14 +43,17 @@ CONTRACT_UNKNOWN = ("The existing contract could not be read, so only replacing 
 
 
 @workflow.defn
-class OnboardingWorkflow(Interview, _Delivering):
+class OnboardingWorkflow(Interview, _Delivering, FlowMarkers):
     """One onboarding of an existing repository: the branch is checked out, the user
     confirms replacing a contract, contract tests or Dockerfile it already has, the LLM
     drafts the requirements, the API and the language from the code, and the user reviews
     the drafts in an interview of updates. Finalizing fixes the drafts as the contract and
     hands it to a DeliveryWorkflow, which writes and verifies the contract tests and the
     Dockerfile against the existing code, reviews and publishes them; the onboarding stays
-    open as long as its delivery is."""
+    open as long as its delivery is. An onboarding started since flows report their
+    markers (`state.flow_markers`) keeps WaitingForUser (a contract decision, the
+    interviewer's questions or its delivery's) and UnresolvedFindings (its delivery's)
+    up to date."""
 
     TOO_LONG = REVIEW_TOO_LONG
     CLOSED = "This onboarding is no longer accepting messages."
@@ -65,9 +69,36 @@ class OnboardingWorkflow(Interview, _Delivering):
         self._init_delivery()
         # Set when the onboarding expired without activity.
         self._expired = False
+        # The markers its delivery last reported.
+        self._delivery_waiting = False
+        self._delivery_unresolved: bool | None = None
+
+    def _markers_enabled(self) -> bool:
+        return bool(self.state.flow_markers)
+
+    def _marker_target(self) -> str | None:
+        return None
+
+    def _waiting_for_user(self) -> bool:
+        if self.state.status == "awaiting_confirmation":
+            return True
+        if self.state.status == "interviewing" and pending_questions(self.state.messages):
+            return True
+        return self._delivering and self._delivery_waiting
+
+    def _unresolved_findings(self) -> bool | None:
+        return self._delivery_unresolved
+
+    @workflow.signal(name=CHILD_MARKERS_SIGNAL)
+    def child_markers(self, markers: ChildMarkers) -> None:
+        """Its delivery's markers changed."""
+        self._delivery_waiting = bool(markers.waiting)
+        if markers.unresolved is not None:
+            self._delivery_unresolved = bool(markers.unresolved)
 
     @workflow.run
     async def run(self, state: OnboardingState) -> dict[str, Any] | None:
+        self._start_markers()
         if not self.state.checkout:
             await self._check_out()
             if self.state.status == "preparing":
@@ -95,6 +126,7 @@ class OnboardingWorkflow(Interview, _Delivering):
         await workflow.wait_condition(workflow.all_handlers_finished)
         if self.state.status == "completed":
             await self._deliver()
+            await self._close_markers()
             if self._delivery_cancelled:
                 # Its pull request was closed without merging: the onboarding is cancelled.
                 await end_cancelled(FLOW_CANCELLED)
@@ -103,7 +135,9 @@ class OnboardingWorkflow(Interview, _Delivering):
             # The onboarding ended without running its delivery: it failed, was
             # declined or replaced by a fork. It was abandoned, and shows as cancelled.
             # So does one that expired, with the reason in its state.
+            await self._close_markers()
             await end_cancelled(FLOW_ABANDONED)
+        await self._close_markers()
         return None
 
     async def _check_out(self) -> None:
@@ -502,6 +536,7 @@ class OnboardingWorkflow(Interview, _Delivering):
                 architecture=architecture,
                 architecture_structure=structure,
                 architecture_only=True,
+                flow_markers=self.state.flow_markers,
             )))
             return
         await self._run_delivery(DeliveryState(spec=TaskSpec(
@@ -515,4 +550,5 @@ class OnboardingWorkflow(Interview, _Delivering):
             onboarding=True,
             architecture=architecture,
             architecture_structure=structure,
+            flow_markers=self.state.flow_markers,
         )))

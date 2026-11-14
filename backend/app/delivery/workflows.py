@@ -15,6 +15,7 @@ from app.delivery.flow.review import ReviewRounds
 from app.delivery.flow.stages import RESTORE_KEPT_PATCH, Stages, restore_finding
 from app.delivery.flow.verification import Verification
 from app.delivery.flow.waiting import PullRequestWait
+from app.temporal.flow_markers import START_STAGE_SIGNAL, FlowMarkers, PendingStage
 
 with workflow.unsafe.imports_passed_through():
     from app.delivery.causes import with_cause
@@ -44,7 +45,7 @@ def _same_mention(first: tuple[str | None, int | None],
 
 @workflow.defn
 class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, Baseline,
-                       Verification, ReviewRounds, Publication):
+                       Verification, ReviewRounds, Publication, FlowMarkers, PendingStage):
     """Turns a specified task into verified, published sources: code generation, the
     parallel service and test authors, verification with its repair loop, and the push.
     A bugfix generates no code and goes red to green instead: regression tests, proof
@@ -56,6 +57,11 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
     retried on its own. A finished run stays open, as its session does, for the user's
     next decision: the restart update continues it as a new run, so every retry stays a
     child of the session the task belongs to.
+
+    A task flow creates its delivery pending (`state.pending`) and starts it once the
+    stage before it hands the task on. A delivery started since flows report their markers
+    (`spec.flow_markers`) keeps WaitingForUser (agents' questions, or open review findings
+    while it waits) and UnresolvedFindings up to date and reports them to its parent flow.
 
     The run and its pipelines are here; each stage's rounds are a mixin of
     app.delivery.flow, all working on the one `state`, `spec` and `progress`."""
@@ -96,9 +102,33 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
         self._handed_over = not state.record_only
         # The failed CI this run fixes on its own, if it is such a round.
         self._ci_round: dict[str, Any] | None = state.ci_fix
+        self._init_pending()
+
+    def _markers_enabled(self) -> bool:
+        return bool(self.spec.flow_markers)
+
+    def _waiting_for_user(self) -> bool:
+        return bool(self.progress.agent_questions) or (
+            self.state.waiting and self.progress.open_findings)
+
+    def _unresolved_findings(self) -> bool | None:
+        return bool(self.progress.open_findings)
+
+    def _marker_target(self) -> str | None:
+        parent = workflow.info().parent
+        return parent.workflow_id if parent else self.spec.task_flow_id
+
+    @workflow.signal(name=START_STAGE_SIGNAL)
+    def start_stage(self, state: DeliveryState) -> None:
+        """The task flow starts this pending delivery from `state`."""
+        self._started_with(state)
 
     @workflow.run
     async def run(self, state: DeliveryState) -> DeliveryProgress:
+        if self.state.pending:
+            await self._wait_pending()
+            return self.progress
+        self._start_markers()
         # Mentions that ended before this run, such as in a stopped one, are kept in the
         # mention history and leave the workflow's state, once a fix round that was
         # stopped has had its outcome replied.
@@ -120,6 +150,7 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
         self._start_queued()
         if workflow.patched(PULL_REQUEST_CLOSES_PATCH):
             if not await self._wait_for_pull_request():
+                await self._close_markers()
                 return self.progress
         else:
             # A run that began to wait before deliveries watched their pull request: the
@@ -140,6 +171,7 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
                     # turned out to be a fix request: it was accepted, so the delivery
                     # waits again and starts its round instead of closing with it queued.
                     if not self._fix_pending():
+                        await self._close_markers()
                         return self.progress
                     workflow.deprecate_patch('idle-queued-mentions')
                     workflow.logger.info('Fix request queued while closing; continuing')

@@ -111,3 +111,10 @@ class ApiDesignState:
     architecture_session_id: str | None = None
     architecture: str | None = None
     architecture_structure: dict[str, Any] | None = None
+    # The top-level task flow the design is a stage of; None for a design started before
+    # task flows existed.
+    task_flow_id: str | None = None
+    # The task flows of forks that link to this design as an earlier stage of theirs.
+    linked_task_flows: list[str] = field(default_factory=list)
+    # Set on the placeholder a task flow creates its pending API design child with.
+    pending: bool = False

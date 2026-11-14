@@ -1,5 +1,6 @@
 """Architecture sessions: one long-running Temporal workflow per task's architecture,
-started by its requirements session; there is no other way to start one."""
+started by its task flow once the requirements are finalized (before task flows existed,
+by its requirements session), or as a fork of one; there is no other way to start one."""
 
 import dataclasses
 import logging
@@ -14,12 +15,13 @@ from app.architecture.models import (
 )
 from app.config import TASK_QUEUE
 from app.requirements.lookup import source_session_lookup
+from app.task_flow import service as task_flows
 from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import execution_fields
 from app.temporal.registry import register
 from app.temporal.sessions import (
-    FLOW_CLOSED, SessionBusy, flow_closed, fork_messages, is_running, start_update,
-    state_at_message,
+    FLOW_CLOSED, SessionBusy, SessionNotFound, flow_closed, fork_messages, is_running,
+    start_update, state_at_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,7 @@ TURN_ACTIVITY = "architecture_turn"
 SKIP_OPEN = ("Confirm skipping the architecture stage, or decline it by saying what the "
              "architecture should cover.")
 DESIGN_STARTED = "The API design of this architecture has started; it can no longer be forked."
+NOT_STARTED = "This architecture session has not started yet."
 
 
 def new_session_id() -> str:
@@ -57,14 +60,19 @@ async def _start(state: ArchitectureState) -> str:
     return session_id
 
 
-async def fork_session(session_id: str, message_index: int) -> str:
+async def fork_session(session_id: str, message_index: int) -> tuple[str, str | None]:
     """A new architecture session of the same requirements session with the conversation
-    up to the message, and the draft as it was at that point; 409 once this session's API
-    design has started."""
+    up to the message, and the draft as it was at that point, in a new task flow of its
+    own linked to the original task's requirements session; 409 once this session's API
+    design has started, or once its flow has closed. The fork's ID and its task flow's,
+    None for a session started before task flows existed."""
     source = await get_state(session_id)
+    if source.pending:
+        raise SessionBusy(NOT_STARTED)
     if source.api_design_session_id:
         raise SessionBusy(DESIGN_STARTED)
-    if source.source_session_id and await flow_closed(source.source_session_id):
+    flow = source.task_flow_id or source.source_session_id
+    if flow and await flow_closed(flow):
         raise SessionBusy(FLOW_CLOSED)
     messages = fork_messages(source.messages, message_index)
     structure = await state_at_message(
@@ -77,7 +85,7 @@ async def fork_session(session_id: str, message_index: int) -> str:
     if proposals and proposals[-1] == len(messages) - 1:
         open_proposal = {"reason": str(messages[-1][SKIP_PROPOSAL_KEY]),  # type: ignore[literal-required]
                          "message_index": proposals[-1]}
-    fork_id = await _start(dataclasses.replace(
+    fork = dataclasses.replace(
         source,
         messages=messages,
         structure=structure,
@@ -90,10 +98,17 @@ async def fork_session(session_id: str, message_index: int) -> str:
         forked_from={"session_id": session_id, "message_index": message_index},
         checkout=None,
         api_design_session_id=None,
-    ))
+        next_session_id=None,
+        linked_task_flows=[],
+        task_flow_id=None,
+    )
+    if source.task_flow_id:
+        fork_id, task_flow_id = await task_flows.fork_architecture(source, fork)
+    else:
+        fork_id, task_flow_id = await _start(fork), None
     logger.info("Forked architecture session %s after message %d as %s",
                 session_id, message_index, fork_id)
-    return fork_id
+    return fork_id, task_flow_id
 
 
 async def send_message(session_id: str, message: str) -> None:
@@ -135,10 +150,14 @@ def problems(state: ArchitectureState) -> list[str]:
 
 async def get_session(session_id: str) -> dict[str, Any]:
     state = await get_state(session_id)
+    if state.pending:
+        # Created by its task flow, which has not started it yet.
+        raise SessionNotFound(NOT_STARTED)
     session = dataclasses.asdict(state)
     # The design's start and the repository's architecture are internal hand-over state.
     for key in ("design", "requirements_document", "change_document",
-                "existing_architecture", "existing_structure"):
+                "existing_architecture", "existing_structure", "next_session_id",
+                "linked_task_flows", "pending"):
         del session[key]
     structure = session.pop("structure")
     return {

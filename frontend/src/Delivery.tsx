@@ -143,6 +143,8 @@ export type DeliveryProgress = {
   pull_request_text_error: string | null;
   // Authorised mentions of the app on the pull request and what they led to.
   mentions: PullRequestMention[];
+  // The top-level flows fix rounds started after the delivery's flow closed, oldest first.
+  fix_flow_ids: string[];
   // Whether an onboarding changed the existing code after the user confirmed a bug in it.
   existing_code_changed: boolean;
   // The repository's CI on the last pushed commit.
@@ -198,6 +200,8 @@ export type PullRequestMention = {
   classification: "pending" | "fix" | "clarification" | "unclear";
   status: "classifying" | "queued" | "running" | "replied" | "completed" | "error";
   round: number | null;
+  // The new top-level flow its fix request started on a merged or closed pull request.
+  fix_flow_id: string | null;
   reply_url: string | null;
   error: string | null;
 };
@@ -224,6 +228,7 @@ function pullRequestMentions(value: unknown): PullRequestMention[] {
       status: ["queued", "running", "replied", "completed", "error"].includes(record.status as string)
         ? record.status as PullRequestMention["status"] : "classifying",
       round: Number.isSafeInteger(record.round) ? record.round as number : null,
+      fix_flow_id: typeof record.fix_flow_id === "string" ? record.fix_flow_id : null,
       reply_url: githubLink(record.reply_url),
       error: typeof record.error === "string" ? record.error : null,
     } satisfies PullRequestMention];
@@ -431,6 +436,8 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     pull_request_status: publicationStatuses.includes(value.pull_request_status as PublicationStatus)
       ? value.pull_request_status as PublicationStatus : "not_applicable",
     mentions: pullRequestMentions(value.mentions),
+    fix_flow_ids: Array.isArray(value.fix_flow_ids)
+      ? value.fix_flow_ids.filter((item): item is string => typeof item === "string") : [],
     existing_code_changed: value.existing_code_changed === true,
     ci: ciChecks(value.ci),
   };
@@ -894,12 +901,31 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
           ({mention.comment_type === "review" ? "inline review comment" : "comment"}):{" "}
           {mention.classification === "pending" ? "being classified" : mention.classification}, {mention.status}
           {mention.round !== null && <> — review round {mention.round}</>}
+          {mention.fix_flow_id && <> — fixed in the new flow <FixFlow id={mention.fix_flow_id} /></>}
           {mention.reply_url && <> — <a href={mention.reply_url} target="_blank" rel="noreferrer">reply</a></>}
           {mention.error && <p role="alert">{mention.error}</p>}
         </li>)}
       </ul>
     </section>}
+    {progress.fix_flow_ids.length > 0 && <section aria-label="Fix rounds in new flows">
+      <h3>Fix rounds in new flows</h3>
+      <p>This flow closed with its pull request, so these fix rounds run in flows of their own,
+        each pushing to a new branch with a new pull request.</p>
+      <ul>
+        {progress.fix_flow_ids.map((id) => <li key={id}><FixFlow id={id} /></li>)}
+      </ul>
+    </section>}
   </>;
+}
+
+/** A flow a fix round runs in: its delivery's view for a flow of its own, otherwise its ID
+ * as the Flows page lists it among the top-level flows. */
+function FixFlow({ id }: { id: string }) {
+  const session = id.startsWith("delivery-fix-session-") ? id.replace(/^delivery-/, "") : null;
+  if (session) {
+    return <a href={`?mode=requirements&session_id=${encodeURIComponent(session)}`}><code>{id}</code></a>;
+  }
+  return <a href="?" title="Listed on the Flows page"><code>{id}</code></a>;
 }
 
 const findingTargets: Record<ReviewFinding["target"], string> = {

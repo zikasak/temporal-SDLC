@@ -212,7 +212,7 @@ async def test_api_change_is_designed_from_the_repository_contract(server, live,
     assert state.api["endpoints"][0]["requirement_ids"] == ["FR-1"]
 
     # A fork changes the same service.
-    fork = server.client.get_workflow_handle(await service.fork_session(handle.id, 0))
+    fork = server.client.get_workflow_handle((await service.fork_session(handle.id, 0))[0])
     forked = await wait_for_status(fork, "interviewing")
     assert forked.change_document == "# Change" and forked.api == state.api
     await fork.terminate()
@@ -598,7 +598,7 @@ async def test_fork_keeps_api_as_it_was_at_the_message(server, live, live_connec
     await source.execute_update(ApiDesignWorkflow.send_message, "/bookings")
     # draft, /bookings, Recorded.
 
-    fork = server.client.get_workflow_handle(await service.fork_session(source.id, 0))
+    fork = server.client.get_workflow_handle((await service.fork_session(source.id, 0))[0])
     # A fork checks out its own copy of the repository first.
     state = await wait_for_status(fork, "interviewing")
     assert [item["path"] for item in state.api["endpoints"]] == ["/rooms"]
@@ -607,12 +607,12 @@ async def test_fork_keeps_api_as_it_was_at_the_message(server, live, live_connec
     assert (await service.get_session(fork.id))["repository"] == repository_selection
 
     # Forking after a user message answers it again from the API it had then.
-    regenerated = server.client.get_workflow_handle(await service.fork_session(source.id, 1))
+    regenerated = server.client.get_workflow_handle((await service.fork_session(source.id, 1))[0])
     state = await wait_for_status(regenerated, "interviewing")
     assert len(state.messages) == 3
     assert [item["path"] for item in state.api["endpoints"]] == ["/rooms", "/bookings"]
     assert state.repository == repository_selection
-    nested = server.client.get_workflow_handle(await service.fork_session(fork.id, 0))
+    nested = server.client.get_workflow_handle((await service.fork_session(fork.id, 0))[0])
     assert (await wait_for_status(nested, "interviewing")).repository == repository_selection
     await nested.terminate()
     for handle in (source, fork, regenerated):

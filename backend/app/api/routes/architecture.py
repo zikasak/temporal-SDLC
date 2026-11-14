@@ -82,10 +82,11 @@ async def skip(session_id: str):
 async def fork(session_id: str, body: ForkBody):
     _check_session_id(session_id)
     try:
-        fork_id = await service.fork_session(session_id, body.message_index)
+        fork_id, task_flow_id = await service.fork_session(session_id, body.message_index)
     except Exception as exc:
         raise http_error(exc) from exc
-    return {"session_id": fork_id}
+    # A fork of a session started before task flows existed has none.
+    return {"session_id": fork_id, **({"task_flow_id": task_flow_id} if task_flow_id else {})}
 
 
 @router.get("/{session_id}/document")

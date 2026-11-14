@@ -167,6 +167,13 @@ class TaskSpec:
     # An onboarding that adds only the architecture to the repository's contract: nothing
     # is written, verified or reviewed, the two files are pushed with a pull request.
     architecture_only: bool = False
+    # The top-level task flow the delivery is a stage of; None for an onboarding's and for
+    # one started before task flows existed.
+    task_flow_id: str | None = None
+    # Whether the delivery keeps its WaitingForUser and UnresolvedFindings search
+    # attributes up to date and reports them to its parent flow: every delivery started
+    # since flows report them.
+    flow_markers: bool = False
 
 
 @dataclass
@@ -267,6 +274,9 @@ class DeliveryProgress:
     # on, without their text; every mention, with its text, is in the mention history
     # (app.delivery.mentions), and the progress the session API reports shows them all.
     mentions: list[PullRequestMention] = field(default_factory=list)
+    # The top-level flows fix rounds started after the delivery's flow closed, oldest
+    # first: filled in by the session API from those flows, never by the workflow.
+    fix_flow_ids: list[str] = field(default_factory=list)
     # Whether an onboarding changed the repository's existing code, which it does only
     # after the user confirmed a bug in it; the commit and pull request then say so.
     existing_code_changed: bool = False
@@ -589,6 +599,9 @@ class DeliveryState:
     spec: TaskSpec
     progress: DeliveryProgress = field(default_factory=DeliveryProgress)
     retry_stage: RetryStage | None = None
+    # Set on the placeholder a task flow creates its pending delivery child with: the run
+    # waits for the task flow to start it with the delivery's state, or to skip it.
+    pending: bool = False
     # The user's instructions about open review findings, which start a new run of fix
     # rounds, verification and code review on the delivered sources.
     instructions: str | None = None

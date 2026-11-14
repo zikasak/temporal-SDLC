@@ -15,6 +15,8 @@ from app.api_design.models import ApiDesignState
 from app.architecture.models import ArchitectureResult, ArchitectureState
 from app.requirements import service
 from app.requirements.models import RequirementsState
+from app.task_flow import service as task_flows
+from app.task_flow.workflows import TaskWorkflow
 from app.temporal import sessions
 from app.temporal.executions import ensure_search_attributes
 from app.temporal.sessions import InvalidForkPoint
@@ -84,6 +86,11 @@ class FakeActivities:
     async def register_session(self, session_id: str) -> None:
         self.registered.append(session_id)
 
+    @activity.defn(name="name_task_flow")
+    async def name_task_flow(self, kind: str | None, task: str,
+                             requirements: list[dict[str, Any]]) -> str:
+        return f"Named {task.strip()}"
+
 
 # The API designs the sessions started, by ID, with what they were started from.
 designs: dict[str, ApiDesignState] = {}
@@ -133,10 +140,11 @@ async def server():
 async def workers(env, **options):
     activities = FakeActivities()
     async with Worker(
-        env.client, task_queue=TASK_QUEUE, workflows=[RequirementsWorkflow, FakeApiDesign, FakeArchitecture],
+        env.client, task_queue=TASK_QUEUE,
+        workflows=[RequirementsWorkflow, FakeApiDesign, FakeArchitecture, TaskWorkflow],
         activities=[activities.requirements_turn, activities.write_requirements_document,
                     activities.checkout_repository, activities.read_requirements_document,
-                    activities.register_session],
+                    activities.register_session, activities.name_task_flow],
         **options,
     ):
         yield activities
@@ -194,7 +202,9 @@ def serve_from(env, monkeypatch):
 
     monkeypatch.setattr(service, "connect_temporal", connect)
     monkeypatch.setattr(sessions, "connect_temporal", connect)
-    monkeypatch.setattr(service, "TASK_QUEUE", TASK_QUEUE)
+    # New sessions and forks start in task flows of their own.
+    monkeypatch.setattr(task_flows, "connect_temporal", connect)
+    monkeypatch.setattr(task_flows, "TASK_QUEUE", TASK_QUEUE)
 
 
 @pytest.fixture
@@ -393,9 +403,10 @@ def titles(state: RequirementsState) -> list[str]:
 
 
 async def start_from_intake(env, repository, task: str):
-    return env.client.get_workflow_handle(await service.start_session(
+    session_id, _ = await service.start_session(
         repository=repository, kind="bugfix",
-        answers=["Data storage and retrieval", "Rooms vanish"], task=task))
+        answers=["Data storage and retrieval", "Rooms vanish"], task=task)
+    return env.client.get_workflow_handle(session_id)
 
 
 async def test_session_starts_from_the_intake(server, live, live_temporal, repository_selection):
@@ -424,7 +435,7 @@ async def test_fork_keeps_requirements_as_they_were_at_the_message(server, live,
     await source.execute_update(RequirementsWorkflow.send_message, "B")
     # intake, A, Question 1?, B, Question 2?
 
-    fork = server.client.get_workflow_handle(await service.fork_session(source.id, 2))
+    fork = server.client.get_workflow_handle((await service.fork_session(source.id, 2))[0])
     state = await wait_for_status(fork, "interviewing")
     assert [item["content"] for item in state.messages][2:] == ["Question 1?"]
     assert titles(state) == ["A"]
@@ -435,7 +446,7 @@ async def test_fork_keeps_requirements_as_they_were_at_the_message(server, live,
     assert state.checkout == {"commit": "1" * 40}
 
     # Forking after a user message answers it again.
-    regenerated = server.client.get_workflow_handle(await service.fork_session(source.id, 3))
+    regenerated = server.client.get_workflow_handle((await service.fork_session(source.id, 3))[0])
     state = await wait_for_status(regenerated, "interviewing")
     assert [item["content"] for item in state.messages][3:] == ["B", "Question 2?"]
     assert titles(state) == ["A", "B"]
@@ -445,7 +456,7 @@ async def test_fork_keeps_requirements_as_they_were_at_the_message(server, live,
     state = await fork.query(RequirementsWorkflow.get_state)
     assert titles(state) == ["A", "C"]
     for index, expected in [(0, []), (2, ["A"]), (4, ["A", "C"])]:
-        nested = server.client.get_workflow_handle(await service.fork_session(fork.id, index))
+        nested = server.client.get_workflow_handle((await service.fork_session(fork.id, index))[0])
         nested_state = await wait_for_status(nested, "interviewing")
         assert titles(nested_state) == expected
         assert nested_state.repository == repository_selection

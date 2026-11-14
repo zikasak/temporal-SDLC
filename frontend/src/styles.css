@@ -478,6 +478,16 @@ h2 {
   background: var(--green);
 }
 
+/* A stage of a task flow that waits for the stages before it, or will never run. */
+.status-pending .status-dot {
+  background: transparent;
+  border: 1px solid var(--muted);
+}
+
+.status-skipped .status-dot {
+  background: var(--muted);
+}
+
 .status-error .status-dot,
 .status-failed .status-dot,
 .status-canceled .status-dot,
@@ -2097,6 +2107,26 @@ h2 {
 }
 
 /* A closed flow whose review findings stayed open: marked, not highlighted. */
+/* A task flow, listed by its short name. */
+.flow-name {
+  min-width: 0;
+  max-width: 48ch;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* An earlier stage of another task, which a forked or fix-round task flow links to. */
+.flow-linked {
+  border: 1px dashed var(--muted);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.8em;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
 .flow-unresolved {
   border: 1px solid #c9a46a;
   border-radius: 999px;

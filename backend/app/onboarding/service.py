@@ -53,6 +53,8 @@ async def _unfinished(session_id: str) -> bool:
 
 
 async def _start(session_id: str, state: OnboardingState) -> None:
+    # It keeps its WaitingForUser and UnresolvedFindings search attributes up to date.
+    state.flow_markers = True
     client = await connect_temporal()
     await client.start_workflow(WORKFLOW_TYPE, state, id=session_id, task_queue=TASK_QUEUE,
                                 **execution_fields(state.repository, session_id))
@@ -209,7 +211,7 @@ async def get_session(session_id: str) -> dict[str, Any]:
     state = await get_state(session_id)
     session = dataclasses.asdict(state)
     for key in ("drafted", "drafted_architecture_only", "artifacts_unknown",
-                "contract_problem", "conflicts"):
+                "contract_problem", "conflicts", "flow_markers"):
         del session[key]
     delivery = None
     if _delivers(state):
