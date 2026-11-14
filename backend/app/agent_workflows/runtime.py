@@ -275,7 +275,8 @@ def workspace_tools(root: Path, contracts: Path | None = None,
 
     @tool
     async def shell(command: str) -> str:
-        """Run a shell command in the project (120 second timeout).
+        """Run a shell command in the project (120 second timeout). Processes it starts
+        in the background end with it: start a server and use it in one command.
 
         Long output is saved to a log file and summarized as its error lines and tail;
         the summary names the log so read_file or search_files can retrieve the rest.
@@ -291,15 +292,14 @@ def workspace_tools(root: Path, contracts: Path | None = None,
                 await asyncio.wait_for(process.wait(), timeout=120)
                 status = f'Exit code: {process.returncode}'
             except BaseException as exc:
-                # Kill descendants too: a shell may have exited while its children live.
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                _end_session(process.pid)
                 await process.wait()
                 if not isinstance(exc, TimeoutError):
                     raise
                 status = 'Command timed out'
+            # What the command left running in the background goes too: such processes
+            # kept every thread they had until the container hit its process limit.
+            _end_session(process.pid)
         return await run_sync(shell_output, log, status)
 
     def shell_output(log: Path, status: str) -> str:
@@ -357,6 +357,14 @@ def workspace_tools(root: Path, contracts: Path | None = None,
     for item in (read_contract, search_contracts):
         item.coroutine = partial(run_sync, item.func)
     return [*tools, read_contract, search_contracts]
+
+
+def _end_session(pid: int) -> None:
+    """Kill the process group a shell command led, with what its descendants left in it."""
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def _tokens(message: BaseMessage) -> int:

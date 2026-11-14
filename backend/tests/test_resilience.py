@@ -285,6 +285,19 @@ async def test_work_is_committed_to_hidden_refs_on_the_base_commit(session, tmp_
     assert (target / 'app.py').read_text() == 'print(2)\n'
 
 
+async def test_work_is_saved_without_files_too_large_to_push(session, tmp_path, monkeypatch):
+    session_dir, origin, _ = session
+    monkeypatch.setattr(work_refs, 'MAX_FILE_BYTES', 100)
+    tree = tmp_path / 'service'
+    tree.mkdir()
+    (tree / 'app.py').write_text('print(2)\n')
+    (tree / 'core').write_bytes(b'\0' * 101)
+    commit = await work_refs.save_work(
+        session_dir, session_dir.name, 'implementation', tree, lambda _: True,
+        status='agent failed: boom', token=_token)
+    assert _git('ls-tree', '-r', '--name-only', commit, cwd=origin) == 'app.py'
+
+
 async def test_work_of_a_session_without_a_repository_is_not_saved(tmp_path):
     tree = tmp_path / 'tree'
     tree.mkdir()

@@ -607,7 +607,9 @@ async def run_agent(role: str, session_id: str, workspace: Path,
         await _build_image(image_build, agent_image, log_path.parent / 'agent-build.log')
         await docker(
             'create', '--name', name, '--cap-drop=ALL',
-            '--security-opt=no-new-privileges', '--pids-limit=256',
+            # Threads count as processes: the CLI and a Maven build's JVMs need room. No
+            # core dumps: a crashed CLI left one of gigabytes in the project it salvages.
+            '--security-opt=no-new-privileges', '--pids-limit=1024', '--ulimit', 'core=0',
             '--memory=4g', '--cpus=2', '--user', '10001:10001',
             '-e', 'OPENAI_API_KEY', '-e', 'OPENAI_BASE_URL',
             *trace_args, *setting_args, *adapter_args, agent_image, env=environment,
