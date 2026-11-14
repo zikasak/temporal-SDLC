@@ -150,6 +150,18 @@ Contract ambiguities and how the suite reads them:
   that every requirements and API design session action requires sign-in. The contract does
   not say how an invalid `page_token` is reported before Temporal is contacted, so it is not
   tested.
+- Task flows (FR-125 to FR-143, `tests/test_task_flows.py`): creating a task flow, its
+  pending/skipped children, forks, fix rounds and the closing rules need GitHub, Temporal and
+  an LLM. Without them the suite checks that `type=TaskWorkflow` and the `parent`/`top_level`
+  filters combine without a validation error (200 or 503), that `parent` with `top_level`
+  answers 422, that starting a requirements session on a repository the service cannot reach
+  is refused (the contract lists 404, 409 and 503 for that), and that the chat endpoints need
+  sign-in. When Temporal is present the new fields of `WorkflowExecution` (`name`, `linked`,
+  `waiting_for_user`, `unresolved_findings`) are checked on whatever executions come back.
+- Earlier modules still check some `GET /workflows` items only when Temporal answers 200.
+  There an ArchitectureWorkflow's `parent_workflow_id` is asserted to be a requirements
+  session, which is what that contract version said; with task flows the contract makes the
+  task flow the parent. Against the Temporal-less image these assertions are never reached.
 - Unknown IDs are well formed (prefix and 32 hex digits) so that they are treated as
   unknown rather than malformed.
 
