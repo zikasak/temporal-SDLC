@@ -87,17 +87,36 @@ async def get_task_flow(task_flow_id: str) -> TaskFlowState | None:
         return None
 
 
+def _unknown_search_attribute(exc: RPCError) -> bool:
+    """Whether the server refused a start for naming a search attribute it does not know."""
+    return (exc.status == RPCStatusCode.INVALID_ARGUMENT
+            and "search attribute" in str(exc.message or exc).lower())
+
+
 async def _start(state: TaskFlowState, task_flow_id: str, *,
                  existing_ok: bool = False, task_queue: str | None = None) -> str:
     """Start the task flow and wait until it has created its children, so that its first
     stage can be served at once."""
     client = await connect_temporal()
-    try:
-        handle = await client.start_workflow(
+
+    async def start():
+        return await client.start_workflow(
             WORKFLOW_TYPE, state, id=task_flow_id, task_queue=task_queue or TASK_QUEUE,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
             id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
             **execution_fields(state.repository, name=state.name, linked=state.linked))
+
+    try:
+        try:
+            handle = await start()
+        except RPCError as exc:
+            if not _unknown_search_attribute(exc):
+                raise
+            # A namespace the workers have not prepared yet, such as a fresh server:
+            # register the attributes the flow is started with and try once more.
+            from app.temporal.executions import ensure_search_attributes
+            await ensure_search_attributes(client)
+            handle = await start()
     except WorkflowAlreadyStartedError:
         if not existing_ok:
             raise
