@@ -1361,9 +1361,17 @@ A round of fixes (a repair after failed tests or checks, or an automatic fix of 
 costs an agent run and a verification. The ceilings on rounds are high (12 repair rounds,
 6 CI fix rounds in a row), so that a long but converging repair is not cut short; within
 them each further round has to be earned by progress. `app/delivery/rounds.py` decides it
-from what the rounds left failing (how many, and what: the failing tests, or the error
-lines of the checks' or CI's output with what varies between runs taken out), without the
-LLM, so that a replay of the workflow decides the same:
+from what the rounds left failing (how many, and what), without the LLM, so that a replay
+of the workflow decides the same. What is counted is failed tests, never the length of the
+output: for the contract and component tests, their runs' failures; for the checks' or the
+CI's output, the tests its runner names as failed, each with the type of its error
+(`failure_outcome` in `app/verification/checks.py` reads pytest, Go, Maven Surefire,
+Gradle, Jest and Vitest), or the runner's own total when it names none. Only output that
+names no failed test, such as a build that did not compile, is judged by its distinct
+error lines, with traceback indentation and exception chaining taken out. The rounds
+repairing failed tests and those repairing failed checks are judged each by their own
+history, since one's count is no measure of the other's progress; the ceiling counts
+them all.
 
 - the same failures after three rounds in a row: the fixes go round in circles, stop;
 - failures that grew in each of the last two rounds: the fixes make it worse, stop;

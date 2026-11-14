@@ -141,6 +141,9 @@ class FakeStages:
         # 'failed', 'missing' or 'error'; the last one repeats. Each run's context, and
         # the excerpts the LLM was asked to analyse.
         self.checks_results: list[str] = ['missing']
+        # How many tests each failed run reports failing, other ones each run; unset, a
+        # failed run reports only its error line, as runs recorded before counting did.
+        self.checks_failures: list[int] = []
         self.checks_runs: list[str] = []
         self.checks_after: list[list[str]] = []
         self.analysed: list[str] = []
@@ -391,8 +394,14 @@ class FakeStages:
         self.checks_runs.append(status)
         if status == 'failed':
             excerpt = 'E   AttributeError: module has no attribute TASK_QUEUE'
-            return {'status': 'failed', 'exit_code': 1, 'excerpt': excerpt,
-                    'signature': [excerpt], 'log': '/checks/output.log', 'error': None}
+            result = {'status': 'failed', 'exit_code': 1, 'excerpt': excerpt,
+                      'signature': [excerpt], 'log': '/checks/output.log', 'error': None}
+            if self.checks_failures:
+                run = self.checks_runs.count('failed') - 1
+                failures = self.checks_failures[min(run, len(self.checks_failures) - 1)]
+                result.update(failures=failures, signature=[
+                    f'tests/test_x.py::test_{run}_{index}' for index in range(failures)])
+            return result
         return {'status': status, 'exit_code': 0 if status == 'passed' else None,
                 'excerpt': '', 'signature': [], 'log': None,
                 'error': 'did not finish' if status == 'error' else None}

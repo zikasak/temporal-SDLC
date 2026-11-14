@@ -34,6 +34,10 @@ LEGACY_REPAIR_ROUNDS = 5
 # repairs what it reports, and decides each further repair round from progress.
 REPOSITORY_CHECKS_PATCH = 'repository-checks'
 CHECKS_UNREPAIRED = "The repository's checks still fail"
+# Marks the workflow code that judges the rounds repairing failed tests and those
+# repairing failed checks each by their own history: their failures are counted apart, so
+# one is no measure of the other's progress.
+PHASED_ROUNDS_PATCH = 'phased-repair-rounds'
 # Rounds in which the test author of an API change puts back the repository's tests the
 # changed service still passes, each verified again.
 MAX_RESTORE_ROUNDS = 2
@@ -260,6 +264,7 @@ class Verification:
         self.progress.repair_decision = None
         self.progress.checks = None
         history: list[dict[str, Any]] = []
+        previous: str | None = None
         attempt = 0
         await verify()
         while True:
@@ -272,8 +277,16 @@ class Verification:
                     failing = 'checks'
             if failing is None:
                 return
+            if failing != previous and workflow.patched(PHASED_ROUNDS_PATCH):
+                # Once the tests pass, the checks' first failures are where their rounds
+                # start from, and the tests' again when a round breaks them.
+                history = []
+            previous = failing
             history.append(self._round_outcome(failing))
             decision = decide(history, MAX_REPAIR_ROUNDS)
+            if decision['go'] and attempt >= MAX_REPAIR_ROUNDS:
+                decision = {'go': False, 'reason': (f'{MAX_REPAIR_ROUNDS} rounds of fixes ran, '
+                                                    'the most allowed.')}
             self.progress.repair_decision = {**decision, 'rounds': attempt}
             if not decision['go']:
                 workflow.logger.info('No further repair round: %s', decision['reason'])
@@ -293,8 +306,13 @@ class Verification:
     def _round_outcome(self, failing: str) -> dict[str, Any]:
         """What is failing now, for the decision whether to go on repairing."""
         if failing == 'checks':
-            signature = (self.progress.checks or {}).get('signature') or ['checks failed']
-            return outcome(len(signature), [f'checks: {item}' for item in signature])
+            checks = self.progress.checks or {}
+            signature = checks.get('signature') or ['checks failed']
+            # The failed tests the checks report; a run recorded before they were counted
+            # has only its error lines, counted as they were then.
+            failures = checks.get('failures')
+            return outcome(len(signature) if failures is None else failures,
+                           [f'checks: {item}' for item in signature])
         runs = [run for run in (self.progress.verification,
                                 self.progress.component_verification) if run]
         failures = sum(run['failures'] + run['errors'] for run in runs)

@@ -12,7 +12,7 @@ with workflow.unsafe.imports_passed_through():
         CiChecks,
     )
     from app.delivery.rounds import decide, outcome
-    from app.verification.checks import failure_signature
+    from app.verification.checks import failure_outcome, failure_signature
 
 # Marks the workflow code that watches the repository's CI on the commit a delivery
 # pushed while it waits, and starts a fix round of its own when the CI fails.
@@ -20,6 +20,9 @@ CI_CHECKS_PATCH = 'ci-checks'
 # Marks the workflow code that decides each further automatic CI fix round from the
 # progress the rounds made (app.delivery.rounds), up to MAX_CI_FIX_ROUNDS.
 JUDGED_CI_PATCH = 'judged-ci-rounds'
+# Marks the workflow code that counts the failed tests of the CI's logs, not their error
+# lines, for that decision (app.verification.checks.failure_outcome).
+CI_FAILED_TESTS_PATCH = 'ci-failed-tests'
 CI_FIX_INSTRUCTIONS = """The repository's CI failed on the commit this delivery pushed
 ({commit}). Its checks run what this pipeline's verification does not, such as the
 repository's own unit tests and builds, so the tests you can run do not show these
@@ -121,9 +124,13 @@ class CiWatch:
             return 'A fix requested in a comment runs first.'
         if workflow.patched(JUDGED_CI_PATCH):
             # What fails now, after the rounds before: another round has to be worth it.
-            signature = failure_signature(report) or [report[-200:]]
-            self.state.ci_history = [*self.state.ci_history,
-                                     outcome(len(signature), signature)]
+            if workflow.patched(CI_FAILED_TESTS_PATCH):
+                found = failure_outcome(report)
+                failed = outcome(found['failures'], found['signature'] or [report[-200:]])
+            else:
+                signature = failure_signature(report) or [report[-200:]]
+                failed = outcome(len(signature), signature)
+            self.state.ci_history = [*self.state.ci_history, failed]
             decision = decide(self.state.ci_history, MAX_CI_FIX_ROUNDS)
             if not decision['go']:
                 return (f'After {self.state.ci_fixes} automatic fix rounds in a row no further '

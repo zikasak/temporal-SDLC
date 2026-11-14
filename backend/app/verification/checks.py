@@ -204,6 +204,87 @@ def failure_signature(excerpt: str) -> list[str]:
     return found[:100]
 
 
+# Test runners' lines naming one failed test: its identity in the first group and, where
+# the line states it, the error in the second.
+_FAILED_TESTS = (
+    # pytest's short test summary: `FAILED tests/x.py::test_y[a] - KeyError: 'z'`, and
+    # `ERROR tests/x.py - ImportError: ...` for a test file that could not be collected.
+    re.compile(r'^(?:FAILED|ERROR) (\S+?(?:::\S+|\.py))(?: - (.*))?$'),
+    # Go: `--- FAIL: TestRooms/lists (0.00s)`.
+    re.compile(r'^\s*--- FAIL: (\S+)'),
+    # Maven Surefire: `[ERROR] RoomsTest.lists -- Time elapsed: 0.01 s <<< FAILURE!`, or
+    # `[ERROR] lists(RoomsTest)  Time elapsed: 0.01 s  <<< ERROR!` before Surefire 3.
+    re.compile(r'^\[ERROR\] (\S+?)(?: --)?\s+Time elapsed: .*<<< (?:FAILURE|ERROR)!'),
+    # Gradle: `RoomsTest > lists() FAILED`.
+    re.compile(r'^(\S+ > .+?) FAILED$'),
+    # Jest: `● Rooms › lists rooms`; Vitest: `FAIL  src/rooms.test.ts > Rooms > lists`.
+    re.compile(r'^\s*● (.+? › .+)$'),
+    re.compile(r'^\s*(?:FAIL|×|✗)\s+(\S+ > .+)$'),
+)
+# Runners' totals of failed tests, by runner, for when they name none of them.
+_FAILED_COUNTS = {
+    # `= 2 failed, 31 passed in 3.05s =`, without the rules under `pytest -q`.
+    'pytest': re.compile(r'^=*\s*(?=.*\b\d+ (?:failed|errors?)\b).*\bin \d+(?:\.\d+)?s\b'),
+    'surefire': re.compile(r'^\[(?:ERROR|WARNING|INFO)\] Tests run: \d+, Failures: (\d+), '
+                           r'Errors: (\d+), Skipped: \d+$'),
+    'jest': re.compile(r'^\s*Tests:?\s+(\d+) failed'),
+    'gradle': re.compile(r'^\d+ tests? completed, (\d+) failed'),
+}
+# The error a test failed with, as pytest's summary states it: `pkg.mod.KeyError: ...`.
+_ERROR_TYPE = re.compile(r'^(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*)(?::|$)')
+# A traceback's lines that only chain one exception to another.
+_CHAINING = re.compile(r'^(?:The above exception was the direct cause|During handling of the '
+                       r'above exception)')
+
+
+def _pytest_failed(line: str) -> int:
+    """How many tests pytest's final line (`= 2 failed, 1 error, 31 passed in 3s =`) says
+    failed or erred."""
+    return sum(int(number) for number in re.findall(r'\b(\d+) (?:failed|errors?)\b', line))
+
+
+def failure_outcome(log: str) -> dict[str, Any]:
+    """What a failed run left failing, for the decision whether another round of fixes is
+    worth it (app.delivery.rounds): `failures`, how many tests failed, and `signature`,
+    which ones, each with the type of the error it failed with where the runner states it.
+
+    Tests are what a round fixes, so they are what is counted: the length of a traceback
+    says nothing about how much fails. Only output that names no failed test, such as a
+    build that did not compile, is judged by its distinct error lines, with traceback
+    indentation and exception chaining taken out.
+
+    The CI's fix rounds call this from workflow code, so it has to stay deterministic, and
+    a change to what it returns has to be put behind a workflow patch there."""
+    lines = _clean(log)
+    tests: dict[str, str] = {}
+    counts: dict[str, int] = {}
+    for line in lines:
+        text = line.strip()
+        for pattern in _FAILED_TESTS:
+            match = pattern.match(text)
+            if match:
+                kind = _ERROR_TYPE.match((match.groups()[1:] or [None])[0] or '')
+                if not tests.get(match.group(1)):
+                    tests[match.group(1)] = kind.group(1) if kind else ''
+                break
+        for runner, pattern in _FAILED_COUNTS.items():
+            match = pattern.match(text)
+            if match:
+                # The last total of a runner is its whole run's.
+                counts[runner] = (_pytest_failed(text) if runner == 'pytest'
+                                  else sum(int(number) for number in match.groups()))
+    counted = sum(counts.values())
+    if tests:
+        return {'failures': max(len(tests), counted), 'signature': sorted(
+            f'{test} ({kind})' if kind else test for test, kind in tests.items())[:100]}
+    errors: list[str] = []
+    for line in failure_signature('\n'.join(lines)):
+        error = re.sub(r'^(?:E|>)\s+', '', line)
+        if not _CHAINING.match(error) and error not in errors:
+            errors.append(error)
+    return {'failures': counted or len(errors) or 1, 'signature': sorted(errors)[:100]}
+
+
 def assemble_repository(language: Any, session_dir: Path, target: Path) -> None:
     """The repository as the delivery would push it, without Git metadata: the checkout,
     with the implementation author's published tree and the contract tests' author's suite
@@ -221,7 +302,7 @@ def assemble_repository(language: Any, session_dir: Path, target: Path) -> None:
 
 def _result(status: str, **fields: Any) -> dict[str, Any]:
     return {'status': status, 'exit_code': None, 'excerpt': '', 'signature': [],
-            'log': None, 'error': None, **fields}
+            'failures': None, 'log': None, 'error': None, **fields}
 
 
 @activity.defn
@@ -229,7 +310,8 @@ def _result(status: str, **fields: Any) -> dict[str, Any]:
 async def run_repository_checks(session_id: str, language: str) -> dict[str, Any]:
     """Activity 'run_repository_checks': run the repository's checks script over the
     repository as the delivery would push it. Returns `status`: `passed`, `failed` (with
-    the `excerpt` of the output that matters and its `signature`), `missing` (the
+    the `excerpt` of the output that matters, and the number of `failures` and their
+    `signature` as failure_outcome reads them from the whole output), `missing` (the
     repository has no checks script), `not_applicable` (the session has no repository) or
     `error` (the run itself did not complete, such as when it timed out); and the `log`."""
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
@@ -273,8 +355,10 @@ async def run_repository_checks(session_id: str, language: str) -> dict[str, Any
     excerpt = failure_excerpt(log)
     logger.info('The checks of session %s failed with exit status %s', session_id, exit_code)
     await run_sync((run_dir / 'excerpt.txt').write_text, excerpt, encoding='utf-8')
+    found = failure_outcome(log)
     return _result('failed', exit_code=exit_code, excerpt=excerpt,
-                   signature=failure_signature(excerpt), log=str(log_path))
+                   failures=found['failures'], signature=found['signature'],
+                   log=str(log_path))
 
 
 ANALYSIS_PROMPT = """The checks script of a repository (its builds and unit tests, as its

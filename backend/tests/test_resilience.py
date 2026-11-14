@@ -26,7 +26,7 @@ from app.implementation.activities import has_unit_tests, is_service_file, publi
 from app.languages import get_language
 from app.llm import limits
 from app.verification.checks import (
-    failure_excerpt, failure_signature, fallback_analysis, parse_analysis,
+    failure_excerpt, failure_outcome, failure_signature, fallback_analysis, parse_analysis,
 )
 
 from tests.test_agent_workflows import profile, scripted_model  # noqa: F401  (fixtures)
@@ -377,6 +377,68 @@ def test_failure_excerpt_keeps_each_failure_once_without_the_noise():
     assert '2 failed, 6 passed' in excerpt
     assert failure_signature(excerpt) == ['E       AssertionError: assert [] == [#]',
                                           'AssertionError: assert [] == [#]']
+
+
+FORK = 'tests/test_fork.py::TestFork::test_fork[{}]'
+# The same two tests failing in two rounds, the second time through a chained traceback.
+RPC_ROUND = f'''E       temporalio.service.RPCError: Namespace default has no mapping
+E           temporalio.service.RPCError: Namespace default has no mapping
+=========================== short test summary info ============================
+FAILED {FORK.format('completed')} - temporalio.service.RPCError: Namespace default has no mapping
+FAILED {FORK.format('canceled')} - temporalio.service.RPCError: Namespace default has no mapping
+========================= 2 failed, 31 passed in 10.19s ========================
+'''
+UPDATE_ROUND = f'''E       asyncio.exceptions.CancelledError
+The above exception was the direct cause of the following exception:
+E               temporalio.client.WorkflowUpdateRPCTimeoutOrCancelledError: Timeout
+=========================== short test summary info ============================
+FAILED {FORK.format('completed')} - temporalio.client.WorkflowUpdateRPCTimeoutOrCancelledError: Timeout
+FAILED {FORK.format('canceled')} - temporalio.client.WorkflowUpdateRPCTimeoutOrCancelledError: Timeout
+2 failed, 31 passed in 30.05s
+'''
+
+
+def test_failures_are_the_failed_tests_not_the_length_of_their_tracebacks():
+    before, after = failure_outcome(RPC_ROUND), failure_outcome(UPDATE_ROUND)
+    assert before['failures'] == after['failures'] == 2
+    # The same tests failing with another error are other failures.
+    assert after['signature'] == [
+        f'{FORK.format(param)} (WorkflowUpdateRPCTimeoutOrCancelledError)'
+        for param in ('canceled', 'completed')]
+    assert before['signature'] != after['signature']
+    assert failure_outcome(PYTEST_LOG) == {'failures': 2, 'signature': [
+        'tests/test_rooms.py::test_get_room (AssertionError)',
+        'tests/test_rooms.py::test_list_rooms (AssertionError)']}
+
+
+@pytest.mark.parametrize('log, failures, first', [
+    ('--- FAIL: TestRooms (0.00s)\n    --- FAIL: TestRooms/lists (0.00s)\nFAIL',
+     2, 'TestRooms'),
+    ('[ERROR] RoomsTest.lists -- Time elapsed: 0.01 s <<< FAILURE!\n'
+     '[ERROR] Tests run: 4, Failures: 1, Errors: 1, Skipped: 0', 2, 'RoomsTest.lists'),
+    ('RoomsTest > lists() FAILED\n    java.lang.AssertionError\n'
+     '3 tests completed, 1 failed', 1, 'RoomsTest > lists()'),
+    ('  ● Rooms › lists rooms\n  ● Console\nTests:       1 failed, 3 passed, 4 total',
+     1, 'Rooms › lists rooms'),
+    (' FAIL  src/rooms.test.ts > Rooms > lists\n      Tests  1 failed | 3 passed (4)',
+     1, 'src/rooms.test.ts > Rooms > lists'),
+    # A runner that names no test still counts its failed ones.
+    ('Tests:       5 failed, 3 passed, 8 total', 5, None),
+])
+def test_failed_tests_are_read_from_each_toolchain(log, failures, first):
+    found = failure_outcome(log)
+    assert found['failures'] == failures
+    if first:
+        assert found['signature'][0] == first
+
+
+def test_output_without_tests_counts_its_distinct_errors():
+    # A traceback's indentation and chaining state no further error.
+    found = failure_outcome('E   ImportError: no module x\nImportError: no module x\n'
+                            'The above exception was the direct cause of the following '
+                            'exception:\nsrc/app.py:3: error: Name "y" is not defined\n')
+    assert found == {'failures': 2, 'signature': [
+        'ImportError: no module x', 'src/app.py:#: error: Name "y" is not defined']}
 
 
 def test_failure_excerpt_reads_other_toolchains():

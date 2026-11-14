@@ -27,8 +27,9 @@ SIGNATURE_ITEMS = 100
 
 
 class RoundOutcome(TypedDict):
-    """What a round left failing: how many, and what (test identities or error lines, with
-    what varies between runs taken out)."""
+    """What a round left failing: how many tests, and which (test identities, or the
+    distinct error lines of output that names no test, with what varies between runs
+    taken out). Outcomes compared with each other have to count the same thing."""
     failures: int
     signature: list[str]
 

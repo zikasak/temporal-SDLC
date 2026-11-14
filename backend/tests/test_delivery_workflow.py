@@ -264,6 +264,21 @@ async def test_checks_failed_by_the_sandbox_are_reported_not_repaired(
     assert state.publication_status == 'completed' and worker.published
 
 
+async def test_checks_rounds_are_judged_apart_from_the_failed_tests_before_them(
+        env, worker, repository_selection):
+    # One contract test fails, then the checks report 2 and 3 other failed tests: two
+    # counts of tests, and a growth once, not twice from the contract test's single one.
+    worker.verification_results = ['failed', 'passed']
+    worker.diagnoses = ['implementation']
+    worker.checks_results = ['failed', 'failed', 'passed']
+    worker.checks_failures = [2, 3]
+    state = await delivered(env, await deliver(env, repository_selection))
+    assert worker.checks_runs == ['failed', 'failed', 'passed']
+    assert [item['target'] for item in state.repairs] == ['implementation'] * 3
+    assert state.verification_error is None
+    assert state.publication_status == 'completed' and worker.published
+
+
 async def test_checks_that_keep_failing_the_same_way_end_the_rounds_unpushed(
         env, worker, repository_selection):
     worker.checks_results = ['failed']
