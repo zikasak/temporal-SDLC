@@ -20,7 +20,7 @@ from app.requirements.service import (
     answer_delivery_questions,
     answer_questions,
     finalize_session,
-    fork,
+    fork as fork_session,
     get_session,
     retry_generation,
     retry_message,
@@ -64,9 +64,11 @@ class CreateBody(BaseModel):
 
     @model_validator(mode="after")
     def answer_every_question(self) -> "CreateBody":
-        if len(self.answers) != len(INTAKE_QUESTIONS[self.kind]):
-            raise ValueError(f"Answer all {len(INTAKE_QUESTIONS[self.kind])} questions "
-                             "of this kind of task")
+        # Either every question of the kind is answered, in order, or none is and the
+        # interviewer asks what it needs; a partial list cannot be matched to the questions.
+        count = len(INTAKE_QUESTIONS[self.kind])
+        if self.answers and len(self.answers) != count:
+            raise ValueError(f"Answer all {count} questions of this kind of task, or none")
         return self
 
 
@@ -272,7 +274,7 @@ async def refresh_checkout(session_id: str):
 async def fork(session_id: str, body: ForkBody):
     _check_session_id(session_id)
     try:
-        fork_id, task_flow_id = await fork(session_id, body.message_index)
+        fork_id, task_flow_id = await fork_session(session_id, body.message_index)
     except Exception as exc:
         raise http_error(exc) from exc
     return {"session_id": fork_id, "task_flow_id": task_flow_id}
