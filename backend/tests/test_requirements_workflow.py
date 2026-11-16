@@ -21,6 +21,7 @@ from app.temporal.sessions import InvalidForkPoint
 from app.temporal import workflows as session_workflows
 from app.temporal.workflows import RequirementsWorkflow
 from tests.pipeline import abandoned
+from tests.dev_server import start_dev_server
 
 TASK_QUEUE = "requirements-test"
 # How long a session waits for the user before it expires, in the tests that let it.
@@ -124,7 +125,7 @@ async def env():
 async def server():
     """The dev server, for children started with the repository's search attributes,
     which the time-skipping one does not know."""
-    async with await WorkflowEnvironment.start_local() as server:
+    async with await start_dev_server() as server:
         await ensure_search_attributes(server.client)
         yield server
 

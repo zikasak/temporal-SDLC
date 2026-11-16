@@ -12,7 +12,6 @@ from temporalio import activity
 from temporalio.client import WorkflowExecutionStatus, WorkflowUpdateFailedError
 from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError
-from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, Worker
 
 from app.api.routes.requirements import router
@@ -40,6 +39,7 @@ from tests.pipeline import (
     ADDED_SEAM, CODE, COMPONENT_IMAGE, SEAM, SEAM_IMAGE, FakeCodegenWorkflow, FakeStages,
     finished, legacy_patch_markers, patch_ids, stage_workers,
 )
+from tests.dev_server import start_dev_server
 
 TASK_QUEUE = "delivery-test"
 DOCUMENT = {"document_id": "0" * 32, "filename": "requirements.md",
@@ -148,7 +148,7 @@ async def env():
     search attributes, which the time-skipping server cannot register, and it tells a
     parent that its child was terminated and terminates children with their parent. No
     test here needs time skipped."""
-    async with await WorkflowEnvironment.start_local() as env:
+    async with await start_dev_server() as env:
         await ensure_search_attributes(env.client)
         yield env
 

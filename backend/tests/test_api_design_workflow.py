@@ -31,6 +31,7 @@ from tests.pipeline import (
     CODE, FakeCodegenWorkflow, FakeStages, abandoned, finished, legacy_patch_markers, patch_ids,
     stage_workers,
 )
+from tests.dev_server import start_dev_server
 
 TASK_QUEUE = "api-design-test"
 # How long a session waits for the user before it expires, in the tests that let it.
@@ -102,7 +103,7 @@ async def env():
 async def server():
     """The dev server, for sessions that start their deliveries and forks with the
     repository's search attributes, which the time-skipping one does not know."""
-    async with await WorkflowEnvironment.start_local() as server:
+    async with await start_dev_server() as server:
         await ensure_search_attributes(server.client)
         yield server
 
