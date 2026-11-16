@@ -116,5 +116,10 @@ def test_workflow_listing_accepts_the_architecture_type(admin):
     for item in body["workflows"]:
         assert item["workflow_type"] == "ArchitectureWorkflow", item
         assert item["workflow_id"].startswith("architecture-session-"), item
-        # A child of its requirements session.
-        assert item["parent_workflow_id"].startswith("requirements-session-"), item
+        # FR-125/FR-132: a direct child of its task flow, never of another stage flow.
+        parent = item["parent_workflow_id"]
+        assert parent is None or isinstance(parent, str), item
+        if parent is not None:
+            assert parent
+            assert not parent.startswith(("requirements-session-", "architecture-session-",
+                                          "api-design-session-")), item

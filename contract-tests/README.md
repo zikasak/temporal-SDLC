@@ -163,9 +163,10 @@ Contract ambiguities and how the suite reads them:
   never waiting, no stage of a task in the top-level list, and no children for an unknown
   parent. Whether `parent` together with `top_level=false` is rejected is not stated, so
   it is not tested. Existing tests that mention `parent_workflow_id` of an architecture
-  session being a requirements session (`test_architecture.py`) predate task flows (a stage's
-  parent is now the task flow); they only inspect a listing and pass for an empty one, and
-  `test_workflow_listing_accepts_the_architecture_type` is left as it was.
+  session being a requirements session predate task flows; a stage's parent is now the task
+  flow (FR-125, FR-132). `test_workflow_listing_accepts_the_architecture_type` was corrected
+  to assert that an architecture session's parent is never a requirements, architecture or
+  API design session (the task flow's ID prefix is not specified, so only that is checked).
 - Unknown IDs are well formed (prefix and 32 hex digits) so that they are treated as
   unknown rather than malformed.
 
