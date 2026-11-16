@@ -150,6 +150,22 @@ Contract ambiguities and how the suite reads them:
   that every requirements and API design session action requires sign-in. The contract does
   not say how an invalid `page_token` is reported before Temporal is contacted, so it is not
   tested.
+- Task flows (FR-125 to FR-143, `tests/test_task_flows.py`): children, pending/skipped
+  stages, linked earlier stages, closing with the delivery's status, fork and fix-round task
+  flows and the unresolved findings marker need Temporal, GitHub and an LLM. Without them the
+  suite checks that a task in an unreachable repository is refused (404, 409 or 503; the
+  contract lists all three) and that a task of 10000 characters passes size validation, the
+  intake's types, `GET /workflows` accepting `type=TaskWorkflow`, `parent` and `top_level`
+  (422 when combined, `top_level=true`), a garbage `page_token` (422, or 503 when Temporal is
+  unreachable), and, when Temporal answers, invariants of every listed execution:
+  `name`, `linked`, `waiting_for_user` and `unresolved_findings` always present, `name` a
+  string only for a TaskWorkflow, pending/skipped only for stages with a parent, a closed flow
+  never waiting, no stage of a task in the top-level list, and no children for an unknown
+  parent. Whether `parent` together with `top_level=false` is rejected is not stated, so
+  it is not tested. Existing tests that mention `parent_workflow_id` of an architecture
+  session being a requirements session (`test_architecture.py`) predate task flows (a stage's
+  parent is now the task flow); they only inspect a listing and pass for an empty one, and
+  `test_workflow_listing_accepts_the_architecture_type` is left as it was.
 - Unknown IDs are well formed (prefix and 32 hex digits) so that they are treated as
   unknown rather than malformed.
 
