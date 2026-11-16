@@ -4,11 +4,11 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 from temporalio import workflow
-from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from app.api.routes import workflows as workflows_route
 from app.temporal import executions
+from tests.dev_server import start_dev_server
 
 TASK_QUEUE = "listing-test"
 
@@ -52,7 +52,7 @@ class FakeSession:
 
 @pytest.fixture(scope="module")
 async def env():
-    async with await WorkflowEnvironment.start_local() as env:
+    async with await start_dev_server() as env:
         yield env
 
 

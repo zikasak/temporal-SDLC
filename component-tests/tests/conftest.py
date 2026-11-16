@@ -9,6 +9,15 @@ from temporalio.testing import WorkflowEnvironment
 
 from helpers import RECORD, Recorder
 
+# The dev server reads each history shard's task queues at most 20 times a second by
+# default, so every workflow task, activity or child started right after another waits up
+# to 50 ms; without the limit the tests run in a fraction of the time.
+FAST_TASK_DISPATCH = [
+    arg for setting in ('history.transferProcessorMaxPollRPS=10000',
+                        'history.timerProcessorMaxPollRPS=10000',
+                        'history.visibilityProcessorMaxPollRPS=10000')
+    for arg in ('--dynamic-config-value', setting)]
+
 
 @pytest.fixture(autouse=True)
 def recorder() -> Recorder:
@@ -36,6 +45,7 @@ async def local_env() -> AsyncIterator[WorkflowEnvironment]:
             SearchAttributeKey.for_keyword("Branch"),
             SearchAttributeKey.for_keyword("OnboardingId"),
         ],
+        dev_server_extra_args=FAST_TASK_DISPATCH,
     )
     try:
         yield env
