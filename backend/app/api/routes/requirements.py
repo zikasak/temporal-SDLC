@@ -147,6 +147,13 @@ async def retrieve_intake():
     return intake()
 
 
+def _created(session_id: str, task_flow_id: str | None) -> dict[str, str]:
+    """A started session, with its task flow unless it runs on its own."""
+    if task_flow_id is None:
+        return {"session_id": session_id}
+    return {"session_id": session_id, "task_flow_id": task_flow_id}
+
+
 @router.post("/sessions", status_code=201)
 async def create_session(body: CreateBody):
     try:
@@ -157,7 +164,7 @@ async def create_session(body: CreateBody):
             repository=repository, kind=body.kind, answers=body.answers, task=body.task)
     except Exception as exc:
         raise http_error(exc) from exc
-    return {"session_id": session_id, "task_flow_id": task_flow_id}
+    return _created(session_id, task_flow_id)
 
 
 @router.get("/sessions/{session_id}")
@@ -277,7 +284,7 @@ async def fork(session_id: str, body: ForkBody):
         fork_id, task_flow_id = await fork_session(session_id, body.message_index)
     except Exception as exc:
         raise http_error(exc) from exc
-    return {"session_id": fork_id, "task_flow_id": task_flow_id}
+    return _created(fork_id, task_flow_id)
 
 
 @router.get("/sessions/{session_id}/document")

@@ -11,7 +11,10 @@ from app.requirements.lookup import requirements_session_lookup
 from app.requirements.models import DIRECT_KINDS, RequirementsState, TaskKind
 from app.requirements.prompt import intake_messages, opening_message
 from app.task_flow.models import FORK_SUFFIX, TaskFlowState
-from app.task_flow.service import check_open, derived_name, new_stage_id, start_task_flow
+from app.task_flow.service import (
+    check_open, derived_name, flow_cannot_run, new_stage_id, run_stage_alone, stage_started,
+    start_task_flow,
+)
 from app.temporal.client import connect_temporal
 from app.temporal.sessions import (
     SessionBusy, SessionNotFound, fork_messages, start_update, state_at_message,
@@ -24,11 +27,12 @@ async def start_task(
     state: RequirementsState | None = None, *, repository: RepositorySelection | None = None,
     kind: TaskKind | None = None, answers: list[str] | None = None, task: str = "",
     name: str = "", name_suffix: str = "", origin: str = "new", task_queue: str | None = None,
-) -> tuple[str, str]:
+) -> tuple[str, str | None]:
     """Start a new top-level task flow whose requirements child interviews the user in
     `repository` from their answers to the intake questions of `kind` and their `task`,
     or from a prepared `state` such as a fork. Returns the session's and the task flow's
-    IDs. `task_queue` is the queue the flow runs on, such as the forked session's."""
+    IDs, the latter None when the session runs on its own. `task_queue` is the queue the
+    flow runs on, such as the forked session's."""
     if state is None:
         if repository is None:
             raise ValueError("A requirements session needs a repository.")
@@ -44,6 +48,12 @@ async def start_task(
         origin=origin,  # type: ignore[arg-type]
         first_stage="requirements", first_stage_id=session_id, requirements=state),
         client=client, task_queue=task_queue)
+    if not await stage_started(client, session_id) and await flow_cannot_run(client, flow_id):
+        # No worker on the queue runs task flows: the session runs on its own.
+        await run_stage_alone(client, flow_id, "RequirementsWorkflow", session_id,
+                              dataclasses.replace(state, task_flow_id=None, pending=False),
+                              state.repository, task_queue)
+        return session_id, None
     logger.info("Started requirements session %s in task flow %s", session_id, flow_id)
     return session_id, flow_id
 
@@ -71,7 +81,7 @@ async def fork_session(session_id: str, message_index: int) -> str:
     return fork_id
 
 
-async def fork(session_id: str, message_index: int) -> tuple[str, str]:
+async def fork(session_id: str, message_index: int) -> tuple[str, str | None]:
     """A new session with the conversation up to the message, and the requirements as
     they were at that point, in a new task flow of its own named after the original with
     a " (fork)" suffix; 409 once the session's flow has completed or been cancelled.

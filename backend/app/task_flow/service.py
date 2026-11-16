@@ -7,6 +7,7 @@ import logging
 import uuid
 from typing import Any
 
+from temporalio.api.enums.v1 import EventType
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.service import RPCError, RPCStatusCode
@@ -53,7 +54,7 @@ async def start_task_flow(state: TaskFlowState, flow_id: str | None = None, *,
     if state.first_stage != "delivery" and state.first_stage_id:
         await register(state.first_stage_id)
     if state.first_stage_id:
-        await _first_stage_started(client, state.first_stage_id)
+        await stage_started(client, state.first_stage_id)
     logger.info("Started task flow %s (%s) with its %s stage %s", flow_id, state.origin,
                 state.first_stage, state.first_stage_id)
     return flow_id
@@ -66,21 +67,66 @@ FIRST_STAGE_WAIT_SECONDS = 2.0
 FIRST_STAGE_POLL_SECONDS = 0.05
 
 
-async def _first_stage_started(client: Any, workflow_id: str) -> None:
+async def stage_started(client: Any, workflow_id: str) -> bool:
+    """Whether the stage `workflow_id` has been started, waiting a bounded while for it;
+    True too when that cannot be checked."""
     try:
         async with asyncio.timeout(FIRST_STAGE_WAIT_SECONDS):
             while True:
                 try:
                     await client.get_workflow_handle(workflow_id).describe()
-                    return
+                    return True
                 except RPCError as exc:
                     if exc.status != RPCStatusCode.NOT_FOUND:
                         logger.warning("Could not check the first stage %s: %s",
                                        workflow_id, exc)
-                        return
+                        return True
                 await asyncio.sleep(FIRST_STAGE_POLL_SECONDS)
     except TimeoutError:
         logger.warning("The first stage %s of a task flow has not started yet", workflow_id)
+        return False
+
+
+async def flow_cannot_run(client: Any, flow_id: str) -> bool:
+    """Whether the task flow's workflow tasks fail, such as on a queue whose worker does
+    not run task flows, waiting a bounded while to find out; False while no worker has
+    tried to run it, as when the worker is down, so that the flow runs once it is up."""
+    try:
+        async with asyncio.timeout(FIRST_STAGE_WAIT_SECONDS):
+            while True:
+                handle = client.get_workflow_handle(flow_id)
+                async for event in handle.fetch_history_events():
+                    if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED:
+                        return True
+                    if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
+                        return False
+                await asyncio.sleep(FIRST_STAGE_POLL_SECONDS * 4)
+    except TimeoutError:
+        return False
+    except RPCError as exc:
+        logger.warning("Could not check task flow %s: %s", flow_id, exc)
+        return False
+
+
+async def run_stage_alone(client: Any, flow_id: str, workflow_type: str, workflow_id: str,
+                          start: Any, repository: Any, task_queue: str | None) -> None:
+    """Run a first stage that its task flow has not started, such as when no worker runs
+    task flows on the queue, as a session of its own: the task flow is stopped and the
+    stage started directly, so that the session the caller reports exists."""
+    try:
+        await client.get_workflow_handle(flow_id).terminate(
+            "The task flow did not start its first stage; it runs on its own.")
+    except RPCError as exc:
+        if exc.status != RPCStatusCode.NOT_FOUND:
+            raise
+    await client.start_workflow(
+        workflow_type, start, id=workflow_id, task_queue=task_queue or TASK_QUEUE,
+        id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+        id_conflict_policy=WorkflowIDConflictPolicy.TERMINATE_EXISTING,
+        **execution_fields(repository),
+    )
+    logger.warning("Started stage %s on its own: task flow %s did not start it",
+                   workflow_id, flow_id)
 
 
 async def _describe(flow_id: str | None, client: Any = None):
