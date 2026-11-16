@@ -496,7 +496,7 @@ async def run_script(role: str, session_id: str, workspace: Path, command: str,
         await docker(
             'create', '--name', name, '--cap-drop=ALL', '--security-opt=no-new-privileges',
             '--pids-limit=1024', '--memory=6g', '--cpus=2', '--user', '10001:10001',
-            '-e', 'HOME=/home/agent', '-e', 'CI=true',
+            '-e', 'HOME=/home/agent', '-e', 'CI=true', '-e', 'PYTHONDONTWRITEBYTECODE=1',
             '--workdir', f'/workspace/{workdir}', '--entrypoint', 'sh', image, '-c', command)
         async with async_context(tempfile.TemporaryDirectory) as temporary:
             archive = Path(temporary) / 'workspace.tar'
@@ -611,6 +611,9 @@ async def run_agent(role: str, session_id: str, workspace: Path,
             # core dumps: a crashed CLI left one of gigabytes in the project it salvages.
             '--security-opt=no-new-privileges', '--pids-limit=1024', '--ulimit', 'core=0',
             '--memory=4g', '--cpus=2', '--user', '10001:10001',
+            # No bytecode caches in the project: they were copied into what tests read as
+            # text, and failed them in the sandbox only.
+            '-e', 'PYTHONDONTWRITEBYTECODE=1',
             '-e', 'OPENAI_API_KEY', '-e', 'OPENAI_BASE_URL',
             *trace_args, *setting_args, *adapter_args, agent_image, env=environment,
         )

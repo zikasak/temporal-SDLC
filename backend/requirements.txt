@@ -16,5 +16,6 @@ python-multipart
 pypdf
 pytest
 pytest-asyncio
+pytest-xdist
 pyyaml
 openapi-spec-validator

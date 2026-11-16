@@ -251,17 +251,22 @@ The repository's checks script, {script}, builds every part of the repository an
 these tests; verification runs it after you finish and sends its failures back to you. When
 the checkout holds it, run it with shell (`sh {script}` from the project root) before you
 finish and fix what fails. Without it, build each part you changed and run its tests with
-its own tool.
+its own tool. A whole run takes minutes: give that shell call a `timeout_seconds` of 900 and
+run it in one call, not split into parts or polled in the background. Run the tests your
+change concerns first, on their own, to learn of a failure quickly.
 """.format(script=CHECKS_SCRIPT)
 
 CHECKS_REPAIR_PROMPT = """
 This is a repair run. /workspace/service already holds your previous implementation, which
 builds and passes the contract tests, but the repository's checks script failed against it:
 its own builds or tests. The `repair` entry of the input holds `instructions`, an analysis of
-the failure, and `checks`, the relevant part of the script's output. Fix the cause with
-targeted edits: the code when it broke what a test rightly asserts, or a test of the
-repository when your change rightly altered what it asserts. Run the checks script again
-before you finish. Do not delete, skip or weaken tests to make them pass.
+the failure, and `checks`, the relevant part of the script's output, which starts with the
+tests that failed and what each failed with. Fix the cause with targeted edits: the code
+when it broke what a test rightly asserts, or a test of the repository when your change
+rightly altered what it asserts. First run the failed tests on their own and see them fail;
+when a failed test is not in your workspace, say so in your notes and work from its output.
+Once they pass, run the whole checks script again (shell `timeout_seconds` 900, in one
+call) before you finish. Do not delete, skip or weaken tests to make them pass.
 """
 
 ONBOARDING_CHECKS_PROMPT = """

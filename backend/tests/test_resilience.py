@@ -26,7 +26,8 @@ from app.implementation.activities import has_unit_tests, is_service_file, publi
 from app.languages import get_language
 from app.llm import limits
 from app.verification.checks import (
-    failure_excerpt, failure_outcome, failure_signature, fallback_analysis, parse_analysis,
+    checks_excerpt, failure_excerpt, failure_outcome, failure_signature, fallback_analysis,
+    parse_analysis,
 )
 
 from tests.test_agent_workflows import profile, scripted_model  # noqa: F401  (fixtures)
@@ -378,6 +379,35 @@ def test_failure_excerpt_keeps_each_failure_once_without_the_noise():
     assert failure_signature(excerpt) == ['E       AssertionError: assert [] == [#]',
                                           'AssertionError: assert [] == [#]']
 
+
+# A test that timed out deep in asyncio: pytest prints the library's source at length.
+HANG_LOG = '''=================================== FAILURES ===================================
+_ TestFork.test_fork_is_refused_after_it_closed[completed] _
+fut = <coroutine object fork_session at 0x7fd786807bc0>, timeout = 10.0
+    async def wait_for(fut, timeout):
+''' + ''.join(f'        # line {n} of the source of asyncio.wait_for, nobody needs it\n'
+          for n in range(400)) + '''/usr/local/lib/python3.12/asyncio/tasks.py:520: in wait_for
+E   TimeoutError
+tests/test_session_fork_closed_flow.py:61: in test_fork_is_refused_after_it_closed
+    await asyncio.wait_for(service.fork_session('req-open', 0), 10)
+E   TimeoutError
+=========================== short test summary info ============================
+FAILED tests/test_session_fork_closed_flow.py::TestFork::test_fork_is_refused_after_it_closed[completed] - TimeoutError
+========================= 1 failed, 783 passed in 470.38s ======================
+'''
+
+
+def test_checks_excerpt_starts_with_each_failed_test_and_what_it_failed_with():
+    excerpt = checks_excerpt(HANG_LOG, limit=3000)
+    report, _, rest = excerpt.partition('\n\nThe output:\n')
+    assert report.splitlines()[:2] == [
+        'Tests that failed (1):',
+        'FAILED tests/test_session_fork_closed_flow.py::TestFork::'
+        'test_fork_is_refused_after_it_closed[completed] - TimeoutError']
+    # The frames of the repository's own code are kept, not those of installed packages.
+    assert 'tests/test_session_fork_closed_flow.py:61: in test_fork_is_refused' in report
+    assert 'asyncio/tasks.py' not in report and 'E   TimeoutError' in report
+    assert rest and len(excerpt) <= 3000
 
 FORK = 'tests/test_fork.py::TestFork::test_fork[{}]'
 # The same two tests failing in two rounds, the second time through a chained traceback.

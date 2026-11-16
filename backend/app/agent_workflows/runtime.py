@@ -74,6 +74,11 @@ def _max_turns(profile: AgentProfile) -> int:
 
 READ_LINES = 500
 READ_CHARS = 30000
+# A shell command's default and longest time. The longest must stay below the time a
+# coding agent's model may go silent (app.llm.claude.ChatClaude.timeout), which a command
+# running in a tool call counts towards.
+SHELL_TIMEOUT = 120
+SHELL_MAX_TIMEOUT = 900
 SHELL_CHARS = 8000
 SHELL_TAIL_CHARS = 3000
 DIAGNOSTIC_LINES = 40
@@ -274,13 +279,17 @@ def workspace_tools(root: Path, contracts: Path | None = None,
         return search_lines(regex, workspace_path(path), pattern)
 
     @tool
-    async def shell(command: str) -> str:
-        """Run a shell command in the project (120 second timeout). Processes it starts
-        in the background end with it: start a server and use it in one command.
+    async def shell(command: str, timeout_seconds: int = SHELL_TIMEOUT) -> str:
+        """Run a shell command in the project. It is stopped after `timeout_seconds`
+        (default 120, at most 900): give a test suite or a checks script the time it needs
+        and run it whole in one call, rather than splitting it or polling a background
+        run. Processes it starts in the background end with it: start a server and use it
+        in one command.
 
         Long output is saved to a log file and summarized as its error lines and tail;
         the summary names the log so read_file or search_files can retrieve the rest.
         """
+        limit = min(max(int(timeout_seconds), 1), SHELL_MAX_TIMEOUT)
         logs = root / OUTPUT_DIR
         await run_sync(logs.mkdir, exist_ok=True)
         log = logs / f'shell-{next(commands)}.log'
@@ -289,14 +298,14 @@ def workspace_tools(root: Path, contracts: Path | None = None,
                 command, cwd=root, stdout=output, stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True)
             try:
-                await asyncio.wait_for(process.wait(), timeout=120)
+                await asyncio.wait_for(process.wait(), timeout=limit)
                 status = f'Exit code: {process.returncode}'
             except BaseException as exc:
                 _end_session(process.pid)
                 await process.wait()
                 if not isinstance(exc, TimeoutError):
                     raise
-                status = 'Command timed out'
+                status = f'Command timed out after {limit} seconds'
             # What the command left running in the background goes too: such processes
             # kept every thread they had until the container hit its process limit.
             _end_session(process.pid)

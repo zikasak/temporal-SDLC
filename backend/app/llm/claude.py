@@ -30,6 +30,7 @@ TRACE_EXPORT_TIMEOUT = 120
 FINAL_EXPORT_ENV = 'APP_CLAUDE_FINAL_EXPORT'
 # Claude Code reports this in its User-Agent; the SDK would label every run 'sdk-py'.
 ENTRYPOINT = 'temporal-sdlc'
+MCP_TOOL_TIMEOUT_MS = 960_000
 
 
 class ClaudeTurnLimit(RuntimeError):
@@ -42,7 +43,9 @@ class ChatClaude(Runnable):
     thinking_level: str = 'default'
     cli_path: str | None = None
     # Seconds without any message from Claude; a coding stage's many turns may take longer.
-    timeout: float = 600
+    # A tool call sends nothing while it runs, so this exceeds the longest shell command
+    # (app.agent_workflows.runtime.SHELL_MAX_TIMEOUT).
+    timeout: float = 1200
     # Coding stages keep native transcripts beside the project through a pause.
     cwd: Path | None = None
     config_dir: Path | None = None
@@ -102,6 +105,9 @@ class ChatClaude(Runnable):
                        PYTHONPATH=os.pathsep.join(filter(None, [str(Path(__file__).parents[2]),
                                                                os.getenv('PYTHONPATH')])))
             env['CC_LANGFUSE_STATE_DIR'] = str((self.config_dir or cwd) / '.langfuse-state')
+            # The CLI's own limit on one tool call, in milliseconds: above the longest
+            # shell command (app.agent_workflows.runtime.SHELL_MAX_TIMEOUT, 900 seconds).
+            env['MCP_TOOL_TIMEOUT'] = str(MCP_TOOL_TIMEOUT_MS)
             if self.config_dir is not None:
                 await run_sync(self.config_dir.mkdir, parents=True, exist_ok=True, mode=0o700)
                 env['CLAUDE_CONFIG_DIR'] = str(self.config_dir)
