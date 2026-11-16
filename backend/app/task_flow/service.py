@@ -60,21 +60,27 @@ async def start_task_flow(state: TaskFlowState, flow_id: str | None = None, *,
 
 
 # How long starting a task flow waits for it to have started its first stage, which the
-# caller then reports, such as the session the user opens next.
-FIRST_STAGE_POLLS = 100
-FIRST_STAGE_POLL_SECONDS = 0.1
+# caller then reports, such as the session the user opens next. The wait is best effort
+# and bounded: a stage that has not started by then is reported all the same.
+FIRST_STAGE_WAIT_SECONDS = 2.0
+FIRST_STAGE_POLL_SECONDS = 0.05
 
 
 async def _first_stage_started(client: Any, workflow_id: str) -> None:
-    for _ in range(FIRST_STAGE_POLLS):
-        try:
-            await client.get_workflow_handle(workflow_id).describe()
-            return
-        except RPCError as exc:
-            if exc.status != RPCStatusCode.NOT_FOUND:
-                raise
-        await asyncio.sleep(FIRST_STAGE_POLL_SECONDS)
-    logger.warning("The first stage %s of a task flow has not started yet", workflow_id)
+    try:
+        async with asyncio.timeout(FIRST_STAGE_WAIT_SECONDS):
+            while True:
+                try:
+                    await client.get_workflow_handle(workflow_id).describe()
+                    return
+                except RPCError as exc:
+                    if exc.status != RPCStatusCode.NOT_FOUND:
+                        logger.warning("Could not check the first stage %s: %s",
+                                       workflow_id, exc)
+                        return
+                await asyncio.sleep(FIRST_STAGE_POLL_SECONDS)
+    except TimeoutError:
+        logger.warning("The first stage %s of a task flow has not started yet", workflow_id)
 
 
 async def _describe(flow_id: str | None, client: Any = None):
