@@ -41,6 +41,11 @@ AGENT_SETTINGS = ('AGENT_CONTEXT_TOKENS', 'LOG_LEVEL', 'IMPLEMENTATION_MAX_TURNS
 CONTAINER_LINE_CHARS = 4000
 # How long a container's remaining output may take to arrive once it was waited for.
 LOG_DRAIN_SECONDS = 2
+# The longest an agent may run.
+AGENT_TIMEOUT_SECONDS = 3600
+# How long an agent that ran out of time has, once asked to stop, to export its traces
+# (app.llm.claude.TRACE_EXPORT_TIMEOUT, then the tracing flush) before it is killed.
+AGENT_STOP_GRACE_SECONDS = 150
 # A level name near the start of a line: Python's `INFO name: ...`, Logback's
 # `12:00:00.000 [main] WARN ...`, Spring Boot's `<timestamp>  ERROR 1 --- ...`.
 _LINE_LEVEL = re.compile(r'\b(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL|CRITICAL)\b')
@@ -569,6 +574,18 @@ def _archive_workspace(workspace: Path, archive: Path) -> None:
             tar.add(item, arcname=item.name, filter=owner)
 
 
+async def _stop_agent(name: str, role: str, session_id: str) -> None:
+    """Ask an agent that ran out of time to stop, so that it exports its traces before
+    it is removed; `docker rm -f` alone kills it with whatever it had not exported."""
+    logger.warning('%s agent ran out of time; stopping it (session=%s, container=%s)',
+                   role, session_id, name)
+    try:
+        await docker('stop', '-t', str(AGENT_STOP_GRACE_SECONDS), name,
+                     timeout=AGENT_STOP_GRACE_SECONDS + 30)
+    except Exception:
+        logger.warning('Could not stop agent container %s', name, exc_info=True)
+
+
 async def run_agent(role: str, session_id: str, workspace: Path,
                     output: Path, output_name: str, log_path: Path, *,
                     image_build: AgentImageBuild, paused: Path) -> None:
@@ -625,7 +642,11 @@ async def run_agent(role: str, session_id: str, workspace: Path,
         await docker('start', name)
         logger.info('%s agent running (session=%s, container=%s)', role, session_id, name)
         async with forward_logs(name, f'{label} agent {session_id}', environment):
-            await docker('wait', name, timeout=3600)
+            try:
+                await docker('wait', name, timeout=AGENT_TIMEOUT_SECONDS)
+            except TimeoutError:
+                await _stop_agent(name, role, session_id)
+                raise
         state = json.loads(await docker('inspect', '--format', '{{json .State}}', name))
         try:
             agent_log = await docker('logs', '--tail', '200', name, timeout=30)

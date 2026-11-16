@@ -440,7 +440,7 @@ def note_tool(notes: list[str]) -> BaseTool:
 LIMIT_RETRIES = 2
 LIMIT_RETRY_SECONDS = 60
 # What a run of the agent ended with.
-DONE, PAUSED, LIMITED = 'done', 'paused', 'limited'
+DONE, PAUSED, LIMITED, STOPPED = 'done', 'paused', 'limited', 'stopped'
 
 
 class ProviderLimit(Exception):
@@ -527,6 +527,18 @@ def configure_container_logging() -> None:
 async def run_agent(profile: AgentProfile) -> None:
     role = os.getenv('APP_TRACE_AGENT_ROLE', profile.root.name).replace('_', '-')
     outcome = DONE
+    # The agent is the container's PID 1, which ignores SIGTERM without a handler: `docker
+    # stop` would wait, then kill it with its traces unexported. Cancelling the run instead
+    # closes the model's session, which exports it, then flushes below.
+    loop, task = asyncio.get_running_loop(), asyncio.current_task()
+    stopped = []
+
+    def stop() -> None:
+        if not stopped:
+            stopped.append(True)
+            task.cancel()
+
+    loop.add_signal_handler(signal.SIGTERM, stop)
     try:
         with trace_operation(f'author-{role}', as_type='agent', feature=role,
                              session_id=os.getenv('APP_TRACE_SESSION_ID'),
@@ -538,8 +550,16 @@ async def run_agent(profile: AgentProfile) -> None:
                     PAUSED: 'Paused for the user\'s answers',
                     LIMITED: 'Stopped until the provider is available',
                 }.get(outcome, profile.completion_message))
+    except asyncio.CancelledError:
+        if not stopped:
+            raise
+        print('Stopped before finishing', flush=True)
+        outcome = STOPPED
     finally:
+        loop.remove_signal_handler(signal.SIGTERM)
         await run_sync(shutdown_tracing)
+    if outcome == STOPPED:
+        sys.exit(128 + signal.SIGTERM)
     if outcome == PAUSED:
         sys.exit(PAUSE_EXIT)
     if outcome == LIMITED:

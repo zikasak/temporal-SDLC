@@ -26,7 +26,7 @@ async def record_repository_tests(tmp_path, monkeypatch) -> dict:
                                            'session', 'java')
 
 
-@pytest.mark.parametrize('failure', [None, 'agent', 'build', 'empty', 'cancel'])
+@pytest.mark.parametrize('failure', [None, 'agent', 'build', 'empty', 'cancel', 'timeout'])
 async def test_contract_only_generation_publishes_compiled_suite(tmp_path, monkeypatch, failure):
     """Owns source isolation, Docker lifecycle and publication at the host boundary."""
     monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
@@ -51,10 +51,15 @@ async def test_contract_only_generation_publishes_compiled_suite(tmp_path, monke
     image_id = 'sha256:' + 'c' * 64
     container_name = None
     removed = []
+    stopped = []
     runner_built = False
 
     async def docker(*args, **kwargs):
         nonlocal container_name, runner_built
+        if args[0] == 'stop':
+            # Stopped with time to export its traces, before it is removed.
+            assert not removed
+            stopped.append((args[-1], args[args.index('-t') + 1]))
         if args[0] == 'create':
             container_name = args[args.index('--name') + 1]
             assert container_name.startswith('test-generation-')
@@ -81,6 +86,8 @@ async def test_contract_only_generation_publishes_compiled_suite(tmp_path, monke
                     'test_glob': 'src/test/java/**/*Test.java'}
         if args[0] == 'wait' and failure == 'cancel':
             raise asyncio.CancelledError()
+        if args[0] == 'wait' and failure == 'timeout':
+            raise TimeoutError()
         if args[0] == 'inspect':
             return json.dumps({'ExitCode': 1 if failure == 'agent' else 0})
         if args[0] == 'logs':
@@ -119,8 +126,10 @@ async def test_contract_only_generation_publishes_compiled_suite(tmp_path, monke
     environment = ActivityEnvironment()
     if failure:
         expected = {'agent': 'model unavailable', 'build': 'test compilation failed',
-                    'empty': 'did not produce a test suite', 'cancel': None}[failure]
-        exception = asyncio.CancelledError if failure == 'cancel' else RuntimeError
+                    'empty': 'did not produce a test suite', 'cancel': None,
+                    'timeout': None}[failure]
+        exception = {'cancel': asyncio.CancelledError,
+                     'timeout': TimeoutError}.get(failure, RuntimeError)
         with pytest.raises(exception, match=expected) as raised:
             await environment.run(activities.generate_service_tests, 'session', context)
         assert not manifest.exists() and not (manifest.parent / 'suite').exists()
@@ -134,6 +143,8 @@ async def test_contract_only_generation_publishes_compiled_suite(tmp_path, monke
         assert (Path(result['path']) / 'src/test/java/example/ContractTest.java').is_file()
     assert runner_built == (failure in {None, 'build'})
     assert removed == [container_name]
+    assert stopped == ([(container_name, str(docker_agents.AGENT_STOP_GRACE_SECONDS))]
+                       if failure == 'timeout' else [])
     assert private_source.read_text() == 'PRIVATE IMPLEMENTATION SOURCE'
 
 

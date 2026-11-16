@@ -400,6 +400,51 @@ shutdown_tracing()
     assert len(generations) == 2
 
 
+def test_claude_agent_stopped_mid_turn_exports_its_session_before_exiting(
+        claude_http, tracing_server, tmp_path):
+    replies, requests = claude_http
+    environment, spans = tracing_server
+    environment.update(TEST_MODEL_SETTINGS=json.dumps({'adapter': 'claude', 'model': 'claude-test'}),
+                       TEST_WORKSPACE=str(tmp_path / 'stage'),
+                       APP_TRACE_SESSION_ID='stopped-pipeline', APP_TRACE_AGENT_ROLE='implementation')
+    # The turn is still running, waiting for its model, when the agent is stopped.
+    replies.extend([[{'type': 'tool_use', 'id': 'first', 'name': 'mcp__flow__write_file',
+                      'input': {'path': 'first.txt', 'content': 'first'}}],
+                    (20, [{'type': 'text', 'text': 'Too late'}])])
+    run_script('''
+import asyncio, os, signal, threading, time
+from pathlib import Path
+from app.agent_workflows import runtime
+from app.settings.models import SETTINGS_FILENAME
+directory = Path(os.environ['TEST_WORKSPACE'])
+root = directory / 'service'
+root.mkdir(parents=True)
+(directory / SETTINGS_FILENAME).write_text(os.environ['TEST_MODEL_SETTINGS'])
+def stop_once_working():
+    while not (root / 'first.txt').exists():
+        time.sleep(0.05)
+    time.sleep(1)
+    os.kill(os.getpid(), signal.SIGTERM)
+threading.Thread(target=stop_once_working, daemon=True).start()
+try:
+    asyncio.run(runtime.run_agent(runtime.AgentProfile(root=root, prompt='Write files',
+        initial_messages=['Create a service'], max_turns_env='TEST_AGENT_MAX_TURNS',
+        validate_completion=lambda root: None, completion_message='Done',
+        exhaustion_message='Too many turns')))
+except SystemExit as exc:
+    assert exc.code == 128 + signal.SIGTERM, exc.code
+else:
+    raise AssertionError('The stopped agent finished')
+''', environment)
+    agent, = [span for span in spans if span.name == 'author-implementation']
+    assert attributes(agent)['langfuse.observation.level'] == 'ERROR'
+    native_turn, = [span for span in spans if span.name == 'Conversational Turn']
+    assert native_turn.parent_span_id == agent.span_id
+    tool, = [span for span in spans if attributes(span).get('langfuse.observation.type') == 'tool']
+    assert tool.name == 'Tool: mcp__flow__write_file'
+    assert tool.parent_span_id == native_turn.span_id
+
+
 def test_claude_agent_over_its_turn_budget_still_exports_its_session(
         claude_http, tracing_server, tmp_path):
     replies, requests = claude_http
