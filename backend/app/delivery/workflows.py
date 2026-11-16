@@ -26,7 +26,8 @@ with workflow.unsafe.imports_passed_through():
         DeliveryProgress, DeliveryState, mention_key, open_review_findings,
     )
     from app.review.models import review_request
-    from app.temporal.execution_fields import task_fields
+    from app.temporal.execution_fields import FLOW_STATE_ATTRIBUTE, SKIPPED, task_fields
+    from app.temporal.flow_state import FlowReporting
 
 # Marks the workflow code that waits for its pull request to be merged or closed,
 # checking it every PULL_REQUEST_CHECK_INTERVAL; runs that began to wait before it only
@@ -44,7 +45,7 @@ def _same_mention(first: tuple[str | None, int | None],
 
 @workflow.defn
 class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, Baseline,
-                       Verification, ReviewRounds, Publication):
+                       Verification, ReviewRounds, Publication, FlowReporting):
     """Turns a specified task into verified, published sources: code generation, the
     parallel service and test authors, verification with its repair loop, and the push.
     A bugfix generates no code and goes red to green instead: regression tests, proof
@@ -57,11 +58,22 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
     next decision: the restart update continues it as a new run, so every retry stays a
     child of the session the task belongs to.
 
+    The delivery of a task flow is created pending, as soon as the task is known to need
+    it, and starts once the task flow hands it the task (`begin`), or closes as skipped.
+    A tracked delivery reports whether it waits for the user (its agents' questions, or
+    open review findings while it waits) and whether it has unresolved review findings.
+
     The run and its pipelines are here; each stage's rounds are a mixin of
     app.delivery.flow, all working on the one `state`, `spec` and `progress`."""
 
     @workflow.init
     def __init__(self, state: DeliveryState) -> None:
+        self._init_reporting()
+        self._begun: DeliveryState | None = None
+        self._skip = False
+        self._adopt(state)
+
+    def _adopt(self, state: DeliveryState) -> None:
         self.state = state
         self.spec = state.spec
         self.progress = state.progress
@@ -97,8 +109,50 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
         # The failed CI this run fixes on its own, if it is such a round.
         self._ci_round: dict[str, Any] | None = state.ci_fix
 
+    def _tracked(self) -> bool:
+        return bool(self.spec.tracked)
+
+    def _waiting(self) -> bool:
+        return bool(self.progress.agent_questions) or bool(
+            self.state.waiting and self.progress.open_findings)
+
+    def _unresolved(self) -> bool | None:
+        return bool(self.progress.open_findings)
+
+    def _report_to(self) -> str | None:
+        parent = workflow.info().parent
+        return parent.workflow_id if parent else None
+
+    @workflow.signal
+    def begin(self, state: DeliveryState) -> None:
+        """The task flow starts this pending delivery with the task it was handed."""
+        if self.state.pending and self._begun is None:
+            self._begun = state
+
+    @workflow.signal
+    def skip_stage(self) -> None:
+        """The task flow will never run this pending delivery."""
+        self._skip = True
+
+    async def _await_begin(self) -> bool:
+        await workflow.wait_condition(lambda: self._begun is not None or self._skip)
+        if self._begun is None:
+            workflow.logger.info('Pending delivery skipped')
+            workflow.upsert_search_attributes([FLOW_STATE_ATTRIBUTE.value_set(SKIPPED)])
+            return False
+        state = self._begun
+        state.pending = False
+        state.spec.task_flow_id = state.spec.task_flow_id or self.spec.task_flow_id
+        self._adopt(state)
+        workflow.upsert_search_attributes([FLOW_STATE_ATTRIBUTE.value_unset()])
+        workflow.logger.info('Delivery started by its task flow')
+        return True
+
     @workflow.run
     async def run(self, state: DeliveryState) -> DeliveryProgress:
+        if self.state.pending and not await self._await_begin():
+            return self.progress
+        self._start_reporting()
         # Mentions that ended before this run, such as in a stopped one, are kept in the
         # mention history and leave the workflow's state, once a fix round that was
         # stopped has had its outcome replied.
@@ -120,6 +174,7 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
         self._start_queued()
         if workflow.patched(PULL_REQUEST_CLOSES_PATCH):
             if not await self._wait_for_pull_request():
+                await self._stop_reporting()
                 return self.progress
         else:
             # A run that began to wait before deliveries watched their pull request: the
@@ -140,6 +195,7 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
                     # turned out to be a fix request: it was accepted, so the delivery
                     # waits again and starts its round instead of closing with it queued.
                     if not self._fix_pending():
+                        await self._stop_reporting()
                         return self.progress
                     workflow.deprecate_patch('idle-queued-mentions')
                     workflow.logger.info('Fix request queued while closing; continuing')

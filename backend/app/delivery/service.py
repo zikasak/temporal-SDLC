@@ -27,6 +27,8 @@ from app.github.models import PullRequestMention
 from app.requirements.lookup import lookup_requirements
 from app.requirements.models import CHANGE_KINDS
 from app.routing.models import SEAM_MISMATCH
+from app.task_flow import service as task_flows
+from app.task_flow.models import FIX_SUFFIX, TASK_FLOW_PREFIX, TaskFlowState
 from app.temporal import registry
 from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import task_fields
@@ -62,12 +64,74 @@ async def get_state(session_id: str) -> DeliveryState | None:
         if exc.status != RPCStatusCode.NOT_FOUND:
             raise
         return None
+    if state.pending:
+        # Created by its task flow, waiting for the stages before it.
+        return None
     if description.status not in (WorkflowExecutionStatus.RUNNING,
                                   WorkflowExecutionStatus.COMPLETED):
         state = interrupted(state)
     state = await _with_acceptance(client, session_id, description, state)
     state.progress = await with_mention_history(session_id, state.progress)
+    if description.status in CLOSED_STATUSES:
+        await _with_fix_flows(client, session_id, state)
     return state
+
+
+async def _describe(client: Client, workflow_id: str) -> WorkflowExecutionDescription | None:
+    try:
+        return await client.get_workflow_handle(workflow_id).describe()
+    except RPCError as exc:
+        if exc.status != RPCStatusCode.NOT_FOUND:
+            raise
+        return None
+
+
+async def fix_flows(client: Client, session_id: str,
+                    onboarding: bool) -> list[tuple[str, str]]:
+    """The flows that carried on the closed delivery of `session_id`, oldest first, each
+    as (its workflow ID, the session its delivery runs as): a task flow of its own for a
+    task's delivery, the fix round's own top-level delivery for an onboarding's and for
+    one carried on before task flows existed."""
+    found = []
+    for number in range(1, MAX_FOLLOW_UPS + 1):
+        follow_up = follow_up_session_id(session_id, number)
+        if not onboarding:
+            flow_id = fix_flow_id(follow_up)
+            if await _describe(client, flow_id) is not None:
+                found.append((flow_id, follow_up))
+                continue
+        if await _describe(client, delivery_id(follow_up)) is not None:
+            found.append((delivery_id(follow_up), follow_up))
+            continue
+        break
+    return found
+
+
+async def _with_fix_flows(client: Client, session_id: str, state: DeliveryState) -> None:
+    """Report the flows fix rounds started after the delivery's flow closed, and the
+    mentions on its pull request that started them, with the flow each started."""
+    flows = await fix_flows(client, session_id, state.spec.onboarding)
+    state.progress.fix_flow_ids = [flow_id for flow_id, _ in flows]
+    pull = (state.progress.pull_request or {}).get('number')
+    if not flows or not pull:
+        return
+    known = {(item.get('comment_type'), item.get('comment_id'))
+             for item in state.progress.mentions}
+    started = []
+    for flow_id, follow_up in flows:
+        for item in await mention_history.history(follow_up):
+            key = (item.get('comment_type'), item.get('comment_id'))
+            if item.get('pull_number') != pull or key in known:
+                continue
+            known.add(key)
+            mention = {name: value for name, value in item.items()
+                       if name not in ('round', OUTCOME_OWED)}
+            mention['fix_flow_id'] = flow_id
+            started.append(mention)
+    if started:
+        state.progress.mentions = sorted(
+            [*state.progress.mentions, *started],
+            key=lambda item: str(item.get('received_at') or ''))
 
 
 async def follow_up_session(session_id: str) -> dict:
@@ -97,6 +161,8 @@ async def follow_up_session(session_id: str) -> dict:
         'repository': spec.repository,
         'checkout': spec.checkout,
         'architecture_session_id': None,
+        # The task flow the fix round runs in, for a task's delivery.
+        'task_flow_id': spec.task_flow_id,
         'delivery': dataclasses.asdict(state.progress),
     }
 
@@ -317,6 +383,13 @@ def follow_up_session_id(session_id: str, number: int) -> str:
     return f'{FOLLOW_UP_PREFIX}{digest}'
 
 
+def fix_flow_id(follow_up: str) -> str:
+    """The task flow that holds the delivery of the follow-up session `follow_up` of a
+    task's closed delivery: derived from it, so that a handover tried again finds it."""
+    digest = hashlib.sha256(f'{follow_up}:task-flow'.encode()).hexdigest()[:32]
+    return f'{TASK_FLOW_PREFIX}{digest}'
+
+
 def _follow_up_state(state: DeliveryState, session_id: str) -> DeliveryState:
     """The closed delivery's task as a flow of its own: the same task, its built
     artifacts and its last push to start from, under a session of its own, whose result
@@ -350,22 +423,62 @@ async def _copy_workspace(source: str, target: str) -> None:
         logger.warning('Working copy of session %s not copied to %s: %s', source, target, exc)
 
 
+async def _delivery_started(client: Client, workflow_id: str) -> None:
+    """Wait a little for a delivery its new task flow starts to run."""
+    for _ in range(MENTION_RESTART_POLLS):
+        description = await _describe(client, workflow_id)
+        if description is not None and description.status == WorkflowExecutionStatus.RUNNING:
+            return
+        await asyncio.sleep(MENTION_RESTART_POLL_SECONDS)
+
+
+async def _start_fix_flow(finished: _Finished, state: DeliveryState, flow_id: str) -> None:
+    """Start the task flow of a fix round of a task's closed delivery: named after the
+    original task flow with a " (fix)" suffix, holding the fix delivery as its child and
+    linking to the original task's stages. WorkflowAlreadyStartedError when it ran
+    before."""
+    original = finished.state.spec.task_flow_id
+    name, suffix = await task_flows.derived_name(original, FIX_SUFFIX)
+    stages = await task_flows.stages(original) if original else {}
+    linked = [item for item in stages.get('stages') or []
+              if not str(item).startswith('delivery-')]
+    if not original:
+        # A delivery from before task flows: the session it delivered for.
+        linked = [finished.state.spec.session_id]
+    spec = state.spec
+    brief = spec.brief or {}
+    state.spec.task_flow_id = flow_id
+    state.spec.tracked = True
+    await task_flows.start_task_flow(TaskFlowState(
+        kind=spec.kind, repository=spec.repository,
+        task=str(brief.get('requirements_document') or spec.requirements_document or ''),
+        name=name, name_suffix=suffix, origin='fix', first_stage='delivery',
+        first_stage_id=delivery_id(spec.session_id), delivery=state, linked=linked,
+    ), flow_id)
+
+
 async def _follow_up(finished: _Finished, session_id: str,
                      prepare=None) -> tuple[str, bool]:
     """The open flow that carries on the closed delivery of `session_id`, as its session
-    ID, started as a new top-level DeliveryWorkflow when there is none: the earliest of
+    ID, started when there is none: for a task's delivery a new task flow holding the fix
+    delivery, for an onboarding's a new top-level DeliveryWorkflow. It is the earliest of
     its follow-ups whose workflow does not exist yet or still runs. `prepare(state)`
     changes the state a new one starts from. Also true when this call started it."""
     client = finished.client
+    in_task = not finished.state.spec.onboarding
     for number in range(1, MAX_FOLLOW_UPS + 1):
         follow_up = follow_up_session_id(session_id, number)
         workflow_id = delivery_id(follow_up)
-        try:
-            description = await client.get_workflow_handle(workflow_id).describe()
-        except RPCError as exc:
-            if exc.status != RPCStatusCode.NOT_FOUND:
-                raise
-        else:
+        description = await _describe(client, workflow_id)
+        if description is None and in_task:
+            flow = await _describe(client, fix_flow_id(follow_up))
+            if flow is not None:
+                if flow.status != WorkflowExecutionStatus.RUNNING:
+                    continue
+                # Its task flow is starting its delivery.
+                await _delivery_started(client, workflow_id)
+                return follow_up, False
+        if description is not None:
             if description.status == WorkflowExecutionStatus.RUNNING:
                 return follow_up, False
             continue
@@ -373,6 +486,17 @@ async def _follow_up(finished: _Finished, session_id: str,
         if prepare is not None:
             prepare(state)
         await _copy_workspace(session_id, follow_up)
+        if in_task:
+            try:
+                await _start_fix_flow(finished, state, fix_flow_id(follow_up))
+            except WorkflowAlreadyStartedError:
+                # Started concurrently, such as by another handover: that one is the flow.
+                await _delivery_started(client, workflow_id)
+                return follow_up, False
+            await _delivery_started(client, workflow_id)
+            logger.info('Delivery of session %s closed; carried on in the task flow %s',
+                        session_id, fix_flow_id(follow_up))
+            return follow_up, True
         try:
             await client.start_workflow(
                 'DeliveryWorkflow', state, id=workflow_id,

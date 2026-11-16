@@ -1,57 +1,57 @@
-"""API design sessions: one long-running Temporal workflow per discussion."""
+"""API design sessions: one long-running Temporal workflow per discussion, started by its
+task flow once the architecture or the requirements hand the task on, or as a fork in a
+task flow of its own."""
 
 import dataclasses
 import logging
-import uuid
 from typing import Any
-
-from temporalio.client import WorkflowUpdateStage
 
 from app.api_design.models import ApiDesignState
 from app.api_design.openapi import design_problems
-from app.config import TASK_QUEUE
+from app.requirements.document import render_requirements_markdown
 from app.requirements.lookup import source_session_lookup
 from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, RetryStage
+from app.task_flow.models import FORK_SUFFIX, TaskFlowState
+from app.task_flow.service import check_open, derived_name, new_stage_id, start_task_flow
 from app.temporal.client import connect_temporal
-from app.temporal.execution_fields import execution_fields
-from app.temporal.registry import register
 from app.temporal.sessions import (
-    FLOW_CLOSED, SessionBusy, SessionNotFound, flow_closed, fork_messages, is_running,
-    start_update, state_at_message,
+    SessionBusy, SessionNotFound, fork_messages, start_update, state_at_message,
 )
 
 logger = logging.getLogger(__name__)
 
 
-async def _start(state: ApiDesignState) -> str:
-    """Start the session as a child of the requirements session its task began with, so
-    the task stays one workflow tree; a requirements session closed before that existed
-    can only have it on its own."""
-    session_id = f"api-design-session-{uuid.uuid4().hex}"
-    if await is_running(state.source_session_id):
-        await start_update(state.source_session_id, "start_api_design", session_id, state,
-                           wait_for_stage=WorkflowUpdateStage.COMPLETED)
-    else:
-        client = await connect_temporal()
-        await client.start_workflow(
-            "ApiDesignWorkflow",
-            state,
-            id=session_id,
-            task_queue=TASK_QUEUE,
-            **execution_fields(state.repository),
-        )
-    await register(session_id)
-    logger.info("Started API design session %s from %s", session_id, state.source_session_id)
-    return session_id
+async def _start(state: ApiDesignState, source: ApiDesignState) -> tuple[str, str]:
+    """Start the session in a new task flow of its own, named after the source's with a
+    " (fork)" suffix, which links to the task's requirements and architecture sessions and
+    holds a pending delivery."""
+    session_id = new_stage_id("api_design")
+    name, suffix = await derived_name(source.task_flow_id, FORK_SUFFIX)
+    linked = [item for item in (state.source_session_id, state.architecture_session_id)
+              if item]
+    flow_id = await start_task_flow(TaskFlowState(
+        kind=state.kind, repository=state.repository,
+        task=render_requirements_markdown(state.requirements),
+        name=name, name_suffix=suffix, origin="fork",
+        first_stage="api_design", first_stage_id=session_id, design=state, linked=linked))
+    logger.info("Started API design session %s from %s in task flow %s", session_id,
+                state.source_session_id, flow_id)
+    return session_id, flow_id
 
 
 async def fork_session(session_id: str, message_index: int) -> str:
-    """A new session with the discussion up to the message, and the API model
-    as it was at that point; 409 once its flow has completed or been cancelled."""
+    """As fork; returns the fork's session ID."""
+    fork_id, _ = await fork(session_id, message_index)
+    return fork_id
+
+
+async def fork(session_id: str, message_index: int) -> tuple[str, str]:
+    """A new session with the discussion up to the message, and the API model as it was
+    at that point, in a new task flow; 409 once its flow has completed or been cancelled.
+    Returns the fork's and its task flow's IDs."""
     source = await get_state(session_id)
-    if source.source_session_id and await flow_closed(source.source_session_id):
-        raise SessionBusy(FLOW_CLOSED)
+    await check_open(session_id, source.task_flow_id or source.source_session_id)
     messages = fork_messages(source.messages, message_index)
     api = await state_at_message(
         session_id, source.messages, message_index,
@@ -60,7 +60,7 @@ async def fork_session(session_id: str, message_index: int) -> str:
         activity="api_design_turn",
         key="api",
     )
-    fork_id = await _start(ApiDesignState(
+    fork_id, flow_id = await _start(ApiDesignState(
         source_session_id=source.source_session_id,
         requirements=source.requirements,
         requirements_document=source.requirements_document,
@@ -78,10 +78,10 @@ async def fork_session(session_id: str, message_index: int) -> str:
         architecture_session_id=source.architecture_session_id,
         architecture=source.architecture,
         architecture_structure=source.architecture_structure,
-    ))
+    ), source)
     logger.info("Forked API design session %s after message %d as %s",
                 session_id, message_index, fork_id)
-    return fork_id
+    return fork_id, flow_id
 
 
 async def send_message(session_id: str, message: str) -> None:
@@ -135,14 +135,19 @@ async def instruct_findings(session_id: str, instructions: str) -> DeliveryProgr
 async def get_state(session_id: str) -> ApiDesignState:
     client = await connect_temporal()
     handle = client.get_workflow_handle(session_id)
-    return await handle.query("get_state", result_type=ApiDesignState)
+    state = await handle.query("get_state", result_type=ApiDesignState)
+    if state.pending:
+        raise SessionNotFound("This API design session has not started yet.")
+    return state
 
 
 async def get_session(session_id: str) -> dict[str, Any]:
     state = await get_state(session_id)
     session = dataclasses.asdict(state)
     # Polled every few seconds; the requirement list is enough for the page.
-    del session["requirements_document"], session["change_document"], session["contract"]
+    for key in ("requirements_document", "change_document", "contract", "pending",
+                "linked_task_flows"):
+        del session[key]
     # The pipeline's results belong to the delivery a finished design starts.
     progress = DeliveryProgress()
     if state.status == 'completed' and state.document:

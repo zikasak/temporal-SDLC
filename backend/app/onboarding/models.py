@@ -78,6 +78,9 @@ class OnboardingState:
     # What an architecture-only draft disagrees with in the existing api.json or
     # requirements.json, as the LLM recorded it; each blocks finalizing.
     conflicts: list[str] = field(default_factory=list)
+    # Whether the onboarding and its delivery report whether they wait for the user and
+    # have unresolved review findings; onboardings started before this existed do not.
+    tracked: bool = False
 
 
 def drafted_architecture_only(state: OnboardingState) -> bool:

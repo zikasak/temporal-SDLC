@@ -111,3 +111,10 @@ class ApiDesignState:
     architecture_session_id: str | None = None
     architecture: str | None = None
     architecture_structure: dict[str, Any] | None = None
+    # The top-level task flow (TaskWorkflow) the design is a stage of, which runs its
+    # delivery; None for a design started before task flows existed, which runs it itself.
+    task_flow_id: str | None = None
+    # Created by its task flow, waiting for the architecture or the requirements.
+    pending: bool = False
+    # The forked or fix-round task flows that link to this session as an earlier stage.
+    linked_task_flows: list[str] = field(default_factory=list)

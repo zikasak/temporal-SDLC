@@ -15,6 +15,8 @@ from app.api_design.models import ApiDesignState
 from app.architecture.models import ArchitectureResult, ArchitectureState
 from app.requirements import service
 from app.requirements.models import RequirementsState
+from app.task_flow import service as task_flows
+from app.task_flow.workflows import TaskWorkflow
 from app.temporal import sessions
 from app.temporal.executions import ensure_search_attributes
 from app.temporal.sessions import InvalidForkPoint
@@ -84,6 +86,14 @@ class FakeActivities:
     async def register_session(self, session_id: str) -> None:
         self.registered.append(session_id)
 
+    @activity.defn(name="name_task_flow")
+    async def name_task_flow(self, text: str) -> str:
+        return "Task"
+
+    @activity.defn(name="closed_workflows")
+    async def closed_workflows(self, workflow_ids: list[str]) -> list[str]:
+        return []
+
 
 # The API designs the sessions started, by ID, with what they were started from.
 designs: dict[str, ApiDesignState] = {}
@@ -133,10 +143,12 @@ async def server():
 async def workers(env, **options):
     activities = FakeActivities()
     async with Worker(
-        env.client, task_queue=TASK_QUEUE, workflows=[RequirementsWorkflow, FakeApiDesign, FakeArchitecture],
+        env.client, task_queue=TASK_QUEUE,
+        workflows=[RequirementsWorkflow, FakeApiDesign, FakeArchitecture, TaskWorkflow],
         activities=[activities.requirements_turn, activities.write_requirements_document,
                     activities.checkout_repository, activities.read_requirements_document,
-                    activities.register_session],
+                    activities.register_session, activities.name_task_flow,
+                    activities.closed_workflows],
         **options,
     ):
         yield activities
@@ -194,7 +206,9 @@ def serve_from(env, monkeypatch):
 
     monkeypatch.setattr(service, "connect_temporal", connect)
     monkeypatch.setattr(sessions, "connect_temporal", connect)
-    monkeypatch.setattr(service, "TASK_QUEUE", TASK_QUEUE)
+    # Every session starts in a task flow of its own.
+    monkeypatch.setattr(task_flows, "connect_temporal", connect)
+    monkeypatch.setattr(task_flows, "TASK_QUEUE", TASK_QUEUE)
 
 
 @pytest.fixture

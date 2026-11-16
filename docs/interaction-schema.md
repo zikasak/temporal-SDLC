@@ -100,7 +100,8 @@ The main worker's workflows, activities, agent, and tools are logical modules wi
 | Interaction | Path through the system | Result |
 | --- | --- | --- |
 | Chat | Browser → API → Temporal → `LLMRequestWorkflow` → agent/provider/tools | Async answer; each reply gets a new workflow/request ID. Attachments are parsed before the model turn. |
-| Requirements interview | Browser → API → Temporal updates → `RequirementsWorkflow` → agent | Long-running interview with structured requirements; finalization writes a Markdown document. |
+| Task flow | Browser → API → Temporal → `TaskWorkflow` → its stage children | One top-level flow per task: it creates its requirements, architecture, API design and delivery stages up front (pending until the stage before hands the task on), starts each in turn and closes with its delivery's status; see [task flows](task-flows.md). |
+| Requirements interview | Browser → API → Temporal updates → `RequirementsWorkflow` (a child of its `TaskWorkflow`) → agent | Long-running interview with structured requirements; finalization writes a Markdown document. |
 | API design | Browser → API loads completed requirements → `ApiDesignWorkflow` → agent | Structured API model; finalization renders and stores OpenAPI YAML. |
 | Code generation | `ApiDesignWorkflow` → `DeliveryWorkflow` → Temporal child workflow → codegen worker → local generator | Server code in the session's language, chosen during API design from the registry in `backend/app/languages/` (Java: Spring interfaces, models, and disabled test stubs; Python: FastAPI routers and Pydantic models), written to disk. |
 | Implementation and tests | After codegen, `DeliveryWorkflow` starts two child workflows on separate queues and Docker containers in parallel | Service image and independent JUnit HTTP test runner image; results/errors reported separately. Test authoring receives only requirements and API contracts. |

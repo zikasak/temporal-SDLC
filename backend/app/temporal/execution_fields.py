@@ -14,13 +14,33 @@ from temporalio.common import SearchAttributeKey, SearchAttributePair, TypedSear
 REPOSITORY_ATTRIBUTE = SearchAttributeKey.for_keyword("Repository")
 BRANCH_ATTRIBUTE = SearchAttributeKey.for_keyword("Branch")
 ONBOARDING_ATTRIBUTE = SearchAttributeKey.for_keyword("OnboardingId")
-SEARCH_ATTRIBUTES = (REPOSITORY_ATTRIBUTE, BRANCH_ATTRIBUTE, ONBOARDING_ATTRIBUTE)
+# A stage of a task flow that was created but waits for the stages before it (pending), or
+# one that will never run (skipped); listings show it instead of the Temporal status.
+FLOW_STATE_ATTRIBUTE = SearchAttributeKey.for_keyword("FlowState")
+# A task flow's current short name.
+TASK_NAME_ATTRIBUTE = SearchAttributeKey.for_keyword("TaskName")
+# Whether the flow waits for the user, and whether its delivery has open review findings
+# that were not accepted; upserted by stages, onboardings and task flows as they change.
+WAITING_ATTRIBUTE = SearchAttributeKey.for_bool("WaitingForUser")
+UNRESOLVED_ATTRIBUTE = SearchAttributeKey.for_bool("UnresolvedFindings")
+SEARCH_ATTRIBUTES = (REPOSITORY_ATTRIBUTE, BRANCH_ATTRIBUTE, ONBOARDING_ATTRIBUTE,
+                     FLOW_STATE_ATTRIBUTE, TASK_NAME_ATTRIBUTE, WAITING_ATTRIBUTE,
+                     UNRESOLVED_ATTRIBUTE)
 REPOSITORY_MEMO = "repository"
+# A task flow's stages: {"stages": [workflow IDs of its own stages], "linked": [earlier
+# stages of another task it links to], "delivery": its delivery's workflow ID}.
+TASK_FLOW_MEMO = "task_flow"
+PENDING = "pending"
+SKIPPED = "skipped"
 
 
-def execution_fields(repository: Any = None, onboarding_id: str | None = None) -> dict[str, Any]:
-    """Keyword arguments of start_workflow and of starting a child workflow."""
+def execution_fields(repository: Any = None, onboarding_id: str | None = None,
+                     flow_state: str | None = None) -> dict[str, Any]:
+    """Keyword arguments of start_workflow and of starting a child workflow; `flow_state`
+    starts a stage of a task flow as pending."""
     pairs: list[SearchAttributePair] = []
+    if flow_state:
+        pairs.append(SearchAttributePair(FLOW_STATE_ATTRIBUTE, flow_state))
     memo: dict[str, Any] = {}
     if repository:
         selection = dict(repository)

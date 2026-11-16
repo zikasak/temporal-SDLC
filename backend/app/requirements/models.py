@@ -77,8 +77,16 @@ class RequirementsState:
     api_design_session_id: str | None = None
     # The architecture session the session started itself once the user finalized a new
     # service or an API change; it hands the task on to the API design, which is a child
-    # of this session too, as are forks of either.
+    # of this session too, as are forks of either. In a task flow, the architecture session
+    # the task flow started from this session's hand-off.
     architecture_session_id: str | None = None
+    # The top-level task flow (TaskWorkflow) the session is a stage of; None for a
+    # session started before task flows existed, which starts its later stages itself.
+    task_flow_id: str | None = None
+    # Created by its task flow, but not started yet; a requirements session never is.
+    pending: bool = False
+    # The forked or fix-round task flows that link to this session as an earlier stage.
+    linked_task_flows: list[str] = field(default_factory=list)
 
 
 def numbered_after(requirements: list[Requirement], published: Iterable[str],

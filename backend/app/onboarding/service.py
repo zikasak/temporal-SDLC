@@ -78,7 +78,7 @@ async def start_onboarding(repository: RepositorySelection) -> str:
         for other in await storage.sessions_of(conn, full_name, branch):
             if await _unfinished(other):
                 raise SessionBusy(ANOTHER_ONBOARDING)
-        await _start(session_id, OnboardingState(repository=repository))
+        await _start(session_id, OnboardingState(repository=repository, tracked=True))
         await storage.add(conn, session_id, full_name, branch)
     logger.info("Started onboarding %s of %s@%s", session_id, full_name, branch)
     return session_id
@@ -119,6 +119,7 @@ async def fork_onboarding(session_id: str, message_index: int) -> str:
         drafted_architecture_only=drafted_architecture_only(source),
         architecture_structure=drafts["architecture_structure"],
         conflicts=list(drafts["conflicts"] or []),
+        tracked=True,
     )
     async with storage.branch_lock(repository["full_name"], repository["branch"]) as conn:
         # The original ends only once the fork that replaces it exists, so that a failed
@@ -209,7 +210,7 @@ async def get_session(session_id: str) -> dict[str, Any]:
     state = await get_state(session_id)
     session = dataclasses.asdict(state)
     for key in ("drafted", "drafted_architecture_only", "artifacts_unknown",
-                "contract_problem", "conflicts"):
+                "contract_problem", "conflicts", "tracked"):
         del session[key]
     delivery = None
     if _delivers(state):

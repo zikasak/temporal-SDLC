@@ -64,6 +64,9 @@ class PullRequestMention(TypedDict):
     status: Literal['classifying', 'queued', 'running', 'replied', 'completed', 'error']
     # The first review round of the fix round the mention started.
     round: NotRequired[int]
+    # The new top-level flow the mention's fix request started because the delivery's
+    # flow had closed; its fix round is recorded there.
+    fix_flow_id: NotRequired[str]
     reply_url: NotRequired[str]
     error: NotRequired[str]
     # Where replies go, whatever pull request the delivery links to later: the repository

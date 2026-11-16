@@ -23,6 +23,8 @@ from app.delivery.models import DeliveryProgress, delivery_id
 from app.delivery.workflows import DeliveryWorkflow
 from app.requirements.document import render_requirements_markdown
 from app.requirements.models import RequirementsState
+from app.task_flow import service as task_flows
+from app.task_flow.workflows import TaskWorkflow
 from app.temporal import sessions
 from app.temporal.executions import ensure_search_attributes
 from app.temporal import workflows as session_workflows
@@ -91,6 +93,18 @@ class FakeActivities(FakeStages):
         self.documents.append(session_id)
         return DOCUMENT
 
+    @activity.defn(name="name_task_flow")
+    async def name_task_flow(self, text: str) -> str:
+        return "Task"
+
+    @activity.defn(name="closed_workflows")
+    async def closed_workflows(self, workflow_ids: list[str]) -> list[str]:
+        return list(workflow_ids)
+
+    @activity.defn(name="register_session")
+    async def register_session(self, session_id: str) -> None:
+        pass
+
 
 @pytest.fixture(scope="session")
 async def env():
@@ -111,11 +125,13 @@ async def server():
 async def workers(env, **options):
     activities = FakeActivities()
     async with Worker(
-        env.client, task_queue=TASK_QUEUE, workflows=[ApiDesignWorkflow, DeliveryWorkflow],
+        env.client, task_queue=TASK_QUEUE,
+        workflows=[ApiDesignWorkflow, DeliveryWorkflow, TaskWorkflow],
         activities=[activities.api_design_turn, activities.write_openapi_document,
                     activities.checkout_repository, activities.publish_repository,
                     activities.write_pull_request_text, activities.open_pull_request,
-                    activities.read_repository_contract],
+                    activities.read_repository_contract, activities.name_task_flow,
+                    activities.closed_workflows, activities.register_session],
         **options,
     ), stage_workers(env, activities):
         yield activities
@@ -332,9 +348,10 @@ def serve_from(env, monkeypatch):
     async def connect():
         return env.client
 
-    for module in (service, delivery_service, sessions):
+    for module in (service, delivery_service, sessions, task_flows):
         monkeypatch.setattr(module, "connect_temporal", connect)
-    monkeypatch.setattr(service, "TASK_QUEUE", TASK_QUEUE)
+    # Every fork starts in a task flow of its own.
+    monkeypatch.setattr(task_flows, "TASK_QUEUE", TASK_QUEUE)
 
 
 @pytest.fixture

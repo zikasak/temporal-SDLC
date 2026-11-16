@@ -1,7 +1,7 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { repositoryPublication, type RepositoryPublication, type RepositorySelection } from "./github";
 import { QuestionForm, questionList, type Question } from "./Questions";
-import { isObject } from "./api";
+import { isObject, readBody } from "./api";
 
 type GeneratedCode = {
   server: { path: string; files: number };
@@ -147,6 +147,8 @@ export type DeliveryProgress = {
   existing_code_changed: boolean;
   // The repository's CI on the last pushed commit.
   ci: CiChecks | null;
+  // The new top-level flows fix rounds started after the delivery's flow closed.
+  fix_flow_ids: string[];
 };
 
 const ciStatuses = ["pending", "passed", "failed", "inconclusive", "none", "timed_out", "unavailable"] as const;
@@ -200,6 +202,8 @@ export type PullRequestMention = {
   round: number | null;
   reply_url: string | null;
   error: string | null;
+  // The new flow the mention's fix request started because the delivery's flow had closed.
+  fix_flow_id: string | null;
 };
 
 function githubLink(value: unknown): string | null {
@@ -226,6 +230,7 @@ function pullRequestMentions(value: unknown): PullRequestMention[] {
       round: Number.isSafeInteger(record.round) ? record.round as number : null,
       reply_url: githubLink(record.reply_url),
       error: typeof record.error === "string" ? record.error : null,
+      fix_flow_id: typeof record.fix_flow_id === "string" ? record.fix_flow_id : null,
     } satisfies PullRequestMention];
   });
 }
@@ -433,6 +438,7 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     mentions: pullRequestMentions(value.mentions),
     existing_code_changed: value.existing_code_changed === true,
     ci: ciChecks(value.ci),
+    fix_flow_ids: strings(value.fix_flow_ids),
   };
 }
 
@@ -895,11 +901,50 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
           {mention.classification === "pending" ? "being classified" : mention.classification}, {mention.status}
           {mention.round !== null && <> — review round {mention.round}</>}
           {mention.reply_url && <> — <a href={mention.reply_url} target="_blank" rel="noreferrer">reply</a></>}
+          {mention.fix_flow_id && <> — fix round in <FixFlowLink flowId={mention.fix_flow_id} /></>}
           {mention.error && <p role="alert">{mention.error}</p>}
         </li>)}
       </ul>
     </section>}
+    {progress.fix_flow_ids.length > 0 && <section aria-label="Fix rounds after the flow closed">
+      <h3>Fix rounds after the flow closed</h3>
+      <p>Each runs as a flow of its own, pushed to a new branch with a new pull request.</p>
+      <ul>
+        {progress.fix_flow_ids.map((flowId) => <li key={flowId}><FixFlowLink flowId={flowId} /></li>)}
+      </ul>
+    </section>}
   </>;
+}
+
+// The delivery of a fix round on a closed flow runs as a session of its own.
+const fixDeliveryPrefix = "delivery-fix-session-";
+
+function fixSessionLink(deliveryId: string) {
+  return `?mode=requirements&session_id=${encodeURIComponent(deliveryId.slice("delivery-".length))}`;
+}
+
+/** A link to the view of a flow a fix round started after the delivery's flow closed: its
+ * delivery's own, found among the children of a task flow. */
+function FixFlowLink({ flowId }: { flowId: string }) {
+  const [link, setLink] = useState<string | null>(
+    flowId.startsWith(fixDeliveryPrefix) ? fixSessionLink(flowId) : null);
+  useEffect(() => {
+    if (link || !flowId.startsWith("task-flow-")) return;
+    const controller = new AbortController();
+    const params = new URLSearchParams({ parent: flowId, type: "DeliveryWorkflow" });
+    fetch(`/api/workflows?${params}`, { signal: controller.signal })
+      .then(async (response) => {
+        const body = await readBody(response);
+        if (!response.ok || !isObject(body) || !Array.isArray(body.workflows)) return;
+        const delivery = body.workflows.find((item: unknown) => isObject(item)
+          && typeof item.workflow_id === "string" && item.workflow_id.startsWith(fixDeliveryPrefix));
+        if (delivery && !controller.signal.aborted) setLink(fixSessionLink(delivery.workflow_id));
+      })
+      // Shown without a link until the next render tries again.
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [flowId, link]);
+  return link ? <a href={link}><code>{flowId}</code></a> : <code>{flowId}</code>;
 }
 
 const findingTargets: Record<ReviewFinding["target"], string> = {

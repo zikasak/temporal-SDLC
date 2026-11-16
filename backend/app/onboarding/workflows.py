@@ -20,6 +20,7 @@ with workflow.unsafe.imports_passed_through():
     from app.requirements.document import render_requirements_markdown
     from app.temporal.activities import checkout_repository, update_repository_checkout
     from app.temporal.closing import end_cancelled
+    from app.temporal.flow_state import FlowReporting
     from app.temporal.interview import Interview, assistant_message
     from app.temporal.workflows import (
         FLOW_ABANDONED, FLOW_ABANDONED_PATCH, FLOW_CANCELLED, SESSION_IDLE_TIMEOUT, _Delivering,
@@ -42,7 +43,7 @@ CONTRACT_UNKNOWN = ("The existing contract could not be read, so only replacing 
 
 
 @workflow.defn
-class OnboardingWorkflow(Interview, _Delivering):
+class OnboardingWorkflow(Interview, _Delivering, FlowReporting):
     """One onboarding of an existing repository: the branch is checked out, the user
     confirms replacing a contract, contract tests or Dockerfile it already has, the LLM
     drafts the requirements, the API and the language from the code, and the user reviews
@@ -65,9 +66,40 @@ class OnboardingWorkflow(Interview, _Delivering):
         self._init_delivery()
         # Set when the onboarding expired without activity.
         self._expired = False
+        self._init_reporting()
+        # What its delivery last reported: whether it waits for the user, and whether it
+        # has unresolved review findings.
+        self._delivery_waiting = False
+        self._delivery_unresolved = False
+
+    def _tracked(self) -> bool:
+        return self.state.tracked
+
+    def _waiting(self) -> bool:
+        """A contract decision, the interviewer's open questions or reply, or its
+        delivery's agents' questions and open review findings."""
+        status = self.state.status
+        if status == "awaiting_confirmation":
+            return True
+        if (status == "interviewing" and self.state.drafted and self.state.messages
+                and self.state.messages[-1]["role"] == "assistant"):
+            return True
+        return self._delivering and self._delivery_waiting
+
+    def _unresolved(self) -> bool | None:
+        return self._delivery_unresolved
+
+    @workflow.signal
+    def child_state(self, workflow_id: str, waiting: bool, unresolved: bool | None) -> None:
+        """The onboarding's delivery reported whether it waits for the user and has
+        unresolved review findings."""
+        self._delivery_waiting = bool(waiting)
+        if unresolved is not None:
+            self._delivery_unresolved = bool(unresolved)
 
     @workflow.run
     async def run(self, state: OnboardingState) -> dict[str, Any] | None:
+        self._start_reporting()
         if not self.state.checkout:
             await self._check_out()
             if self.state.status == "preparing":
@@ -95,6 +127,7 @@ class OnboardingWorkflow(Interview, _Delivering):
         await workflow.wait_condition(workflow.all_handlers_finished)
         if self.state.status == "completed":
             await self._deliver()
+            await self._stop_reporting()
             if self._delivery_cancelled:
                 # Its pull request was closed without merging: the onboarding is cancelled.
                 await end_cancelled(FLOW_CANCELLED)
@@ -103,7 +136,9 @@ class OnboardingWorkflow(Interview, _Delivering):
             # The onboarding ended without running its delivery: it failed, was
             # declined or replaced by a fork. It was abandoned, and shows as cancelled.
             # So does one that expired, with the reason in its state.
+            await self._stop_reporting()
             await end_cancelled(FLOW_ABANDONED)
+        await self._stop_reporting()
         return None
 
     async def _check_out(self) -> None:
@@ -502,6 +537,7 @@ class OnboardingWorkflow(Interview, _Delivering):
                 architecture=architecture,
                 architecture_structure=structure,
                 architecture_only=True,
+                tracked=self.state.tracked,
             )))
             return
         await self._run_delivery(DeliveryState(spec=TaskSpec(
@@ -515,4 +551,5 @@ class OnboardingWorkflow(Interview, _Delivering):
             onboarding=True,
             architecture=architecture,
             architecture_structure=structure,
+            tracked=self.state.tracked,
         )))

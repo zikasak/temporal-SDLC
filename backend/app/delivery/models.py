@@ -167,6 +167,13 @@ class TaskSpec:
     # An onboarding that adds only the architecture to the repository's contract: nothing
     # is written, verified or reviewed, the two files are pushed with a pull request.
     architecture_only: bool = False
+    # The top-level task flow (TaskWorkflow) the delivery is a child of; None for an
+    # onboarding's delivery and one started before task flows existed.
+    task_flow_id: str | None = None
+    # Whether the delivery reports whether it waits for the user and has unresolved
+    # review findings (search attributes, and signals to its parent); deliveries started
+    # before this existed do not.
+    tracked: bool = False
 
 
 @dataclass
@@ -272,6 +279,9 @@ class DeliveryProgress:
     existing_code_changed: bool = False
     # The repository's CI on the last pushed commit, watched while the delivery waits.
     ci: CiChecks | None = None
+    # The new top-level flows started by fix rounds after the delivery's flow closed,
+    # oldest first: filled in from them by the session API, never by the workflow.
+    fix_flow_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -640,6 +650,9 @@ class DeliveryState:
     # row, the failure before the first round included (app.delivery.rounds): whether
     # another round is worth it is decided from it.
     ci_history: list[dict[str, Any]] = field(default_factory=list)
+    # Created by its task flow, waiting for the stages before it; it then starts from
+    # the state the task flow hands it.
+    pending: bool = False
 
 
 def mention_key(item: Any) -> tuple[str | None, int]:

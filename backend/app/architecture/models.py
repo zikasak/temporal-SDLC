@@ -192,6 +192,13 @@ class ArchitectureState:
     # The start of the task's API design, without the architecture: what the session
     # hands on once finalized or skipped.
     design: ApiDesignState | None = None
+    # The top-level task flow (TaskWorkflow) the session is a stage of; None for a
+    # session started before task flows existed.
+    task_flow_id: str | None = None
+    # Created by its task flow, waiting for the requirements to be finalized.
+    pending: bool = False
+    # The forked or fix-round task flows that link to this session as an earlier stage.
+    linked_task_flows: list[str] = field(default_factory=list)
 
 
 @dataclass

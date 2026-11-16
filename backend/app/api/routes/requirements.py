@@ -20,12 +20,12 @@ from app.requirements.service import (
     answer_delivery_questions,
     answer_questions,
     finalize_session,
-    fork_session,
+    fork,
     get_session,
     retry_generation,
     retry_message,
     send_message,
-    start_session,
+    start_task,
     update_checkout,
 )
 
@@ -151,11 +151,11 @@ async def create_session(body: CreateBody):
         repository = await resolve_repository_selection(
             body.repository.full_name, body.repository.branch,
         )
-        session_id = await start_session(repository=repository, kind=body.kind,
-                                         answers=body.answers, task=body.task)
+        session_id, task_flow_id = await start_task(
+            repository=repository, kind=body.kind, answers=body.answers, task=body.task)
     except Exception as exc:
         raise http_error(exc) from exc
-    return {"session_id": session_id}
+    return {"session_id": session_id, "task_flow_id": task_flow_id}
 
 
 @router.get("/sessions/{session_id}")
@@ -272,10 +272,10 @@ async def refresh_checkout(session_id: str):
 async def fork(session_id: str, body: ForkBody):
     _check_session_id(session_id)
     try:
-        fork_id = await fork_session(session_id, body.message_index)
+        fork_id, task_flow_id = await fork(session_id, body.message_index)
     except Exception as exc:
         raise http_error(exc) from exc
-    return {"session_id": fork_id}
+    return {"session_id": fork_id, "task_flow_id": task_flow_id}
 
 
 @router.get("/sessions/{session_id}/document")
