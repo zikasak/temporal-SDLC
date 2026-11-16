@@ -438,13 +438,11 @@ async def _start_fix_flow(finished: _Finished, state: DeliveryState, flow_id: st
     linking to the original task's stages. WorkflowAlreadyStartedError when it ran
     before."""
     original = finished.state.spec.task_flow_id
-    name, suffix = await task_flows.derived_name(original, FIX_SUFFIX)
-    stages = await task_flows.stages(original) if original else {}
+    client = finished.client
+    name, suffix = await task_flows.derived_name(original, FIX_SUFFIX, client)
+    stages = await task_flows.stages(original, client)
     linked = [item for item in stages.get('stages') or []
               if not str(item).startswith('delivery-')]
-    if not original:
-        # A delivery from before task flows: the session it delivered for.
-        linked = [finished.state.spec.session_id]
     spec = state.spec
     brief = spec.brief or {}
     state.spec.task_flow_id = flow_id
@@ -454,18 +452,19 @@ async def _start_fix_flow(finished: _Finished, state: DeliveryState, flow_id: st
         task=str(brief.get('requirements_document') or spec.requirements_document or ''),
         name=name, name_suffix=suffix, origin='fix', first_stage='delivery',
         first_stage_id=delivery_id(spec.session_id), delivery=state, linked=linked,
-    ), flow_id)
+    ), flow_id, client=client, task_queue=finished.description.task_queue)
 
 
 async def _follow_up(finished: _Finished, session_id: str,
                      prepare=None) -> tuple[str, bool]:
     """The open flow that carries on the closed delivery of `session_id`, as its session
     ID, started when there is none: for a task's delivery a new task flow holding the fix
-    delivery, for an onboarding's a new top-level DeliveryWorkflow. It is the earliest of
+    delivery, for an onboarding's, as for a delivery from before task flows that belongs
+    to none, a new top-level DeliveryWorkflow. It is the earliest of
     its follow-ups whose workflow does not exist yet or still runs. `prepare(state)`
     changes the state a new one starts from. Also true when this call started it."""
     client = finished.client
-    in_task = not finished.state.spec.onboarding
+    in_task = not finished.state.spec.onboarding and bool(finished.state.spec.task_flow_id)
     for number in range(1, MAX_FOLLOW_UPS + 1):
         follow_up = follow_up_session_id(session_id, number)
         workflow_id = delivery_id(follow_up)

@@ -33,15 +33,18 @@ def new_stage_id(stage: str) -> str:
     return f"{STAGE_PREFIXES[stage]}{uuid.uuid4().hex}"
 
 
-async def start_task_flow(state: TaskFlowState, flow_id: str | None = None) -> str:
+async def start_task_flow(state: TaskFlowState, flow_id: str | None = None, *,
+                          client: Any = None, task_queue: str | None = None) -> str:
     """Start the task flow, which starts its first stage (`state.first_stage_id`) at once
     and creates the stages after it pending. With `flow_id`, such as a fix round's flow
     derived from the delivery it carries on, a flow of that ID that ran before is not
-    started again: WorkflowAlreadyStartedError."""
+    started again: WorkflowAlreadyStartedError. `client` is the caller's connection to
+    Temporal, and `task_queue` the queue of the workflows the flow derives from, such as
+    the forked session's; by default this service's own."""
     flow_id = flow_id or new_task_flow_id()
-    client = await connect_temporal()
+    client = client or await connect_temporal()
     await client.start_workflow(
-        WORKFLOW_TYPE, state, id=flow_id, task_queue=TASK_QUEUE,
+        WORKFLOW_TYPE, state, id=flow_id, task_queue=task_queue or TASK_QUEUE,
         id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
         **execution_fields(state.repository),
@@ -74,10 +77,10 @@ async def _first_stage_started(client: Any, workflow_id: str) -> None:
     logger.warning("The first stage %s of a task flow has not started yet", workflow_id)
 
 
-async def _describe(flow_id: str | None):
+async def _describe(flow_id: str | None, client: Any = None):
     if not flow_id:
         return None
-    client = await connect_temporal()
+    client = client or await connect_temporal()
     try:
         return await client.get_workflow_handle(flow_id).describe()
     except RPCError as exc:
@@ -86,9 +89,9 @@ async def _describe(flow_id: str | None):
         return None
 
 
-async def task_name(flow_id: str | None) -> str:
+async def task_name(flow_id: str | None, client: Any = None) -> str:
     """The task flow's current name; empty when it has none, such as no flow at all."""
-    description = await _describe(flow_id)
+    description = await _describe(flow_id, client)
     if description is None:
         return ""
     return str(description.typed_search_attributes.get(TASK_NAME_ATTRIBUTE) or "")
@@ -102,18 +105,19 @@ def _without_suffix(name: str) -> str:
     return name
 
 
-async def derived_name(flow_id: str | None, suffix: str) -> tuple[str, str]:
+async def derived_name(flow_id: str | None, suffix: str,
+                       client: Any = None) -> tuple[str, str]:
     """The name of a fork or fix round of the task flow `flow_id` and the suffix it keeps
     when renamed; an empty name when the original has none, so that the new flow names
     itself."""
-    name = _without_suffix(await task_name(flow_id))
+    name = _without_suffix(await task_name(flow_id, client))
     return (f"{name}{suffix}" if name else "", suffix)
 
 
-async def stages(flow_id: str | None) -> dict[str, Any]:
+async def stages(flow_id: str | None, client: Any = None) -> dict[str, Any]:
     """The task flow's own stages, the earlier stages it links to and its delivery, as its
     memo records them: {"stages": [...], "linked": [...], "delivery": ...}."""
-    description = await _describe(flow_id)
+    description = await _describe(flow_id, client)
     if description is None:
         return {}
     try:
@@ -124,14 +128,15 @@ async def stages(flow_id: str | None) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-async def check_open(session_id: str, task_flow_id: str | None) -> None:
+async def check_open(session_id: str, task_flow_id: str | None,
+                     client: Any = None) -> None:
     """SessionBusy (409) when the session's flow has completed or been cancelled: its
     task flow, or for a session from before task flows the session itself."""
     for workflow_id in (task_flow_id, session_id):
-        if workflow_id and await flow_closed(workflow_id):
+        if workflow_id and await flow_closed(workflow_id, client):
             raise SessionBusy(FLOW_CLOSED)
 
 
-async def is_open(flow_id: str) -> bool:
-    description = await _describe(flow_id)
+async def is_open(flow_id: str, client: Any = None) -> bool:
+    description = await _describe(flow_id, client)
     return bool(description and description.status == WorkflowExecutionStatus.RUNNING)

@@ -27,14 +27,20 @@ async def _start(state: ApiDesignState, source: ApiDesignState) -> tuple[str, st
     " (fork)" suffix, which links to the task's requirements and architecture sessions and
     holds a pending delivery."""
     session_id = new_stage_id("api_design")
-    name, suffix = await derived_name(source.task_flow_id, FORK_SUFFIX)
+    client = await connect_temporal()
+    name, suffix = await derived_name(source.task_flow_id, FORK_SUFFIX, client)
+    # The fork's flow runs where the forked session does.
+    forked = (state.forked_from or {}).get("session_id")
+    task_queue = ((await client.get_workflow_handle(forked).describe()).task_queue
+                  if forked else None)
     linked = [item for item in (state.source_session_id, state.architecture_session_id)
               if item]
     flow_id = await start_task_flow(TaskFlowState(
         kind=state.kind, repository=state.repository,
         task=render_requirements_markdown(state.requirements),
         name=name, name_suffix=suffix, origin="fork",
-        first_stage="api_design", first_stage_id=session_id, design=state, linked=linked))
+        first_stage="api_design", first_stage_id=session_id, design=state, linked=linked),
+        client=client, task_queue=task_queue)
     logger.info("Started API design session %s from %s in task flow %s", session_id,
                 state.source_session_id, flow_id)
     return session_id, flow_id
@@ -51,7 +57,8 @@ async def fork(session_id: str, message_index: int) -> tuple[str, str]:
     at that point, in a new task flow; 409 once its flow has completed or been cancelled.
     Returns the fork's and its task flow's IDs."""
     source = await get_state(session_id)
-    await check_open(session_id, source.task_flow_id or source.source_session_id)
+    await check_open(session_id, source.task_flow_id or source.source_session_id,
+                     await connect_temporal())
     messages = fork_messages(source.messages, message_index)
     api = await state_at_message(
         session_id, source.messages, message_index,

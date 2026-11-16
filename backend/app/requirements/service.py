@@ -23,12 +23,12 @@ logger = logging.getLogger(__name__)
 async def start_task(
     state: RequirementsState | None = None, *, repository: RepositorySelection | None = None,
     kind: TaskKind | None = None, answers: list[str] | None = None, task: str = "",
-    name: str = "", name_suffix: str = "", origin: str = "new",
+    name: str = "", name_suffix: str = "", origin: str = "new", task_queue: str | None = None,
 ) -> tuple[str, str]:
     """Start a new top-level task flow whose requirements child interviews the user in
     `repository` from their answers to the intake questions of `kind` and their `task`,
     or from a prepared `state` such as a fork. Returns the session's and the task flow's
-    IDs."""
+    IDs. `task_queue` is the queue the flow runs on, such as the forked session's."""
     if state is None:
         if repository is None:
             raise ValueError("A requirements session needs a repository.")
@@ -37,11 +37,13 @@ async def start_task(
         state = RequirementsState(messages=intake_messages(kind, answers, task), kind=kind,
                                   repository=repository)
     session_id = new_stage_id("requirements")
+    client = await connect_temporal()
     flow_id = await start_task_flow(TaskFlowState(
         kind=state.kind, repository=state.repository,
         task=task.strip() or _task_text(state), name=name, name_suffix=name_suffix,
         origin=origin,  # type: ignore[arg-type]
-        first_stage="requirements", first_stage_id=session_id, requirements=state))
+        first_stage="requirements", first_stage_id=session_id, requirements=state),
+        client=client, task_queue=task_queue)
     logger.info("Started requirements session %s in task flow %s", session_id, flow_id)
     return session_id, flow_id
 
@@ -75,7 +77,8 @@ async def fork(session_id: str, message_index: int) -> tuple[str, str]:
     a " (fork)" suffix; 409 once the session's flow has completed or been cancelled.
     Returns the fork's and its task flow's IDs."""
     source = await get_state(session_id)
-    await check_open(session_id, source.task_flow_id)
+    client = await connect_temporal()
+    await check_open(session_id, source.task_flow_id, client)
     messages = fork_messages(source.messages, message_index)
     requirements = await state_at_message(
         session_id, source.messages, message_index,
@@ -84,7 +87,9 @@ async def fork(session_id: str, message_index: int) -> tuple[str, str]:
         activity="requirements_turn",
         key="requirements",
     )
-    name, suffix = await derived_name(source.task_flow_id, FORK_SUFFIX)
+    name, suffix = await derived_name(source.task_flow_id, FORK_SUFFIX, client)
+    # The fork's flow runs where the forked session does.
+    task_queue = (await client.get_workflow_handle(session_id).describe()).task_queue
     fork_id, flow_id = await start_task(RequirementsState(
         messages=messages,
         requirements=requirements,
@@ -93,7 +98,7 @@ async def fork(session_id: str, message_index: int) -> tuple[str, str]:
         retired=source.retired,
         repository=source.repository,
         forked_from={"session_id": session_id, "message_index": message_index},
-    ), name=name, name_suffix=suffix, origin="fork")
+    ), name=name, name_suffix=suffix, origin="fork", task_queue=task_queue)
     logger.info("Forked requirements session %s after message %d as %s",
                 session_id, message_index, fork_id)
     return fork_id, flow_id

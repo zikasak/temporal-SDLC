@@ -47,13 +47,19 @@ async def _start(state: ArchitectureState, source: ArchitectureState) -> tuple[s
     " (fork)" suffix, which links to the task's requirements session and holds pending
     API design and delivery stages."""
     session_id = new_stage_id("architecture")
-    name, suffix = await derived_name(source.task_flow_id, FORK_SUFFIX)
+    client = await connect_temporal()
+    name, suffix = await derived_name(source.task_flow_id, FORK_SUFFIX, client)
+    # The fork's flow runs where the forked session does.
+    forked = (state.forked_from or {}).get("session_id")
+    task_queue = ((await client.get_workflow_handle(forked).describe()).task_queue
+                  if forked else None)
     flow_id = await start_task_flow(TaskFlowState(
         kind=state.kind, repository=state.repository,
         task=render_requirements_markdown(state.requirements),
         name=name, name_suffix=suffix, origin="fork",
         first_stage="architecture", first_stage_id=session_id, architecture=state,
-        linked=[state.source_session_id] if state.source_session_id else []))
+        linked=[state.source_session_id] if state.source_session_id else []),
+        client=client, task_queue=task_queue)
     logger.info("Started architecture session %s from %s in task flow %s", session_id,
                 state.source_session_id, flow_id)
     return session_id, flow_id
@@ -73,7 +79,8 @@ async def fork(session_id: str, message_index: int) -> tuple[str, str]:
     source = await get_state(session_id)
     if source.api_design_session_id:
         raise SessionBusy(DESIGN_STARTED)
-    await check_open(session_id, source.task_flow_id or source.source_session_id)
+    await check_open(session_id, source.task_flow_id or source.source_session_id,
+                     await connect_temporal())
     messages = fork_messages(source.messages, message_index)
     structure = await state_at_message(
         session_id, source.messages, message_index,
