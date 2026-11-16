@@ -35,11 +35,13 @@ async def test_docker_preserves_redacted_bounded_diagnostics_and_reaps_process(
     destination = tmp_path / 'artifacts/image-build.log'
     operation = docker_agents.docker(
         'build', '--build-arg', 'PASSWORD=never-log-this', '.', env=env,
-        timeout=0.5 if outcome == 'timeout' else 5, log_path=destination,
+        # Long enough for the fake to start and print on a loaded machine, well short of
+        # its sleep.
+        timeout=3 if outcome == 'timeout' else 5, log_path=destination,
     )
     if outcome == 'cancel':
         task = asyncio.create_task(operation)
-        for _ in range(100):
+        for _ in range(500):
             if ready.exists():
                 break
             await asyncio.sleep(0.01)

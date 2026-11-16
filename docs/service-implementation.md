@@ -1339,9 +1339,14 @@ without the LLM, for any toolchain: colours, timestamps, dependency downloads, p
 bars, passing tests and captured output of passing setup are dropped; runs of the same
 line are shown once; the lines that report errors and failures are kept with a few lines
 of context, each distinct failure once (two failures are the same when they state the
-same errors, whichever test they are of); and the end of the output is kept. Only that
-excerpt (at most 12,000 characters) goes to the LLM (`analyze_checks_failure`, with the
-diagnosis model), which answers where the problem is: a `summary`, the `files` to look at
+same errors, whichever test they are of); and the end of the output is kept. Before that
+comes `failed_tests_report`: every test the runner says failed, with its one-line verdict
+and, for pytest, each test's error lines and the frames of the repository's own code
+(not of installed packages) that raised them, so that a long traceback through a library
+cannot crowd out which tests fail and why. Only that excerpt (at most 12,000 characters,
+`checks_excerpt`) goes to the LLM (`analyze_checks_failure`, with the diagnosis model),
+which names every failed test with the command that runs just those and gives one
+diagnosis, not a list of possibilities, and answers where the problem is: a `summary`, the `files` to look at
 and `instructions`, and its `cause`: `code`, or `environment` when the sandbox is at fault
 and no change to the repository could fix it (a program the checks call is not installed,
 or a registry could not be reached). Without the LLM, the excerpt's first error is the

@@ -195,7 +195,8 @@ async def test_interrupted_generation_reaps_pi_process(tmp_path, cancel):
                       f'pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\n'
                       'time.sleep(60)\n')
     script.chmod(0o755)
-    model = ChatPi(command=str(script), timeout=10 if cancel else 0.5)
+    # The timeout must let the fake start and write its pid even on a loaded machine.
+    model = ChatPi(command=str(script), timeout=10 if cancel else 3)
     task = asyncio.create_task(model.ainvoke('hi'))
     pid = None
     try:

@@ -285,6 +285,70 @@ def failure_outcome(log: str) -> dict[str, Any]:
     return {'failures': counted or len(errors) or 1, 'signature': sorted(errors)[:100]}
 
 
+# A frame of the repository's own code in a pytest traceback, `tests/x.py:90: in test_y` or
+# `app/x.py:12: KeyError`: a relative path, unlike the frames of installed packages.
+_OWN_FRAME = re.compile(r'^[\w.-][\w./-]*\.\w+:\d+:')
+# pytest's header of one failed test's section: `____ TestX.test_y[a] ____`, or `_ name _`
+# for a long name; not the `_ _ _ _` between the frames of a traceback.
+_TEST_SECTION = re.compile(r'^_+ (?:(?:ERROR|FAILURE) at \w+ of )?([^_\s].*?) _+$')
+REPORT_CHARS = 5000
+SECTION_LINES = 10
+
+
+def failed_tests_report(log: str, limit: int = REPORT_CHARS) -> str:
+    """Every test a run reports failed, with what it failed with, before anything else of
+    the output: the test runner's own one-line verdicts and, for pytest, each failed test's
+    error lines and the frames of the repository's own code that raised them. A long
+    traceback through installed packages otherwise fills the excerpt, and whoever reads it
+    learns neither which tests fail nor why. Empty when the output names no failed test."""
+    lines = _clean(log)
+    verdicts: list[str] = []
+    for line in lines:
+        text = line.strip()
+        if any(pattern.match(text) for pattern in _FAILED_TESTS) and text not in verdicts:
+            verdicts.append(text)
+    if not verdicts:
+        return ''
+    sections: list[str] = []
+    name: str | None = None
+    body: list[str] = []
+
+    def close() -> None:
+        if name and body:
+            sections.append('\n'.join([f'{name}:', *body[:SECTION_LINES]]))
+
+    for line in lines:
+        text = line.strip()
+        header = _TEST_SECTION.match(text)
+        if header or _SECTION.match(text):
+            close()
+            name, body = (header.group(1) if header else None), []
+        elif name and ((text.startswith('E ') and text[1:].strip())
+                       or _OWN_FRAME.match(text)):
+            if text not in body:
+                body.append(text)
+    close()
+    report = '\n'.join([f'Tests that failed ({len(verdicts)}):', *verdicts[:50]])
+    if len(verdicts) > 50:
+        report += f'\n… ({len(verdicts) - 50} more)'
+    if sections:
+        report += '\n\nWhat each failed with:\n' + '\n\n'.join(sections)
+    if len(report) > limit:
+        report = report[:limit - 8] + '\n… (cut)'
+    return report
+
+
+def checks_excerpt(log: str, limit: int = EXCERPT_CHARS) -> str:
+    """The excerpt of a failed run of the checks: the failed tests and what each failed
+    with (failed_tests_report), then the rest of what the output says about the failure
+    (failure_excerpt), within `limit` characters."""
+    report = failed_tests_report(log)
+    if not report:
+        return failure_excerpt(log, limit)
+    rest = failure_excerpt(log, max(limit - len(report) - 20, 1000))
+    return f'{report}\n\nThe output:\n{rest}'[:limit]
+
+
 def assemble_repository(language: Any, session_dir: Path, target: Path) -> None:
     """The repository as the delivery would push it, without Git metadata: the checkout,
     with the implementation author's published tree and the contract tests' author's suite
@@ -345,14 +409,14 @@ async def run_repository_checks(session_id: str, language: str) -> dict[str, Any
                                               f'{str(exc)[-500:]}', log=str(log_path))
     log = await run_sync(log_path.read_text, encoding='utf-8', errors='replace')
     if exit_code is None:
-        excerpt = failure_excerpt(log)
+        excerpt = checks_excerpt(log)
         return _result('error', excerpt=excerpt, log=str(log_path),
                        error=f'The checks script did not finish in {CHECKS_TIMEOUT // 60} '
                              'minutes.')
     if exit_code == 0:
         logger.info('The checks of session %s passed', session_id)
         return _result('passed', exit_code=0, log=str(log_path))
-    excerpt = failure_excerpt(log)
+    excerpt = checks_excerpt(log)
     logger.info('The checks of session %s failed with exit status %s', session_id, exit_code)
     await run_sync((run_dir / 'excerpt.txt').write_text, excerpt, encoding='utf-8')
     found = failure_outcome(log)
@@ -363,13 +427,20 @@ async def run_repository_checks(session_id: str, language: str) -> dict[str, Any
 
 ANALYSIS_PROMPT = """The checks script of a repository (its builds and unit tests, as its
 CI runs them) failed after a coding agent changed the code. Below is the relevant part of
-the script's output; passing tests, downloads and repeated failures were left out.
+the script's output: first every test that failed with what it failed with, then the rest
+of the output about the failure; passing tests, downloads and repeated failures were left
+out.
 
 Say where the problem is, for the agent that will fix it. Answer with a JSON object and
 nothing else: {{"cause": "code" or "environment", "summary": "<one sentence: what fails and
 why>", "files": ["<path of a file to look at>", ...], "instructions": "<what to change,
 concretely: which code or which test and how; say whether the code broke what a test rightly
 asserts, or a test asserts what the change rightly altered>"}}.
+
+Name every failed test in the instructions, with the command that runs just those tests, so
+the agent can see them fail and pass. Give one diagnosis, the one the output supports best,
+not a list of possibilities to check; when the output cannot tell two causes apart, say
+which evidence the agent should look at to decide, and what to change in each case.
 
 The cause is "environment" only when the failure is the sandbox's, not the repository's:
 a program the checks call is not installed (such as `git` not found), or the network or a
