@@ -150,6 +150,24 @@ Contract ambiguities and how the suite reads them:
   that every requirements and API design session action requires sign-in. The contract does
   not say how an invalid `page_token` is reported before Temporal is contacted, so it is not
   tested.
+- Task flows (FR-125 to FR-140, FR-143, `tests/test_task_flows.py`): a task flow, its
+  pending/skipped/linked children and the `name`, `linked`, `waiting_for_user` and
+  `unresolved_findings` fields exist only with Temporal, so the suite checks them on whatever
+  executions `GET /workflows` returns when it answers 200 (503 without Temporal is accepted
+  and verifies nothing more). It checks invariants only: task flows have no parent and a name,
+  `name` is null for other types, `linked` is a boolean, a closed flow never waits for the user,
+  only stages of a task are `pending` or `skipped`, top-level listings hold no stage, children
+  listed under a task flow have it as parent unless `linked`, and a requirements or API design
+  session lists no children. Starting a task (`POST /requirements/sessions`) is covered only as
+  far as an unreachable repository is refused with 404, 409 or 503 (the contract lists all
+  three); the body is built from the answers' first options in `GET /requirements/intake`.
+  `TaskWorkflow`, `RequirementsWorkflow`, `ApiDesignWorkflow` and `DeliveryWorkflow` are assumed
+  to be valid `type` values (the contract names them in `workflow_type`).
+- The older conditional assertions in `test_architecture.py::test_workflow_listing_accepts_the_architecture_type`
+  (architecture sessions as children of a requirements session) and in `test_workflow_filters.py`
+  describe the shape before task flows; they run only when Temporal answers 200, which the
+  self-contained service never does. In the current contract an architecture session's
+  parent is its task flow (`parent_workflow_id`).
 - Unknown IDs are well formed (prefix and 32 hex digits) so that they are treated as
   unknown rather than malformed.
 
