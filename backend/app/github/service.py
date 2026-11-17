@@ -65,7 +65,15 @@ async def connect_created_app(code: str) -> dict:
     }, app["webhook_secret"])
 
 
+def _connected(row: dict[str, Any] | None) -> dict[str, Any]:
+    """The saved connection; GitHub is not connected without one."""
+    if row is None:
+        raise GitHubError(409, "Connect GitHub before choosing a repository.")
+    return row
+
+
 def _app_token(row: dict[str, Any] | None) -> str:
+    row = _connected(row)
     private_key = storage.decrypt_private_key(row)
     return client.app_token(row["app_id"], private_key)
 
@@ -84,7 +92,7 @@ async def check_connection(events_url: str | None = None) -> dict:
     """Validate the saved app and pick up its installation. `events_url` is where this
     instance receives webhook deliveries, for an app created from the manifest without
     a webhook secret."""
-    row = await storage.get_connection()
+    row = _connected(await storage.get_connection())
     app_token = _app_token(row)
     app = await client.get_app(app_token)
     installation = None
@@ -122,6 +130,7 @@ async def check_connection(events_url: str | None = None) -> dict:
 
 async def installation_token(row: dict[str, Any] | None) -> str:
     """A fresh token for the saved installation; GitHub expires each after an hour."""
+    row = _connected(row)
     app_token = _app_token(row)
     if row["installation_id"] is None:
         raise GitHubError(409, "Install the GitHub App, then check the connection in GitHub settings.")

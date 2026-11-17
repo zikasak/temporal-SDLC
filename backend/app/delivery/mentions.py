@@ -9,6 +9,7 @@ from typing import Any
 from psycopg.types.json import Jsonb
 
 from app.db import connect
+from app.github.models import PullRequestMention
 
 
 async def ensure_schema() -> None:
@@ -37,7 +38,7 @@ async def ensure_schema() -> None:
         """)
 
 
-async def add(session_id: str, mention: dict[str, Any], recording: str | None = None) -> bool:
+async def add(session_id: str, mention: PullRequestMention, recording: str | None = None) -> bool:
     """Record a mention the delivery received, with its full text; false when the
     delivery already has it from another recording. `recording` identifies the recording
     operation: a retry of the same operation whose earlier attempt committed finds its own
@@ -73,7 +74,7 @@ async def recording(session_id: str, comment_type: str, comment_id: int) -> str 
     return None if row is None else (row['recorded_by'] or '')
 
 
-async def save(session_id: str, mention: dict[str, Any]) -> None:
+async def save(session_id: str, mention: PullRequestMention) -> None:
     """Record how far a mention has come. Its text, which the workflow does not carry,
     stays as it was recorded."""
     async with await connect() as conn:

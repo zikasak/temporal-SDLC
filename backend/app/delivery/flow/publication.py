@@ -7,6 +7,8 @@ from temporalio.exceptions import ActivityError, ApplicationError
 
 from app.delivery.flow.stages import COMPONENT_REPAIRS_PATCH
 
+from app.delivery.flow.base import FlowBase
+
 with workflow.unsafe.imports_passed_through():
     from app.delivery.contract import with_requirements
     from app.delivery.models import open_review_findings
@@ -19,7 +21,7 @@ with workflow.unsafe.imports_passed_through():
 COMPONENT_PUSHES_PATCH = 'component-pushes'
 
 
-class Publication:
+class Publication(FlowBase):
     """The push of the verified sources, or of an onboarding's architecture, and the
     pull request opened from it."""
 

@@ -8,6 +8,8 @@ from temporalio.exceptions import ActivityError, ChildWorkflowError
 
 from app.delivery.flow.stages import MAX_TRACKED, VERIFICATION_ATTEMPTS
 
+from app.delivery.flow.base import FlowBase
+
 with workflow.unsafe.imports_passed_through():
     from app.delivery.causes import with_cause
     from app.config import VERIFICATION_TASK_QUEUE
@@ -31,7 +33,7 @@ MAX_REPRODUCE_ROUNDS = 1
 REPRODUCE_PATCH = 'reproduce-baseline-tests'
 
 
-class Baseline:
+class Baseline(FlowBase):
     """The baseline run of a change's tests against the code as the repository holds
     it, with the rounds in which their authors correct tests it showed written wrong."""
 

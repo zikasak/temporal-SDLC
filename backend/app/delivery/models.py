@@ -327,8 +327,12 @@ def judge_baseline(result: VerificationResult | None, added: list[str], changed:
         if error:
             return 'error', error
     added_all = [(run, case) for run in runs for case in run.added]
-    passing = [case for run, case in added_all
-               if run.result['tracked'][case]['failed'] < run.result['tracked'][case]['tests']]
+    passing = []
+    for run, case in added_all:
+        tracked = run.result['tracked']
+        assert tracked is not None  # _baseline_error returned no error, so it ran
+        if tracked[case]['failed'] < tracked[case]['tests']:
+            passing.append(case)
     if passing or not added_all:
         return 'not_reproduced', (
             (f'Added tests that do not fail against {code}: '

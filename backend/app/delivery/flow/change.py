@@ -3,6 +3,8 @@ from typing import Any
 from temporalio import workflow
 from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflowError
 
+from app.delivery.flow.base import FlowBase
+
 with workflow.unsafe.imports_passed_through():
     from app.config import IMPLEMENTATION_TASK_QUEUE, REVIEW_TASK_QUEUE, ROUTING_TASK_QUEUE
     from app.review.models import (
@@ -44,7 +46,7 @@ def own_failure(exc: BaseException, error_type: str) -> str:
     return ''
 
 
-class Change:
+class Change(FlowBase):
     """A change to an existing service, red to green: routing of its criteria, the
     seam they are observed at, and the reviews of the seam and the regression tests."""
 

@@ -13,6 +13,8 @@ from app.delivery.flow.stages import (
     restore_finding,
 )
 
+from app.delivery.flow.base import FlowBase
+
 with workflow.unsafe.imports_passed_through():
     from app.delivery.causes import with_cause
     from app.delivery.rounds import decide, outcome
@@ -52,7 +54,7 @@ TESTS_AT_FAULT = 'No: the code is right, repair the tests and the contract'
 BUG_SUMMARY_CHARS = 600
 
 
-class Verification:
+class Verification(FlowBase):
     """Verification of the implementation and the tests against each other, with
     its repair rounds: diagnosis, a repair of the side at fault, and a new run."""
 

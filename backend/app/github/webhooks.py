@@ -7,7 +7,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from app.github import client, service, storage
 from app.github.models import PullRequestMention
@@ -48,7 +48,7 @@ def mentions(body: str, slug: str) -> bool:
 
 @dataclass
 class Comment:
-    comment_type: str
+    comment_type: Literal['conversation', 'review']
     comment_id: int
     body: str
     url: str

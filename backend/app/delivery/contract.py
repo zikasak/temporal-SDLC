@@ -52,7 +52,7 @@ def with_requirements(contract: RepositoryContract, added: list[Requirement],
     ended = {item['id'] for item in retired}
     requirements = [*(item for item in contract['requirements'] if item['id'] not in ended),
                     *added]
-    api = {**contract['api'], 'endpoints': [
+    api: ApiModel = {**contract['api'], 'endpoints': [
         {**endpoint, 'requirement_ids': [item for item in endpoint['requirement_ids']
                                          if item not in ended]}
         for endpoint in contract['api']['endpoints']]}
@@ -107,8 +107,9 @@ def write_contract(repository: Path, contract: RepositoryContract) -> None:
         **kept,
     }.items():
         (directory / name).write_text(text)
-    if contract.get('architecture'):
-        write_architecture(repository, contract['architecture'],
+    architecture = contract.get('architecture')
+    if architecture:
+        write_architecture(repository, architecture,
                            contract.get('architecture_structure'))
 
 

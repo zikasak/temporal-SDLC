@@ -13,6 +13,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from app.config import GITHUB_TOKEN_ENCRYPTION_KEY
 from app.db import connect
 from app.github.errors import GitHubError
+from app.github.models import PullRequestMention
 
 
 @dataclass
@@ -22,7 +23,7 @@ class PendingMention:
     comment_type: str
     comment_id: int
     session_id: str
-    mention: dict[str, Any]
+    mention: PullRequestMention
     # Its place in the order the delivery's mentions arrived in; None for claims made
     # before the order was recorded.
     seq: int | None = None
@@ -385,7 +386,7 @@ async def mention_order_lock(session_id: str, wait_seconds: float):
 
 
 async def claim_mention(comment_type: str, comment_id: int, delivery_id: str | None,
-                        session_id: str, mention: dict[str, Any],
+                        session_id: str, mention: PullRequestMention,
                         seq: int | None = None) -> str | None:
     """Claim a comment and its delivery in one transaction, so that neither claim is kept
     without the other, with the mention to hand over to the delivery of `session_id` and
@@ -400,7 +401,7 @@ async def claim_mention(comment_type: str, comment_id: int, delivery_id: str | N
 
 
 async def _claim_mention(comment_type: str, comment_id: int, delivery_id: str | None,
-                         session_id: str, mention: dict[str, Any],
+                         session_id: str, mention: PullRequestMention,
                          seq: int | None) -> str | None:
     async with _connection() as conn:
         async with conn.transaction():

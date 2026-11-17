@@ -18,6 +18,7 @@ from app.delivery import mentions as mention_history
 from app.github import checkout as repository_checkout
 from app.github import client as github_client
 from app.github.errors import GitHubError
+from app.github.models import PullRequestMention
 from app.llm.graph import final_reply, get_message_graph, native_session
 from app.llm.model import get_model
 from app.temporal.activities import _github_token
@@ -147,7 +148,7 @@ async def _answer(session_id: str, body: str, context: dict[str, Any],
 
 
 @activity.defn
-async def record_new_mention(session_id: str, mention: dict[str, Any],
+async def record_new_mention(session_id: str, mention: PullRequestMention,
                              recording: str | None = None) -> bool:
     """Keep a mention the delivery received, with its full text, outside the workflow;
     false when the delivery already has it from another recording. A retry of the same
@@ -156,7 +157,7 @@ async def record_new_mention(session_id: str, mention: dict[str, Any],
 
 
 @activity.defn
-async def save_mention(session_id: str, mention: dict[str, Any]) -> None:
+async def save_mention(session_id: str, mention: PullRequestMention) -> None:
     """Keep how far a mention has come; its recorded text stays."""
     await mention_history.save(session_id, mention)
 

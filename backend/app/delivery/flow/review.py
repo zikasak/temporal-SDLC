@@ -6,6 +6,8 @@ from temporalio.exceptions import ChildWorkflowError
 
 from app.delivery.flow.stages import restore_finding
 
+from app.delivery.flow.base import FlowBase
+
 with workflow.unsafe.imports_passed_through():
     from app.delivery.causes import with_cause
     from app.config import REVIEW_TASK_QUEUE
@@ -25,7 +27,7 @@ with workflow.unsafe.imports_passed_through():
 CORRECTION_REPRODUCE_PATCH = 'reproduce-corrected-tests'
 
 
-class ReviewRounds:
+class ReviewRounds(FlowBase):
     """Code review of the verified delivery: its rounds of findings and corrections,
     and the fix rounds started by the user's instructions or a mention."""
 

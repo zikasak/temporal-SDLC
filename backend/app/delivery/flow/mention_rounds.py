@@ -5,6 +5,8 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError
 
+from app.delivery.flow.base import FlowBase
+
 with workflow.unsafe.imports_passed_through():
     from app.delivery.models import (
         DELIVERY_CLOSING, MENTION_HANDLED, OUTCOME_OWED, STOPPED, is_mention, mention_key,
@@ -30,7 +32,7 @@ ARCHITECTURE_FIX_STARTED = ('Started a fix round of the architecture from your c
                             'tests or code review. I will reply here again with the outcome.')
 
 
-class MentionRounds:
+class MentionRounds(FlowBase):
     """Mentions of the app on the delivery's pull request: classified, answered
     or queued as fix rounds, and replied to when their round ends."""
 

@@ -5,6 +5,8 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 
+from app.delivery.flow.base import FlowBase
+
 with workflow.unsafe.imports_passed_through():
     from app.delivery.models import (
         CI_CHECK_INTERVAL, FOLLOW_UP_PREFIX, PULL_REQUEST_CHECK_INTERVAL, TASK_IDLE_TIMEOUT,
@@ -20,7 +22,7 @@ FOLLOW_UP_CLOSES_PATCH = 'follow-up-closes'
 FOLLOW_UP_HANDOVER_TIMEOUT = timedelta(hours=1)
 
 
-class PullRequestWait:
+class PullRequestWait(FlowBase):
     """How a finished delivery waits: for the user's next decision, a
     mention's fix round, or its pull request being merged or closed."""
 

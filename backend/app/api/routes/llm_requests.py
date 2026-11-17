@@ -7,11 +7,10 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from starlette.datastructures import UploadFile
 
-from app.asyncio_utils import run_sync
 from app.api.errors import http_error
-from app.api.routes.requirements import ForkBody
 from app.api.routes.github import RepositoryInput
-from app.github.service import resolve_repository_selection
+from app.api.routes.requirements import ForkBody
+from app.asyncio_utils import run_sync
 from app.conversations.errors import ConversationNotReady, ConversationTooLarge
 from app.conversations.service import (
     fork_llm_request,
@@ -28,6 +27,7 @@ from app.documents import (
     original_path,
     store_original,
 )
+from app.github.service import resolve_repository_selection
 from app.temporal.sessions import InvalidForkPoint
 
 router = APIRouter()

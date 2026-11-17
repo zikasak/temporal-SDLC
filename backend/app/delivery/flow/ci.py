@@ -5,6 +5,8 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError
 
+from app.delivery.flow.base import FlowBase
+
 with workflow.unsafe.imports_passed_through():
     from app.delivery.ci_activities import CHECKS_UNAVAILABLE, FAILED
     from app.delivery.models import (
@@ -41,7 +43,7 @@ def _short(commit: str) -> str:
     return commit[:12]
 
 
-class CiWatch:
+class CiWatch(FlowBase):
     """The repository's CI on the commit the delivery pushed: watched while the delivery
     waits, reported in its pull request, and fixed by a round of its own when it fails,
     up to MAX_CI_FIX_ROUNDS times in a row."""

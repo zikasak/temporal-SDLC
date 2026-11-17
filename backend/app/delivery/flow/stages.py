@@ -4,6 +4,8 @@ from typing import Any
 from temporalio import workflow
 from temporalio.exceptions import ChildWorkflowError
 
+from app.delivery.flow.base import FlowBase
+
 with workflow.unsafe.imports_passed_through():
     from app.delivery.causes import with_cause
     from app.config import (
@@ -37,7 +39,7 @@ def restore_finding(kept: list[str],
         'target': 'tests', 'reason': reason}
 
 
-class Stages:
+class Stages(FlowBase):
     """The stage authors a delivery runs as child workflows, and the context each
     is given: the implementation, the contract tests and the component tests."""
 
