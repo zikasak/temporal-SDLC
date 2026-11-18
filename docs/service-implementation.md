@@ -1390,15 +1390,17 @@ request), and `progress.repair_decision` holds the last decision.
 ## Work kept in the repository
 
 Every stage that changes the project, whatever became of its run, commits what its
-author left to a hidden ref of the session's repository (`app/github/work_refs.py`):
-`refs/sdlc/<session-id>/<stage>/latest` after every run (published, failed, rejected or
-stopped by the provider's limits), and `refs/sdlc/<session-id>/<stage>/published` for the
-output the stage published. The stages are `implementation` (and `seam`), `tests`,
+author left to the session's repository (`app/github/work_refs.py`): the branch
+`wip/<id>/<stage>` after every run, finished or not (published, failed, rejected or
+stopped by the provider's limits), `<id>` being the one the publication branch
+`generated/<id>` is named with; and the hidden ref
+`refs/sdlc/<session-id>/<stage>/published` for the output the stage published. The stages are `implementation` (and `seam`), `tests`,
 `component-tests` and `documentation`; each commit holds the repository as the session
 started from it with the stage's files in place, as a publication would write them, and
-the commits of a stage are chained. Such refs are no branch: GitHub lists them in no
-branch list, runs no CI for them, and they never touch the pull request. Fetch one with
-`git fetch origin refs/sdlc/<session-id>/<stage>/latest`.
+the commits of a stage are chained and force-pushed. The `wip/` branches are ordinary
+branches: GitHub lists them and runs the CI that triggers on any push; they never touch
+the pull request. Unfinished work saved before it went to a branch, at
+`refs/sdlc/<session-id>/<stage>/latest`, is still restored from there.
 
 The commit is made without the LLM, so a stage whose agent failed is saved too. Its
 message is written by the stage's model when it answers within a minute; otherwise, and
