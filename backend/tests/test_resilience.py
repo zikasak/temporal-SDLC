@@ -195,8 +195,9 @@ async def test_failed_agent_output_is_saved_before_the_failure_is_raised(tmp_pat
     monkeypatch.setattr(docker_agents, 'docker', docker)
     with pytest.raises(RuntimeError, match='exited with code 1'):
         await ActivityEnvironment().run(run_stage, _stage(tmp_path, []), 'session', {}, tmp_path)
-    assert saved == [('agent failed: Documentation agent exited with code 1. Log: '
-                      f'{tmp_path}/session/docs-stage/agent.log', {'half.md'})]
+    # The status keeps the first 200 characters of the error, however long tmp_path is.
+    error = f'Documentation agent exited with code 1. Log: {tmp_path}/session/docs-stage/agent.log'
+    assert saved == [('agent failed: ' + error[:200], {'half.md'})]
 
 
 # Work refs.
