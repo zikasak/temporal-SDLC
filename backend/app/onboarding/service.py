@@ -21,6 +21,7 @@ from app.requirements.lookup import checkout_requirements, lookup_requirements
 from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import execution_fields
 from app.temporal.registry import register
+from app.temporal.search_attributes import start_workflow
 from app.temporal.sessions import SessionBusy, fork_messages, start_update, state_at_message
 
 logger = logging.getLogger(__name__)
@@ -54,8 +55,8 @@ async def _unfinished(session_id: str) -> bool:
 
 async def _start(session_id: str, state: OnboardingState) -> None:
     client = await connect_temporal()
-    await client.start_workflow(WORKFLOW_TYPE, state, id=session_id, task_queue=TASK_QUEUE,
-                                **execution_fields(state.repository, session_id))
+    await start_workflow(client, WORKFLOW_TYPE, state, id=session_id, task_queue=TASK_QUEUE,
+                         **execution_fields(state.repository, session_id))
     await register(session_id)
 
 

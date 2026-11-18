@@ -34,6 +34,7 @@ from app.tasks.service import (
 from app.routing.models import SEAM_MISMATCH
 from app.temporal import registry
 from app.temporal.client import connect_temporal
+from app.temporal.search_attributes import start_workflow
 from app.temporal.execution_fields import (
     LINKED_ATTRIBUTE, task_fields,
 )
@@ -240,8 +241,8 @@ async def _restart(finished: _Finished, session_id: str) -> None:
             raise SessionBusy(busy) from exc
         return
     try:
-        await finished.client.start_workflow(
-            'DeliveryWorkflow', finished.state, id=workflow_id,
+        await start_workflow(
+            finished.client, 'DeliveryWorkflow', finished.state, id=workflow_id,
             task_queue=description.task_queue,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
             id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
@@ -433,8 +434,8 @@ async def _follow_up(finished: _Finished, session_id: str,
                         session_id, workflow_id)
             return follow_up, True
         try:
-            await client.start_workflow(
-                'DeliveryWorkflow', state, id=workflow_id,
+            await start_workflow(
+                client, 'DeliveryWorkflow', state, id=workflow_id,
                 task_queue=finished.description.task_queue,
                 id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
                 id_conflict_policy=WorkflowIDConflictPolicy.FAIL,

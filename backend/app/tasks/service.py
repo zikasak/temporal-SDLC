@@ -20,6 +20,7 @@ from app.tasks.models import (
 from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import TASK_NAME_ATTRIBUTE, execution_fields
 from app.temporal.registry import register
+from app.temporal.search_attributes import start_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,8 @@ async def start_task_flow(task_flow_id: str, state: TaskFlowState,
     """Start the task flow; its first stage starts with it. With `first_stage`, wait until
     that stage exists, so that it can be served at once."""
     client = client or await connect_temporal()
-    await client.start_workflow(
-        TASK_FLOW_TYPE, state, id=task_flow_id, task_queue=task_queue,
+    await start_workflow(
+        client, TASK_FLOW_TYPE, state, id=task_flow_id, task_queue=task_queue,
         id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
         **execution_fields(state.repository,

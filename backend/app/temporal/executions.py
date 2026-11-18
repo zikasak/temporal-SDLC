@@ -8,11 +8,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from temporalio.api.common.v1 import WorkflowExecution as ExecutionRef
-from temporalio.api.enums.v1 import IndexedValueType
-from temporalio.api.operatorservice.v1 import (
-    AddSearchAttributesRequest,
-    ListSearchAttributesRequest,
-)
 from temporalio.api.workflowservice.v1 import DeleteWorkflowExecutionRequest
 from temporalio.client import Client, WorkflowExecution
 from temporalio.service import RPCError, RPCStatusCode
@@ -32,11 +27,11 @@ from app.temporal.execution_fields import (
     ONBOARDING_ATTRIBUTE,
     REPOSITORY_ATTRIBUTE,
     REPOSITORY_MEMO,
-    SEARCH_ATTRIBUTES,
     TASK_NAME_ATTRIBUTE,
     UNRESOLVED_ATTRIBUTE,
     WAITING_ATTRIBUTE,
 )
+from app.temporal.search_attributes import ensure_search_attributes  # noqa: F401 - re-exported
 
 logger = logging.getLogger(__name__)
 
@@ -276,20 +271,6 @@ async def list_executions(
                       for item in executions.current_page or []],
         "next_page_token": base64.urlsafe_b64encode(next_token).decode() if next_token else None,
     }
-
-
-async def ensure_search_attributes(client: Client) -> None:
-    """Register the custom search attributes the executions are started with."""
-    listed = await client.operator_service.list_search_attributes(
-        ListSearchAttributesRequest(namespace=client.namespace))
-    # Each with its own type: keywords, the keyword list of linked task flows and the
-    # booleans of the waiting highlight and the findings marker.
-    missing = {key.name: IndexedValueType.ValueType(int(key.indexed_value_type))
-               for key in SEARCH_ATTRIBUTES if key.name not in listed.custom_attributes}
-    if missing:
-        await client.operator_service.add_search_attributes(
-            AddSearchAttributesRequest(namespace=client.namespace, search_attributes=missing))
-        logger.info("Registered search attributes %s", ", ".join(missing))
 
 
 async def delete_untracked_executions(client: Client) -> None:
