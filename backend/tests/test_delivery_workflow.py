@@ -21,7 +21,7 @@ from app.architecture.workflows import ArchitectureWorkflow
 from app.delivery import service as delivery_service
 from app.delivery.models import (
     STOPPED, DeliveryProgress, DeliveryState, TaskSpec,
-    delivery_id,
+    delivery_id, interrupted,
 )
 from app.delivery.ci_activities import CHECKS_DENIED, CHECKS_UNAVAILABLE
 from app.github.checkout import SNAPSHOT_DIR
@@ -1829,6 +1829,8 @@ async def test_a_stopped_delivery_is_retried_from_the_stage_it_stopped_in(server
     await delivery(server, handle.id).terminate()
     progress = await delivery_service.get_progress(handle.id)
     assert progress.tests_error == STOPPED and progress.verification_status == "error"
+    # Nothing after it reports itself as still to come: the page offers the retry.
+    assert progress.publication_status == progress.pull_request_status == "skipped"
     assert (await handle.describe()).status == WorkflowExecutionStatus.RUNNING
 
     live.release_tests.set()
@@ -1844,6 +1846,18 @@ async def test_a_stopped_delivery_is_retried_from_the_stage_it_stopped_in(server
         await asyncio.sleep(0.05)
     else:
         raise AssertionError("the delivery outlived its session")
+
+
+def test_a_delivery_stopped_before_its_push_offers_the_push_again():
+    """Stopped between a passed verification and its push: the push is what failed."""
+    spec = TaskSpec(session_id="stopped", requirements=[], requirements_document="",
+                    api=API, document_id="0" * 32, kind="new_service", language="java",
+                    checkout={"commit": "1" * 40})
+    progress = DeliveryProgress(verification_status="completed", publication_status="waiting",
+                                pull_request_status="waiting")
+    progress = interrupted(DeliveryState(spec=spec, progress=progress)).progress
+    assert progress.publication_error == STOPPED and progress.publication_status == "error"
+    assert progress.pull_request_status == "skipped"
 
 
 def delivery(env, session_id: str) -> Any:
