@@ -113,7 +113,7 @@ async def test_verification_publishes_test_outcomes_and_releases_resources(
         assert result['test_failures'][0]['name'] == 'http'
         assert result['test_failures'][0]['message']
     # A skipped test is named with its reason: the run proved nothing about it.
-    assert result['test_skips'] == ([{'class_name': 'Contract', 'name': 'later',
+    assert result.get('test_skips') == ([{'class_name': 'Contract', 'name': 'later',
                                       'message': 'needs GitHub'}] if counts[4] else [])
     manifest = Path(result['path']).parent / 'result.json'
     assert json.loads(manifest.read_text()) == result

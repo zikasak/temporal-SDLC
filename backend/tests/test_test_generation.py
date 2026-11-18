@@ -1,3 +1,5 @@
+# Assertions read optional fields directly: a None there fails the test anyway.
+# pyright: reportOptionalMemberAccess=false
 import asyncio
 import json
 import tarfile
@@ -12,6 +14,7 @@ from app import docker_agents
 from app.api_design.models import empty_api
 from app.api_design.openapi import render_openapi
 from app.requirements.document import render_requirements_markdown
+from app.requirements.models import Requirement
 from app.languages import OTHER_PARTS_BUILD_DIRS, get_language
 from app.test_generation import activities
 from app.verification import activities as verification
@@ -39,9 +42,9 @@ async def test_contract_only_generation_publishes_compiled_suite(tmp_path, monke
     server = tmp_path / 'session/server'
     server.mkdir()
     (server / 'Generated.java').write_text('PRIVATE GENERATED SOURCE')
-    requirements = [{'id': 'FR-1', 'category': 'functional', 'title': 'Create orders',
-                     'description': 'Clients create orders.', 'priority': 'must',
-                     'rationale': 'Core flow'}]
+    requirements: list[Requirement] = [
+        {'id': 'FR-1', 'category': 'functional', 'title': 'Create orders',
+         'description': 'Clients create orders.', 'priority': 'must', 'rationale': 'Core flow'}]
     context = {'requirements': requirements,
                'requirements_document': render_requirements_markdown(
                    requirements, 'Orders are never deleted.'),
@@ -277,8 +280,9 @@ async def test_only_tests_found_broken_may_differ_from_what_they_were(tmp_path, 
     existing.write_text(java_tests(lists='get();'))
     assert await record_repository_tests(tmp_path, monkeypatch) == {'tests': 1,
                                                                     'component_tests': 0}
-    brief = [{'id': 'FR-1', 'category': 'functional', 'title': 'No double booking',
-              'description': 'A booked room is refused.', 'priority': 'must'}]
+    brief: list[Requirement] = [
+        {'id': 'FR-1', 'category': 'functional', 'title': 'No double booking',
+         'description': 'A booked room is refused.', 'priority': 'must'}]
     context = {'requirements': [], 'api_design': empty_api(), 'language': 'java',
                'repository': {'full_name': 'octocat/project', 'branch': 'main'},
                'brief': {'requirements': brief, 'requirements_document':

@@ -7,6 +7,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 import pytest
 from google.protobuf.json_format import MessageToDict
@@ -47,7 +48,7 @@ def tracing_server():
                                                        'type': 'invalid_request_error'}}).encode())
                 return
             if any(item['role'] == 'tool' for item in payload['messages']):
-                message = {'role': 'assistant', 'content': f'Recorded {user}'}
+                message: dict[str, Any] = {'role': 'assistant', 'content': f'Recorded {user}'}
             else:
                 coding = any(item['function']['name'] == 'write_file'
                              for item in payload.get('tools', []))

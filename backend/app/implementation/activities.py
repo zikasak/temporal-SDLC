@@ -116,7 +116,8 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
               else session_dir / 'implementation/service' if repair
               else session_dir / SEAM_DIR / 'service' if change and context.get('seam_prepared')
               else checkout if change else session_dir / 'server')
-    if not source.is_dir():
+    # A change has a checkout: one without was refused above.
+    if source is None or not source.is_dir():
         raise ApplicationError('Generated server code is unavailable', non_retryable=True)
 
     generated = bool(checkout) and not change and takes_generated_code(language, checkout)
@@ -154,7 +155,8 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
                          or not (project / relative).exists())))
         else:
             copy_service(language, source, project, unit_tests=unit_tests)
-            if unit_tests and source != checkout and not has_unit_tests(language, source):
+            if (unit_tests and checkout and source != checkout
+                    and not has_unit_tests(language, source)):
                 # A tree published before its authors maintained the unit tests: they
                 # are the repository's, as the checkout holds them.
                 copy_regular_files(checkout, project, include=partial(

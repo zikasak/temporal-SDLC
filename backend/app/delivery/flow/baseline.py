@@ -1,6 +1,6 @@
 import asyncio
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -18,6 +18,7 @@ with workflow.unsafe.imports_passed_through():
         unreproducing_tests,
     )
     from app.github.checkout import SNAPSHOT_DIR
+    from app.verification.models import VerificationResult
 
 # Rounds in which the authors of a change's tests bound the waits of the tests the runner
 # stopped at its per-test time limit in the baseline run, each run against it again.
@@ -152,6 +153,7 @@ class Baseline(FlowBase):
     async def _build_baseline(self) -> dict[str, Any]:
         if self._seam_prepared():
             # The service with the seam the change added was built when it was added.
+            assert self.progress.seam is not None
             return {'image_id': self.progress.seam['image_id']}
         return await workflow.execute_activity(
             'build_baseline', args=[self.spec.session_id, self.spec.language],
@@ -180,7 +182,8 @@ class Baseline(FlowBase):
         )
         return image['image_id'], SNAPSHOT_DIR, [], []
 
-    async def _run_components(self, runner_image: str, tracked: list[str]) -> dict[str, Any]:
+    async def _run_components(self, runner_image: str,
+                              tracked: list[str]) -> VerificationResult:
         """Run the component tests once, and once more when the run could not complete,
         as a run of the contract tests is; each test of `tracked` is reported singly."""
         for attempt in range(1, VERIFICATION_ATTEMPTS + 1):
@@ -196,7 +199,7 @@ class Baseline(FlowBase):
                 break
             workflow.logger.warning('Component test run %d could not complete: %s', attempt,
                                     result['error'])
-        return result
+        return cast(VerificationResult, result)
 
     async def _reproduce_components(self, repair: int) -> bool:
         """The baseline of a change with component tests: its contract tests, if it has
@@ -210,6 +213,7 @@ class Baseline(FlowBase):
         self.progress.baseline_error = None
         self.progress.component_baseline = None
         components = self.progress.component_tests
+        assert components is not None  # no component_tests_error, so they were written
         tracked = [*components['added_tests'], *components['changed_tests']]
         if len(tracked) > MAX_TRACKED:
             # The baseline judges every added test on its own, so none may go unreported.
@@ -229,8 +233,8 @@ class Baseline(FlowBase):
                     'VerificationWorkflow', VERIFICATION_TASK_QUEUE,
                     self._child_id('baseline', repair), image['image_id'], test_image,
                     self.spec.language, [*added, *changed], suite_dir)
-            self.progress.component_baseline = await self._run_components(
-                components['image_id'], tracked)
+            component_baseline = await self._run_components(components['image_id'], tracked)
+            self.progress.component_baseline = component_baseline
         except (ActivityError, ChildWorkflowError) as exc:
             workflow.logger.warning('Baseline run failed: %s', exc.cause or exc)
             self.progress.baseline_error = with_cause(
@@ -240,7 +244,7 @@ class Baseline(FlowBase):
             return False
         self.progress.baseline_status, self.progress.baseline_error = judge_baseline(
             self.progress.baseline, added, changed, component_run(
-                self.progress.component_baseline, components['added_tests'],
+                component_baseline, components['added_tests'],
                 components['changed_tests']), seam=self._seam_prepared())
         workflow.logger.info('Baseline run: %s', self.progress.baseline_status)
         return self.progress.baseline_status == 'reproduced'

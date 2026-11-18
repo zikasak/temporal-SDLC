@@ -13,6 +13,7 @@ from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from app.api_design.models import ApiDesignState
 from app.architecture.models import ArchitectureResult, ArchitectureState
+from app.conversations.models import ConversationMessage
 from app.requirements import service
 from app.requirements.models import RequirementsState
 from app.temporal import sessions
@@ -112,6 +113,7 @@ class FakeArchitecture:
     async def run(self, state: ArchitectureState) -> ArchitectureResult:
         design_id = f"api-design-session-{workflow.uuid4().hex}"
         architectures[workflow.info().workflow_id] = design_id
+        assert state.design is not None  # handed over with the requirements' design
         return ArchitectureResult(api_design_session_id=design_id, design=state.design)
 
 
@@ -216,7 +218,7 @@ async def test_interview_and_finalize(env, worker):
     assert state.status == "interviewing" and state.messages[0]["role"] == "assistant"
     assert state.repository is None
 
-    assert state.messages[0]["questions"][0]["question"] == "What kind of task is this?"
+    assert state.messages[0].get("questions", [])[0]["question"] == "What kind of task is this?"
 
     with pytest.raises(WorkflowUpdateFailedError):
         await handle.execute_update(RequirementsWorkflow.finalize)
@@ -405,7 +407,7 @@ async def test_session_starts_from_the_intake(server, live, live_temporal, repos
     state = await wait_for_status(handle, "interviewing")
     # The intake is the opening of the transcript, and the analyst answers it at once.
     assert [item["role"] for item in state.messages] == ["assistant", "user", "assistant"]
-    assert [item["question"] for item in state.messages[0]["questions"]] == [
+    assert [item["question"] for item in state.messages[0].get("questions", [])] == [
         "What kind of task is this?", "Which area of the service is affected?",
         "What is the nature of the change?"]
     assert state.messages[1]["content"] == (
@@ -494,7 +496,7 @@ async def test_state_at_message_spans_continue_as_new_runs(env, worker, temporal
         )
         state = await env.client.get_workflow_handle(session_id).query("get_state", result_type=RequirementsState)
         assert state.repository == repository_selection
-    messages = [
+    messages: list[ConversationMessage] = [
         {"role": "assistant", "content": "Hello"},
         {"role": "user", "content": "Topic 1"}, {"role": "assistant", "content": "Question 1?"},
         {"role": "user", "content": "Topic 3"}, {"role": "assistant", "content": "Question 2?"},

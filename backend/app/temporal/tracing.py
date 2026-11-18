@@ -1,13 +1,17 @@
 """Trace activity executions, never deterministic/replayed workflow code."""
 from functools import wraps
 from inspect import signature
+from typing import TYPE_CHECKING
 
 from temporalio import activity
 
 from app.tracing import trace_operation
 
+if TYPE_CHECKING:
+    from langfuse._client.constants import ObservationTypeLiteralNoEvent
 
-def activity_metadata() -> dict[str, str]:
+
+def activity_metadata() -> dict[str, str | None]:
     if not activity.in_activity():
         return {}
     info = activity.info()
@@ -17,7 +21,8 @@ def activity_metadata() -> dict[str, str]:
             'temporal_attempt': str(info.attempt)}
 
 
-def trace_activity(name: str, *, feature: str, as_type: str = 'span',
+def trace_activity(name: str, *, feature: str,
+                   as_type: 'ObservationTypeLiteralNoEvent' = 'span',
                    input_parameter: str | None = None):
     def decorate(fn):
         parameters = signature(fn)

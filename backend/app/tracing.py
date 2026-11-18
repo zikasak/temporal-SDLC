@@ -7,7 +7,12 @@ import re
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from functools import lru_cache
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from langchain_core.runnables import RunnableConfig
+    from langfuse._client.constants import ObservationTypeLiteralNoEvent
+    from langfuse.types import TraceContext
 
 logger = logging.getLogger(__name__)
 _SECRET_FIELD = re.compile(r'(api[_-]?key|password|secret|authorization|access[_-]?token)', re.I)
@@ -177,7 +182,7 @@ def tracing_client():
     return _client()
 
 
-def langchain_config(**settings) -> dict:
+def langchain_config(**settings: Any) -> 'RunnableConfig':
     """New handler per execution avoids state shared across concurrent turns."""
     client = tracing_client()
     if client is not None:
@@ -200,13 +205,14 @@ def langchain_config(**settings) -> dict:
                 return super().on_llm_end(response, run_id=run_id, **kwargs)
 
         settings['callbacks'] = [AgentCallbackHandler(public_key=os.environ['LANGFUSE_PUBLIC_KEY'])]
-    return settings
+    return cast('RunnableConfig', settings)
 
 
 @contextmanager
 def trace_operation(name: str, *, session_id: str | None, feature: str,
                     input: Any = None, metadata: dict | None = None,
-                    as_type: str = 'span', trace_context: dict | None = None):
+                    as_type: 'ObservationTypeLiteralNoEvent' = 'span',
+                    trace_context: 'TraceContext | None' = None):
     client = tracing_client()
     if client is None:
         yield None
@@ -259,7 +265,7 @@ def container_trace_environment(session_id: str, role: str) -> dict[str, str]:
     return environment
 
 
-def container_trace_context() -> dict | None:
+def container_trace_context() -> 'TraceContext | None':
     trace_id = os.getenv('APP_TRACE_ID', '')
     parent_id = os.getenv('APP_TRACE_PARENT_ID', '')
     if re.fullmatch(r'[0-9a-f]{32}', trace_id) and re.fullmatch(r'[0-9a-f]{16}', parent_id):

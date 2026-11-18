@@ -17,12 +17,12 @@ from app.delivery.flow.base import FlowBase
 
 with workflow.unsafe.imports_passed_through():
     from app.delivery.causes import with_cause
-    from app.delivery.rounds import decide, outcome
+    from app.delivery.rounds import RoundOutcome, decide, outcome
     from app.llm.limits import PROVIDER_LIMIT_ERROR
     from app.verification.checks import fallback_analysis
     from app.config import DIAGNOSIS_TASK_QUEUE, VERIFICATION_TASK_QUEUE
     from app.delivery.models import judge_kept, kept_tests, restorable_tests, unproven_green
-    from app.diagnosis.models import repair_request
+    from app.diagnosis.models import RepairRound, repair_request
     from app.github.checkout import SNAPSHOT_DIR
     from app.requirements.models import CHANGE_KINDS
     from app.review.models import review_request
@@ -174,15 +174,18 @@ class Verification(FlowBase):
             if suite:
                 test_image, suite_dir, added, _ = suite
                 for attempt in range(1, VERIFICATION_ATTEMPTS + 1):
-                    self.progress.verification = await self._child(
+                    verification = await self._child(
                         'VerificationWorkflow', VERIFICATION_TASK_QUEUE,
                         self._child_id('verification', repair), service_image, test_image,
                         self.spec.language, added[:MAX_TRACKED], suite_dir)
-                    if self.progress.verification['status'] != 'error':
+                    self.progress.verification = verification
+                    if verification['status'] != 'error':
                         break
             # A passed run is judged as a whole, so it tracks what one run can report on.
+            components = self.progress.component_tests
+            assert components is not None  # only a change with component tests runs them
             self.progress.component_verification = await self._run_components(
-                runner['image_id'], self.progress.component_tests['added_tests'][:MAX_TRACKED])
+                runner['image_id'], components['added_tests'][:MAX_TRACKED])
         except (ActivityError, ChildWorkflowError) as exc:
             workflow.logger.warning('Verification of the change failed: %s', exc.cause or exc)
             self.progress.verification_error = with_cause(
@@ -265,7 +268,7 @@ class Verification(FlowBase):
         (app.delivery.rounds), up to MAX_REPAIR_ROUNDS."""
         self.progress.repair_decision = None
         self.progress.checks = None
-        history: list[dict[str, Any]] = []
+        history: list[RoundOutcome] = []
         previous: str | None = None
         attempt = 0
         await verify()
@@ -305,7 +308,7 @@ class Verification(FlowBase):
                 return
             await verify(attempt)
 
-    def _round_outcome(self, failing: str) -> dict[str, Any]:
+    def _round_outcome(self, failing: str) -> RoundOutcome:
         """What is failing now, for the decision whether to go on repairing."""
         if failing == 'checks':
             checks = self.progress.checks or {}
@@ -420,11 +423,13 @@ class Verification(FlowBase):
     async def _prove_kept(self) -> None:
         """An API change may rewrite the repository's tests, but only those its service
         no longer passes: run each one it changed or removed as the repository held it."""
-        tests = self.progress.tests
+        tests, verification = self.progress.tests, self.progress.verification
+        implementation = self.progress.implementation
+        assert tests is not None and implementation is not None  # verification ran on them
         touched = [*tests['changed_tests'], *tests['removed_tests']]
         if (not touched or self.progress.verification_error
                 or self.progress.verification_status != 'completed'
-                or self.progress.verification['status'] != 'passed'):
+                or verification is None or verification['status'] != 'passed'):
             return
         self.progress.verification_status = 'running'
         try:
@@ -435,20 +440,21 @@ class Verification(FlowBase):
                 heartbeat_timeout=timedelta(minutes=2),
                 retry_policy=RetryPolicy(maximum_attempts=1),
             )
-            self.progress.existing_tests = await self._child(
+            existing_tests = await self._child(
                 'VerificationWorkflow', VERIFICATION_TASK_QUEUE,
-                self._child_id('existing-tests'), self.progress.implementation['image_id'],
+                self._child_id('existing-tests'), implementation['image_id'],
                 image['image_id'], self.spec.language, touched, SNAPSHOT_DIR)
+            self.progress.existing_tests = existing_tests
         except (ActivityError, ChildWorkflowError) as exc:
             workflow.logger.warning('Run of the repository tests failed: %s', exc.cause or exc)
             self.progress.verification_error = with_cause(
                 "The repository's tests could not be run against the changed service.", exc)
         else:
-            self.progress.verification_error = judge_kept(self.progress.existing_tests, touched)
+            self.progress.verification_error = judge_kept(existing_tests, touched)
             # Once seen passing as the repository holds them, they stay so for every
             # later author: a repair that rewrote one again would only be rejected again.
             self.state.kept_tests = sorted({
-                *self.state.kept_tests, *kept_tests(self.progress.existing_tests, touched)})
+                *self.state.kept_tests, *kept_tests(existing_tests, touched)})
         self.progress.verification_status = 'completed'
 
     async def _restore_kept(self) -> None:
@@ -477,30 +483,35 @@ class Verification(FlowBase):
     async def _verify_service(self, repair: int = 0) -> None:
         self.progress.verification_status = 'running'
         change = self.spec.kind in CHANGE_KINDS
+        implementation, tests = self.progress.implementation, self.progress.tests
+        assert implementation is not None and tests is not None  # both stages succeeded
+        verification = None
         # A run that could not complete says nothing about the code, so it runs once more.
         for attempt in range(1, VERIFICATION_ATTEMPTS + 1):
             try:
-                self.progress.verification = await self._child(
+                verification = await self._child(
                     'VerificationWorkflow', VERIFICATION_TASK_QUEUE,
                     self._child_id('verification', repair),
-                    self.progress.implementation['image_id'], self.progress.tests['image_id'],
+                    implementation['image_id'], tests['image_id'],
                     self.spec.language,
                     # The run of a change answers for every test of its suite.
-                    self.progress.tests['added_tests'][:MAX_TRACKED] if change else None)
+                    tests['added_tests'][:MAX_TRACKED] if change else None)
+                self.progress.verification = verification
             except ChildWorkflowError as exc:
                 workflow.logger.warning('Service verification failed: %s', exc.cause or exc)
                 self.progress.verification_error = with_cause(
                     'Service verification could not complete.', exc)
                 self.progress.verification_status = 'error'
                 return
-            if self.progress.verification['status'] != 'error':
+            if verification['status'] != 'error':
                 break
             workflow.logger.warning('Verification run %d could not complete: %s', attempt,
-                                    self.progress.verification['error'])
+                                    verification['error'])
+        assert verification is not None  # VERIFICATION_ATTEMPTS runs at least once
         self.progress.verification_status = 'completed'
-        if change and self.progress.verification['status'] == 'passed':
+        if change and verification['status'] == 'passed':
             # Red without the fix is only half of it: every test must be seen green.
-            self.progress.verification_error = unproven_green(self.progress.verification)
+            self.progress.verification_error = unproven_green(verification)
 
     async def _repair(self, attempt: int) -> bool:
         """Decide which side the failed tests condemn and have its own stage correct it."""
@@ -529,9 +540,11 @@ class Verification(FlowBase):
             target = diagnosis['target']
         workflow.logger.info('Repair round %d: correcting the %s', attempt, target)
         suite = diagnosis.get('suite')
-        self.progress.repairs.append(
-            {'attempt': attempt, 'target': target, 'tests': diagnosis['tests'],
-             'summary': diagnosis['summary'], **({'suite': suite} if suite else {})})
+        repair_round = RepairRound(attempt=attempt, target=target, tests=diagnosis['tests'],
+                                   summary=diagnosis['summary'])
+        if suite:
+            repair_round['suite'] = suite
+        self.progress.repairs.append(repair_round)
         self.progress.verification_status = 'repairing'
         repair = repair_request(diagnosis, self.progress.verification, attempt,
                                 self.progress.component_verification)

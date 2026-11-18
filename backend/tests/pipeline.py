@@ -516,6 +516,7 @@ class FakeStages:
                    'runner_log': '', 'path': '/verification'}
         if test_image == REPOSITORY_TESTS_IMAGE:
             # The repository's own tests, of which the changed service fails some.
+            assert tracked_tests is not None  # each of them is judged on its own
             self.existing_runs.append((suite_dir, tracked_tests))
             self.existing_services.append(service_image)
             passing = self.still_passing + (
@@ -530,6 +531,7 @@ class FakeStages:
                                 for case in tracked_tests}}
         if service_image in (BASELINE_IMAGE, SEAM_IMAGE):
             self.stages.append('baseline-run')
+            assert tracked_tests is not None  # a baseline judges each added test
             return {**details, **self._baseline(service_image, test_image, tracked_tests)}
         self.stages.append('verification')
         self.verified_languages.append(language)

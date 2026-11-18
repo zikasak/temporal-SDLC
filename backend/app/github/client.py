@@ -475,7 +475,9 @@ def _check_run(value: Any) -> dict[str, Any] | None:
         return None
     name = value.get("name")
     app = value.get("app")
-    output = value.get("output") if isinstance(value.get("output"), dict) else {}
+    output = value.get("output")
+    if not isinstance(output, dict):
+        output = {}
 
     def text(item: Any, limit: int) -> str | None:
         return item[:limit] if isinstance(item, str) and item else None

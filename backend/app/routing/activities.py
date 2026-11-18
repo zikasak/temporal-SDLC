@@ -90,8 +90,8 @@ def prepare_routing(language: Language, session_dir: Path, context: dict[str, An
             (workspace / TOOLS_DIR).mkdir(exist_ok=True)
             copy_file(tool, workspace / TOOLS_DIR / tool.name)
     component = language.component_contract
-    part_components = {part.language.name: part.contract.instructions.format(
-        runtime=RUNTIME_FILE) for part in others}
+    part_components = {part.language.name: contract.instructions.format(runtime=RUNTIME_FILE)
+                       for part in others if (contract := part.contract) is not None}
     write_language(workspace, language, label=language.label, components=(
         component.instructions.format(runtime=RUNTIME_FILE) if component else ''),
         **({'part_components': part_components} if part_components else {}))
@@ -134,6 +134,7 @@ async def _publish_part(part: ComponentPart, session_dir: Path, output: Path,
                         routes: dict[str, dict[str, Any]], repository: Path, work: Path,
                         artifact_dir: Path) -> None:
     contract = part.contract
+    assert contract is not None  # only a part with component tests is routed to
     clean = work / part.contract_dir()
     read = await run_sync(read_components, contract, output / part.contract_dir(), repository,
                           session_dir / CHECKOUT_DIR / part.published_dir(), clean)

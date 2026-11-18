@@ -22,9 +22,10 @@ def _literal(node: ast.expr | None) -> list | None:
             or isinstance(name, ast.Attribute) and name.attr == "Literal"):
         return None
     items = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
-    if not all(isinstance(item, ast.Constant) for item in items):
+    constants = [item for item in items if isinstance(item, ast.Constant)]
+    if len(constants) != len(items):
         return None
-    return [item.value for item in items]
+    return [item.value for item in constants]
 
 
 def _aliases(module: str) -> dict[str, list]:

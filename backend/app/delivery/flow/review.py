@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 from temporalio import workflow
 from temporalio.exceptions import ChildWorkflowError
@@ -39,7 +39,8 @@ class ReviewRounds(FlowBase):
         finding reported again is not sent for another correction: a round with nothing
         new ends the run. Findings left are open: the delivery is pushed as unverified
         and the user decides about them."""
-        earlier = [{key: value for key, value in item.items() if key != 'repeats'}
+        earlier = [cast(ReviewFinding, {key: value for key, value in item.items()
+                                        if key != 'repeats'})
                    for item in corrected or []]
         for count in range(1, MAX_REVIEW_ROUNDS + 1):
             # The user's instructions hold for every round of the run they started.
@@ -278,6 +279,7 @@ class ReviewRounds(FlowBase):
         failed author makes that fix again on the delivered sources, then verification
         and a new run of review rounds, as the round would have gone on."""
         fix = self.state.code_fix
+        assert fix is not None  # a fix retry is only offered for a recorded fix
         worker = 'implementation' if self.state.retry_stage == 'server' else 'tests'
         instructions = fix['instructions']
         number = fix['number']

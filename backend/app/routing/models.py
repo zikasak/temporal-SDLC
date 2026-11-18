@@ -1,6 +1,6 @@
 """Which test suite can prove each criterion of a change, decided before any test is
 written: a criterion no suite can observe stops the delivery while that is still cheap."""
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict, cast
 
 # `contract`: observable over HTTP against the service as verification builds and runs
 # it. `component`: observable only at a seam of the code, an interface it already has or
@@ -128,7 +128,8 @@ def _names(value: Any) -> bool:
 def seam_additions(seam: Seam) -> dict[str, list[str]]:
     """The symbols a seam adds first, by module of its part: those of its own module and
     of the other modules it names."""
-    additions = {seam['module']: list(seam['added'])} if seam.get('added') else {}
+    added = seam.get('added')
+    additions = {seam['module']: list(added)} if added else {}
     for module, symbols in (seam.get('added_elsewhere') or {}).items():
         additions.setdefault(module, []).extend(symbols)
     return additions
@@ -152,7 +153,7 @@ def added_seams(routes: dict[str, Any]) -> dict[str, list[str]]:
         if seam is None:
             continue
         for module, additions in seam_additions(seam).items():
-            key = seam_key({**seam, 'module': module})
+            key = seam_key(cast(Seam, {**seam, 'module': module}))
             symbols = added.setdefault(key, [])
             for symbol in additions:
                 if symbol not in symbols:

@@ -1,6 +1,7 @@
 """Exercise the bundled Claude CLI against a loopback Anthropic endpoint."""
 import copy
 import json
+from typing import Any
 
 import pytest
 
@@ -180,8 +181,8 @@ async def test_native_session_continues_followups_and_resumes_from_disk(claude_h
         """Look up a term."""
         return term
 
-    options = dict(model='claude-opus-5-5', timeout=10, cwd=tmp_path,
-                   config_dir=tmp_path / 'native-config')
+    options: dict[str, Any] = dict(model='claude-opus-5-5', timeout=10, cwd=tmp_path,
+                                   config_dir=tmp_path / 'native-config')
     provider = ChatClaude(**options)
     messages = [SystemMessage('Be brief'), HumanMessage('Original task')]
     async with provider.async_session():

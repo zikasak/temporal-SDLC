@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import psycopg
+from psycopg.rows import DictRow
 
 from app.db import connect
 
@@ -26,7 +27,8 @@ async def ensure_schema() -> None:
 
 
 @asynccontextmanager
-async def branch_lock(full_name: str, branch: str) -> AsyncIterator[psycopg.AsyncConnection]:
+async def branch_lock(full_name: str,
+                      branch: str) -> AsyncIterator[psycopg.AsyncConnection[DictRow]]:
     """Hold the repository branch's lock for one transaction, so that two onboardings of
     it never start at once."""
     async with await connect() as conn:
@@ -36,7 +38,8 @@ async def branch_lock(full_name: str, branch: str) -> AsyncIterator[psycopg.Asyn
             yield conn
 
 
-async def sessions_of(conn: psycopg.AsyncConnection, full_name: str, branch: str) -> list[str]:
+async def sessions_of(conn: psycopg.AsyncConnection[DictRow], full_name: str,
+                      branch: str) -> list[str]:
     cursor = await conn.execute(
         "SELECT session_id FROM app.onboarding_sessions "
         "WHERE lower(full_name) = lower(%s) AND branch = %s ORDER BY created_at DESC",
@@ -44,7 +47,7 @@ async def sessions_of(conn: psycopg.AsyncConnection, full_name: str, branch: str
     return [row["session_id"] for row in await cursor.fetchall()]
 
 
-async def add(conn: psycopg.AsyncConnection, session_id: str, full_name: str,
+async def add(conn: psycopg.AsyncConnection[DictRow], session_id: str, full_name: str,
               branch: str) -> None:
     await conn.execute(
         "INSERT INTO app.onboarding_sessions (session_id, full_name, branch) "

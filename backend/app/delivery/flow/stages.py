@@ -13,7 +13,7 @@ with workflow.unsafe.imports_passed_through():
         TEST_GENERATION_TASK_QUEUE,
     )
     from app.review.models import ReviewFinding, for_suite
-    from app.routing.models import judge_routes
+    from app.routing.models import RequirementRoute, RoutingStatus, judge_routes
 
 # Patches whose old code paths are gone; histories recorded with their markers replay
 # through workflow.deprecate_patch, called where workflow.patched was.
@@ -122,7 +122,8 @@ class Stages(FlowBase):
     def _seam_prepared(self) -> bool:
         return self.progress.seam_status == 'prepared' and self.progress.seam is not None
 
-    def _judge_routes(self, routing: dict[str, Any]) -> tuple[str, str | None]:
+    def _judge_routes(self, routing: dict[str, RequirementRoute],
+                      ) -> tuple[RoutingStatus, str | None]:
         if any(item['route'] == 'component' for item in routing.values()):
             workflow.deprecate_patch(COMPONENT_TESTS_PATCH)
         return judge_routes(routing)
@@ -132,10 +133,12 @@ class Stages(FlowBase):
         routing = dict(self.progress.routing or {})
         for item in unobservable:
             # The seam it was routed to, if any, is kept: a new routing is told of it.
-            seam = (routing.get(item['requirement_id']) or {}).get('seam')
-            routing[item['requirement_id']] = {
-                'route': 'unobservable', 'reason': item['reason'], 'source': 'tests',
-                **({'seam': seam} if seam else {})}
+            earlier = routing.get(item['requirement_id'])
+            seam = earlier.get('seam') if earlier else None
+            route = RequirementRoute(route='unobservable', reason=item['reason'], source='tests')
+            if seam:
+                route['seam'] = seam
+            routing[item['requirement_id']] = route
         self.progress.routing = routing
         self.progress.routing_status, self.progress.routing_error = self._judge_routes(routing)
         workflow.logger.info('The test author found %d criteria unobservable',

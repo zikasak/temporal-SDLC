@@ -3,7 +3,7 @@ The user picks one of them or writes their own. Shared by the host and the agent
 so it depends on nothing beyond pydantic."""
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, TypedDict
 
 from pydantic import BaseModel, Field
@@ -105,7 +105,7 @@ def questions_text(questions: Sequence[Question]) -> str:
                      for number, item in enumerate(questions, 1))
 
 
-def message_text(message: dict[str, Any]) -> str:
+def message_text(message: Mapping[str, Any]) -> str:
     """A stored conversation message as the model reads it: an assistant message with
     the questions it asked with ask_user."""
     questions = message.get('questions')

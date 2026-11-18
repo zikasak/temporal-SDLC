@@ -6,9 +6,12 @@ import psycopg
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from langchain_openai import ChatOpenAI
 
 from app.api.routes.settings import router
 from app.llm import model
+from app.llm.claude import ChatClaude
+from app.llm.pi import ChatPi
 from app.settings import storage
 from app.settings import providers
 from app.settings.models import ModelSettings, WORKFLOW_LABELS, WorkflowSettings
@@ -94,17 +97,22 @@ async def test_settings_persist_per_workflow_and_models_reload_after_save(databa
     assert (await client.get('/settings')).json()['workflows'] == response.json()['workflows']
 
     chat = await model.get_model('chat')
+    assert isinstance(chat, ChatOpenAI)
     assert chat.model_name == 'saved-chat-model' and chat.reasoning_effort is None
     requirements = await model.get_model('requirements')
+    assert isinstance(requirements, ChatPi)
     assert requirements.model == 'openai/saved-pi-model' and requirements.thinking_level == 'high'
     design = await model.get_model('api_design')
+    assert isinstance(design, ChatClaude)
     assert design.model == 'sonnet' and design.thinking_level == 'max'
 
     workflows['chat'] = {'adapter': 'claude', 'model': 'opus', 'thinking_level': 'high'}
     assert (await client.put('/settings', json={'workflows': workflows})).status_code == 200
     updated = await model.get_model('chat')
+    assert isinstance(updated, ChatClaude)
     assert updated.model == 'opus' and updated.thinking_level == 'high'
-    assert (await model.get_model('requirements')).model == 'openai/saved-pi-model'
+    kept = await model.get_model('requirements')
+    assert isinstance(kept, ChatPi) and kept.model == 'openai/saved-pi-model'
 
 
 async def test_invalid_settings_never_partially_overwrite_saved_choices(database, client):

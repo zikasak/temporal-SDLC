@@ -1,11 +1,13 @@
 """What the delivery pipeline is asked to build and how far it has come."""
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Literal, TypedDict
 
 from app.api_design.models import ApiModel
 from app.config import PULL_REQUEST_CHECK_INTERVAL_SECONDS
+from app.delivery.rounds import RoundOutcome
 from app.diagnosis.models import RepairRound
 from app.github.models import (
     PublicationStatus, PullRequest, PullRequestMention, RepositoryCheckout,
@@ -643,7 +645,7 @@ class DeliveryState:
     # What the CI left failing on each pushed commit of the automatic fix rounds in a
     # row, the failure before the first round included (app.delivery.rounds): whether
     # another round is worth it is decided from it.
-    ci_history: list[dict[str, Any]] = field(default_factory=list)
+    ci_history: list[RoundOutcome] = field(default_factory=list)
 
 
 def mention_key(item: Any) -> tuple[str | None, int]:
@@ -654,7 +656,7 @@ def mention_key(item: Any) -> tuple[str | None, int]:
     return None, int(item)
 
 
-def is_mention(entry: dict[str, Any], key: tuple[str | None, int]) -> bool:
+def is_mention(entry: Mapping[str, Any], key: tuple[str | None, int]) -> bool:
     comment_type, comment_id = key
     return entry['comment_id'] == comment_id and (
         comment_type is None or entry['comment_type'] == comment_type)

@@ -65,13 +65,14 @@ class PullRequestWait(FlowBase):
 
     async def _check_pull_request(self) -> None:
         """Ask GitHub how the pull request stands; a failed check changes nothing."""
-        if not self._checks_pull_request():
+        pull, repository = self.progress.pull_request, self.spec.repository
+        if not self._checks_pull_request() or pull is None or repository is None:
             return
-        number = self.progress.pull_request['number']
+        number = pull['number']
         try:
             current = await workflow.execute_activity(
                 'pull_request_state',
-                args=[self.spec.repository['full_name'], number],
+                args=[repository['full_name'], number],
                 result_type=dict, start_to_close_timeout=timedelta(minutes=1),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )

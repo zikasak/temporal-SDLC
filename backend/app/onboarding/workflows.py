@@ -1,6 +1,7 @@
 import asyncio
+from collections.abc import Sequence
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -14,7 +15,7 @@ with workflow.unsafe.imports_passed_through():
         find_onboarding_artifacts, inspect_onboarding_contract, onboarding_turn,
     )
     from app.onboarding.models import (
-        ARCHITECTURE_PRESENT, DECISIONS, FINISHED_STATUSES, OnboardingState,
+        ARCHITECTURE_PRESENT, DECISIONS, FINISHED_STATUSES, Artifact, OnboardingState,
         draft_kind_changed, onboarding_problems,
     )
     from app.requirements.document import render_requirements_markdown
@@ -42,7 +43,7 @@ CONTRACT_UNKNOWN = ("The existing contract could not be read, so only replacing 
 
 
 @workflow.defn
-class OnboardingWorkflow(Interview, _Delivering):
+class OnboardingWorkflow(Interview[OnboardingState], _Delivering):
     """One onboarding of an existing repository: the branch is checked out, the user
     confirms replacing a contract, contract tests or Dockerfile it already has, the LLM
     drafts the requirements, the API and the language from the code, and the user reviews
@@ -130,7 +131,7 @@ class OnboardingWorkflow(Interview, _Delivering):
             workflow.logger.warning("Existing artifacts unknown: %s", exc.cause or exc)
             return None
 
-    async def _after_checkout(self, known: list[str]) -> None:
+    async def _after_checkout(self, known: Sequence[str]) -> None:
         """Find what the branch has: what was not `known` before needs the user's decision;
         otherwise the onboarding goes on with drafting or the interview."""
         found = await self._artifacts()
@@ -138,7 +139,7 @@ class OnboardingWorkflow(Interview, _Delivering):
             self.state.status = "failed"
             self.state.error = ARTIFACTS_FAILED
             return
-        self.state.existing_artifacts = found
+        self.state.existing_artifacts = cast(list[Artifact], found)
         await self._inspect(found)
         accepted = known if self._decided() else []
         # A fork carries architecture_only over: adding only the architecture still needs
@@ -400,7 +401,7 @@ class OnboardingWorkflow(Interview, _Delivering):
                 self.state.status = status
                 return
             self.state.artifacts_unknown = False
-            self.state.existing_artifacts = found
+            self.state.existing_artifacts = cast(list[Artifact], found)
             await self._inspect(found)
             if self._ended():
                 return

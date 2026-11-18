@@ -472,7 +472,9 @@ def parse_analysis(text: str) -> dict[str, Any] | None:
         return None
     if not isinstance(data, dict) or not isinstance(data.get('instructions'), str):
         return None
-    files = data.get('files') if isinstance(data.get('files'), list) else []
+    files = data.get('files')
+    if not isinstance(files, list):
+        files = []
     return {'cause': 'environment' if data.get('cause') == 'environment' else 'code',
             'summary': str(data.get('summary') or '')[:500],
             'files': [str(item)[:300] for item in files[:20]],

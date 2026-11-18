@@ -1,5 +1,7 @@
 """The delivery pipeline, entered directly and through the requirements session that
 delivers a bugfix or a documentation task."""
+# Assertions read optional fields directly: a None there fails the test anyway.
+# pyright: reportOptionalSubscript=false, reportOptionalMemberAccess=false
 import asyncio
 import uuid
 from contextlib import asynccontextmanager
@@ -16,7 +18,7 @@ from temporalio.worker import Replayer, Worker
 
 from app.api.routes.requirements import router
 from app.api_design import service as api_design_service
-from app.api_design.models import empty_api
+from app.api_design.models import ApiModel, empty_api
 from app.architecture.workflows import ArchitectureWorkflow
 from app.delivery import service as delivery_service
 from app.delivery.models import (
@@ -30,7 +32,7 @@ from app.delivery.workflows import DeliveryWorkflow
 from app.review.models import MAX_STAGE_REVIEW_ROUNDS
 from app.requirements import service as requirements_service
 from app.requirements.document import render_requirements_markdown
-from app.requirements.models import RequirementsState
+from app.requirements.models import Requirement, RequirementsState, TaskKind
 from app.temporal import sessions
 from app.temporal.executions import ensure_search_attributes
 from app.temporal.workflows import ApiDesignWorkflow, RequirementsWorkflow
@@ -44,14 +46,14 @@ from tests.dev_server import start_dev_server
 TASK_QUEUE = "delivery-test"
 DOCUMENT = {"document_id": "0" * 32, "filename": "requirements.md",
             "content_type": "text/markdown", "size_bytes": 10, "revision": 1}
-API = {**empty_api(), "endpoints": [{
+API: ApiModel = {**empty_api(), "endpoints": [{
     "method": "GET", "path": "/rooms", "summary": "S", "description": "", "tag": "",
     "parameters": [], "request_schema": None, "response_status": 200,
     "response_schema": None, "response_array": False, "error_statuses": [],
     "requirement_ids": [],
 }]}
 # What the repository was published with, as opposed to what the bugfix interview records.
-PUBLISHED = [{"id": "FR-1", "category": "functional", "title": "Book rooms",
+PUBLISHED: list[Requirement] = [{"id": "FR-1", "category": "functional", "title": "Book rooms",
               "description": "Guests book rooms.", "priority": "must"}]
 CONTRACT = {
     "language": "java", "api": API, "requirements": PUBLISHED,
@@ -204,7 +206,7 @@ async def workers(env, monkeypatch):
 
 
 async def deliver(env, repository=None, language: str | None = "java",
-                  kind: str = "new_service", session_id: str | None = None):
+                  kind: TaskKind = "new_service", session_id: str | None = None):
     """Start the delivery of a one-endpoint service, as a finished design does."""
     session_id = session_id or f"api-design-session-{uuid.uuid4().hex}"
     spec = TaskSpec(session_id=session_id, requirements=[],
@@ -383,7 +385,7 @@ async def test_a_retried_correction_restores_repository_tests_the_service_passes
     worker.passing_after_correction = [lists]
     session_id = await deliver(env, repository_selection, kind="api_change")
     state = await delivered(env, session_id)
-    assert state.correction_failed and "still passes were changed or removed" in state.verification_error
+    assert state.correction_failed and "still passes were changed or removed" in (state.verification_error or '')
 
     retried = await delivery_service.retry(session_id, 'review')
     # The page sees the correction going on, not its failure.
@@ -408,7 +410,7 @@ async def test_a_retried_correction_tells_the_test_author_which_test_skipped_and
     session_id = await deliver(env, repository_selection, kind="api_change")
     state = await delivered(env, session_id)
     assert state.correction_failed
-    assert 'RoomsTest#books (skip reason: GitHub is not configured)' in state.verification_error
+    assert 'RoomsTest#books (skip reason: GitHub is not configured)' in (state.verification_error or '')
 
     await delivery_service.retry(session_id, 'review')
     state = await delivered(env, session_id)
@@ -842,17 +844,17 @@ async def test_a_criterion_no_suite_can_observe_stops_the_bugfix_before_its_test
     assert state.publication_status == 'skipped'
     if found_by == 'failure':
         assert state.routing_status == 'error' and state.routing is None
-        assert 'could not be decided' in state.routing_error
+        assert 'could not be decided' in (state.routing_error or '')
         # An agent's or provider's error is never shown: it may carry credentials.
-        assert 'sk-secret' not in state.routing_error
+        assert 'sk-secret' not in (state.routing_error or '')
     else:
         # The user is told which criterion and why, early and as a matter of the brief.
         assert state.routing_status == 'unobservable'
         assert state.routing['FR-2']['route'] == 'unobservable'
         assert state.routing['FR-2']['source'] == found_by
         reason = 'Route of FR-2.' if found_by == 'routing' else 'Needs a pull request.'
-        assert f'FR-2: {reason}' in state.routing_error
-        assert 'Rephrase' in state.routing_error
+        assert f'FR-2: {reason}' in (state.routing_error or '')
+        assert 'Rephrase' in (state.routing_error or '')
         assert state.routing_error.startswith('The test author found') == (found_by == 'tests')
 
     # Retrying the tests routes the criteria again first.
@@ -890,13 +892,13 @@ async def test_criteria_routed_to_a_seam_get_component_tests_written_from_their_
     if outcome == 'declined':
         assert state.routing_status == 'unobservable' and state.component_tests is None
         assert state.routing['FR-2']['source'] == 'tests'
-        assert 'FR-2: Happens in no stubbed symbol.' in state.routing_error
+        assert 'FR-2: Happens in no stubbed symbol.' in (state.routing_error or '')
         # The seam it was declined at is kept, and the user is pointed at the retry.
-        assert state.routing['FR-2']['seam'] == SEAM
-        assert 'Retry the tests to route them again' in state.routing_error
+        assert state.routing['FR-2'].get('seam') == SEAM
+        assert 'Retry the tests to route them again' in (state.routing_error or '')
     elif outcome == 'failed':
         assert state.component_tests is None
-        assert 'component tests could not be generated' in state.component_tests_error
+        assert 'component tests could not be generated' in (state.component_tests_error or '')
     if outcome == 'written':
         return
 
@@ -1013,8 +1015,8 @@ async def test_a_seam_that_cannot_be_added_stops_the_change_before_its_tests(
             'The seam the acceptance criteria are observed at could not be added to the code '
             'or built. The seam agent left no Dockerfile at the root of the repository.')
     else:
-        assert 'does not match its component contract' in state.seam_error
-        assert 'Rooms.merged is not present at runtime' in state.seam_error
+        assert 'does not match its component contract' in (state.seam_error or '')
+        assert 'Rooms.merged is not present at runtime' in (state.seam_error or '')
     assert state.routing_status == 'routed'
     assert state.component_tests is None and state.implementation is None
     assert state.baseline_status == 'skipped' and state.verification_status == 'skipped'
@@ -1072,7 +1074,7 @@ async def test_a_seam_whose_correction_misses_its_contract_stops_the_change(
     handle, state = await fixed(env, repository_selection)
     assert worker.stages == ['routing', 'seam', 'seam']
     assert state.seam_status == 'error'
-    assert 'does not match its component contract' in state.seam_error
+    assert 'does not match its component contract' in (state.seam_error or '')
     assert state.component_tests is None and state.implementation is None
     assert state.baseline_status == 'skipped' and not worker.published
 
@@ -1164,8 +1166,8 @@ async def test_a_baseline_through_an_added_seam_that_proves_nothing_adds_the_sea
     handle, state = await fixed(env, repository_selection)
     assert state.baseline_status == 'not_reproduced'
     # Said of the code with the seam, which may itself be what made the test pass.
-    assert 'against the code with only the seam the change added' in state.baseline_error
-    assert 'adding the seam already changed what the tests observe' in state.baseline_error
+    assert 'against the code with only the seam the change added' in (state.baseline_error or '')
+    assert 'adding the seam already changed what the tests observe' in (state.baseline_error or '')
     assert state.implementation is None and not worker.published
 
     # Retrying the tests adds the seam again, since the seam itself may be at fault.
@@ -1241,7 +1243,7 @@ async def test_nothing_is_fixed_unless_the_component_tests_fail_without_the_fix(
     handle, state = await fixed(env, repository_selection)
     assert state.baseline_status == status and error in state.baseline_error
     if baseline == 'skipped':
-        assert 'behaviour a seam of the code shows' in state.baseline_error
+        assert 'behaviour a seam of the code shows' in (state.baseline_error or '')
     # A run that could not complete runs once more before it is judged.
     assert worker.stages.count('component-baseline') == (
         2 if baseline == 'error' else 1 + MAX_REPRODUCE_ROUNDS * (baseline == 'not_reproduced'))
@@ -1280,7 +1282,7 @@ async def test_component_tests_that_keep_hanging_stop_the_delivery(
     assert worker.stages.count('component-baseline') == MAX_BOUND_ROUNDS + 1
     assert state.baseline_status == 'error' and (
         'Component tests: Tests the runner stopped at its per-test time limit in the '
-        f'baseline run: {ADDED_COMPONENT_TESTS[0]} (1)') in state.baseline_error
+        f'baseline run: {ADDED_COMPONENT_TESTS[0]} (1)') in (state.baseline_error or '')
     assert 'implementation' not in worker.stages and not worker.published
 
 
@@ -1292,7 +1294,7 @@ async def test_a_change_with_component_tests_is_not_green_while_one_of_its_tests
     _, state = await fixed(env, repository_selection)
     assert state.baseline_status == 'reproduced' and state.verification_status == 'completed'
     assert 'Component tests: Tests skipped in the run against the changed service: 1' in (
-        state.verification_error)
+        state.verification_error or '')
     # A skip is no failure to diagnose: nothing is repaired, reviewed or pushed.
     assert worker.diagnosed == [] and worker.repairs == [] and worker.reviewed == []
     assert state.publication_status == 'skipped' and state.publication_error is None
@@ -1422,7 +1424,7 @@ async def test_a_fix_that_breaks_its_component_contract_is_written_again(
     assert state.baseline_status == 'reproduced'
     # The fix is at fault: nothing is run against it, and its stage is the one retried.
     assert state.implementation_error.startswith(worker.conformance_error)
-    assert 'Retry the implementation' in state.implementation_error
+    assert 'Retry the implementation' in (state.implementation_error or '')
     assert state.verification_status == 'skipped' and state.verification_error is None
     assert state.verification is None and state.component_verification is None
     assert worker.stages[-2:] == ['implementation', 'component-runner']
@@ -1448,7 +1450,7 @@ async def test_more_component_tests_than_a_baseline_tracks_are_not_judged_in_par
     _, state = await fixed(env, repository_selection)
     assert state.baseline_status == 'error'
     assert 'added 1001 tests, more than one baseline run reports on singly (1000)' in (
-        state.baseline_error)
+        state.baseline_error or '')
     # Nothing is run: a baseline of some of them would not prove the rest.
     assert worker.component_runs == [] and 'baseline' not in worker.stages
     assert state.implementation is None and not worker.published
@@ -1463,7 +1465,7 @@ async def test_bugfix_is_not_published_until_every_test_is_seen_to_pass(env, wor
     assert state.baseline_status == 'reproduced'
     if outcome == 'skipped':
         assert state.verification['status'] == 'passed'
-        assert 'Tests skipped in the run against the changed service: 1' in state.verification_error
+        assert 'Tests skipped in the run against the changed service: 1' in (state.verification_error or '')
     else:
         assert state.verification['status'] == 'error' and state.verification_error is None
     assert state.publication_status == 'skipped' and not worker.published
@@ -1581,7 +1583,7 @@ async def test_a_suite_still_keeping_tests_after_the_restore_rounds_is_retried_w
     state = await delivered(env, session_id)
     # Two restore rounds, each verified again, and the suite still rewrites the test.
     assert [stage for stage, _ in worker.repairs] == ["tests", "tests"]
-    assert len(worker.existing_runs) == 3 and KEPT in state.verification_error
+    assert len(worker.existing_runs) == 3 and KEPT in (state.verification_error or '')
     assert state.publication_status == "skipped" and not worker.published and not state.reviews
 
     worker.__class__ = FakeActivities
@@ -1607,7 +1609,7 @@ async def test_a_suite_still_keeping_tests_after_the_restore_rounds_is_retried_w
 async def test_api_change_is_not_published_with_a_test_that_did_not_run(env, worker, repository_selection):
     worker.verification_result = "skipped"
     state = await delivered(env, await deliver(env, repository_selection, kind="api_change"))
-    assert "Tests skipped" in state.verification_error
+    assert "Tests skipped" in (state.verification_error or '')
     assert state.publication_status == "skipped" and not worker.published
 
 
@@ -1692,7 +1694,7 @@ async def test_a_session_blocked_on_its_contract_goes_on_from_the_latest_commit(
     worker.fail_checkout = True
     await requirements_service.update_checkout(handle.id)
     state = await wait_until(handle, lambda state: state.status == "interviewing")
-    assert state.checkout == {"commit": "1" * 40} and "checked out again" in state.error
+    assert state.checkout == {"commit": "1" * 40} and "checked out again" in (state.error or '')
 
     worker.fail_checkout = False
     await requirements_service.update_checkout(handle.id)
@@ -1858,9 +1860,10 @@ async def test_only_the_first_of_answers_sent_together_resumes_the_agent():
     agent._questions = [{"question": "Which database?", "options": ["Postgres", "MySQL"]}]
     agent.validate_answer_questions(["Postgres"])
     agent.validate_answer_questions(["MySQL"])
-    await agent.answer_questions(["Postgres"])
+    # Temporal's update decorator is typed as an unbound, synchronous method.
+    await agent.answer_questions(["Postgres"])  # pyright: ignore[reportCallIssue]
     with pytest.raises(ApplicationError, match="not waiting"):
-        await agent.answer_questions(["MySQL"])
+        await agent.answer_questions(["MySQL"])  # pyright: ignore[reportCallIssue]
     assert agent._answers == ["Postgres"]
 
 

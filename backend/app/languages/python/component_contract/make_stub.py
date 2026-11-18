@@ -23,6 +23,7 @@ import copy
 import json
 import sys
 from pathlib import Path
+from typing import TypeGuard, cast, overload
 
 # What a named symbol's docstring says until the agent states the behaviour; the host
 # rejects a contract that still holds it.
@@ -66,7 +67,7 @@ def _bound(statement: ast.stmt) -> list[str]:
     return []
 
 
-def _type_checking(statement: ast.stmt) -> bool:
+def _type_checking(statement: ast.stmt) -> TypeGuard[ast.If]:
     test = statement.test if isinstance(statement, ast.If) else None
     return (isinstance(test, ast.Name) and test.id == 'TYPE_CHECKING'
             or isinstance(test, ast.Attribute) and test.attr == 'TYPE_CHECKING')
@@ -163,6 +164,15 @@ class Stubber:
         self.unresolved.add(name)
         return False
 
+    @overload
+    def types(self, node: ast.expr) -> ast.expr: ...
+
+    @overload
+    def types(self, node: None) -> None: ...
+
+    @overload
+    def types(self, node: ast.expr | None) -> ast.expr | None: ...
+
     def types(self, node: ast.expr | None) -> ast.expr | None:
         """A type expression with every name made available, or `Any` in its place."""
         if node is None:
@@ -184,7 +194,7 @@ class Stubber:
                     root = root.value
                 if isinstance(root, ast.Name):
                     return item if stubber.resolve(root.id) else stubber._any()
-                return self.generic_visit(item)
+                return cast(ast.expr, self.generic_visit(item))
 
             def visit_Subscript(self, item: ast.Subscript) -> ast.expr:
                 head = item.value
@@ -193,7 +203,7 @@ class Stubber:
                     # Its strings are values, not forward references.
                     item.value = self.visit(head)
                     return item
-                return self.generic_visit(item)
+                return cast(ast.expr, self.generic_visit(item))
 
             def visit_Constant(self, item: ast.Constant) -> ast.expr:
                 if isinstance(item.value, str) and item is not node:
@@ -205,7 +215,7 @@ class Stubber:
                     return stubber.types(inner)
                 return item
 
-        return Names().visit(copy.deepcopy(node))
+        return cast(ast.expr, Names().visit(copy.deepcopy(node)))
 
     def _any(self) -> ast.Name:
         self.imports.setdefault('Any', 'from typing import Any')
@@ -242,8 +252,8 @@ class Stubber:
         stub.returns = self.types(stub.returns)
         stub.decorator_list = self._decorators(node)
         stub.type_comment = None
-        stub.body = ([ast.Expr(ast.Constant(PLACEHOLDER))] if documented else []) + [
-            ast.Expr(ast.Constant(Ellipsis))]
+        body: list[ast.stmt] = [ast.Expr(ast.Constant(PLACEHOLDER))] if documented else []
+        stub.body = [*body, ast.Expr(ast.Constant(Ellipsis))]
         return stub
 
     def assignment(self, node: ast.stmt) -> ast.stmt:
@@ -254,13 +264,15 @@ class Stubber:
         if isinstance(node, ast.TypeAlias):
             return ast.TypeAlias(copy.deepcopy(node.name), copy.deepcopy(node.type_params),
                                  self.types(node.value))
+        assert isinstance(node, ast.Assign)  # the only other assignment a stub keeps
         value = node.value
         factory = (isinstance(value, ast.Call) and (
             getattr(value.func, 'id', None) or getattr(value.func, 'attr', None))
             in _TYPE_FACTORIES)
         if isinstance(value, _SIMPLE_VALUES) or factory:
             return ast.Assign(copy.deepcopy(node.targets), self.types(value), lineno=0)
-        return ast.AnnAssign(copy.deepcopy(node.targets[0]), self._any(), None, simple=1)
+        target = cast(ast.Name | ast.Attribute | ast.Subscript, copy.deepcopy(node.targets[0]))
+        return ast.AnnAssign(target, self._any(), None, simple=1)
 
     def member(self, statement: ast.stmt, members: set[str]) -> list[ast.stmt]:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -340,7 +352,7 @@ def make_stub(module: str, symbols: list[str], repository: Path, components: Pat
             stubber.named.discard(name)
             stubber.named.update(f'{name}.{member}' for member in members)
     statements: list[ast.stmt] = []
-    insertions: list[tuple[str, list[ast.stmt]]] = []
+    insertions: list[tuple[str, set[str]]] = []
     done: set[str] = set()
     while len(done) < len(stubber.wanted):
         for name, members in list(stubber.wanted.items()):
@@ -398,7 +410,7 @@ def _extend_class(text: str, name: str, members: set[str], stubber: Stubber,
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or '').split('\n\n')[0])
     parser.add_argument('module')
     parser.add_argument('symbols', nargs='+')
     parser.add_argument('--repository', default='repository', type=Path)

@@ -1,5 +1,5 @@
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -42,11 +42,12 @@ class MentionRounds(FlowBase):
         then answered right away from the code as last pushed, or queued as a fix round
         that runs after the current one, in the order the requests arrived. Its full text
         is kept in the mention history, never in the workflow's state."""
-        body = mention['body']
+        body = mention.get('body')
+        assert body is not None  # handed over with its text; only the workflow drops it
         self._handed_over = True
-        entry: PullRequestMention = {
+        entry = cast(PullRequestMention, {
             **{key: value for key, value in mention.items() if key != 'body'},
-            'classification': 'pending', 'status': 'classifying'}
+            'classification': 'pending', 'status': 'classifying'})
         self.progress.mentions.append(entry)
         # Its place in the queue is taken as it arrives: a fix request whose
         # classification ends sooner never overtakes one that arrived before it.
@@ -150,10 +151,11 @@ class MentionRounds(FlowBase):
 
     def _queued_entry(self, key: tuple[str | None, int | None]) -> PullRequestMention | None:
         """The fix request of the comment `key`, as (comment type, comment ID)."""
-        if key[1] is None:
+        comment_type, comment_id = key
+        if comment_id is None:
             return None
         return next((item for item in self.progress.mentions
-                     if is_mention(item, key) and item['classification'] == 'fix'
+                     if is_mention(item, (comment_type, comment_id)) and item['classification'] == 'fix'
                      and item['status'] in ('queued', 'running')), None)
 
     def _running_entry(self) -> PullRequestMention | None:
@@ -351,6 +353,7 @@ class MentionRounds(FlowBase):
         fix_error, self._fix_error = self._fix_error, None
         fix_summary, self._fix_summary = self._fix_summary, None
         if pushed:
+            assert publication is not None
             if self.spec.architecture_only:
                 verified = ('Only the architecture changed, so no tests, verification or '
                             'code review ran.'

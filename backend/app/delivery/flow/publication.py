@@ -1,5 +1,5 @@
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -10,7 +10,7 @@ from app.delivery.flow.stages import COMPONENT_REPAIRS_PATCH
 from app.delivery.flow.base import FlowBase
 
 with workflow.unsafe.imports_passed_through():
-    from app.delivery.contract import with_requirements
+    from app.delivery.contract import RepositoryContract, with_requirements
     from app.delivery.models import open_review_findings
     from app.requirements.models import CHANGE_KINDS
     from app.temporal.activities import (
@@ -85,7 +85,8 @@ class Publication(FlowBase):
             # The documentation alone: the service, its tests and its contract stay.
             push, args = publish_documentation, [self.spec.language, not unverified]
         else:
-            contract = {
+            # A delivery that reaches publication had its language chosen.
+            contract = cast(RepositoryContract, {
                 'language': self.spec.language,
                 'requirements': self.spec.requirements,
                 'requirements_document': self.spec.requirements_document,
@@ -94,7 +95,7 @@ class Publication(FlowBase):
                 # without one the repository's files are kept.
                 'architecture': self.spec.architecture,
                 'architecture_structure': self.spec.architecture_structure,
-            }
+            })
             if self.spec.brief:
                 # The repository's contract grows by what the change required of the service.
                 contract = with_requirements(contract, self.spec.brief['requirements'],
@@ -267,7 +268,8 @@ class Publication(FlowBase):
             if route['route'] not in ('contract', 'component'):
                 continue
             item: dict[str, Any] = {'id': requirement, 'title': titles.get(requirement, '')}
-            if route.get('seam'):
-                item['seam'] = route['seam']
+            seam = route.get('seam')
+            if seam:
+                item['seam'] = seam
             proofs.setdefault(route['route'], []).append(item)
         return proofs

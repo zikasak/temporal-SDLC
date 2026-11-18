@@ -1,3 +1,5 @@
+# Assertions read optional fields directly: a None there fails the test anyway.
+# pyright: reportOptionalMemberAccess=false
 import json
 import tarfile
 from pathlib import Path

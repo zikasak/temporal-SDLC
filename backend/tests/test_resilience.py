@@ -1,5 +1,7 @@
 """Work kept in the repository, waits for the provider's limits, the repository's checks
 and their excerpts, decisions about further rounds of fixes, and failure causes."""
+# Assertions read optional fields directly: a None there fails the test anyway.
+# pyright: reportOptionalSubscript=false, reportOptionalMemberAccess=false
 
 import json
 import subprocess

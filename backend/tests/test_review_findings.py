@@ -83,7 +83,7 @@ def test_a_change_with_component_tests_has_its_tests_and_stubs_reviewed(tmp_path
         {'summary': 'Leaks a private helper.', 'target': 'both',
          'path': 'contracts/components/app/rooms.pyi'}]),
         {'contracts/components/app/rooms.pyi'})
-    assert findings[0]['path'] == 'contracts/components/app/rooms.pyi'
+    assert findings[0].get('path') == 'contracts/components/app/rooms.pyi'
 
 
 def test_a_change_with_component_tests_of_its_web_client_has_that_parts_reviewed(tmp_path):
@@ -134,12 +134,14 @@ def _written(tmp_path, items):
 
 
 def test_findings_about_the_stubs_go_to_no_author_and_tests_findings_to_their_suite():
-    from app.review.models import correctable, for_suite, for_worker, review_request
-    stub = {'summary': 'S', 'target': 'both', 'reason': 'R', 'path': 'contracts/components/a.pyi'}
-    component = {'summary': 'C', 'target': 'tests', 'reason': 'R',
+    from app.review.models import (
+        ReviewFinding, correctable, for_suite, for_worker, review_request,
+    )
+    stub: ReviewFinding = {'summary': 'S', 'target': 'both', 'reason': 'R', 'path': 'contracts/components/a.pyi'}
+    component: ReviewFinding = {'summary': 'C', 'target': 'tests', 'reason': 'R',
                  'path': 'component-tests/tests/test_a.py'}
-    contract = {'summary': 'H', 'target': 'tests', 'reason': 'R', 'path': 'tests/test_a.py'}
-    anywhere = {'summary': 'A', 'target': 'tests', 'reason': 'R'}
+    contract: ReviewFinding = {'summary': 'H', 'target': 'tests', 'reason': 'R', 'path': 'tests/test_a.py'}
+    anywhere: ReviewFinding = {'summary': 'A', 'target': 'tests', 'reason': 'R'}
     findings = [stub, component, contract, anywhere]
     assert not correctable(stub) and all(map(correctable, findings[1:]))
     assert for_worker(findings, 'implementation') == []

@@ -10,7 +10,7 @@ import tempfile
 import uuid
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -478,7 +478,7 @@ def read_findings(output: Path, changed: set[str],
 
 def _round_id() -> str:
     """The review round in progress: the child workflow running it, one per round."""
-    return activity.info().workflow_id if activity.in_activity() else ''
+    return (activity.info().workflow_id or '') if activity.in_activity() else ''
 
 
 async def _static_findings(language: Language, session_id: str, workspace: Path,
@@ -559,7 +559,7 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
                 language, session_dir, context, workspace, part)
             if prepared.decided is not None:
                 # A host check decided the round: no agent runs, and no other part.
-                findings = [{**item, **({'target': target} if target else {})}
+                findings = [cast(ReviewFinding, {**item, **({'target': target} if target else {})})
                             for item in prepared.decided]
                 for finding in findings:
                     repeats = _repeated({}, finding, previous)

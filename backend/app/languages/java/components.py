@@ -92,6 +92,7 @@ def _tokens(source: str) -> list[_Token]:
         if match is None:
             raise ValueError(f"line {line}: unreadable character")
         kind, value = match.lastgroup, match.group()
+        assert kind is not None  # every alternative of TOKEN is a named group
         if kind == "op" and value in "\"'":
             raise ValueError(f"line {line}: unterminated literal")
         if kind == "op" and value == "/" and source.startswith("/*", position):
@@ -169,7 +170,9 @@ class _Stub:
     def balanced(self, words: list[str]) -> None:
         """A bracketed group of constants, names, types and annotations, such as a
         method's parameters or an annotation's arguments: no code."""
-        closing = [OPENING[self.peek()]]
+        opening = self.peek()
+        assert opening is not None  # called at an opening bracket
+        closing = [OPENING[opening]]
         words.append(self.take().value)
         while closing:
             line, value = self.line(), self.peek()

@@ -157,14 +157,16 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
                 self.state.instructions = None
                 workflow.continue_as_new(self.state)
         await workflow.wait_condition(workflow.all_handlers_finished)
-        if self._next is not self.state:
+        following = self._next
+        assert following is not None  # the wait above ends only with a next run
+        if following is not self.state:
             # Mentions received since the user's decision was read stay with the delivery.
-            self._next.progress.mentions = self.progress.mentions
-            running = (self._next.mention_type, self._next.mention)
-            self._next.mention_queue = [
+            following.progress.mentions = self.progress.mentions
+            running = (following.mention_type, following.mention)
+            following.mention_queue = [
                 item for item in self.state.mention_queue
-                if self._next.mention is None or not _same_mention(mention_key(item), running)]
-        workflow.continue_as_new(self._next)
+                if following.mention is None or not _same_mention(mention_key(item), running)]
+        workflow.continue_as_new(following)
 
     @workflow.update
     def restart(self, state: DeliveryState) -> None:

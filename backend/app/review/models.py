@@ -100,7 +100,7 @@ def earlier_findings(findings: list[ReviewFinding]) -> list[dict[str, Any]]:
     """The findings a run of review rounds already had corrected, numbered from 1, as the
     next review receives them to tell whether they are settled."""
     return [{'number': number, 'summary': item['summary'][:PREVIOUS_SUMMARY_CHARS],
-             'target': item['target'], **({'path': item['path']} if item.get('path') else {})}
+             'target': item['target'], **({'path': path} if (path := item.get('path')) else {})}
             for number, item in enumerate(findings, start=1)]
 
 
@@ -133,7 +133,7 @@ def commit_findings(findings: list[ReviewFinding]) -> str:
              + (f' (the first {COMMIT_FINDINGS} are listed)' if len(findings) > COMMIT_FINDINGS
                 else '')]
     for number, item in enumerate(findings[:COMMIT_FINDINGS], start=1):
-        where = f' [{item["path"]}]' if item.get('path') else ''
+        where = f' [{path}]' if (path := item.get('path')) else ''
         summary = ' '.join(item['summary'].split())
         lines.append(f'{number}. ({item["target"]}){where} {summary}')
     return '\n'.join(lines)
