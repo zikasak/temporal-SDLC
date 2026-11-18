@@ -16,8 +16,8 @@ with workflow.unsafe.imports_passed_through():
     from app.temporal.activities import register_session
     from app.temporal.closing import end_cancelled
     from app.temporal.execution_fields import execution_fields
-    from app.temporal.flow_flags import FlowFlags, PendingStage, interview_waits
-    from app.temporal.interview import Interview, assistant_message
+    from app.temporal.flags import FlowFlags, PendingStage, mark_skipped
+    from app.temporal.interview import Interview, assistant_message, pending_questions
     from app.temporal.workflows import FLOW_ABANDONED, FLOW_ABANDONED_PATCH, _check_out
 
 DISCUSSION_TOO_LONG = "This discussion is too long to continue. Finalize the architecture."
@@ -34,9 +34,7 @@ class ArchitectureWorkflow(Interview, FlowFlags, PendingStage):
     proposing to skip the stage instead), and the user reviews it in a conversation of
     updates. Finalizing writes architecture.md and architecture.json; finalizing or
     confirming the skip of an API change ends the session and hands the task's API design
-    on: as a stage of a task flow (created pending until the requirements are finalized)
-    to the task flow, which starts its pending API design; otherwise to the requirements
-    session, whose child it becomes. The session has no idle timeout."""
+    to the requirements session, whose child it becomes. The session has no idle timeout."""
 
     INTERVIEWER = "architect"
     TOO_LONG = DISCUSSION_TOO_LONG
@@ -57,6 +55,14 @@ class ArchitectureWorkflow(Interview, FlowFlags, PendingStage):
             self.state.status = "preparing"
         self._updates = 0
         self._turn_lock = asyncio.Lock()
+        self._init_flags()
+        self._init_pending()
+
+    def _flags(self) -> tuple[bool | None, bool | None]:
+        """Waiting for the user while it asks questions or proposes skipping the stage."""
+        return (self.state.status == "interviewing"
+                and (self.state.skip_proposal is not None
+                     or bool(pending_questions(self.state.messages))), None)
 
     def _needs_draft(self) -> bool:
         """Whether the session waits for its first draft (or the proposal made instead)."""
@@ -66,25 +72,11 @@ class ArchitectureWorkflow(Interview, FlowFlags, PendingStage):
     @workflow.run
     async def run(self, state: ArchitectureState) -> ArchitectureResult | None:
         if self.state.pending:
-            return await self._wait_pending()
-        return await self._run_flagged(self._run)
-
-    @workflow.signal
-    def begin(self, state: ArchitectureState) -> None:
-        """The task flow starts this pending session from `state`."""
-        self._begin(state)
-
-    @workflow.signal
-    def skip_pending(self) -> None:
-        """The task flow closes this pending session: it will never run."""
-        self._skip()
-
-    def _flags(self) -> tuple[bool, bool]:
-        return (self.state.status == "interviewing"
-                and (self.state.skip_proposal is not None or interview_waits(self.state)),
-                False)
-
-    async def _run(self) -> ArchitectureResult | None:
+            # Created by its task flow before the requirements were finalized.
+            await self._wait_pending()
+            return None
+        if self.state.task_flow_id:
+            self._keep_flags()
         ready = await _check_out(self.state, self._resume_status)
         if ready and self.state.status in ("drafting", "turn_running"):
             async with self._turn_lock:
@@ -101,9 +93,10 @@ class ArchitectureWorkflow(Interview, FlowFlags, PendingStage):
                 workflow.logger.info("Continuing as new")
                 workflow.continue_as_new(self.state)
         await workflow.wait_condition(workflow.all_handlers_finished)
-        if self.state.task_flow_id:
-            await self._hand_off()
-            return None
+        await self._close_flags()
+        if self.state.task_flow_id and self.state.status == "skipped":
+            # The confirmed skip: the stage never ran, and is listed as skipped.
+            mark_skipped()
         if self.state.status == "failed" or not self.state.api_design_session_id:
             if workflow.patched(FLOW_ABANDONED_PATCH):
                 # The session ended without handing the task on, so nothing of it will be
@@ -111,6 +104,8 @@ class ArchitectureWorkflow(Interview, FlowFlags, PendingStage):
                 await end_cancelled(FLOW_ABANDONED)
             return None
         design = handed_design(self.state, workflow.info().workflow_id)
+        if self.state.task_flow_id:
+            design.task_flow_id = self.state.task_flow_id
         if workflow.info().parent is None:
             # Without a requirements session to follow it, the session starts the design
             # itself, which outlives it.
@@ -139,30 +134,10 @@ class ArchitectureWorkflow(Interview, FlowFlags, PendingStage):
     def get_state(self) -> ArchitectureState:
         return self.state
 
-    async def _hand_off(self) -> None:
-        """Hand the API design to the task flow, which starts its pending design child; a
-        session that failed hands nothing on, and the design is skipped."""
-        if self.state.status == "failed" or not self.state.api_design_session_id:
-            workflow.logger.info("Nothing handed on to the task flow")
-            return
-        design = handed_design(self.state, workflow.info().workflow_id)
-        design.task_flow_id = self.state.task_flow_id
-        try:
-            await workflow.get_external_workflow_handle(self.state.task_flow_id).signal(
-                "architecture_finished", design)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - a closed task flow starts nothing
-            workflow.logger.warning("The task flow was not told: %s", exc)
-            return
-        workflow.logger.info("API design handed on to the task flow %s",
-                             self.state.task_flow_id)
-
     def _hand_over(self) -> None:
-        # A task flow reserved the design's ID when it created the design pending.
-        self.state.api_design_session_id = (
-            self.state.next_session_id if self.state.task_flow_id and self.state.next_session_id
-            else f"api-design-session-{workflow.uuid4().hex}")
+        # In a task flow, the API design the task flow reserved for the task.
+        self.state.api_design_session_id = (self.state.next_session_id
+                                            or f"api-design-session-{workflow.uuid4().hex}")
 
     async def _turn(self) -> bool:
         drafting = self.state.structure is None

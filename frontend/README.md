@@ -8,6 +8,10 @@ The **GitHub** tab connects one shared GitHub App installation: the app's ID and
 
 Requirements and API-design sessions check the branch out before the LLM starts, keep all LLM file access inside that checkout, and push the verified service and tests to a new `generated/…` branch; the app therefore needs the Contents read and write permission. Chat only records its selection. The connection is shared by every signed-in user. See [GitHub setup, permissions, security, and API details](../docs/github-connector.md).
 
+## Flows page
+
+The Flows page lists the top-level flows: task flows (by their current name), onboardings and chats. Opening a task flow lists its requirements, architecture, API design and delivery steps with their statuses, including **Pending** for a step that waits for the steps it depends on and **Skipped** for one that will never run; the earlier steps of another task that a forked or fix-round task flow links to are marked *linked from another task*. A flow or step the backend reports as waiting for you is highlighted, with an **Open questions** button that opens the step that asks; a closed flow whose delivery's review findings were neither accepted nor acted on carries an *unresolved findings* marker instead. The **Requirements** filter lists task flows; requirements flows from before task flows existed appear only under **All**, without highlight or marker. A session's view links to all steps of its task flow (`?parent=<task flow>`), and a closed delivery lists the new flows its fix rounds started.
+
 ## Requirement IDs in conversations
 
 In the requirements, architecture, API design and onboarding conversations, and in the coding agents' questions in the delivery progress, requirement IDs the LLM mentions in its messages, questions and options (such as `FR-12`, `fr12` or `NFR-3`) are marked. Hovering over one or tapping it shows the requirement's ID, title, description, priority and category, marked "retired" when the task retires it, or "Unknown requirement" when no requirement has that ID. The text comes from the session response's `lookup_requirements` field.

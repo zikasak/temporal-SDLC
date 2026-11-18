@@ -15,7 +15,7 @@ from app.delivery.flow.review import ReviewRounds
 from app.delivery.flow.stages import RESTORE_KEPT_PATCH, Stages, restore_finding
 from app.delivery.flow.verification import Verification
 from app.delivery.flow.waiting import PullRequestWait
-from app.temporal.flow_flags import FlowFlags, PendingStage
+from app.temporal.flags import FlowFlags, PendingStage
 
 with workflow.unsafe.imports_passed_through():
     from app.delivery.causes import with_cause
@@ -97,33 +97,23 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
         self._handed_over = not state.record_only
         # The failed CI this run fixes on its own, if it is such a round.
         self._ci_round: dict[str, Any] | None = state.ci_fix
+        self._init_flags()
+        self._init_pending()
+
+    def _flags(self) -> tuple[bool | None, bool | None]:
+        """Waiting for the user while an agent asks questions or, once the run waits, open
+        review findings wait for a decision; unresolved while those findings are open."""
+        open_findings = bool(self.progress.open_findings)
+        return (bool(self.progress.agent_questions) or (self.state.waiting and open_findings),
+                open_findings)
 
     @workflow.run
-    async def run(self, state: DeliveryState) -> DeliveryProgress | None:
-        # A delivery its task flow created before its design or requirements were
-        # finalized waits until the task flow starts it.
+    async def run(self, state: DeliveryState) -> DeliveryProgress:
         if self.state.pending:
-            return await self._wait_pending()
-        return await self._run_flagged(self._run)
-
-    @workflow.signal
-    def begin(self, state: DeliveryState) -> None:
-        """The task flow starts this pending delivery from `state`."""
-        self._begin(state)
-
-    @workflow.signal
-    def skip_pending(self) -> None:
-        """The task flow closes this pending delivery: it will never run."""
-        self._skip()
-
-    def _flags(self) -> tuple[bool, bool]:
-        """It waits for the user while an agent asks, or while its open review findings
-        wait for a decision; the findings stay unresolved until accepted or fixed."""
-        return (bool(self.progress.agent_questions)
-                or (self.state.waiting and self.progress.open_findings),
-                self.progress.open_findings)
-
-    async def _run(self) -> DeliveryProgress:
+            # Created by its task flow before the task was specified.
+            await self._wait_pending()
+            return self.progress
+        self._keep_flags()
         # Mentions that ended before this run, such as in a stopped one, are kept in the
         # mention history and leave the workflow's state, once a fix round that was
         # stopped has had its outcome replied.
@@ -145,6 +135,7 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
         self._start_queued()
         if workflow.patched(PULL_REQUEST_CLOSES_PATCH):
             if not await self._wait_for_pull_request():
+                await self._close_flags()
                 return self.progress
         else:
             # A run that began to wait before deliveries watched their pull request: the
@@ -165,6 +156,7 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
                     # turned out to be a fix request: it was accepted, so the delivery
                     # waits again and starts its round instead of closing with it queued.
                     if not self._fix_pending():
+                        await self._close_flags()
                         return self.progress
                     workflow.deprecate_patch('idle-queued-mentions')
                     workflow.logger.info('Fix request queued while closing; continuing')

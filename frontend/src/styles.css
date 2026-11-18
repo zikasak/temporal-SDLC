@@ -478,19 +478,10 @@ h2 {
   background: var(--green);
 }
 
-/* A stage of a task flow that waits for the stages before it, or will never run. */
-.status-pending .status-dot {
-  background: transparent;
-  border: 1px solid #9aa39d;
-}
-
-.status-skipped {
-  color: var(--muted);
-}
-
 .status-error .status-dot,
 .status-failed .status-dot,
 .status-canceled .status-dot,
+.status-cancelled .status-dot,
 .status-terminated .status-dot,
 .status-timed_out .status-dot {
   background: var(--red);
@@ -2106,17 +2097,31 @@ h2 {
   background: #fdf6ec;
 }
 
-/* A task flow's current name. */
+/* A task flow, by its current name. */
 .flow-name {
   min-width: 0;
-  max-width: 48ch;
+  max-width: 40ch;
   overflow: hidden;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* An earlier stage of another task that a forked or fix-round task flow links to. */
+/* A stage still waiting for the stages it depends on, or one that will never run. */
+.status-pending .status-dot {
+  background: transparent;
+  border: 1px solid #9aa39d;
+}
+
+.status-skipped .status-dot {
+  background: #c9cec9;
+}
+
+.flow-inactive > .flow-row {
+  color: var(--muted);
+}
+
+/* An earlier stage of another task, linked from a forked or fix-round task flow. */
 .flow-linked {
   border: 1px dashed #9aa39d;
   border-radius: 999px;

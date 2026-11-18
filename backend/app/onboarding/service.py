@@ -54,9 +54,8 @@ async def _unfinished(session_id: str) -> bool:
 
 async def _start(session_id: str, state: OnboardingState) -> None:
     client = await connect_temporal()
-    # Started with WaitingForUser, which it keeps, as its delivery does with its findings.
     await client.start_workflow(WORKFLOW_TYPE, state, id=session_id, task_queue=TASK_QUEUE,
-                                **execution_fields(state.repository, session_id, flags=True))
+                                **execution_fields(state.repository, session_id))
     await register(session_id)
 
 

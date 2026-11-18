@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import { repositoryPublication, type RepositoryPublication, type RepositorySelection } from "./github";
 import { QuestionForm, questionList, type Question } from "./Questions";
 import { isObject } from "./api";
+import { flowStepsLink } from "./url";
 
 type GeneratedCode = {
   server: { path: string; files: number };
@@ -439,14 +440,6 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
       ? value.fix_flow_ids.filter((item): item is string => typeof item === "string" && item !== "")
       : [],
   };
-}
-
-/** The view of a flow a fix round started after the delivery's flow closed: a task flow
- * (task-flow-…) or an onboarding's fix delivery (delivery-fix-session-…) runs as the session
- * fix-session-… with the same digest, shown like a requirements session. */
-export function fixFlowLink(flowId: string): string | null {
-  const digest = /^(?:task-flow-|delivery-fix-session-)([0-9a-f]{32})$/.exec(flowId)?.[1];
-  return digest ? `?mode=requirements&session_id=fix-session-${digest}` : null;
 }
 
 /** What the page shows at once after answering an agent, until the next poll. */
@@ -914,15 +907,11 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
     </section>}
     {progress.fix_flow_ids.length > 0 && <section aria-label="Fix rounds after the flow closed">
       <h3>Fix rounds after the flow closed</h3>
-      <p className="field-hint">Each runs as a flow of its own, pushed to a new branch with a new pull request.</p>
+      <p>Each runs as a new flow of its own, pushed to a new branch with a new pull request.</p>
       <ul>
-        {progress.fix_flow_ids.map((flowId, index) => {
-          const link = fixFlowLink(flowId);
-          return <li key={flowId}>
-            {link ? <a href={link}>Fix round {index + 1}</a> : <>Fix round {index + 1}</>}{" "}
-            <code>{flowId}</code>
-          </li>;
-        })}
+        {progress.fix_flow_ids.map((id) => <li key={id}>
+          <a href={flowStepsLink(id)}><code>{id}</code></a>
+        </li>)}
       </ul>
     </section>}
   </>;

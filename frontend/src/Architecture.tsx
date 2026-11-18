@@ -9,7 +9,7 @@ import {
 import {
   ConversationMarkdown, RequirementLookupProvider, lookupRequirementList, type LookupRequirement,
 } from "./RequirementLookup";
-import { rememberSessionId, urlParam } from "./url";
+import { flowStepsLink, rememberSessionId, urlParam } from "./url";
 
 type SessionStatus =
   | "preparing" | "drafting" | "interviewing" | "turn_running" | "finalizing" | "completed"
@@ -38,6 +38,8 @@ type Session = {
   skip_declined: boolean;
   document: { document_id: string; filename: string; revision: number } | null;
   error: string | null;
+  // The top-level task flow the session is a stage of; null for sessions from before.
+  task_flow_id: string | null;
   forked_from: { session_id: string; message_index: number } | null;
   repository: RepositorySelection | null;
   checkout: RepositoryCheckout | null;
@@ -123,6 +125,8 @@ function sessionRecord(value: unknown): Session {
       ? (value.document as Session["document"])
       : null,
     error: typeof value.error === "string" ? value.error : null,
+    task_flow_id: "task_flow_id" in value && typeof value.task_flow_id === "string"
+      ? value.task_flow_id : null,
     forked_from: isObject(value.forked_from) && typeof value.forked_from.session_id === "string" &&
       typeof value.forked_from.message_index === "number"
       ? { session_id: value.forked_from.session_id, message_index: value.forked_from.message_index }
@@ -486,6 +490,13 @@ export default function Architecture() {
               <a href={`?mode=requirements&session_id=${encodeURIComponent(session.source_session_id)}`}>
                 Open the requirements
               </a>
+            </p>
+          )}
+
+          {session?.task_flow_id && (
+            <p className="request-id">
+              Part of a task flow:{" "}
+              <a href={flowStepsLink(session.task_flow_id)}>show all its steps</a>
             </p>
           )}
 

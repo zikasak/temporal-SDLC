@@ -20,6 +20,7 @@ from app.temporal.executions import ensure_search_attributes
 from app.temporal.sessions import InvalidForkPoint
 from app.temporal import workflows as session_workflows
 from app.temporal.workflows import RequirementsWorkflow
+from app.tasks import service as task_service
 from app.tasks.workflows import TaskWorkflow
 from tests.pipeline import abandoned
 from tests.dev_server import start_dev_server
@@ -86,14 +87,6 @@ class FakeActivities:
     async def register_session(self, session_id: str) -> None:
         self.registered.append(session_id)
 
-    @activity.defn(name="name_task_flow")
-    async def name_task_flow(self, text: str) -> str:
-        return "Named task"
-
-    @activity.defn(name="open_workflows")
-    async def open_workflows(self, workflow_ids: list[str]) -> list[str]:
-        return []
-
 
 # The API designs the sessions started, by ID, with what they were started from.
 designs: dict[str, ApiDesignState] = {}
@@ -144,12 +137,11 @@ async def workers(env, **options):
     activities = FakeActivities()
     async with Worker(
         env.client, task_queue=TASK_QUEUE,
-        # A session the service starts is the requirements stage of a task flow.
-        workflows=[RequirementsWorkflow, FakeApiDesign, FakeArchitecture, TaskWorkflow],
+        # Sessions started from the intake or forked are stages of a task flow.
+        workflows=[TaskWorkflow, RequirementsWorkflow, FakeApiDesign, FakeArchitecture],
         activities=[activities.requirements_turn, activities.write_requirements_document,
                     activities.checkout_repository, activities.read_requirements_document,
-                    activities.register_session, activities.name_task_flow,
-                    activities.open_workflows],
+                    activities.register_session],
         **options,
     ):
         yield activities
@@ -207,6 +199,7 @@ def serve_from(env, monkeypatch):
 
     monkeypatch.setattr(service, "connect_temporal", connect)
     monkeypatch.setattr(sessions, "connect_temporal", connect)
+    monkeypatch.setattr(task_service, "connect_temporal", connect)
     monkeypatch.setattr(service, "TASK_QUEUE", TASK_QUEUE)
 
 

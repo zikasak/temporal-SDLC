@@ -4,359 +4,385 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import (
-    ActivityError, ApplicationError, CancelledError, ChildWorkflowError,
-)
+from temporalio.exceptions import ActivityError, CancelledError, ChildWorkflowError
+
+from app.temporal.flags import FlowFlags
 
 with workflow.unsafe.imports_passed_through():
-    from app.api_design.models import ApiDesignState
-    from app.delivery.models import TASK_IDLE_TIMEOUT, DeliveryState, delivery_id
-    from app.tasks.activities import name_task_flow, open_workflows
+    from app.api_design.models import ApiDesignState, empty_api
+    from app.architecture.models import ArchitectureResult, ArchitectureState
+    from app.delivery.models import TASK_IDLE_TIMEOUT, DeliveryState, TaskSpec, delivery_id
+    from app.requirements.models import DIRECT_KINDS
+    from app.tasks.activities import name_task_flow
     from app.tasks.models import (
-        STAGE_ORDER, STAGE_TYPES, StageKind, TaskFlowState, TaskHandoff, TaskStage,
-        fallback_name, placeholder, with_suffix,
+        DesignResult, RequirementsResult, TaskFlowState, bounded_name,
+        fallback_name, stages_for,
     )
     from app.temporal.activities import register_session
     from app.temporal.closing import end_cancelled
     from app.temporal.execution_fields import (
-        DELIVERY_MEMO, PENDING, STAGES_MEMO, TASK_NAME_ATTRIBUTE, execution_fields,
+        DELIVERY_SESSION_MEMO, LINKED_STAGES_MEMO, TASK_NAME_ATTRIBUTE, execution_fields,
+        task_fields,
     )
 
-# How often a flow whose own stages have all closed checks whether the earlier stages of
-# another task that it links to have closed too.
-LINKED_CHECK_INTERVAL = timedelta(minutes=10)
-DELIVERY_CANCELLED = "The task's pull request was closed without being merged."
-NO_DELIVERY = "The task ended without a delivery."
-
-
-def _requirements_text(requirements: list[dict[str, Any]]) -> str:
-    return "\n".join(f"- {item.get('id', '')}: {item.get('title', '')} - "
-                     f"{' '.join(str(item.get('description', '')).split())}"
-                     for item in requirements)
+STAGE_TYPES = {
+    "requirements": "RequirementsWorkflow",
+    "architecture": "ArchitectureWorkflow",
+    "api_design": "ApiDesignWorkflow",
+    "delivery": "DeliveryWorkflow",
+}
+TASK_CANCELLED = "The task ended without a delivery, or its pull request was closed."
 
 
 @workflow.defn
-class TaskWorkflow:
-    """The top-level flow of one task. It creates every stage of the task as its own
-    child at once: the first works at once, each later one waits pending until the stage
-    before it hands the task on (the requirements once finalized, the architecture once
-    finalized or skipped, the API design once finalized), and is closed as skipped when
-    that stage ended without handing it on. The flow keeps the task's short name, stays
-    open while any of its stages (and any earlier stage of another task it links to) is
-    open, and then closes with its delivery's status: completed when the delivery's pull
-    request was merged or nothing was left to wait for, cancelled otherwise."""
+class TaskWorkflow(FlowFlags):
+    """The top-level flow of one task. It creates its stages as its children up front for
+    the kind of task (requirements, architecture, API design and delivery for a new
+    service or an API change; requirements and delivery for a bugfix or documentation),
+    each one pending until the stages it depends on have finished, then starts it with
+    what the stage before handed on, and closes the stages that will never run as skipped.
+    It keeps the task's short name, aggregates its children's waiting-for-user and
+    unresolved-findings flags, and closes once every child has, with its delivery's
+    status: completed when the pull request was merged (or the delivery pushed without
+    one), cancelled otherwise, as when the delivery was skipped.
+
+    A fork starts a task flow whose first stage is the forked session, linked to the
+    original task's earlier stages; a fix round on a closed task's delivery starts one
+    whose only child is that delivery."""
 
     @workflow.init
     def __init__(self, state: TaskFlowState) -> None:
         self.state = state
-        self._actions: list[tuple[str, Any]] = []
-        # The stage kinds that handed the task on, and the stages told to skip.
-        self._handed: set[str] = set()
-        self._skipping: set[str] = set()
+        self._init_flags()
         self._handles: dict[str, workflow.ChildWorkflowHandle] = {}
+        self._naming: asyncio.Task[None] | None = None
+        # Registrations of the stages' session IDs, awaited before the task flow closes.
+        self._registrations: list[asyncio.Task[None]] = []
+        # A delivery stopped from outside waits here for the user to start it again.
+        self._delivery_stopped = False
         self._redelivery: DeliveryState | None = None
-        self._idle = False
-        self._namings: list[asyncio.Task[None]] = []
 
-    @workflow.run
-    async def run(self, state: TaskFlowState) -> str:
-        for index, stage in enumerate(self.state.stages):
-            await self._create(stage, pending=index > 0)
-        if not self.state.name:
-            # Named by the LLM from the task; until then, by its start.
-            self.state.name = with_suffix(fallback_name(self.state.task), self.state.suffix)
-            self._name_from(self.state.task)
-        while True:
-            await workflow.wait_condition(
-                lambda: bool(self._actions) or self._redelivery is not None or self._settled())
-            if self._actions:
-                action, value = self._actions.pop(0)
-                await self._act(action, value)
-                continue
-            if self._redelivery is not None:
-                await self._start_delivery_again()
-                continue
-            delivery = self._stage("delivery")
-            if delivery and delivery.outcome == "failed" and not self._idle:
-                # Stopped from outside, such as terminated while a stage was stuck: the
-                # user may start it again from where it stopped.
-                try:
-                    await workflow.wait_condition(lambda: self._redelivery is not None,
-                                                  timeout=TASK_IDLE_TIMEOUT)
-                except asyncio.TimeoutError:
-                    self._idle = True
-                continue
-            break
-        self._idle = True
-        await self._await_linked()
-        for task in self._namings:
-            await task
-        await workflow.wait_condition(workflow.all_handlers_finished)
-        delivery = self._stage("delivery")
-        outcome = delivery.outcome if delivery else None
-        if outcome == "completed":
-            workflow.logger.info("Task completed with its delivery")
-            self.state.status = "completed"
-            return "completed"
-        self.state.status = "cancelled"
-        workflow.logger.info("Task closed without a completed delivery (%s)", outcome)
-        await end_cancelled(DELIVERY_CANCELLED if outcome == "cancelled" else NO_DELIVERY)
+    # The stages' workflow IDs.
+
+    def _id(self, stage: str) -> str | None:
+        if stage == "requirements":
+            return self.state.requirements_session_id
+        if stage == "architecture":
+            return self.state.architecture_session_id
+        if stage == "api_design":
+            return self.state.api_design_session_id
+        session = self.state.delivery_session_id
+        return delivery_id(session) if session else None
+
+    def _flags(self) -> tuple[bool | None, bool | None]:
+        delivery = self._id("delivery")
+        unresolved = bool(delivery and self._children_flags.get(delivery, (False, False))[1])
+        return self._children_waiting(), unresolved
 
     @workflow.query
     def get_state(self) -> TaskFlowState:
         return self.state
 
-    # Hand-offs of the stages, each starting the stage after it.
+    @workflow.run
+    async def run(self, state: TaskFlowState) -> TaskFlowState:
+        self._keep_flags()
+        self._remember()
+        if not self.state.name:
+            self.state.name = fallback_name(self.state.task)
+            self._naming = asyncio.create_task(self._name(self.state.task, []))
+        self._show_name()
+        first = self._first_stage()
+        await self._create_stages(first)
+        outcome = await self._follow(first)
+        self.state.delivery_outcome = outcome
+        for registration in self._registrations:
+            await registration
+        if self._naming is not None:
+            await self._naming
+        await workflow.wait_condition(workflow.all_handlers_finished)
+        await self._close_flags()
+        if outcome != "completed":
+            workflow.logger.info("Task flow closes as cancelled (delivery %s)", outcome)
+            await end_cancelled(TASK_CANCELLED)
+        workflow.logger.info("Task flow completed with its delivery")
+        return self.state
 
-    @workflow.signal
-    def requirements_finalized(self, handoff: TaskHandoff) -> None:
-        self._handed.add("requirements")
-        self._actions.append(("requirements", handoff))
+    # Name.
 
-    @workflow.signal
-    def architecture_finished(self, design: ApiDesignState) -> None:
-        self._handed.add("architecture")
-        self._actions.append(("architecture", design))
+    async def _name(self, task: str, requirements: list[Any]) -> None:
+        try:
+            name = await workflow.execute_activity(
+                name_task_flow, args=[task, requirements],
+                start_to_close_timeout=timedelta(minutes=2),
+                schedule_to_close_timeout=timedelta(minutes=5),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except ActivityError as exc:
+            workflow.logger.warning("Task flow not named by the LLM: %s", exc.cause or exc)
+            return
+        if name:
+            self.state.name = bounded_name(name)
+            self._show_name()
 
-    @workflow.signal
-    def design_finalized(self, delivery: DeliveryState) -> None:
-        self._handed.add("api_design")
-        self._actions.append(("api_design", delivery))
+    def _show_name(self) -> None:
+        workflow.upsert_search_attributes(
+            [TASK_NAME_ATTRIBUTE.value_set(bounded_name(self.state.name))])
+
+    async def _rename(self, requirements: list[Any]) -> None:
+        """Rewrite the name from the finalized requirements; a fork keeps its suffix."""
+        if self._naming is not None:
+            await self._naming
+        if self.state.origin == "fix":
+            return
+        await self._name(self.state.task, requirements)
+        if self.state.origin == "fork" and not self.state.name.endswith(" (fork)"):
+            self.state.name = bounded_name(self.state.name, " (fork)")
+            self._show_name()
+
+    def _remember(self) -> None:
+        """Keep what listings read of the task flow in its memo."""
+        workflow.upsert_memo({LINKED_STAGES_MEMO: list(self.state.linked),
+                              DELIVERY_SESSION_MEMO: self.state.delivery_session_id})
+
+    # Stages.
+
+    def _first_stage(self) -> str:
+        if self.state.requirements is not None:
+            return "requirements"
+        if self.state.architecture is not None:
+            return "architecture"
+        if self.state.api_design is not None:
+            return "api_design"
+        return "delivery"
+
+    def _following(self, first: str) -> list[str]:
+        """The stages this task flow creates: its first and every one after it."""
+        if self.state.origin == "fix" or first == "delivery":
+            return ["delivery"]
+        stages = (list(STAGE_TYPES) if first in ("architecture", "api_design")
+                  else list(stages_for(self.state.kind)))
+        return stages[stages.index(first):]
+
+    def _placeholder(self, stage: str) -> Any:
+        """The state a pending stage is created with."""
+        workflow_id = workflow.info().workflow_id
+        if stage == "architecture":
+            return ArchitectureState(
+                source_session_id=self.state.requirements_session_id or "",
+                repository=self.state.repository, task_flow_id=workflow_id,
+                next_session_id=self.state.api_design_session_id, pending=True)
+        if stage == "api_design":
+            return ApiDesignState(
+                source_session_id=self.state.requirements_session_id or "",
+                kind=self.state.kind, repository=self.state.repository,
+                task_flow_id=workflow_id,
+                architecture_session_id=self.state.architecture_session_id, pending=True)
+        return DeliveryState(spec=TaskSpec(
+            session_id=self.state.delivery_session_id or "", requirements=[],
+            requirements_document="", api=empty_api(), kind=self.state.kind,
+            repository=self.state.repository), pending=True)
+
+    def _first_state(self, stage: str) -> Any:
+        return {"requirements": self.state.requirements,
+                "architecture": self.state.architecture,
+                "api_design": self.state.api_design,
+                "delivery": self.state.delivery}[stage]
+
+    async def _create_stages(self, first: str) -> None:
+        stages = self._following(first)
+        for stage in stages:
+            if stage == "delivery" and not self.state.delivery_session_id:
+                # Named after the API design when the task has one, else the requirements.
+                self.state.delivery_session_id = (
+                    self.state.api_design_session_id if "api_design" in stages
+                    else self.state.requirements_session_id)
+                self._remember()
+            if stage == first:
+                await self._create(stage, self._first_state(stage), pending=False)
+            else:
+                await self._create(stage, self._placeholder(stage), pending=True)
+
+    async def _create(self, stage: str, state: Any, pending: bool) -> None:
+        workflow_id = self._id(stage)
+        if not workflow_id or workflow_id in self._handles:
+            return
+        if stage == "delivery":
+            fields = task_fields(state.spec)
+            if pending:
+                fields = execution_fields(state.spec.repository, pending=True)
+        else:
+            fields = execution_fields(self.state.repository, pending=pending)
+        result_types = {"requirements": RequirementsResult,
+                        "architecture": ArchitectureResult,
+                        "api_design": DesignResult, "delivery": dict}
+        self._handles[workflow_id] = await workflow.start_child_workflow(
+            STAGE_TYPES[stage], state, id=workflow_id, result_type=result_types[stage],
+            **fields)
+        self.state.created[stage] = workflow_id
+        if not pending:
+            self.state.started.append(workflow_id)
+        workflow.logger.info("Stage %s %s %s", stage, workflow_id,
+                             "created, pending" if pending else "started")
+        if stage != "delivery":
+            self._registrations.append(asyncio.create_task(self._register(workflow_id)))
+
+    async def _register(self, session_id: str) -> None:
+        try:
+            await workflow.execute_activity(
+                register_session, session_id,
+                start_to_close_timeout=timedelta(minutes=1),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except ActivityError as exc:
+            # Unrecorded, the session is still listed and served while Temporal is up.
+            workflow.logger.warning("Session %s not recorded: %s", session_id,
+                                    exc.cause or exc)
+
+    async def _start(self, stage: str, state: Any) -> None:
+        """Start the pending stage from `state`, creating it first if the task did not
+        need it when it began, such as after the kind of task changed."""
+        workflow_id = self._id(stage)
+        if workflow_id not in self._handles:
+            await self._create(stage, state, pending=False)
+            return
+        await self._handles[workflow_id].signal("start_stage", state)
+        self.state.started.append(workflow_id)
+        workflow.logger.info("Stage %s %s started", stage, workflow_id)
+
+    async def _skip(self, *stages: str) -> None:
+        """Close the pending stages that will never run as skipped."""
+        for stage in stages:
+            workflow_id = self._id(stage)
+            if (not workflow_id or workflow_id not in self._handles
+                    or workflow_id in self.state.started or workflow_id in self.state.skipped):
+                continue
+            await self._skip_id(workflow_id)
+
+    async def _skip_id(self, workflow_id: str) -> None:
+        try:
+            await self._handles[workflow_id].signal("skip_stage")
+        except Exception as exc:  # noqa: BLE001 - a closed stage needs no skip
+            workflow.logger.warning("Stage %s not skipped: %s", workflow_id, exc)
+        self.state.skipped.append(workflow_id)
+        await self._closed(workflow_id)
+
+    async def _closed(self, workflow_id: str) -> Any:
+        """Wait for the stage to close; its result, or None when it did not complete."""
+        try:
+            return await self._handles[workflow_id]
+        except ChildWorkflowError as exc:
+            workflow.logger.warning("Stage %s did not complete: %s", workflow_id,
+                                    exc.cause or exc)
+            return None
+        finally:
+            if workflow_id not in self.state.closed:
+                self.state.closed.append(workflow_id)
+
+    async def _follow(self, first: str) -> str:
+        """Follow the stages from `first` on; how the task's delivery ended."""
+        stage = first
+        if stage == "requirements":
+            stage = await self._after_requirements()
+        if stage == "architecture":
+            stage = await self._after_architecture()
+        if stage == "api_design":
+            stage = await self._after_design()
+        if stage == "delivery":
+            return await self._follow_delivery()
+        await self._skip("architecture", "api_design", "delivery")
+        return "skipped"
+
+    async def _after_requirements(self) -> str | None:
+        result: RequirementsResult | None = await self._closed(self._id("requirements"))
+        if not result or not result.finalized:
+            # Expired, failed or stopped: no later stage will run.
+            return None
+        self.state.kind = result.kind
+        await self._rename(list(result.requirements))
+        if result.delivery is not None and result.kind in DIRECT_KINDS:
+            await self._skip("architecture", "api_design")
+            session_id = self.state.requirements_session_id
+            if self.state.delivery_session_id != session_id:
+                # The kind changed from one with an API design: its delivery is another.
+                await self._skip("delivery")
+                self.state.delivery_session_id = session_id
+                self._remember()
+            await self._start("delivery", result.delivery)
+            return "delivery"
+        if result.architecture is not None:
+            architecture = result.architecture
+            architecture.task_flow_id = workflow.info().workflow_id
+            architecture.next_session_id = self.state.api_design_session_id
+            architecture.pending = False
+            if self.state.delivery_session_id != self.state.api_design_session_id:
+                await self._skip("delivery")
+                self.state.delivery_session_id = self.state.api_design_session_id
+                self._remember()
+                await self._create("api_design", self._placeholder("api_design"), True)
+                await self._create("delivery", self._placeholder("delivery"), True)
+            await self._start("architecture", architecture)
+            return "architecture"
+        return None
+
+    async def _after_architecture(self) -> str | None:
+        result: ArchitectureResult | None = await self._closed(self._id("architecture"))
+        if not result:
+            return None
+        design = result.design
+        design.task_flow_id = workflow.info().workflow_id
+        design.pending = False
+        await self._start("api_design", design)
+        return "api_design"
+
+    async def _after_design(self) -> str | None:
+        result: DesignResult | None = await self._closed(self._id("api_design"))
+        if not result or result.delivery is None:
+            return None
+        await self._start("delivery", result.delivery)
+        return "delivery"
+
+    async def _follow_delivery(self) -> str:
+        """Wait for the delivery to close: 'completed' when it did (its pull request was
+        merged, or it pushed without one), 'cancelled' when its pull request was closed
+        without merging, 'skipped' when it never ran. A delivery stopped from outside
+        waits for the user to start it again (`restart_delivery`)."""
+        workflow_id = self._id("delivery")
+        while True:
+            try:
+                await self._handles[workflow_id]
+            except ChildWorkflowError as exc:
+                if isinstance(exc.cause, CancelledError):
+                    self._closed_delivery(workflow_id)
+                    return "cancelled"
+                workflow.logger.warning("Delivery did not finish: %s", exc.cause or exc)
+            else:
+                self._closed_delivery(workflow_id)
+                return "skipped" if workflow_id in self.state.skipped else "completed"
+            self._delivery_stopped = True
+            try:
+                await workflow.wait_condition(lambda: self._redelivery is not None,
+                                              timeout=TASK_IDLE_TIMEOUT)
+            except asyncio.TimeoutError:
+                self._delivery_stopped = False
+                self._closed_delivery(workflow_id)
+                return "stopped"
+            state, self._redelivery = self._redelivery, None
+            self._delivery_stopped = False
+            workflow.logger.info("Starting the stopped delivery again")
+            self._handles[workflow_id] = await workflow.start_child_workflow(
+                "DeliveryWorkflow", state, id=workflow_id, result_type=dict,
+                **task_fields(state.spec))
+
+    def _closed_delivery(self, workflow_id: str) -> None:
+        if workflow_id not in self.state.closed:
+            self.state.closed.append(workflow_id)
 
     @workflow.update
     def restart_delivery(self, state: DeliveryState) -> None:
-        """Start the task's stopped delivery again from `state`."""
+        """Start this task's stopped delivery again from `state`."""
         self._redelivery = state
 
     @restart_delivery.validator
     def validate_restart_delivery(self, state: DeliveryState) -> None:
-        delivery = self._stage("delivery")
-        if (delivery is None or delivery.state != "closed" or delivery.outcome != "failed"
-                or self._redelivery is not None or self._idle):
+        if not self._delivery_stopped or self._redelivery is not None:
             raise ValueError("This task's delivery cannot be started again.")
-
-    def _stage(self, kind: str) -> TaskStage | None:
-        return next((item for item in reversed(self.state.stages)
-                     if item.kind == kind and not item.replaced), None)
-
-    async def _ensure_design_stages(self, architecture_session_id: str | None) -> None:
-        """Create pending architecture and API design stages, and a delivery named after
-        the design, for a task whose intake named a kind without them."""
-        if self._stage("architecture") is not None:
-            return
-        self.state.architecture_session_id = (
-            architecture_session_id or f"architecture-session-{workflow.uuid4().hex}")
-        self.state.api_design_session_id = f"api-design-session-{workflow.uuid4().hex}"
-        for kind, workflow_id in (("architecture", self.state.architecture_session_id),
-                                  ("api_design", self.state.api_design_session_id)):
-            stage = TaskStage(kind=kind, workflow_id=workflow_id)
-            self.state.stages.append(stage)
-            await self._create(stage, pending=True)
-        await self._replace_delivery(self.state.api_design_session_id)
-
-    async def _replace_delivery(self, session_id: str) -> None:
-        """Have the task's delivery named after `session_id`: a pending delivery named
-        otherwise is skipped, and a new pending one takes its place."""
-        current = self._stage("delivery")
-        if current is not None and current.workflow_id == delivery_id(session_id):
-            return
-        if current is not None:
-            current.replaced = True
-            await self._skip_stage(current)
-        self.state.delivery_session_id = session_id
-        stage = TaskStage(kind="delivery", workflow_id=delivery_id(session_id))
-        self.state.stages.append(stage)
-        await self._create(stage, pending=True)
-        workflow.upsert_memo({STAGES_MEMO: [item.workflow_id for item in self.state.stages],
-                              DELIVERY_MEMO: stage.workflow_id})
-
-    async def _skip_kinds(self, kinds: tuple[str, ...]) -> None:
-        for stage in self.state.stages:
-            if stage.kind in kinds:
-                await self._skip_stage(stage)
-
-    async def _skip_stage(self, stage: TaskStage) -> None:
-        if stage.state != "pending" or stage.workflow_id in self._skipping:
-            return
-        self._skipping.add(stage.workflow_id)
-        if await self._signal(stage, "skip_pending"):
-            workflow.logger.info("Stage %s (%s) skipped", stage.workflow_id, stage.kind)
-
-    async def _signal(self, stage: TaskStage, signal: str, *args: Any) -> bool:
-        """Signal the stage; false when it could not be, such as when it has closed."""
-        try:
-            await self._handles[stage.workflow_id].signal(signal, *args)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - a closed stage takes no signal
-            workflow.logger.warning("Stage %s not signalled %s: %s", stage.workflow_id,
-                                    signal, exc)
-            return False
-        return True
-
-    def _settled(self) -> bool:
-        return all(item.state == "closed" for item in self.state.stages)
-
-    def _fields(self, kind: str, pending: bool) -> dict[str, Any]:
-        return execution_fields(self.state.repository, flags=True,
-                                findings=kind == "delivery",
-                                flow_state=PENDING if pending else None)
-
-    def _initial(self, kind: StageKind) -> Any:
-        """The start of the flow's first stage, which works at once."""
-        flow_id = workflow.info().workflow_id
-        state: Any = {"requirements": self.state.requirements,
-                      "architecture": self.state.architecture,
-                      "api_design": self.state.design,
-                      "delivery": self.state.delivery}[kind]
-        if state is None:
-            raise ApplicationError(f"The flow has no start for its {kind} stage.",
-                                   non_retryable=True)
-        if kind == "requirements":
-            state.task_flow_id = flow_id
-            state.next_session_id = self.state.architecture_session_id
-        elif kind == "architecture":
-            state.task_flow_id = flow_id
-            state.next_session_id = self.state.api_design_session_id
-            state.pending = False
-        elif kind == "api_design":
-            state.task_flow_id = flow_id
-            state.pending = False
-        else:
-            state.spec.task_flow_id = flow_id
-            state.pending = False
-        return state
-
-    async def _create(self, stage: TaskStage, *, pending: bool) -> None:
-        argument = placeholder(stage.kind, self.state) if pending else self._initial(stage.kind)
-        handle = await workflow.start_child_workflow(
-            STAGE_TYPES[stage.kind], argument, id=stage.workflow_id,
-            **self._fields(stage.kind, pending))
-        self._handles[stage.workflow_id] = handle
-        stage.state = "pending" if pending else "running"
-        stage.outcome = None
-        workflow.logger.info("Stage %s (%s) created%s", stage.workflow_id, stage.kind,
-                             " pending" if pending else "")
-        asyncio.create_task(self._follow(stage, handle))
-
-    async def _follow(self, stage: TaskStage, handle: workflow.ChildWorkflowHandle) -> None:
-        try:
-            await handle
-        except ChildWorkflowError as exc:
-            workflow.logger.info("Stage %s did not complete: %s", stage.workflow_id,
-                                 exc.cause or exc)
-            outcome = "cancelled" if isinstance(exc.cause, CancelledError) else "failed"
-        else:
-            outcome = "skipped" if stage.workflow_id in self._skipping else "completed"
-        stage.state = "closed"
-        stage.outcome = outcome
-        if stage.kind != "delivery":
-            self._actions.append(("closed", stage.kind))
-
-    async def _act(self, action: str, value: Any) -> None:
-        if action == "requirements":
-            handoff: TaskHandoff = value
-            if handoff.requirements:
-                self._name_from(_requirements_text(handoff.requirements))
-            if handoff.architecture is not None:
-                await self._ensure_design_stages(handoff.architecture_session_id)
-                architecture = handoff.architecture
-                architecture.task_flow_id = workflow.info().workflow_id
-                architecture.next_session_id = self.state.api_design_session_id
-                await self._begin("architecture", architecture)
-            elif handoff.delivery is not None:
-                # A task that leaves the API as it is has no design: stages created for
-                # the kind the intake named are skipped, its delivery named after the
-                # requirements session.
-                await self._skip_kinds(("architecture", "api_design"))
-                await self._replace_delivery(handoff.delivery.spec.session_id)
-                await self._begin("delivery", self._delivery(handoff.delivery))
-            else:
-                await self._skip_after("requirements")
-        elif action == "architecture":
-            design: ApiDesignState = value
-            design.task_flow_id = workflow.info().workflow_id
-            await self._begin("api_design", design)
-        elif action == "api_design":
-            await self._begin("delivery", self._delivery(value))
-        elif action == "closed" and value not in self._handed:
-            # The stage ended without handing the task on: nothing after it will run.
-            await self._skip_after(value)
-
-    def _delivery(self, state: DeliveryState) -> DeliveryState:
-        state.spec.task_flow_id = workflow.info().workflow_id
-        return state
-
-    async def _begin(self, kind: StageKind, state: Any) -> None:
-        stage = self._stage(kind)
-        if stage is None or stage.state != "pending":
-            workflow.logger.warning("No pending %s stage to start", kind)
-            return
-        state.pending = False
-        if not await self._signal(stage, "begin", state):
-            return
-        stage.state = "running"
-        workflow.logger.info("Stage %s (%s) started", stage.workflow_id, kind)
-        if kind in ("architecture", "api_design"):
-            try:
-                await workflow.execute_activity(
-                    register_session, stage.workflow_id,
-                    start_to_close_timeout=timedelta(minutes=1),
-                    retry_policy=RetryPolicy(maximum_attempts=3))
-            except ActivityError as exc:
-                # Unrecorded, the session is still served while Temporal is up.
-                workflow.logger.warning("Session %s not recorded: %s", stage.workflow_id,
-                                        exc.cause or exc)
-
-    async def _skip_after(self, kind: str) -> None:
-        await self._skip_kinds(STAGE_ORDER[STAGE_ORDER.index(kind) + 1:])  # type: ignore[arg-type]
-
-    async def _start_delivery_again(self) -> None:
-        state, self._redelivery = self._redelivery, None
-        stage = self._stage("delivery")
-        workflow.logger.info("Starting the stopped delivery again")
-        state.pending = False
-        state.spec.task_flow_id = workflow.info().workflow_id
-        handle = await workflow.start_child_workflow(
-            STAGE_TYPES["delivery"], state, id=stage.workflow_id,
-            **self._fields("delivery", False))
-        self._handles[stage.workflow_id] = handle
-        stage.state = "running"
-        stage.outcome = None
-        asyncio.create_task(self._follow(stage, handle))
-
-    def _name_from(self, text: str) -> None:
-        self._namings.append(asyncio.create_task(self._rename(text)))
-
-    async def _rename(self, text: str) -> None:
-        """Have the LLM name the flow from `text`; a failure keeps the current name."""
-        if not text.strip():
-            return
-        try:
-            name = await workflow.execute_activity(
-                name_task_flow, text,
-                start_to_close_timeout=timedelta(minutes=2),
-                schedule_to_close_timeout=timedelta(minutes=5),
-                retry_policy=RetryPolicy(maximum_attempts=2))
-        except ActivityError as exc:
-            workflow.logger.warning("The task flow was not named: %s", exc.cause or exc)
-            return
-        self.state.name = with_suffix(name, self.state.suffix)
-        workflow.upsert_search_attributes([TASK_NAME_ATTRIBUTE.value_set(self.state.name)])
-        workflow.logger.info("Task flow named %s", self.state.name)
-
-    async def _await_linked(self) -> None:
-        """Wait until the earlier stages of another task that this flow links to have
-        closed too; a check that fails does not keep the flow open."""
-        while self.state.linked:
-            try:
-                still_open = await workflow.execute_activity(
-                    open_workflows, self.state.linked,
-                    start_to_close_timeout=timedelta(minutes=1),
-                    retry_policy=RetryPolicy(maximum_attempts=3))
-            except ActivityError as exc:
-                workflow.logger.warning("Linked stages not checked: %s", exc.cause or exc)
-                return
-            if not still_open:
-                return
-            await workflow.sleep(LINKED_CHECK_INTERVAL)

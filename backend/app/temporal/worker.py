@@ -30,7 +30,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from app.onboarding.workflows import OnboardingWorkflow
     from app.settings.storage import ensure_schema as ensure_settings_schema
-    from app.tasks.activities import name_task_flow, open_workflows
+    from app.tasks.activities import name_task_flow
     from app.tasks.workflows import TaskWorkflow
     from app.temporal.activities import (
         api_design_turn,
@@ -89,7 +89,7 @@ async def main():
             classify_mention, answer_mention, reply_to_mention,
             record_new_mention, save_mention, mention_body,
             pull_request_state, commit_checks, ci_failure_report, comment_pull_request,
-            name_task_flow, open_workflows,
+            name_task_flow,
         ],
     )
     logger.info("Worker started on task queue %s at %s", TASK_QUEUE, TEMPORAL_ADDRESS)

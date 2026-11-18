@@ -82,8 +82,8 @@ async def skip(session_id: str):
 async def fork(session_id: str, body: ForkBody):
     _check_session_id(session_id)
     try:
-        # The fork starts a task flow of its own.
-        return await service.fork_task_session(session_id, body.message_index)
+        # The fork starts a new top-level task flow of its own.
+        return await service.fork(session_id, body.message_index)
     except Exception as exc:
         raise http_error(exc) from exc
 
