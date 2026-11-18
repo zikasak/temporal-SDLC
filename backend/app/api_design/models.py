@@ -111,3 +111,9 @@ class ApiDesignState:
     architecture_session_id: str | None = None
     architecture: str | None = None
     architecture_structure: dict[str, Any] | None = None
+    # The top-level task flow the design is a stage of, which starts its delivery once it
+    # is finalized; None for a design started before task flows existed, which runs its
+    # delivery as its own child.
+    task_flow_id: str | None = None
+    # A placeholder of a stage its task flow has not started yet.
+    pending: bool = False

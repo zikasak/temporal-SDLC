@@ -27,6 +27,7 @@ from app.temporal import sessions
 from app.temporal.executions import ensure_search_attributes
 from app.temporal import workflows as session_workflows
 from app.temporal.workflows import ApiDesignWorkflow
+from app.tasks.workflows import TaskWorkflow
 from tests.pipeline import (
     CODE, FakeCodegenWorkflow, FakeStages, abandoned, finished, legacy_patch_markers, patch_ids,
     stage_workers,
@@ -92,6 +93,14 @@ class FakeActivities(FakeStages):
         self.documents.append(session_id)
         return DOCUMENT
 
+    @activity.defn(name="name_task_flow")
+    async def name_task_flow(self, text: str) -> str:
+        return "Named task"
+
+    @activity.defn(name="open_workflows")
+    async def open_workflows(self, workflow_ids: list[str]) -> list[str]:
+        return []
+
 
 @pytest.fixture(scope="session")
 async def env():
@@ -112,11 +121,14 @@ async def server():
 async def workers(env, **options):
     activities = FakeActivities()
     async with Worker(
-        env.client, task_queue=TASK_QUEUE, workflows=[ApiDesignWorkflow, DeliveryWorkflow],
+        # A fork is the first stage of a task flow of its own.
+        env.client, task_queue=TASK_QUEUE,
+        workflows=[ApiDesignWorkflow, DeliveryWorkflow, TaskWorkflow],
         activities=[activities.api_design_turn, activities.write_openapi_document,
                     activities.checkout_repository, activities.publish_repository,
                     activities.write_pull_request_text, activities.open_pull_request,
-                    activities.read_repository_contract],
+                    activities.read_repository_contract, activities.name_task_flow,
+                    activities.open_workflows],
         **options,
     ), stage_workers(env, activities):
         yield activities

@@ -16,6 +16,7 @@ with workflow.unsafe.imports_passed_through():
     from app.temporal.activities import register_session
     from app.temporal.closing import end_cancelled
     from app.temporal.execution_fields import execution_fields
+    from app.temporal.flow_flags import FlowFlags, PendingStage, interview_waits
     from app.temporal.interview import Interview, assistant_message
     from app.temporal.workflows import FLOW_ABANDONED, FLOW_ABANDONED_PATCH, _check_out
 
@@ -27,13 +28,15 @@ NO_SKIP = ("A new service always goes through the architecture stage; only the s
 
 
 @workflow.defn
-class ArchitectureWorkflow(Interview):
+class ArchitectureWorkflow(Interview, FlowFlags, PendingStage):
     """One architecture session of a task: the LLM drafts the top-level architecture from
     the requirements (an API change starting from the repository's existing one, or
     proposing to skip the stage instead), and the user reviews it in a conversation of
     updates. Finalizing writes architecture.md and architecture.json; finalizing or
     confirming the skip of an API change ends the session and hands the task's API design
-    to the requirements session, whose child it becomes. The session has no idle timeout."""
+    on: as a stage of a task flow (created pending until the requirements are finalized)
+    to the task flow, which starts its pending API design; otherwise to the requirements
+    session, whose child it becomes. The session has no idle timeout."""
 
     INTERVIEWER = "architect"
     TOO_LONG = DISCUSSION_TOO_LONG
@@ -62,6 +65,26 @@ class ArchitectureWorkflow(Interview):
 
     @workflow.run
     async def run(self, state: ArchitectureState) -> ArchitectureResult | None:
+        if self.state.pending:
+            return await self._wait_pending()
+        return await self._run_flagged(self._run)
+
+    @workflow.signal
+    def begin(self, state: ArchitectureState) -> None:
+        """The task flow starts this pending session from `state`."""
+        self._begin(state)
+
+    @workflow.signal
+    def skip_pending(self) -> None:
+        """The task flow closes this pending session: it will never run."""
+        self._skip()
+
+    def _flags(self) -> tuple[bool, bool]:
+        return (self.state.status == "interviewing"
+                and (self.state.skip_proposal is not None or interview_waits(self.state)),
+                False)
+
+    async def _run(self) -> ArchitectureResult | None:
         ready = await _check_out(self.state, self._resume_status)
         if ready and self.state.status in ("drafting", "turn_running"):
             async with self._turn_lock:
@@ -78,6 +101,9 @@ class ArchitectureWorkflow(Interview):
                 workflow.logger.info("Continuing as new")
                 workflow.continue_as_new(self.state)
         await workflow.wait_condition(workflow.all_handlers_finished)
+        if self.state.task_flow_id:
+            await self._hand_off()
+            return None
         if self.state.status == "failed" or not self.state.api_design_session_id:
             if workflow.patched(FLOW_ABANDONED_PATCH):
                 # The session ended without handing the task on, so nothing of it will be
@@ -113,8 +139,30 @@ class ArchitectureWorkflow(Interview):
     def get_state(self) -> ArchitectureState:
         return self.state
 
+    async def _hand_off(self) -> None:
+        """Hand the API design to the task flow, which starts its pending design child; a
+        session that failed hands nothing on, and the design is skipped."""
+        if self.state.status == "failed" or not self.state.api_design_session_id:
+            workflow.logger.info("Nothing handed on to the task flow")
+            return
+        design = handed_design(self.state, workflow.info().workflow_id)
+        design.task_flow_id = self.state.task_flow_id
+        try:
+            await workflow.get_external_workflow_handle(self.state.task_flow_id).signal(
+                "architecture_finished", design)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a closed task flow starts nothing
+            workflow.logger.warning("The task flow was not told: %s", exc)
+            return
+        workflow.logger.info("API design handed on to the task flow %s",
+                             self.state.task_flow_id)
+
     def _hand_over(self) -> None:
-        self.state.api_design_session_id = f"api-design-session-{workflow.uuid4().hex}"
+        # A task flow reserved the design's ID when it created the design pending.
+        self.state.api_design_session_id = (
+            self.state.next_session_id if self.state.task_flow_id and self.state.next_session_id
+            else f"api-design-session-{workflow.uuid4().hex}")
 
     async def _turn(self) -> bool:
         drafting = self.state.structure is None

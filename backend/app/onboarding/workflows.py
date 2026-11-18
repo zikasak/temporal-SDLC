@@ -20,6 +20,7 @@ with workflow.unsafe.imports_passed_through():
     from app.requirements.document import render_requirements_markdown
     from app.temporal.activities import checkout_repository, update_repository_checkout
     from app.temporal.closing import end_cancelled
+    from app.temporal.flow_flags import FlowFlags, interview_waits
     from app.temporal.interview import Interview, assistant_message
     from app.temporal.workflows import (
         FLOW_ABANDONED, FLOW_ABANDONED_PATCH, FLOW_CANCELLED, SESSION_IDLE_TIMEOUT, _Delivering,
@@ -42,7 +43,7 @@ CONTRACT_UNKNOWN = ("The existing contract could not be read, so only replacing 
 
 
 @workflow.defn
-class OnboardingWorkflow(Interview, _Delivering):
+class OnboardingWorkflow(Interview, _Delivering, FlowFlags):
     """One onboarding of an existing repository: the branch is checked out, the user
     confirms replacing a contract, contract tests or Dockerfile it already has, the LLM
     drafts the requirements, the API and the language from the code, and the user reviews
@@ -68,6 +69,15 @@ class OnboardingWorkflow(Interview, _Delivering):
 
     @workflow.run
     async def run(self, state: OnboardingState) -> dict[str, Any] | None:
+        return await self._run_flagged(self._run)
+
+    def _flags(self) -> tuple[bool, bool]:
+        """It waits for the user's decision about the existing contract or for their
+        reply to the interviewer; its delivery reports its own questions and findings."""
+        return (self.state.status == "awaiting_confirmation" or interview_waits(self.state),
+                False)
+
+    async def _run(self) -> dict[str, Any] | None:
         if not self.state.checkout:
             await self._check_out()
             if self.state.status == "preparing":

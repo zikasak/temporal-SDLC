@@ -147,6 +147,8 @@ export type DeliveryProgress = {
   existing_code_changed: boolean;
   // The repository's CI on the last pushed commit.
   ci: CiChecks | null;
+  // The new top-level flows that fix rounds started after the flow closed, oldest first.
+  fix_flow_ids: string[];
 };
 
 const ciStatuses = ["pending", "passed", "failed", "inconclusive", "none", "timed_out", "unavailable"] as const;
@@ -433,7 +435,18 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     mentions: pullRequestMentions(value.mentions),
     existing_code_changed: value.existing_code_changed === true,
     ci: ciChecks(value.ci),
+    fix_flow_ids: Array.isArray(value.fix_flow_ids)
+      ? value.fix_flow_ids.filter((item): item is string => typeof item === "string" && item !== "")
+      : [],
   };
+}
+
+/** The view of a flow a fix round started after the delivery's flow closed: a task flow
+ * (task-flow-…) or an onboarding's fix delivery (delivery-fix-session-…) runs as the session
+ * fix-session-… with the same digest, shown like a requirements session. */
+export function fixFlowLink(flowId: string): string | null {
+  const digest = /^(?:task-flow-|delivery-fix-session-)([0-9a-f]{32})$/.exec(flowId)?.[1];
+  return digest ? `?mode=requirements&session_id=fix-session-${digest}` : null;
 }
 
 /** What the page shows at once after answering an agent, until the next poll. */
@@ -897,6 +910,19 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
           {mention.reply_url && <> — <a href={mention.reply_url} target="_blank" rel="noreferrer">reply</a></>}
           {mention.error && <p role="alert">{mention.error}</p>}
         </li>)}
+      </ul>
+    </section>}
+    {progress.fix_flow_ids.length > 0 && <section aria-label="Fix rounds after the flow closed">
+      <h3>Fix rounds after the flow closed</h3>
+      <p className="field-hint">Each runs as a flow of its own, pushed to a new branch with a new pull request.</p>
+      <ul>
+        {progress.fix_flow_ids.map((flowId, index) => {
+          const link = fixFlowLink(flowId);
+          return <li key={flowId}>
+            {link ? <a href={link}>Fix round {index + 1}</a> : <>Fix round {index + 1}</>}{" "}
+            <code>{flowId}</code>
+          </li>;
+        })}
       </ul>
     </section>}
   </>;

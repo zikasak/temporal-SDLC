@@ -77,8 +77,18 @@ class RequirementsState:
     api_design_session_id: str | None = None
     # The architecture session the session started itself once the user finalized a new
     # service or an API change; it hands the task on to the API design, which is a child
-    # of this session too, as are forks of either.
+    # of this session too, as are forks of either. For a session of a task flow, the
+    # architecture session the task flow starts once the user finalized the session.
     architecture_session_id: str | None = None
+    # The top-level task flow (TaskWorkflow) the session is a stage of; None for a
+    # session started before task flows existed, which runs its task's later stages as
+    # its own children instead.
+    task_flow_id: str | None = None
+    # The architecture session the task flow reserved for the stage after this one.
+    next_session_id: str | None = None
+    # Set when the document was written because the session was idle for a day: the
+    # task's later stages are then skipped.
+    stages_skipped: bool = False
 
 
 def numbered_after(requirements: list[Requirement], published: Iterable[str],

@@ -2,55 +2,59 @@
 
 import dataclasses
 import logging
-import uuid
 from typing import Any
-
-from temporalio.client import WorkflowUpdateStage
 
 from app.api_design.models import ApiDesignState
 from app.api_design.openapi import design_problems
-from app.config import TASK_QUEUE
 from app.requirements.lookup import source_session_lookup
 from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, RetryStage
+from app.config import TASK_QUEUE
+from app.tasks.models import FORK_SUFFIX, TaskFlowState, with_suffix
+from app.tasks.service import start_task_flow, task_flow_closed, task_flow_name
 from app.temporal.client import connect_temporal
-from app.temporal.execution_fields import execution_fields
-from app.temporal.registry import register
 from app.temporal.sessions import (
-    FLOW_CLOSED, SessionBusy, SessionNotFound, flow_closed, fork_messages, is_running,
-    start_update, state_at_message,
+    FLOW_CLOSED, SessionBusy, flow_closed, fork_messages, start_update, state_at_message,
 )
 
 logger = logging.getLogger(__name__)
 
 
-async def _start(state: ApiDesignState) -> str:
-    """Start the session as a child of the requirements session its task began with, so
-    the task stays one workflow tree; a requirements session closed before that existed
-    can only have it on its own."""
-    session_id = f"api-design-session-{uuid.uuid4().hex}"
-    if await is_running(state.source_session_id):
-        await start_update(state.source_session_id, "start_api_design", session_id, state,
-                           wait_for_stage=WorkflowUpdateStage.COMPLETED)
-    else:
-        client = await connect_temporal()
-        await client.start_workflow(
-            "ApiDesignWorkflow",
-            state,
-            id=session_id,
-            task_queue=TASK_QUEUE,
-            **execution_fields(state.repository),
-        )
-    await register(session_id)
-    logger.info("Started API design session %s from %s", session_id, state.source_session_id)
-    return session_id
+async def _start(state: ApiDesignState, source_task_flow_id: str | None) -> dict[str, str]:
+    """Start the design as the first stage of a new top-level task flow named after the
+    task it came from with a " (fork)" suffix: its delivery is created pending, and it
+    links to that task's requirements and architecture sessions."""
+    linked = [item for item in (state.source_session_id, state.architecture_session_id)
+              if item]
+    client = await connect_temporal()
+    flow = TaskFlowState(
+        kind=state.kind or "new_service", repository=state.repository,
+        name=with_suffix(await task_flow_name(source_task_flow_id, client), FORK_SUFFIX)
+        if source_task_flow_id else "",
+        task="\n".join(f"- {item['id']}: {item['title']}" for item in state.requirements),
+        suffix=FORK_SUFFIX, origin="fork", source_task_flow_id=source_task_flow_id,
+        linked=linked, design=state)
+    task_flow_id = await start_task_flow(flow, "api_design", task_queue=TASK_QUEUE,
+                                         client=client)
+    session_id = flow.api_design_session_id
+    logger.info("Started API design session %s from %s in task flow %s", session_id,
+                state.source_session_id, task_flow_id)
+    return {"session_id": session_id, "task_flow_id": task_flow_id}
 
 
 async def fork_session(session_id: str, message_index: int) -> str:
-    """A new session with the discussion up to the message, and the API model
-    as it was at that point; 409 once its flow has completed or been cancelled."""
+    """A new design in a task flow of its own, as fork_task_session starts it."""
+    return (await fork_task_session(session_id, message_index))["session_id"]
+
+
+async def fork_task_session(session_id: str, message_index: int) -> dict[str, str]:
+    """A new session with the discussion up to the message, and the API model as it was
+    at that point, in a new task flow of its own; 409 once its flow has completed or been
+    cancelled."""
     source = await get_state(session_id)
-    if source.source_session_id and await flow_closed(source.source_session_id):
+    if (await task_flow_closed(source.task_flow_id, await connect_temporal())
+            if source.task_flow_id
+            else source.source_session_id and await flow_closed(source.source_session_id)):
         raise SessionBusy(FLOW_CLOSED)
     messages = fork_messages(source.messages, message_index)
     api = await state_at_message(
@@ -60,7 +64,7 @@ async def fork_session(session_id: str, message_index: int) -> str:
         activity="api_design_turn",
         key="api",
     )
-    fork_id = await _start(ApiDesignState(
+    started = await _start(ApiDesignState(
         source_session_id=source.source_session_id,
         requirements=source.requirements,
         requirements_document=source.requirements_document,
@@ -78,10 +82,10 @@ async def fork_session(session_id: str, message_index: int) -> str:
         architecture_session_id=source.architecture_session_id,
         architecture=source.architecture,
         architecture_structure=source.architecture_structure,
-    ))
+    ), source.task_flow_id)
     logger.info("Forked API design session %s after message %d as %s",
-                session_id, message_index, fork_id)
-    return fork_id
+                session_id, message_index, started["session_id"])
+    return started
 
 
 async def send_message(session_id: str, message: str) -> None:
@@ -142,7 +146,8 @@ async def get_session(session_id: str) -> dict[str, Any]:
     state = await get_state(session_id)
     session = dataclasses.asdict(state)
     # Polled every few seconds; the requirement list is enough for the page.
-    del session["requirements_document"], session["change_document"], session["contract"]
+    for key in ("requirements_document", "change_document", "contract", "pending"):
+        del session[key]
     # The pipeline's results belong to the delivery a finished design starts.
     progress = DeliveryProgress()
     if state.status == 'completed' and state.document:

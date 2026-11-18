@@ -15,6 +15,7 @@ from app.delivery.flow.review import ReviewRounds
 from app.delivery.flow.stages import RESTORE_KEPT_PATCH, Stages, restore_finding
 from app.delivery.flow.verification import Verification
 from app.delivery.flow.waiting import PullRequestWait
+from app.temporal.flow_flags import FlowFlags, PendingStage
 
 with workflow.unsafe.imports_passed_through():
     from app.delivery.causes import with_cause
@@ -44,7 +45,7 @@ def _same_mention(first: tuple[str | None, int | None],
 
 @workflow.defn
 class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, Baseline,
-                       Verification, ReviewRounds, Publication):
+                       Verification, ReviewRounds, Publication, FlowFlags, PendingStage):
     """Turns a specified task into verified, published sources: code generation, the
     parallel service and test authors, verification with its repair loop, and the push.
     A bugfix generates no code and goes red to green instead: regression tests, proof
@@ -98,7 +99,31 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
         self._ci_round: dict[str, Any] | None = state.ci_fix
 
     @workflow.run
-    async def run(self, state: DeliveryState) -> DeliveryProgress:
+    async def run(self, state: DeliveryState) -> DeliveryProgress | None:
+        # A delivery its task flow created before its design or requirements were
+        # finalized waits until the task flow starts it.
+        if self.state.pending:
+            return await self._wait_pending()
+        return await self._run_flagged(self._run)
+
+    @workflow.signal
+    def begin(self, state: DeliveryState) -> None:
+        """The task flow starts this pending delivery from `state`."""
+        self._begin(state)
+
+    @workflow.signal
+    def skip_pending(self) -> None:
+        """The task flow closes this pending delivery: it will never run."""
+        self._skip()
+
+    def _flags(self) -> tuple[bool, bool]:
+        """It waits for the user while an agent asks, or while its open review findings
+        wait for a decision; the findings stay unresolved until accepted or fixed."""
+        return (bool(self.progress.agent_questions)
+                or (self.state.waiting and self.progress.open_findings),
+                self.progress.open_findings)
+
+    async def _run(self) -> DeliveryProgress:
         # Mentions that ended before this run, such as in a stopped one, are kept in the
         # mention history and leave the workflow's state, once a fix round that was
         # stopped has had its outcome replied.
