@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 from temporalio import activity, workflow
-from temporalio.client import WorkflowFailureError
+from temporalio.client import WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.exceptions import ApplicationError, CancelledError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
@@ -44,14 +44,24 @@ ADDED_SEAM = {"module": "service.rooms", "symbols": ["Rooms.close", "Rooms.merge
               "added": ["Rooms.merged"]}
 SEAM_IMAGE = "sha256:" + "7" * 64
 BROKEN_TEST = {"class_name": "RoomsTest", "name": "lists"}
+# How long `abandoned` waits in real time for a flow session to close.
+ABANDON_POLLS = 400
+ABANDON_POLL_SECONDS = 0.05
 
 
 async def abandoned(handle) -> None:
     """Wait for a flow session that delivered nothing, such as one that expired, failed or
-    was finalized with no part started, to end as cancelled."""
+    was finalized with no part started, to end as cancelled. It ends by asking the server
+    to cancel it and waiting for that request; awaiting its result on the time-skipping
+    server lets that server skip time while the request is on its way, until the run
+    times out. So the close is waited for in real time, and only then its result."""
+    for _ in range(ABANDON_POLLS):
+        if (await handle.describe()).status != WorkflowExecutionStatus.RUNNING:
+            break
+        await asyncio.sleep(ABANDON_POLL_SECONDS)
     with pytest.raises(WorkflowFailureError) as ended:
         await handle.result()
-    assert isinstance(ended.value.cause, CancelledError)
+    assert isinstance(ended.value.cause, CancelledError), repr(ended.value.cause)
 
 
 async def finished(env, session_id: str) -> DeliveryProgress:
