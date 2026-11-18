@@ -195,8 +195,9 @@ async def test_failed_agent_output_is_saved_before_the_failure_is_raised(tmp_pat
     monkeypatch.setattr(docker_agents, 'docker', docker)
     with pytest.raises(RuntimeError, match='exited with code 1'):
         await ActivityEnvironment().run(run_stage, _stage(tmp_path, []), 'session', {}, tmp_path)
-    assert saved == [('agent failed: Documentation agent exited with code 1. Log: '
-                      f'{tmp_path}/session/docs-stage/agent.log', {'half.md'})]
+    # The status keeps the first 200 characters of the error, however long tmp_path is.
+    error = f'Documentation agent exited with code 1. Log: {tmp_path}/session/docs-stage/agent.log'
+    assert saved == [('agent failed: ' + error[:200], {'half.md'})]
 
 
 # Work refs.
@@ -233,7 +234,8 @@ async def _token():
     return 'secret', 'app[bot]\n1+app[bot]@users.noreply.github.com'
 
 
-async def test_work_is_committed_to_hidden_refs_on_the_base_commit(session, tmp_path):
+async def test_work_is_committed_to_its_branch_and_published_ref_on_the_base_commit(
+        session, tmp_path):
     session_dir, origin, base = session
     tree = tmp_path / 'service'
     tree.mkdir()
@@ -250,7 +252,8 @@ async def test_work_is_committed_to_hidden_refs_on_the_base_commit(session, tmp_
         session_dir, session_dir.name, 'implementation', tree, include, status='built',
         published=True, token=_token, write_message=write_message)
     ref = f'refs/sdlc/{session_dir.name}/implementation'
-    assert _git('rev-parse', f'{ref}/latest', cwd=origin) == commit
+    branch = 'refs/heads/wip/abc/implementation'
+    assert _git('rev-parse', branch, cwd=origin) == commit
     assert _git('rev-parse', f'{ref}/published', cwd=origin) == commit
     assert _git('rev-parse', f'{commit}^', cwd=origin) == base
     files = set(_git('ls-tree', '-r', '--name-only', commit, cwd=origin).splitlines())
@@ -274,6 +277,7 @@ async def test_work_is_committed_to_hidden_refs_on_the_base_commit(session, tmp_
         session_dir, session_dir.name, 'implementation', tree, include,
         status='agent failed: boom', token=_token, write_message=failing)
     assert _git('rev-parse', f'{second}^', cwd=origin) == commit
+    assert _git('rev-parse', branch, cwd=origin) == second
     assert _git('rev-parse', f'{ref}/published', cwd=origin) == commit
     assert _git('log', '-1', '--format=%s', second, cwd=origin) == (
         'WIP implementation: agent failed: boom (app.py)')
@@ -284,6 +288,25 @@ async def test_work_is_committed_to_hidden_refs_on_the_base_commit(session, tmp_
                                         target, include, token=_token)
     assert {item.name for item in target.iterdir()} == {'app.py', 'new.py'}
     assert (target / 'app.py').read_text() == 'print(2)\n'
+
+    # And a stage starting over, from the unfinished work on the branch.
+    latest = tmp_path / 'latest'
+    assert await work_refs.restore_work(session_dir, session_dir.name, 'implementation',
+                                        latest, include, token=_token,
+                                        kind=work_refs.LATEST)
+    assert (latest / 'app.py').read_text() == 'print(3)\n'
+
+
+async def test_unfinished_work_saved_before_it_went_to_a_branch_is_restored(
+        session, tmp_path):
+    session_dir, origin, base = session
+    _git('update-ref', f'refs/sdlc/{session_dir.name}/implementation/latest', base,
+         cwd=origin)
+    target = tmp_path / 'restored'
+    assert await work_refs.restore_work(session_dir, session_dir.name, 'implementation',
+                                        target, lambda _: True, token=_token,
+                                        kind=work_refs.LATEST)
+    assert (target / 'app.py').read_text() == 'print(1)\n'
 
 
 async def test_work_is_saved_without_files_too_large_to_push(session, tmp_path, monkeypatch):
