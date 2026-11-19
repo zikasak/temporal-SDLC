@@ -64,6 +64,10 @@ class PullRequestMention(TypedDict):
     status: Literal['classifying', 'queued', 'running', 'replied', 'completed', 'error']
     # The first review round of the fix round the mention started.
     round: NotRequired[int]
+    # The workflow_id of the new top-level flow the mention's fix request started because
+    # the delivery's flow had closed: the task flow holding the fix delivery for a task,
+    # or the fix round's own flow for an onboarding. Also listed in fix_flow_ids.
+    fix_flow_id: NotRequired[str]
     reply_url: NotRequired[str]
     error: NotRequired[str]
     # Where replies go, whatever pull request the delivery links to later: the repository
@@ -75,6 +79,10 @@ class PullRequestMention(TypedDict):
     # Set by the delivery while the outcome of a stopped fix round is still to be replied
     # in the pull request; never shown.
     outcome_owed: NotRequired[bool]
+    # Set in a closed delivery's history for a mention handed to the flow that carries it
+    # on: that flow's session, whose delivery reports how far the mention has come; never
+    # shown.
+    handed_to: NotRequired[str]
 
 
 PublicationStatus = Literal['not_applicable', 'waiting', 'running', 'completed', 'skipped',

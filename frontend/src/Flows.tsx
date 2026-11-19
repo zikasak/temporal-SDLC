@@ -273,6 +273,85 @@ async function waitingFlow(flow: Flow, signal: AbortSignal, depth = 0): Promise<
   return flowLink(flow) ? flow : null;
 }
 
+type Attention = { waiting_for_user: boolean; unresolved_findings: boolean };
+
+/** The session endpoint that shows how a flow from before the backend reported its flags
+ * stands; null for flows without one, such as task flows and single steps. */
+function sessionEndpoint(flow: Flow): string | null {
+  const id = encodeURIComponent(flow.workflow_id);
+  switch (flow.workflow_type) {
+    case "RequirementsWorkflow":
+      return `/api/requirements/sessions/${id}`;
+    case "ArchitectureWorkflow":
+      return `/api/architecture/sessions/${id}`;
+    case "ApiDesignWorkflow":
+      return `/api/api-design/sessions/${id}`;
+    case "OnboardingWorkflow":
+      return `/api/onboarding/sessions/${id}`;
+    case "DeliveryWorkflow": {
+      // Only a fix round's own flow has a session of its own to read.
+      const sessionId = flow.workflow_id.replace(/^delivery-/, "");
+      return sessionId.startsWith(followUpPrefix)
+        ? `/api/requirements/sessions/${encodeURIComponent(sessionId)}` : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/** Whether a session waits for the user (the interviewer's or an agent's questions, open
+ * review findings, a skip proposal or a contract decision) and whether its delivery has
+ * open review findings that were not accepted. */
+function sessionAttention(session: unknown): Attention {
+  if (!isObject(session)) return { waiting_for_user: false, unresolved_findings: false };
+  const delivery = isObject(session.delivery) ? session.delivery : null;
+  const unresolved = delivery?.open_findings === true;
+  const messages = Array.isArray(session.messages) ? session.messages : [];
+  const last = messages[messages.length - 1];
+  const asked = session.status === "interviewing" && isObject(last) && last.role === "assistant" &&
+    Array.isArray(last.questions) && last.questions.length > 0;
+  const agentQuestions = Array.isArray(delivery?.agent_questions) && delivery.agent_questions.length > 0;
+  const waiting = asked || agentQuestions || unresolved || isObject(session.skip_proposal) ||
+    session.status === "awaiting_confirmation";
+  return { waiting_for_user: waiting, unresolved_findings: unresolved };
+}
+
+/** The flow with the flags the backend reports, or for a flow from before it did (null),
+ * as its session shows them. */
+function useAttention(flow: Flow, tick: number): Flow {
+  const endpoint = flow.waiting_for_user === null || flow.unresolved_findings === null
+    ? sessionEndpoint(flow) : null;
+  const inactive = flow.status === "pending" || flow.status === "skipped";
+  const [derived, setDerived] = useState<Attention | null>(null);
+
+  useEffect(() => {
+    if (!endpoint || inactive) {
+      setDerived(null);
+      return;
+    }
+    const controller = new AbortController();
+    fetch(endpoint, { signal: controller.signal })
+      .then(async (response) => {
+        const body = await readBody(response);
+        if (!controller.signal.aborted && response.ok) setDerived(sessionAttention(body));
+      })
+      .catch(() => {
+        // Shown without highlight or marker until the session can be read.
+      });
+    return () => controller.abort();
+    // A running flow is read again on every tick, and a closed one while its findings
+    // are unresolved, until they are accepted.
+  }, [endpoint, inactive, flow.run_id, flow.status,
+    flow.status === "running" || derived?.unresolved_findings ? tick : 0]);
+
+  if (!derived) return flow;
+  return {
+    ...flow,
+    waiting_for_user: flow.waiting_for_user ?? derived.waiting_for_user,
+    unresolved_findings: flow.unresolved_findings ?? derived.unresolved_findings,
+  };
+}
+
 const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 function duration(start: string, end: string | null) {
@@ -364,9 +443,9 @@ function FlowChildren({ parent, link, tick, onOpen }: {
 }
 
 /** A flow and, once opened, its steps. Whether it waits for the user and whether it closed
- * with unresolved review findings are as the backend reports them; flows from before it
- * did are only listed and opened. */
-function FlowRow({ flow, inheritedLink, tick, onOpen, onFilter, topLevel = false }: {
+ * with unresolved review findings are as the backend reports them, or for flows from before
+ * it did, as their sessions show them. */
+function FlowRow({ flow: listed, inheritedLink, tick, onOpen, onFilter, topLevel = false }: {
   flow: Flow;
   inheritedLink: string | null;
   tick: number;
@@ -376,6 +455,7 @@ function FlowRow({ flow, inheritedLink, tick, onOpen, onFilter, topLevel = false
   topLevel?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const flow = useAttention(listed, tick);
   const ownLink = flowLink(flow);
   const link = ownLink ?? inheritedLink;
   const closed = closedStatuses.includes(flow.status);

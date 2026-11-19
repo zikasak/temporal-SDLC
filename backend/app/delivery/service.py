@@ -149,7 +149,8 @@ async def with_mention_history(session_id: str,
     """The progress with every mention of the delivery, oldest first, from the mention
     history, as the workflow last reported those it still works on, and with the text of
     the comments that review rounds refer to as their instructions."""
-    history = await mention_history.history(session_id)
+    history = [await _as_handed(item) if item.get(HANDED_TO) else item
+               for item in await mention_history.history(session_id)]
     key = lambda item: (item['comment_type'], item['comment_id'])  # noqa: E731
     texts = {key(item): item.get('body', '') for item in history}
     current = {key(item): item for item in progress.mentions}
@@ -165,6 +166,54 @@ async def with_mention_history(session_id: str,
     progress.reviews = [
         _with_instructions(item, texts) for item in progress.reviews]
     return progress
+
+
+HANDED_TO = 'handed_to'
+# Fields of a handed-over mention that the flow carrying it on reports how far it has come.
+HANDED_FIELDS = ('classification', 'status', 'reply_url', 'error')
+
+
+async def _as_handed(item: dict) -> dict:
+    """A mention of a closed delivery handed to the flow that carries it on, as far as
+    that flow's delivery has brought it. Its fix round is in that flow: it has no round
+    here, but the flow's fix_flow_id, which a mention answered as a clarification or as
+    unclear, which started no fix, has not."""
+    result = {name: value for name, value in item.items() if name not in (HANDED_TO, 'round')}
+    try:
+        live = await mention_history.find(item[HANDED_TO], item['comment_type'],
+                                          item['comment_id'])
+    except Exception as exc:  # noqa: BLE001 - the recorded state is shown instead
+        logger.warning('Mention %s handed to %s not read: %s',
+                       item.get('comment_id'), item.get(HANDED_TO), exc)
+        live = None
+    for name in HANDED_FIELDS:
+        if live and name in live:
+            result[name] = live[name]
+    if result.get('classification') in ('clarification', 'unclear'):
+        result.pop('fix_flow_id', None)
+    return result
+
+
+async def _top_level_flow(client: Client, session_id: str) -> str:
+    """The top-level flow of the delivery of `session_id`: the task flow holding it, or
+    the delivery itself, such as an onboarding's."""
+    workflow_id = delivery_id(session_id)
+    description = await client.get_workflow_handle(workflow_id).describe()
+    parent = description.parent_id
+    return parent if parent and parent.startswith(TASK_FLOW_PREFIX) else workflow_id
+
+
+async def _record_handover(client: Client, session_id: str, target: str,
+                           mention: PullRequestMention) -> None:
+    """Keep a mention handed to the flow `target` that carries on the closed delivery of
+    `session_id` in that delivery's history too, with the flow it started as fix_flow_id,
+    so the original delivery's progress links the mention to that flow."""
+    fix_flow = await _top_level_flow(client, target)
+    record = {name: value for name, value in mention.items()
+              if name not in (OUTCOME_OWED, 'round')}
+    record['fix_flow_id'] = fix_flow
+    record[HANDED_TO] = target
+    await mention_history.save(session_id, record)
 
 
 def _with_instructions(round_: dict, texts: dict) -> dict:
@@ -841,7 +890,16 @@ async def receive_mention(session_id: str, mention: PullRequestMention) -> bool:
             raise
         # Accepted is not yet admitted: a comment the delivery handled before, which has
         # left its live state, is only found by its durable recording.
-        await _admitted(target, mention, update_id)
+        try:
+            await _admitted(target, mention, update_id)
+        except MentionHandled:
+            # Handed over before, perhaps by a delivery of the webhook whose recording
+            # here did not happen: the original delivery still links it to its flow.
+            if target != session_id:
+                await _record_handover(client, session_id, target, mention)
+            raise
+        if target != session_id:
+            await _record_handover(client, session_id, target, mention)
         logger.info('Mention %s on the pull request of session %s handed to the delivery '
                     'of %s', mention['comment_id'], session_id, target)
         return True
