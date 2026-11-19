@@ -183,3 +183,12 @@ The verification worker starts both images on one network, supplies
 `SERVICE_WAIT_HOST=service` and `SERVICE_WAIT_PORT=8080`, and waits up to two minutes for
 TCP readiness before running pytest, which is limited to ten minutes. The JUnit XML
 report is written to `/tests/reports/junit.xml`.
+
+## Contract note: parent of an architecture stage
+
+`WorkflowExecution.parent_workflow_id` says a stage of a task has the task flow as parent, so an
+architecture workflow's parent is not a `requirements-session-*` ID.
+`test_architecture_stage_parent_is_its_task_flow` asserts this. The older
+`test_workflow_listing_accepts_the_architecture_type` is retained unchanged and still asserts the
+superseded `requirements-session-` prefix. It only applies when the listing returns architecture
+items, so it needs a service with Temporal.
