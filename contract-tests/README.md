@@ -164,12 +164,6 @@ Contract ambiguities and how the suite reads them:
   not say whether `parent` with `top_level=false` is rejected, so that is not tested.
   The contract says a malformed `page_token` answers 422 but not whether this is detected
   before Temporal is contacted, so it is not tested.
-- Architecture, API design and delivery stages are children of the task flow, not of the
-  requirements session (FR-125, FR-127). `test_workflow_listing_accepts_the_architecture_type`
-  in `test_architecture.py` still asserts a `requirements-session-` parent when the listing
-  answers 200; against a service without Temporal (the supported target) it only observes the
-  503, so it is kept unchanged. A service with Temporal would have to be checked against
-  `parent_workflow_id` being the task flow's ID.
 - Unknown IDs are well formed (prefix and 32 hex digits) so that they are treated as
   unknown rather than malformed.
 
