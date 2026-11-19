@@ -840,6 +840,19 @@ async def _open_follow_up(client: Client, session_id: str) -> str | None:
     return None
 
 
+async def _handed_before(session_id: str, mention: PullRequestMention) -> bool:
+    """Whether the closed delivery of `session_id` already recorded the mention, such as
+    one handed over before. Only a guard: the flow that carries the delivery on rejects
+    a comment it already has, so when the history cannot be read the handover goes on."""
+    try:
+        found = await mention_history.find(session_id, mention['comment_type'],
+                                           mention['comment_id'])
+    except Exception as exc:  # noqa: BLE001 - the carrying flow rejects duplicates itself
+        logger.warning('Mention history of session %s not read: %s', session_id, exc)
+        return False
+    return found is not None
+
+
 async def receive_mention(session_id: str, mention: PullRequestMention) -> bool:
     """Hand an authorised mention of the app on the delivery's pull request to the
     delivery, which classifies it and replies or queues its fix round. A delivery that
@@ -896,8 +909,7 @@ async def receive_mention(session_id: str, mention: PullRequestMention) -> bool:
                 # A new top-level flow carries the closed delivery on, on a new branch:
                 # its delivery classifies the mention, as every delivery does, and runs
                 # its fix round or answers it.
-                if await mention_history.find(session_id, mention['comment_type'],
-                                              mention['comment_id']) is not None:
+                if await _handed_before(session_id, mention):
                     raise MentionHandled(MENTION_HANDLED)
 
                 def mentioned(follow_up: DeliveryState) -> None:
