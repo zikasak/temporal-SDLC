@@ -128,10 +128,16 @@ class TaskWorkflow(FlowFlags):
         workflow.upsert_search_attributes(
             [TASK_NAME_ATTRIBUTE.value_set(bounded_name(self.state.name))])
 
-    async def _rename(self, requirements: list[Any]) -> None:
+    def _rename_later(self, requirements: list[Any]) -> None:
+        """Rename in the background, so naming never holds up the next stage; run()
+        awaits it before the task flow closes."""
+        self._naming = asyncio.create_task(self._rename(self._naming, requirements))
+
+    async def _rename(self, previous: asyncio.Task[None] | None,
+                      requirements: list[Any]) -> None:
         """Rewrite the name from the finalized requirements; a fork keeps its suffix."""
-        if self._naming is not None:
-            await self._naming
+        if previous is not None:
+            await previous
         if self.state.origin == "fix":
             return
         await self._name(self.state.task, requirements)
@@ -298,7 +304,7 @@ class TaskWorkflow(FlowFlags):
             # Expired, failed or stopped: no later stage will run.
             return None
         self.state.kind = result.kind
-        await self._rename(list(result.requirements))
+        requirements = list(result.requirements)
         if result.delivery is not None and result.kind in DIRECT_KINDS:
             await self._skip("architecture", "api_design")
             session_id = self.state.requirements_session_id
@@ -308,6 +314,7 @@ class TaskWorkflow(FlowFlags):
                 self.state.delivery_session_id = session_id
                 self._remember()
             await self._start("delivery", result.delivery)
+            self._rename_later(requirements)
             return "delivery"
         if result.architecture is not None:
             architecture = result.architecture
@@ -321,7 +328,9 @@ class TaskWorkflow(FlowFlags):
                 await self._create("api_design", self._placeholder("api_design"), True)
                 await self._create("delivery", self._placeholder("delivery"), True)
             await self._start("architecture", architecture)
+            self._rename_later(requirements)
             return "architecture"
+        self._rename_later(requirements)
         return None
 
     async def _after_architecture(self) -> str | None:
