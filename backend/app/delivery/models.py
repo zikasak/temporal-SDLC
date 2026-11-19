@@ -713,7 +713,8 @@ def interrupted(state: DeliveryState) -> DeliveryState:
         progress.routing_status = 'error'
         progress.baseline_status = 'skipped'
         progress.verification_status = 'skipped'
-    elif progress.verification_status in ('waiting', 'running', 'diagnosing', 'repairing'):
+    elif progress.verification_status in ('waiting', 'running', 'checking', 'diagnosing',
+                                          'repairing'):
         # Before the delivery was verified, the author whose retry starts it over failed.
         if state.spec.kind == 'docs':
             progress.documentation_error = STOPPED
@@ -726,6 +727,20 @@ def interrupted(state: DeliveryState) -> DeliveryState:
         else:
             progress.implementation_error = STOPPED
         progress.verification_status = 'error'
+    elif progress.publication_status == 'waiting' and progress.verification_status in (
+            'completed', 'not_applicable'):
+        # Stopped after the delivery was done and before its push started: retrying the
+        # push goes on from there.
+        progress.publication_error = STOPPED
+        progress.publication_status = 'error'
+        progress.pull_request_status = 'skipped'
+    # The steps after the stopped stage never run in this run. Left waiting, they would
+    # report the delivery as still working, and its retry would stay unavailable.
+    if progress.publication_status == 'waiting':
+        progress.publication_status = 'completed' if progress.publication else 'skipped'
+    if progress.pull_request_status == 'waiting':
+        progress.pull_request_status = ('completed' if progress.publication
+                                        and progress.pull_request else 'skipped')
     return state
 
 
