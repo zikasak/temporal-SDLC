@@ -53,6 +53,8 @@ class FakeSession:
 @pytest.fixture(scope="module")
 async def env():
     async with await start_dev_server() as env:
+        # Listings filter on the custom search attributes, such as LinkedTaskFlows.
+        await executions.ensure_search_attributes(env.client)
         yield env
 
 

@@ -8,9 +8,11 @@ from temporalio.exceptions import (
     ActivityError, ApplicationError, CancelledError, ChildWorkflowError,
 )
 
-from app.temporal.interview import Interview, assistant_message
+from app.temporal.flags import FlowFlags, PendingStage
+from app.temporal.interview import Interview, assistant_message, pending_questions
 
 with workflow.unsafe.imports_passed_through():
+    from app.tasks.models import DesignResult, RequirementsResult
     from app.api_design.models import ApiDesignState
     from app.api_design.openapi import api_problems, design_problems
     from app.api_design.prompt import opening_fallback
@@ -215,8 +217,14 @@ class LLMRequestWorkflow:
         )
 
 
+def _interview_flags(state: RequirementsState | ApiDesignState) -> tuple[bool, None]:
+    """An interview waits for the user while its last message asks unanswered questions."""
+    return (state.status == "interviewing" and bool(pending_questions(state.messages)),
+            None)
+
+
 @workflow.defn
-class RequirementsWorkflow(Interview[RequirementsState], _Delivering):
+class RequirementsWorkflow(Interview[RequirementsState], _Delivering, FlowFlags):
     """One requirements interview: each user message is an update, and the
     finalize update turns the gathered requirements into a document. A task that
     leaves the API as it is has no API design to follow, so the session then hands
@@ -252,9 +260,15 @@ class RequirementsWorkflow(Interview[RequirementsState], _Delivering):
         self._finalized = False
         # Set when the session expired after a day without messages.
         self._expired = False
+        self._init_flags()
+
+    def _flags(self) -> tuple[bool | None, bool | None]:
+        return _interview_flags(self.state)
 
     @workflow.run
-    async def run(self, state: RequirementsState | None = None) -> dict[str, Any] | None:
+    async def run(self, state: RequirementsState | None = None) -> Any:
+        if self.state.task_flow_id:
+            self._keep_flags()
         ready = await _check_out(self.state, self._resume_status)
         if ready and _opens_with_answer(self._started_unanswered, self.state):
             async with self._turn_lock:
@@ -277,6 +291,10 @@ class RequirementsWorkflow(Interview[RequirementsState], _Delivering):
                 workflow.logger.info("Continuing as new")
                 workflow.continue_as_new(self.state)
         await workflow.wait_condition(workflow.all_handlers_finished)
+        if self.state.task_flow_id:
+            # A stage of a task flow hands the task on to it; the task flow starts the
+            # next stage.
+            return await self._hand_off()
         if self.state.status == "completed" and self.state.kind in DIRECT_KINDS:
             await self._deliver()
             if self._delivery_cancelled:
@@ -645,14 +663,44 @@ class RequirementsWorkflow(Interview[RequirementsState], _Delivering):
             return render_requirements_markdown(self.state.requirements,
                                                 retired=self.state.retired)
 
+    async def _hand_off(self) -> RequirementsResult:
+        """What this stage hands to its task flow as it closes: whether the user generated
+        the document, and the start of the next stage it leads to: the architecture of a
+        new service or an API change, or the delivery of a bugfix or documentation task.
+        A document written because the session was idle leads to none."""
+        finalized = self._finalized and self.state.status == "completed"
+        result = RequirementsResult(finalized=finalized, kind=self.state.kind,
+                                    requirements=list(self.state.requirements),
+                                    document=self.state.document)
+        if finalized and self.state.repository:
+            if self.state.kind in DIRECT_KINDS:
+                result.delivery = await self._delivery_state()
+            elif self.state.kind in ARCHITECTURE_KINDS:
+                session_id = (self.state.next_session_id
+                              or f"architecture-session-{workflow.uuid4().hex}")
+                architecture = architecture_state(workflow.info().workflow_id, self.state,
+                                                  await self._requirements_text())
+                architecture.task_flow_id = self.state.task_flow_id
+                if architecture.design is not None:
+                    architecture.design.task_flow_id = self.state.task_flow_id
+                result.architecture = architecture
+                self.state.architecture_session_id = session_id
+        await self._close_flags()
+        return result
+
     async def _deliver(self) -> None:
         """Hand the brief and the repository's contract to a delivery and stay open
         until that ends."""
+        await self._run_delivery(await self._delivery_state())
+
+    async def _delivery_state(self) -> DeliveryState:
+        """The delivery of a task that leaves the API as it is: the brief and the
+        repository's contract."""
         session_id = workflow.info().workflow_id
         document = await self._requirements_text()
         contract = self.state.contract
         assert contract is not None  # a task on an existing service read its contract
-        await self._run_delivery(DeliveryState(spec=TaskSpec(
+        return DeliveryState(spec=TaskSpec(
             session_id=session_id,
             requirements=contract["requirements"],
             requirements_document=contract["requirements_document"],
@@ -667,7 +715,7 @@ class RequirementsWorkflow(Interview[RequirementsState], _Delivering):
             # Given to the coding agents read-only; the repository's files stay as they are.
             architecture=contract.get("architecture"),
             architecture_structure=contract.get("architecture_structure"),
-        )))
+        ))
 
     async def _expire(self) -> None:
         """After a day without messages, keep whatever was gathered."""
@@ -687,7 +735,7 @@ class RequirementsWorkflow(Interview[RequirementsState], _Delivering):
 
 
 @workflow.defn
-class ApiDesignWorkflow(Interview[ApiDesignState], _Delivering):
+class ApiDesignWorkflow(Interview[ApiDesignState], _Delivering, FlowFlags, PendingStage):
     """One API design discussion based on a finished requirements session: the
     model drafts the API first, or for a change to an existing service applies the
     change to the API its repository holds, each user message is an update, and the
@@ -711,9 +759,20 @@ class ApiDesignWorkflow(Interview[ApiDesignState], _Delivering):
         self._init_delivery()
         # Set when the session expired after a day without messages.
         self._expired = False
+        self._init_flags()
+        self._init_pending()
+
+    def _flags(self) -> tuple[bool | None, bool | None]:
+        return _interview_flags(self.state)
 
     @workflow.run
-    async def run(self, state: ApiDesignState) -> dict[str, Any] | None:
+    async def run(self, state: ApiDesignState) -> Any:
+        if self.state.pending:
+            # Created by its task flow before the architecture was finalized or skipped.
+            await self._wait_pending()
+            return None
+        if self.state.task_flow_id:
+            self._keep_flags()
         ready = (await _check_out(self.state, self._resume_status)
                  and await self._confirm_contract())
         if ready and not self.state.messages:
@@ -747,6 +806,14 @@ class ApiDesignWorkflow(Interview[ApiDesignState], _Delivering):
                 workflow.logger.info("Continuing as new")
                 workflow.continue_as_new(self.state)
         await workflow.wait_condition(workflow.all_handlers_finished)
+        if self.state.task_flow_id:
+            # A stage of a task flow hands its delivery to the task flow, which starts it
+            # as its own child.
+            result = DesignResult(document=self.state.document)
+            if self.state.status == "completed" and self.state.document:
+                result.delivery = self._delivery_state()
+            await self._close_flags()
+            return result
         if self.state.status == "completed" and self.state.document:
             await self._deliver()
             if self._delivery_cancelled:
@@ -890,9 +957,12 @@ class ApiDesignWorkflow(Interview[ApiDesignState], _Delivering):
 
     async def _deliver(self) -> None:
         """Hand the finished design to its delivery and stay open until that ends."""
+        await self._run_delivery(self._delivery_state())
+
+    def _delivery_state(self) -> DeliveryState:
         document = self.state.document
         assert document is not None  # delivered only once the document was written
-        await self._run_delivery(DeliveryState(spec=TaskSpec(
+        return DeliveryState(spec=TaskSpec(
             session_id=workflow.info().workflow_id,
             requirements=self.state.requirements,
             requirements_document=self.state.requirements_document,
@@ -904,7 +974,7 @@ class ApiDesignWorkflow(Interview[ApiDesignState], _Delivering):
             checkout=self.state.checkout,
             architecture=self.state.architecture,
             architecture_structure=self.state.architecture_structure,
-        )))
+        ))
 
     async def _expire(self) -> None:
         """After a day without messages, keep the API if it is complete."""

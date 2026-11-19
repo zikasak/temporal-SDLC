@@ -19,13 +19,13 @@ from app.requirements.service import (
     instruct_findings,
     answer_delivery_questions,
     answer_questions,
+    create_session as start_session,
     finalize_session,
-    fork_session,
+    fork as fork_session,
     get_session,
     retry_generation,
     retry_message,
     send_message,
-    start_session,
     update_checkout,
 )
 
@@ -151,11 +151,12 @@ async def create_session(body: CreateBody):
         repository = await resolve_repository_selection(
             body.repository.full_name, body.repository.branch,
         )
-        session_id = await start_session(repository=repository, kind=body.kind,
-                                         answers=body.answers, task=body.task)
+        # A new top-level task flow, whose requirements stage this session is.
+        created = await start_session(repository=repository, kind=body.kind,
+                                      answers=body.answers, task=body.task)
     except Exception as exc:
         raise http_error(exc) from exc
-    return {"session_id": session_id}
+    return created
 
 
 @router.get("/sessions/{session_id}")
@@ -272,10 +273,10 @@ async def refresh_checkout(session_id: str):
 async def fork(session_id: str, body: ForkBody):
     _check_session_id(session_id)
     try:
-        fork_id = await fork_session(session_id, body.message_index)
+        # The fork starts a new top-level task flow of its own.
+        return await fork_session(session_id, body.message_index)
     except Exception as exc:
         raise http_error(exc) from exc
-    return {"session_id": fork_id}
 
 
 @router.get("/sessions/{session_id}/document")

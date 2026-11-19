@@ -21,6 +21,8 @@ from app.temporal.executions import ensure_search_attributes
 from app.temporal.sessions import InvalidForkPoint
 from app.temporal import workflows as session_workflows
 from app.temporal.workflows import RequirementsWorkflow
+from app.tasks import service as task_service
+from app.tasks.workflows import TaskWorkflow
 from tests.pipeline import abandoned
 from tests.dev_server import start_dev_server
 
@@ -136,7 +138,9 @@ async def server():
 async def workers(env, **options):
     activities = FakeActivities()
     async with Worker(
-        env.client, task_queue=TASK_QUEUE, workflows=[RequirementsWorkflow, FakeApiDesign, FakeArchitecture],
+        env.client, task_queue=TASK_QUEUE,
+        # Sessions started from the intake or forked are stages of a task flow.
+        workflows=[TaskWorkflow, RequirementsWorkflow, FakeApiDesign, FakeArchitecture],
         activities=[activities.requirements_turn, activities.write_requirements_document,
                     activities.checkout_repository, activities.read_requirements_document,
                     activities.register_session],
@@ -197,6 +201,7 @@ def serve_from(env, monkeypatch):
 
     monkeypatch.setattr(service, "connect_temporal", connect)
     monkeypatch.setattr(sessions, "connect_temporal", connect)
+    monkeypatch.setattr(task_service, "connect_temporal", connect)
     monkeypatch.setattr(service, "TASK_QUEUE", TASK_QUEUE)
 
 

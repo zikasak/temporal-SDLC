@@ -150,6 +150,20 @@ Contract ambiguities and how the suite reads them:
   that every requirements and API design session action requires sign-in. The contract does
   not say how an invalid `page_token` is reported before Temporal is contacted, so it is not
   tested.
+- Task flows (FR-125 to FR-143, `tests/test_task_flows.py`): a `TaskWorkflow` is started by
+  `POST /requirements/sessions` (or a fork, or a fix round), which needs GitHub, Temporal and
+  an LLM, so task flow creation, pending/skipped children, naming, fork/fix flows and the
+  `unresolved_findings` marker cannot be exercised. The suite checks that `TaskWorkflow` is a
+  documented `type`, that `top_level`, `parent`, `type`, `repository`, `branch` and
+  `onboarding_id` combine (200, or 503 without Temporal), that a malformed filter next to
+  `parent` or `top_level` is still a 422, that `parent` with `top_level=true` is a 422, that
+  the listing needs sign-in, and, only when Temporal does answer, that the executions carry
+  `name`, `linked`, `waiting_for_user` and `unresolved_findings` and that task flows and stages
+  are shaped as described. The contract does not name the format of a task flow's
+  `workflow_id`, so the `parent` filter is tried with an arbitrary well-formed ID. It does
+  not say whether `parent` with `top_level=false` is rejected, so that is not tested.
+  The contract says a malformed `page_token` answers 422 but not whether this is detected
+  before Temporal is contacted, so it is not tested.
 - Unknown IDs are well formed (prefix and 32 hex digits) so that they are treated as
   unknown rather than malformed.
 
@@ -169,3 +183,12 @@ The verification worker starts both images on one network, supplies
 `SERVICE_WAIT_HOST=service` and `SERVICE_WAIT_PORT=8080`, and waits up to two minutes for
 TCP readiness before running pytest, which is limited to ten minutes. The JUnit XML
 report is written to `/tests/reports/junit.xml`.
+
+## Contract note: parent of an architecture stage
+
+`WorkflowExecution.parent_workflow_id` says a stage of a task has the task flow as parent, so an
+architecture workflow's parent is not a `requirements-session-*` ID.
+`test_architecture_stage_parent_is_its_task_flow` asserts this. The older
+`test_workflow_listing_accepts_the_architecture_type` is retained unchanged and still asserts the
+superseded `requirements-session-` prefix. It only applies when the listing returns architecture
+items, so it needs a service with Temporal.

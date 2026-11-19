@@ -11,3 +11,8 @@ export function rememberSessionId(mode: string, sessionId: string) {
   else url.searchParams.delete("session_id");
   window.history.replaceState(null, "", url);
 }
+
+/** The Flows page listing the steps of the flow `workflowId`, such as a task flow. */
+export function flowStepsLink(workflowId: string) {
+  return `?parent=${encodeURIComponent(workflowId)}`;
+}

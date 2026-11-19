@@ -210,6 +210,7 @@ class PullRequestWait(FlowBase):
         as it is, for the user to accept the findings or give instructions about them."""
         self.state.waiting = False
         await workflow.wait_condition(workflow.all_handlers_finished)
+        await self._close_flags()
         if merged:
             workflow.logger.info('Pull request merged, delivery completed')
             return self.progress

@@ -111,3 +111,9 @@ class ApiDesignState:
     architecture_session_id: str | None = None
     architecture: str | None = None
     architecture_structure: dict[str, Any] | None = None
+    # The task flow the design is a stage of; None for designs started before task flows,
+    # which run their delivery as their own child.
+    task_flow_id: str | None = None
+    # Set for a stage created before the architecture was finalized or skipped: it waits
+    # for its task flow to start it.
+    pending: bool = False

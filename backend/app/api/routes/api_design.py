@@ -14,7 +14,7 @@ from app.api_design.service import (
     answer_delivery_questions,
     answer_questions,
     finalize_session,
-    fork_session,
+    fork as fork_task_session,
     get_session,
     retry_generation,
     retry_message,
@@ -125,10 +125,10 @@ async def finalize(session_id: str):
 async def fork(session_id: str, body: ForkBody):
     _check_session_id(session_id)
     try:
-        fork_id = await fork_session(session_id, body.message_index)
+        # The fork starts a new top-level task flow of its own.
+        return await fork_task_session(session_id, body.message_index)
     except Exception as exc:
         raise http_error(exc) from exc
-    return {"session_id": fork_id}
 
 
 @router.get("/{session_id}/document")

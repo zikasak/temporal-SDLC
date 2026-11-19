@@ -13,7 +13,7 @@ import { repositoryCheckout, repositorySelection, selectionInput, type Repositor
 import {
   ConversationMarkdown, RequirementLookupProvider, lookupRequirementList, type LookupRequirement,
 } from "./RequirementLookup";
-import { rememberSessionId, urlParam } from "./url";
+import { flowStepsLink, rememberSessionId, urlParam } from "./url";
 
 type SessionStatus = "preparing" | "interviewing" | "turn_running" | "finalizing" | "completed" | "failed";
 type Category = "functional" | "non_functional" | "technical";
@@ -48,6 +48,8 @@ type Session = {
   kind: TaskKind | null;
   document: RequirementsDocument | null;
   error: string | null;
+  // The top-level task flow the session is a stage of; null for sessions from before.
+  task_flow_id: string | null;
   forked_from: { session_id: string; message_index: number } | null;
   repository: RepositorySelection | null;
   checkout: RepositoryCheckout | null;
@@ -154,6 +156,8 @@ function sessionRecord(value: unknown): Session {
       : null,
     document,
     error: "error" in value && typeof value.error === "string" ? value.error : null,
+    task_flow_id: "task_flow_id" in value && typeof value.task_flow_id === "string"
+      ? value.task_flow_id : null,
     forked_from: forkOrigin(value),
     repository,
     checkout: repositoryCheckout("checkout" in value ? value.checkout : null),
@@ -629,6 +633,13 @@ export default function Requirements() {
           {session && (
             <p className="request-id">
               Task kind <strong>{session.kind ? kindLabels[session.kind] : "Not chosen yet"}</strong>
+            </p>
+          )}
+
+          {session?.task_flow_id && (
+            <p className="request-id">
+              Part of a task flow:{" "}
+              <a href={flowStepsLink(session.task_flow_id)}>show all its steps</a>
             </p>
           )}
 

@@ -25,6 +25,7 @@ from app.delivery.models import DeliveryProgress, delivery_id
 from app.delivery.workflows import DeliveryWorkflow
 from app.requirements.document import render_requirements_markdown
 from app.requirements.models import Requirement, RequirementsState
+from app.tasks.workflows import TaskWorkflow
 from app.temporal import sessions
 from app.temporal.executions import ensure_search_attributes
 from app.temporal import workflows as session_workflows
@@ -114,7 +115,9 @@ async def server():
 async def workers(env, **options):
     activities = FakeActivities()
     async with Worker(
-        env.client, task_queue=TASK_QUEUE, workflows=[ApiDesignWorkflow, DeliveryWorkflow],
+        env.client, task_queue=TASK_QUEUE,
+        # A fork is the first stage of a task flow of its own.
+        workflows=[TaskWorkflow, ApiDesignWorkflow, DeliveryWorkflow],
         activities=[activities.api_design_turn, activities.write_openapi_document,
                     activities.checkout_repository, activities.publish_repository,
                     activities.write_pull_request_text, activities.open_pull_request,

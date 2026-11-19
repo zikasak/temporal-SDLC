@@ -57,6 +57,7 @@ Deploy `docker-compose.coolify.yml`, configure the provider keys (`OPENAI_API_KE
 - [docs/langfuse-tracing.md](docs/langfuse-tracing.md): Langfuse tracing.
 - [docs/pi-oauth.md](docs/pi-oauth.md): Pi OAuth in Coolify.
 - [docs/service-implementation.md](docs/service-implementation.md): service implementation, tests and verification workers.
+- [docs/task-flows.md](docs/task-flows.md): the top-level task flow of every task and its stages.
 - [frontend/README.md](frontend/README.md): the web client, sign-in, model settings and local start.
 - [backend/app/languages/java/test_suite/README.md](backend/app/languages/java/test_suite/README.md): Java service contract tests.
 - [backend/app/languages/python/test_suite/README.md](backend/app/languages/python/test_suite/README.md): Python service contract tests.

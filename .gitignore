@@ -47,3 +47,6 @@ npm-debug.log*
 
 # Local tool logs
 .agent-output/
+
+# Local nested worktrees
+.wt/
