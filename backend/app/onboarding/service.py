@@ -8,6 +8,7 @@ import logging
 import uuid
 from typing import Any
 
+from temporalio.client import WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 
 from app.config import TASK_QUEUE
@@ -43,7 +44,17 @@ def new_session_id() -> str:
 async def get_state(session_id: str) -> OnboardingState:
     client = await connect_temporal()
     handle = client.get_workflow_handle(session_id)
-    return await handle.query("get_state", result_type=OnboardingState)
+    state = await handle.query("get_state", result_type=OnboardingState)
+    if state.status not in FINISHED_STATUSES:
+        # An onboarding whose execution closed without finishing, such as an old-shape one
+        # cancelled at startup, keeps its last status; it is over all the same.
+        description = await handle.describe()
+        if description.status not in (None, WorkflowExecutionStatus.RUNNING):
+            state.status = "failed"
+            state.error = state.error or (
+                OLD_SHAPE_REASON if description.status == WorkflowExecutionStatus.CANCELED
+                else "The onboarding ended before it finished; start it again.")
+    return state
 
 
 async def _unfinished(session_id: str) -> bool:

@@ -499,9 +499,14 @@ class RequirementsWorkflow(Interview[RequirementsState], ReviewedInterview, _Del
             result = ArchitectureResult(
                 api_design_session_id=result["api_design_session_id"],
                 design=ApiDesignState(**result["design"]))
-        # Recorded before it starts, so that the design is listed as soon as it runs.
-        await self._register(result.api_design_session_id)
-        await self._start_design(result.api_design_session_id, result.design)
+        if workflow.patched("register-design-first"):
+            # Recorded before it starts, so that the design is listed as soon as it runs.
+            await self._register(result.api_design_session_id)
+            await self._start_design(result.api_design_session_id, result.design)
+        else:
+            # Histories recorded before the change started the design first.
+            await self._start_design(result.api_design_session_id, result.design)
+            await self._register(result.api_design_session_id)
 
     @workflow.update
     async def start_architecture(self, session_id: str, state: ArchitectureState) -> None:
