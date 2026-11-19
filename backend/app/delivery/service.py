@@ -207,13 +207,23 @@ async def _record_handover(client: Client, session_id: str, target: str,
                            mention: PullRequestMention) -> None:
     """Keep a mention handed to the flow `target` that carries on the closed delivery of
     `session_id` in that delivery's history too, with the flow it started as fix_flow_id,
-    so the original delivery's progress links the mention to that flow."""
-    fix_flow = await _top_level_flow(client, target)
+    so the original delivery's progress links the mention to that flow. The flow that
+    took the mention already holds it durably, so this link is best effort: when it
+    cannot be stored the handover still stands."""
+    try:
+        fix_flow = await _top_level_flow(client, target)
+    except RPCError as exc:
+        logger.warning('Flow of the delivery of %s not read: %s', target, exc)
+        fix_flow = delivery_id(target)
     record = {name: value for name, value in mention.items()
               if name not in (OUTCOME_OWED, 'round')}
     record['fix_flow_id'] = fix_flow
     record[HANDED_TO] = target
-    await mention_history.save(session_id, record)
+    try:
+        await mention_history.save(session_id, record)
+    except Exception as exc:  # noqa: BLE001 - the handover itself already succeeded
+        logger.warning('Mention %s handed to %s not recorded for session %s: %s',
+                       mention.get('comment_id'), target, session_id, exc)
 
 
 def _with_instructions(round_: dict, texts: dict) -> dict:
