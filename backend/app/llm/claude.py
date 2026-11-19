@@ -9,10 +9,12 @@ from collections.abc import Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from claude_agent_sdk import (
-    AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ClaudeSDKError,
-    HookMatcher, ResultMessage, SystemMessage as NativeSystemMessage, TextBlock,
+    AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ClaudeSDKError, HookContext,
+    HookInput, HookJSONOutput, HookMatcher, ResultMessage,
+    SystemMessage as NativeSystemMessage, TextBlock,
 )
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
@@ -90,15 +92,18 @@ class ChatClaude(Runnable):
         return await self._turn(messages, tools, until, max_turns)
 
     async def _turn(self, messages, tools, until, max_turns):
-        async def stop_after_tools(data, tool_use_id, context):
+        async def stop_after_tools(data: HookInput, tool_use_id: str | None,
+                                   context: HookContext) -> HookJSONOutput:
             if until is not None and until():
-                return {'continue': False, 'stopReason': 'Paused for the user'}
+                return {'continue_': False, 'stopReason': 'Paused for the user'}
             return {}
 
         if self._client is None:
+            stack = self._stack
+            assert stack is not None  # ainvoke opens a session before any turn
             cwd = self.cwd
             if cwd is None:
-                cwd = Path(await self._stack.enter_async_context(
+                cwd = Path(await stack.enter_async_context(
                     async_context(tempfile.TemporaryDirectory, prefix='claude-native-')))
             env = claude_trace_environment()
             env.update(CLAUDE_CODE_ENTRYPOINT=ENTRYPOINT, APP_CLAUDE_HOOK_PYTHON=sys.executable,
@@ -116,18 +121,18 @@ class ChatClaude(Runnable):
                 # The plugin reads native transcripts. Keep them only for this host
                 # session, under the same temporary-directory cleanup as its cwd.
                 if self.cwd is not None:
-                    cwd_config = Path(await self._stack.enter_async_context(
+                    cwd_config = Path(await stack.enter_async_context(
                         async_context(tempfile.TemporaryDirectory, prefix='claude-tracing-')))
                 else:
                     cwd_config = cwd
                 env['CLAUDE_CONFIG_DIR'] = str(cwd_config / '.claude-native')
                 env['CC_LANGFUSE_STATE_DIR'] = str(cwd_config / '.langfuse-state')
-            thinking = ({} if self.thinking_level == 'default' else
+            thinking: dict[str, Any] = ({} if self.thinking_level == 'default' else
                         {'thinking': {'type': 'disabled'}} if self.thinking_level == 'off' else
                         {'thinking': {'type': 'adaptive'}, 'effort': self.thinking_level})
             # A prompt can embed a whole API model, which Linux refuses as one process
             # argument. A coding stage's cwd is the user's project, so it stays out of there.
-            system_dir = Path(await self._stack.enter_async_context(
+            system_dir = Path(await stack.enter_async_context(
                 async_context(tempfile.TemporaryDirectory, prefix='claude-system-')))
             system_file = system_dir / 'system-prompt.md'
             await run_sync(system_file.write_text,
@@ -152,9 +157,9 @@ class ChatClaude(Runnable):
             self._native_session = self.resume
             if native_tracing:
                 # Runs once the CLI has exited and before its transcript is removed.
-                self._stack.push_async_callback(
+                stack.push_async_callback(
                     self._export_session, env, Path(env['CLAUDE_CONFIG_DIR']))
-            self._client = await self._stack.enter_async_context(ClaudeSDKClient(options))
+            self._client = await stack.enter_async_context(ClaudeSDKClient(options))
         # Follow-ups append only new user messages. Native history, thinking, tool
         # results and compaction stay inside Claude; no transcript reconstruction.
         if self._messages:

@@ -22,7 +22,9 @@ from app.test_generation.activities import copy_test_suite
 from app.test_generation.components import runner_context
 from tests.test_typescript_components import GITHUB_STUB
 
-CONTRACT = get_language('python').component_contract
+_contract = get_language('python').component_contract
+assert _contract is not None
+CONTRACT = _contract
 
 pytestmark = pytest.mark.skipif(
     os.getenv('RUN_DOCKER_VERIFICATION_TESTS') != '1', reason='real Docker tests are opt-in',
@@ -111,6 +113,9 @@ async def test_a_stub_generated_by_make_stub_conforms(tmp_path):
 
 
 JAVA = get_language('java')
+assert JAVA.component_contract is not None and JAVA.component_suite is not None
+JAVA_CONTRACT = JAVA.component_contract
+JAVA_SUITE = JAVA.component_suite
 JAVA_SERVICE = '''package com.example.flows;
 
 public class Flow {
@@ -188,7 +193,7 @@ async def test_java_stubs_conform_to_the_compiled_code_they_describe(tmp_path, s
     repository, components = java_contract(tmp_path, stub)
     work = tmp_path / 'work'
     work.mkdir()
-    check = check_conformance(JAVA.component_contract, repository, components,
+    check = check_conformance(JAVA_CONTRACT, repository, components,
                               ['com.example.flows.Flow'], work, tmp_path / 'logs')
     if error is None:
         await check
@@ -201,10 +206,10 @@ async def test_java_component_tests_run_in_process_without_a_network(tmp_path):
     repository, _ = java_contract(tmp_path, JAVA_STUB)
     suite = tmp_path / 'suite'
     (suite / 'src/test/java/com/example/flows').mkdir(parents=True)
-    shutil.copy(JAVA.component_suite.template / 'pom.xml', suite / 'pom.xml')
+    shutil.copy(JAVA_SUITE.template / 'pom.xml', suite / 'pom.xml')
     (suite / 'src/test/java/com/example/flows/FlowTest.java').write_text(JAVA_TEST)
     context = tmp_path / 'context'
-    runner_context(JAVA.component_suite, repository, suite, context)
+    runner_context(JAVA_SUITE, repository, suite, context)
     image = await build_image(context, 'component test runner', tmp_path / 'build.log',
                               build_args={'PROJECT': 'service'})
     name = f'component-tests-{uuid.uuid4().hex}'

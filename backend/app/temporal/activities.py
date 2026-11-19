@@ -3,7 +3,7 @@ import time
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 from langchain_core.tools import BaseTool
@@ -17,6 +17,7 @@ from app.api_design.models import ApiDesignState, ApiModel
 from app.api_design.openapi import DOCUMENT_FILENAME as OPENAPI_FILENAME
 from app.api_design.openapi import api_problems, render_openapi
 from app.api_design.prompt import api_turn_messages
+from app.conversations.models import ConversationMessage
 from app.config import GENERATED_CODE_DIR
 from app.delivery.contract import (
     ContractError, RepositoryContract, read_contract, read_service_contract, write_architecture,
@@ -55,7 +56,7 @@ from app.temporal.registry import register
 from app.temporal.tracing import trace_activity
 from app.tracing import langchain_config
 from app.requirements.document import DOCUMENT_FILENAME, render_requirements_markdown
-from app.requirements.models import Requirement
+from app.requirements.models import Requirement, TaskKind
 from app.requirements.prompt import document_messages, interview_messages
 from app.review.models import COMMIT_FINDINGS, ReviewFinding, commit_findings
 from app.languages.composite import suite_members
@@ -118,6 +119,13 @@ async def _inline_texts(document_ids: list[str]) -> dict[str, str]:
     return texts
 
 
+def _workflow_id() -> str:
+    """The workflow the running activity works for: every activity here runs in one."""
+    workflow_id = activity.info().workflow_id
+    assert workflow_id is not None
+    return workflow_id
+
+
 def _repository_tools(session_id: str | None = None) -> list[BaseTool]:
     """Read-only tools over the session's checkout; none for a session without one.
 
@@ -125,7 +133,7 @@ def _repository_tools(session_id: str | None = None) -> list[BaseTool]:
     if not activity.in_activity():
         return []
     root = repository_checkout.checkout_path(
-        GENERATED_CODE_DIR, session_id or activity.info().workflow_id)
+        GENERATED_CODE_DIR, session_id or _workflow_id())
     return repository_tools.build(root) if root.is_dir() else []
 
 
@@ -136,7 +144,7 @@ def _published_requirements() -> tuple[Requirement, ...]:
         return ()
     try:
         contract = read_service_contract(repository_checkout.checkout_path(
-            GENERATED_CODE_DIR, activity.info().workflow_id))
+            GENERATED_CODE_DIR, _workflow_id()))
     except ContractError:
         return ()
     return tuple(contract["requirements"])
@@ -147,6 +155,7 @@ async def _github_token() -> tuple[str, dict[str, Any]]:
     try:
         connection = await github_storage.get_connection()
         github_storage.decrypt_private_key(connection)
+        assert connection is not None  # decrypting the key of no connection raised
     except GitHubError as exc:
         # A missing connection or key needs an operator, not another attempt.
         raise ApplicationError(str(exc), non_retryable=True) from exc
@@ -285,7 +294,7 @@ async def publish_repository(
             # The routing kept every published stub and only extended them.
             repository_checkout.replace_files(stubs, stubs_destination, lambda relative: True)
 
-    subject = COMMIT_SUBJECTS.get(kind, COMMIT_SUBJECT)
+    subject = COMMIT_SUBJECTS.get(kind or '', COMMIT_SUBJECT)
     details = COMPONENTS_NOTE if components is not None else ""
     if not findings:
         result = await _publish(session_id, repository, subject, update, details=details)
@@ -293,7 +302,8 @@ async def publish_repository(
     result = await _publish(
         session_id, repository, f"{subject} (unverified)", update, verified=False,
         note=f"{FINDINGS_NOTE}\n\n{commit_findings(findings)}", details=details)
-    return {**result, 'findings': findings[:COMMIT_FINDINGS], 'findings_count': len(findings)}
+    return {**result, 'findings': cast(list[dict[str, Any]], findings[:COMMIT_FINDINGS]),
+            'findings_count': len(findings)}
 
 
 @activity.defn
@@ -329,7 +339,8 @@ async def publish_onboarding(
     result = await _publish(
         session_id, repository, f"{ONBOARDING_SUBJECT} (unverified)", update, verified=False,
         note=f"{FINDINGS_NOTE}\n\n{commit_findings(findings)}", branch=branch, details=details)
-    return {**result, 'findings': findings[:COMMIT_FINDINGS], 'findings_count': len(findings)}
+    return {**result, 'findings': cast(list[dict[str, Any]], findings[:COMMIT_FINDINGS]),
+            'findings_count': len(findings)}
 
 
 @activity.defn
@@ -390,7 +401,7 @@ async def open_pull_request(
     subject = (DOCUMENTATION_SUBJECT if kind == 'docs'
                else ONBOARDING_SUBJECT if kind == 'onboarding'
                else ARCHITECTURE_SUBJECT if kind == 'onboarding_architecture'
-               else COMMIT_SUBJECTS.get(kind, COMMIT_SUBJECT))
+               else COMMIT_SUBJECTS.get(kind or '', COMMIT_SUBJECT))
     title, body = pull_request_description(subject, change, publication, text)
     verified = bool(publication['verified'])
     token, _ = await _github_token()
@@ -419,7 +430,7 @@ async def open_pull_request(
             str(exc), type='PullRequestError',
             non_retryable=exc.status_code in (401, 403, 404, 409, 422)) from exc
     activity.logger.info("%s pull request #%d of %s", action, pull['number'], branch)
-    return {key: pull[key] for key in ('number', 'title', 'url', 'draft', 'base')}
+    return cast(PullRequest, {key: pull[key] for key in ('number', 'title', 'url', 'draft', 'base')})
 
 
 @activity.defn
@@ -484,7 +495,7 @@ async def send_llm_message(
     # Older workflows can still have a single string as their activity input.
     if isinstance(messages, str):
         messages = [{"role": "user", "content": messages}]
-    session_id = session_id or activity.info().workflow_id
+    session_id = session_id or _workflow_id()
     generated_documents = await list_generated_documents(session_id)
     attached_ids = _attached_document_ids(messages)
     inline_texts = await _inline_texts(attached_ids)
@@ -538,9 +549,13 @@ async def requirements_turn(
     messages: list[dict[str, Any]], requirements: list[dict[str, Any]],
     kind: str | None = None, retired: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    retired = retired or []
+    # The workflow hands over its state's plain records.
+    conversation = cast(list[ConversationMessage], messages)
+    gathered = cast(list[Requirement], requirements)
+    task_kind = cast(TaskKind | None, kind)
+    ended = cast(list[Requirement], retired or [])
     ctx = requirements_tools.RequirementsContext.from_list(
-        requirements, kind, await run_sync(_published_requirements), retired)
+        gathered, task_kind, await run_sync(_published_requirements), ended)
     repository = await run_sync(_repository_tools)
     asked = question_tools.QuestionsContext()
     started = time.perf_counter()
@@ -552,7 +567,7 @@ async def requirements_turn(
         async with native_session(model):
             reply = await interview(
                 graph, interview_messages(
-                    messages, requirements, kind,
+                    conversation, gathered, task_kind,
                     repository_tools.GUIDANCE if repository else "",
                     list(ctx.service_requirements()), ctx.retired_list()),
                 langchain_config(recursion_limit=20, run_name='interview-with-tools'),
@@ -564,7 +579,7 @@ async def requirements_turn(
     activity.logger.info("Requirements turn took %.1fs: %d -> %d requirements",
                          time.perf_counter() - started, len(requirements), len(updated))
     if not reply and not asked.questions:
-        if updated == requirements and ctx.kind == kind and ctx.retired_list() == retired:
+        if updated == requirements and ctx.kind == kind and ctx.retired_list() == ended:
             activity.logger.warning("Requirements turn returned no text and no changes")
             raise ApplicationError("The model returned no text", non_retryable=True)
         reply = (f"Noted. {len(updated)} requirements are recorded so far. Tell me what "
@@ -611,7 +626,9 @@ async def write_requirements_document(
     try:
         model = await get_model('requirements')
         answer = await model.ainvoke(
-            document_messages(messages, requirements, retired),
+            document_messages(cast(list[ConversationMessage], messages),
+                              cast(list[Requirement], requirements),
+                              cast(list[Requirement] | None, retired)),
             config=langchain_config(run_name='write-requirements-overview'),
         )
         narrative = str(answer.text).strip() or None
@@ -619,7 +636,8 @@ async def write_requirements_document(
         # The requirement tables alone are still a useful document.
         activity.logger.exception("Could not write the requirements overview")
         narrative = None
-    content = render_requirements_markdown(requirements, narrative, retired)
+    content = render_requirements_markdown(cast(list[Requirement], requirements), narrative,
+                                           cast(list[Requirement] | None, retired))
     return await _save_session_document(session_id, DOCUMENT_FILENAME, content)
 
 

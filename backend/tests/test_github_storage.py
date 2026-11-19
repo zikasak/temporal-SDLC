@@ -1,5 +1,7 @@
 """The connection lifecycle and its encryption against an in-memory stand-in of the
 connection table: no database is used."""
+# Assertions read optional fields directly: a None there fails the test anyway.
+# pyright: reportOptionalSubscript=false
 
 from datetime import datetime, timezone
 
@@ -217,6 +219,7 @@ async def test_wrong_or_missing_key_is_recoverable_without_erasing_the_connectio
 async def test_check_cannot_overwrite_a_connection_replaced_while_github_was_responding(database):
     await storage.save_connection("private key", CONNECTION)
     previous = await storage.get_connection()
+    assert previous is not None
     await storage.save_connection("new key", {**CONNECTION, "app_id": 124, "app_slug": "new-app"})
     with pytest.raises(GitHubError, match="connection changed"):
         await storage.mark_validated(previous, CONNECTION)

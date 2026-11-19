@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.api.errors import http_error
 from app.settings import storage
-from app.settings.models import WORKFLOW_LABELS, WorkflowSettings
+from app.settings.models import WORKFLOW_LABELS, Adapter, WorkflowSettings
 from app.settings.providers import get_provider_options
 
 router = APIRouter(prefix='/settings')
@@ -26,7 +26,8 @@ async def read_providers():
 @router.put('', response_model=WorkflowSettings)
 async def update_settings(body: WorkflowSettings):
     try:
-        providers = await get_provider_options(item.adapter for item in body.workflows.values())
+        adapters: list[Adapter] = [item.adapter for item in body.workflows.values()]
+        providers = await get_provider_options(adapters)
         for workflow, item in body.workflows.items():
             provider = providers[item.adapter]
             if provider.error:

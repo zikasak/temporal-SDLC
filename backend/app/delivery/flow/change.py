@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, cast
 
 from temporalio import workflow
 from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflowError
@@ -12,7 +12,8 @@ with workflow.unsafe.imports_passed_through():
         correctable, earlier_findings, review_request,
     )
     from app.routing.models import (
-        ROUTING_ERROR, ROUTING_ERROR_CHARS, SEAM_ERROR, SEAM_MISMATCH, added_seams,
+        ROUTING_ERROR, ROUTING_ERROR_CHARS, SEAM_ERROR, SEAM_MISMATCH, RequirementRoute,
+        added_seams,
     )
 
 # Marks the workflow code that reviews the seam a change adds, and its regression tests
@@ -108,11 +109,10 @@ class Change(FlowBase):
             self.progress.routing_status = 'error'
             return False
         self.state.declined_routes = None
-        self.progress.routing = {
-            requirement: {**route, 'source': 'routing'}
-            for requirement, route in result['routes'].items()}
-        self.progress.routing_status, self.progress.routing_error = self._judge_routes(
-            self.progress.routing)
+        routing = {requirement: cast(RequirementRoute, {**route, 'source': 'routing'})
+                   for requirement, route in result['routes'].items()}
+        self.progress.routing = routing
+        self.progress.routing_status, self.progress.routing_error = self._judge_routes(routing)
         workflow.logger.info('Routing: %s', self.progress.routing_status)
         return self.progress.routing_status == 'routed'
 
@@ -209,7 +209,7 @@ class Change(FlowBase):
             return False
         return reviewed
 
-    def _baseline_failures(self) -> dict[str, list[dict[str, str]]]:
+    def _baseline_failures(self) -> dict[str, list[dict[str, Any]]]:
         """How the tests failed in the last baseline run of each suite, bounded."""
         runs = {'contract': self.progress.baseline,
                 'component': self.progress.component_baseline}

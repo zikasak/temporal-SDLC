@@ -98,10 +98,13 @@ async def _pi_models() -> list[ModelOption]:
             'The API server cannot execute Pi. Check the Pi executable permissions '
             'for the API user, then refresh provider options.') from exc
 
+    stdin, stdout = process.stdin, process.stdout
+    assert stdin is not None and stdout is not None  # both piped
+
     async def command(kind: str, **params):
-        process.stdin.write((json.dumps({'id': kind, 'type': kind, **params}) + '\n').encode())
-        await process.stdin.drain()
-        while line := await process.stdout.readline():
+        stdin.write((json.dumps({'id': kind, 'type': kind, **params}) + '\n').encode())
+        await stdin.drain()
+        while line := await stdout.readline():
             event = json.loads(line)
             if event.get('type') == 'response' and event.get('id') == kind:
                 if not event.get('success'):

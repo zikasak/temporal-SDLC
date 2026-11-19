@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any
 from zipfile import BadZipFile, ZipFile
 
-from fastapi import UploadFile
+from starlette.datastructures import UploadFile
 
 from app.asyncio_utils import async_context, run_sync
 from app.config import DOCUMENT_STORAGE_DIR
+from app.conversations.models import AttachmentMetadata
 from app.db import connect
 from app.documents.errors import DocumentNotFound, DocumentParseError, DocumentTooLarge
 from app.documents.parsers import document_type
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
-async def store_original(upload: UploadFile) -> dict[str, Any]:
+async def store_original(upload: UploadFile) -> AttachmentMetadata:
     filename = ((upload.filename or "").replace("\\", "/")).split("/")[-1]
     if not filename or len(filename) > 255:
         raise DocumentParseError("Choose a file with a valid filename.")

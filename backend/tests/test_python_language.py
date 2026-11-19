@@ -66,7 +66,7 @@ def test_test_identities_are_those_pytest_reports(tmp_path):
     report = tmp_path / 'junit.xml'
     subprocess.run([sys.executable, '-m', 'pytest', f'--junitxml={report}', '-p', 'no:asyncio',
                     '-W', 'ignore'], cwd=root, capture_output=True, check=False)
-    reported = {SUITE.case_id(case.get('classname'), case.get('name'))
+    reported = {SUITE.case_id(case.get('classname', ''), case.get('name', ''))
                 for case in ElementTree.parse(report).getroot().iter('testcase')}
     assert reported == set(SUITE.test_cases(root)) == {
         'tests.api.test_cases#test_function', 'tests.api.test_cases#test_parameterized',

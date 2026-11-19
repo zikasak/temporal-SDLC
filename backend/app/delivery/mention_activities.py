@@ -6,7 +6,7 @@ import json
 import logging
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
@@ -19,7 +19,7 @@ from app.delivery import mentions as mention_history
 from app.github import checkout as repository_checkout
 from app.github import client as github_client
 from app.github.errors import GitHubError
-from app.github.models import PullRequestMention
+from app.github.models import PullRequestMention, RepositorySelection
 from app.llm.graph import final_reply, get_message_graph, native_session
 from app.llm.model import get_model
 from app.temporal.activities import _github_token
@@ -129,7 +129,8 @@ async def _published_tools(session_dir: Path, context: dict[str, Any],
         return (await _github_token())[0]
 
     try:
-        await repository_checkout.snapshot(session_dir, repository, commit, root, token)
+        await repository_checkout.snapshot(session_dir, cast(RepositorySelection, repository),
+                                           commit, root, token)
     except (repository_checkout.CheckoutError, ApplicationError, OSError) as exc:
         logger.warning('The pushed commit could not be read: %s', exc)
         return []

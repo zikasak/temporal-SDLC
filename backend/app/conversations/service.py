@@ -5,7 +5,7 @@ import logging
 import uuid
 from datetime import datetime, timedelta
 
-from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.client import Client, WorkflowExecutionDescription, WorkflowExecutionStatus
 
 from app.config import TASK_QUEUE
 from app.conversations.errors import (
@@ -148,9 +148,9 @@ async def _start(
         raise ConversationTooLarge("This conversation is too long to continue.")
 
     document_ids = {
-        item["attachment"]["document_id"]
+        attachment["document_id"]
         for item in messages
-        if item.get("attachment")
+        if (attachment := item.get("attachment"))
     }
     await touch_documents(document_ids)
     await touch_generated_documents(session_id)
@@ -179,7 +179,7 @@ async def _start(
 
 
 async def _session_id_for_request(
-    client: Client, request_id: str, description: object
+    client: Client, request_id: str, description: WorkflowExecutionDescription
 ) -> str:
     current_id = request_id
     current_description = description

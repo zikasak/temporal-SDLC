@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from temporalio.exceptions import ApplicationError
 
@@ -84,8 +84,9 @@ def session_language(name: str | None) -> Language:
         raise ApplicationError(str(exc), non_retryable=True) from exc
 
 
-def write_language(workspace: Path, language: Language, **details: str) -> None:
-    """Tell the container's agent what the session's language requires of it."""
+def write_language(workspace: Path, language: Language, **details: object) -> None:
+    """Tell the container's agent what the session's language requires of it; the
+    `details` are JSON values."""
     (workspace / LANGUAGE_FILENAME).write_text(json.dumps({
         'name': language.name, 'build_dirs': list(language.build_dirs), **details}))
 
@@ -168,8 +169,10 @@ async def _work_message(role: str, stage: str, status: str, diff: str) -> str | 
     from langchain_core.messages import HumanMessage
     from app.llm.graph import native_session
     from app.llm.model import get_model
+    from app.settings.models import WorkflowType
     try:
-        model = await get_model(role)
+        # A role without settings of its own, which raises, writes with the review's.
+        model = await get_model(cast(WorkflowType, role))
     except Exception:
         model = await get_model('review')
     async with asyncio.timeout(WORK_MESSAGE_SECONDS):

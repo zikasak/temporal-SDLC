@@ -1,3 +1,5 @@
+# Assertions read optional fields directly: a None there fails the test anyway.
+# pyright: reportOptionalSubscript=false
 import asyncio
 import uuid
 from contextlib import asynccontextmanager
@@ -22,7 +24,7 @@ from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, delivery_id
 from app.delivery.workflows import DeliveryWorkflow
 from app.requirements.document import render_requirements_markdown
-from app.requirements.models import RequirementsState
+from app.requirements.models import Requirement, RequirementsState
 from app.tasks.workflows import TaskWorkflow
 from app.temporal import sessions
 from app.temporal.executions import ensure_search_attributes
@@ -74,7 +76,7 @@ class FakeActivities(FakeStages):
     async def api_design_turn(self, state: ApiDesignState) -> dict[str, Any]:
         await self.release_turn.wait()
         self.turns += 1
-        api = dict(state.api)
+        api: dict[str, Any] = dict(state.api)
         if not state.messages:
             if self.fail_draft:
                 raise ApplicationError("no model", non_retryable=True)
@@ -180,7 +182,7 @@ async def test_new_api_design_inherits_the_requirements_repository(env, worker, 
         await handle.terminate()
 
 
-def requirement(number: int, title: str) -> dict[str, Any]:
+def requirement(number: int, title: str) -> Requirement:
     return {"id": f"FR-{number}", "category": "functional", "title": title,
             "description": "D", "priority": "must"}
 
@@ -268,7 +270,7 @@ async def test_repository_is_checked_out_first_and_pushed_once_verified(server, 
     assert state.tests["context"]["repository"] == repository_selection
     assert state.verification["status"] == "passed"
     assert state.publication is None and state.publication_status == "error"
-    assert "Permission denied" in state.publication_error
+    assert "Permission denied" in (state.publication_error or '')
 
     # A rejected push is repeated on its own: nothing is generated or verified again.
     live.fail_publication = False

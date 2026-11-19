@@ -18,6 +18,7 @@ from langchain_core.messages import (
     AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage, messages_from_dict,
     messages_to_dict,
 )
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool, tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
@@ -338,7 +339,9 @@ def workspace_tools(root: Path, contracts: Path | None = None,
 
     tools = [read_file, write_file, edit_file, list_files, search_files, shell]
     for item in tools:
+        assert isinstance(item, StructuredTool)  # made by @tool
         if item.coroutine is None:
+            assert item.func is not None  # a tool without a coroutine has a function
             item.coroutine = partial(run_sync, item.func)
     if contracts is None:
         return tools
@@ -364,6 +367,7 @@ def workspace_tools(root: Path, contracts: Path | None = None,
                             base=contracts)
 
     for item in (read_contract, search_contracts):
+        assert isinstance(item, StructuredTool) and item.func is not None  # @tool of a function
         item.coroutine = partial(run_sync, item.func)
     return [*tools, read_contract, search_contracts]
 
@@ -402,6 +406,11 @@ def _clip(text: str) -> str:
             f'the agent saw them ...]\n{text[-half:]}')
 
 
+def _named(config: RunnableConfig, run_name: str) -> RunnableConfig:
+    """`config` for a run of its own name."""
+    return {**config, 'run_name': run_name}
+
+
 def _transcript(messages: Sequence[BaseMessage]) -> str:
     lines = []
     for message in messages:
@@ -410,8 +419,10 @@ def _transcript(messages: Sequence[BaseMessage]) -> str:
             continue
         if message.text:
             lines.append(f'Agent: {_clip(message.text)}')
-        lines += [f'Call {call["name"]}: {_clip(json.dumps(call["args"], ensure_ascii=False))}'
-                  for call in message.tool_calls]
+        # Only the agent's own messages call tools; a notice sent to it calls none.
+        if isinstance(message, AIMessage):
+            lines += [f'Call {call["name"]}: {_clip(json.dumps(call["args"], ensure_ascii=False))}'
+                      for call in message.tool_calls]
     return '\n'.join(lines)
 
 
@@ -534,7 +545,7 @@ async def run_agent(profile: AgentProfile) -> None:
     stopped = []
 
     def stop() -> None:
-        if not stopped:
+        if not stopped and task is not None:
             stopped.append(True)
             task.cancel()
 
@@ -766,7 +777,7 @@ async def _run_with_provider(profile: AgentProfile, provider) -> str:
                 continue
             try:
                 result = await by_name[call['name']].ainvoke(
-                    call['args'], **({'config': {**config, 'run_name': call['name']}}
+                    call['args'], **({'config': _named(config, call['name'])}
                                     if traced_config else {}),
                 )
                 if call['name'] in {'write_file', 'edit_file'}:
@@ -839,6 +850,7 @@ async def _wrap_up(profile: AgentProfile, provider, notes: str, working: Sequenc
                    history: Sequence[BaseMessage], traced_config: dict[str, Any]) -> None:
     """Write the completion file of a run whose turns ran out from what it established."""
     inputs = '\n\n'.join(profile.initial_messages)
+    assert profile.wrap_up_prompt and profile.completion_file  # checked by the caller
     request = [SystemMessage(content=profile.wrap_up_prompt + CLIP_NOTICE), HumanMessage(content=(
         f'Task inputs:\n{inputs}\n{_noted(working)}\n\n'
         + (f'Checkpoint:\n{notes}\n\n' if notes else '')

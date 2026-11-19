@@ -47,6 +47,7 @@ async def test_system_prompt_over_the_argument_limit_reaches_claude(claude_http,
     # per-argument limit, so the recorded command line is checked as well as the spawn.
     bundled = Path(claude_agent_sdk.__file__).parent / '_bundled' / 'claude'
     real_cli = str(bundled) if bundled.exists() else shutil.which('claude')
+    assert real_cli is not None, 'the Claude CLI is neither bundled nor installed'
     recorded = tmp_path / 'argv'
     cli = tmp_path / 'claude-recording'
     cli.write_text(f'#!/bin/sh\nprintf \'%s\\0\' "$@" >> {shlex.quote(str(recorded))}\n'

@@ -1,8 +1,10 @@
 """The API design a finished requirements session hands its task to. Safe to import from
 workflow code."""
 
+from typing import cast
+
 from app.api_design.models import ApiDesignState
-from app.delivery.contract import with_requirements
+from app.delivery.contract import RepositoryContract, with_requirements
 from app.requirements.models import RequirementsState
 
 
@@ -20,7 +22,8 @@ def design_state(session_id: str, source: RequirementsState,
     if source.contract:
         # A change to the service the repository holds: the design goes on from that
         # service's contract, which the change's requirements join.
-        contract = with_requirements(source.contract, source.requirements, source.retired)
+        contract = with_requirements(cast(RepositoryContract, source.contract),
+                                     source.requirements, source.retired)
         state.requirements = contract["requirements"]
         state.requirements_document = contract["requirements_document"]
         state.change_document = requirements_document

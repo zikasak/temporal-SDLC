@@ -1,6 +1,8 @@
 """Prompts of an onboarding: drafting the contract from the code, then reviewing it."""
 
 import json
+from collections.abc import Mapping
+from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
@@ -102,7 +104,7 @@ ARCHITECTURE_FALLBACK = (
 )
 
 
-def architecture_fallback(structure: dict | None) -> ConversationMessage:
+def architecture_fallback(structure: Mapping[str, Any] | None) -> ConversationMessage:
     structure = structure or {"components": [], "data_flows": [], "technology_choices": []}
     return {"role": "assistant", "content": ARCHITECTURE_FALLBACK.format(
         components=len(structure["components"]), flows=len(structure["data_flows"]),
@@ -120,7 +122,7 @@ def _conversation(state: OnboardingState, first: str) -> list[BaseMessage]:
 
 
 def turn_messages(state: OnboardingState, extra_guidance: str = "",
-                  contract: dict | None = None) -> list[BaseMessage]:
+                  contract: Mapping[str, Any] | None = None) -> list[BaseMessage]:
     """The messages of a drafting turn (no messages yet) or of an interview turn; for an
     architecture-only onboarding, `contract` is the existing contract it is checked
     against."""

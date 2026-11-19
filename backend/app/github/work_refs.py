@@ -1,12 +1,12 @@
 """The work of a session's authors, kept in its repository as it is written.
 
 Every stage that changes the project (the implementation, the tests, the documentation)
-commits what its author left, after each run and whatever became of it, to a hidden ref of
-the repository: `refs/sdlc/<session-id>/<stage>/latest`, and the output it published to
-`refs/sdlc/<session-id>/<stage>/published`. Such refs are no branch: GitHub shows them in
-no branch list, runs no CI for them and they never touch the pull request. They keep the
-work when the worker's disk does not, such as after a redeploy, and a stage whose
-published output is missing restores it from there.
+commits what its author left, after each run and whatever became of it, finished or not, to
+a branch of the repository: `wip/<session>/<stage>`, `<session>` being the id the
+publication branch is named with. The output it published also goes to the hidden ref
+`refs/sdlc/<session-id>/<stage>/published`, which no branch list shows. They keep the work
+when the worker's disk does not, and a stage whose published output is missing restores it
+from there.
 
 The commit is made without the LLM, so it is made when the LLM failed; the LLM only writes
 its message when it can, else a message is composed from the change itself. Saving never
@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 
 REF_ROOT = 'refs/sdlc'
 LATEST, PUBLISHED = 'latest', 'published'
+# The branches unfinished work is pushed to; apart from the publication branches, since
+# `generated/<id>` and `generated/<id>/<stage>` cannot both be branches.
+WORK_BRANCH_PREFIX = 'wip/'
 # The commits saved last by this worker, by ref, to chain the next one on.
 RECORD = 'work-refs.json'
 # Bounds of what a commit message is written from, and of the message.
@@ -45,6 +48,11 @@ SAVE_TIMEOUT = 300
 # and such a file, like a crashed process's core dump, is no source.
 MAX_FILE_BYTES = 50 * 1024 * 1024
 STATUS_TRAILER = 'Sdlc-Status'
+# Every saved commit carries it: the `wip/` branches are ordinary branches, and the CI a
+# push triggers must not run unverified agent-written code, nor workflows it may have
+# changed, with the repository's secrets. GitHub Actions, GitLab, CircleCI, Travis,
+# Bitbucket and Azure Pipelines skip a push whose head commit says so.
+SKIP_CI = '[skip ci]'
 _NAME = re.compile(r'[A-Za-z0-9_-]{1,200}')
 
 # Writes a commit message from (stage, status, diff); None leaves it to the fallback.
@@ -52,6 +60,22 @@ MessageWriter = Callable[[str, str, str], Awaitable[str | None]]
 
 
 def work_ref(session_id: str, stage: str, kind: str = LATEST) -> str:
+    """The remote ref the stage's work of `kind` is pushed to."""
+    local = _local_ref(session_id, stage, kind)
+    if kind == PUBLISHED:
+        return local
+    return f'refs/heads/{work_branch(session_id, stage)}'
+
+
+def work_branch(session_id: str, stage: str) -> str:
+    """The branch the stage's unfinished work is pushed to."""
+    _local_ref(session_id, stage, LATEST)
+    return f'{WORK_BRANCH_PREFIX}{session_id.rpartition("-session-")[2][:12]}/{stage}'
+
+
+def _local_ref(session_id: str, stage: str, kind: str) -> str:
+    """Where the checkout keeps a fetched work ref, and what the record is keyed by; also
+    where the `latest` work was pushed before it went to a branch."""
     if not (_NAME.fullmatch(session_id) and _NAME.fullmatch(stage)
             and kind in (LATEST, PUBLISHED)):
         raise CheckoutError('Invalid work reference')
@@ -144,7 +168,7 @@ async def _save(session_dir: Path, session_id: str, stage: str, tree: Path,
                 write_message: MessageWriter | None) -> str:
     checkout = session_dir / CHECKOUT_DIR
     base = manifest['commit']
-    latest = work_ref(session_id, stage)
+    latest = _local_ref(session_id, stage, LATEST)
     parent = _record(session_dir).get(latest) or base
     async with async_context(tempfile.TemporaryDirectory, dir=session_dir) as temporary:
         work = Path(temporary) / 'tree'
@@ -184,18 +208,20 @@ async def _save(session_dir: Path, session_id: str, stage: str, tree: Path,
                     logger.info('No LLM commit message for the %s work of %s: %s', stage,
                                 session_id, type(exc).__name__)
             message = message or fallback_message(stage, status, stat)
-            message += f'\n\nSession: {session_id}\n{STATUS_TRAILER}: {status}'
+            message += (f'\n\n{SKIP_CI}\n\nSession: {session_id}\n'
+                        f'{STATUS_TRAILER}: {status}')
             secret, author = await token()
             name, _, email = author.partition('\n')
             identity = {'GIT_AUTHOR_NAME': name, 'GIT_AUTHOR_EMAIL': email,
                         'GIT_COMMITTER_NAME': name, 'GIT_COMMITTER_EMAIL': email}
             commit = await _git('commit-tree', written, '-p', parent, '-m', message,
                                 cwd=checkout, env=identity)
-        refs = [latest, *([work_ref(session_id, stage, PUBLISHED)] if published else [])]
+        kinds = [LATEST, *([PUBLISHED] if published else [])]
         secret, _ = await token()
         await _git('push', '--quiet', '--force', 'origin',
-                   *(f'{commit}:{ref}' for ref in refs), cwd=checkout, token=secret)
-    for ref in refs:
+                   *(f'{commit}:{work_ref(session_id, stage, kind)}' for kind in kinds),
+                   cwd=checkout, token=secret)
+    for ref in (_local_ref(session_id, stage, kind) for kind in kinds):
         await run_sync(_remember, session_dir, ref, commit)
     logger.info('Saved the %s work of session %s (%s) as %s', stage, session_id, status,
                 commit[:12])
@@ -250,16 +276,25 @@ async def restore_work(session_dir: Path, session_id: str, stage: str, target: P
     if (manifest is None or await run_sync(target.exists)
             or not await run_sync((checkout / '.git').is_dir)):
         return False
+    local = _local_ref(session_id, stage, kind)
     ref = work_ref(session_id, stage, kind)
     try:
         secret, _ = await token()
-        await _git('fetch', '--quiet', '--no-tags', '--depth', '1', 'origin',
-                   f'+{ref}:{ref}', cwd=checkout, token=secret)
+        try:
+            await _git('fetch', '--quiet', '--no-tags', '--depth', '1', 'origin',
+                       f'+{ref}:{local}', cwd=checkout, token=secret)
+        except CheckoutError:
+            if ref == local:
+                raise
+            # Saved before unfinished work went to a branch.
+            ref = local
+            await _git('fetch', '--quiet', '--no-tags', '--depth', '1', 'origin',
+                       f'+{ref}:{local}', cwd=checkout, token=secret)
         await run_sync(target.parent.mkdir, parents=True, exist_ok=True)
         async with async_context(tempfile.TemporaryDirectory, dir=target.parent) as temporary:
             work = Path(temporary) / 'tree'
             env = {'GIT_INDEX_FILE': str(Path(temporary) / 'index')}
-            await _git('read-tree', ref, cwd=checkout, env=env)
+            await _git('read-tree', local, cwd=checkout, env=env)
             await _git('checkout-index', '--all', f'--prefix={work}/', cwd=checkout, env=env)
             source = work / prefix if prefix else work
             clean = Path(temporary) / 'clean'

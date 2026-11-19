@@ -1,5 +1,7 @@
 """The author of a change's component tests, which never sees the code, and the trusted
 runner that builds its suite with the code."""
+# Assertions read optional fields directly: a None there fails the test anyway.
+# pyright: reportOptionalMemberAccess=false
 import dataclasses
 import json
 import tarfile
@@ -17,7 +19,9 @@ from app.test_generation import agent
 from app.test_generation import components
 from app.verification import activities as verification
 
-SUITE = get_language('python').component_suite
+_suite = get_language('python').component_suite
+assert _suite is not None
+SUITE = _suite
 REQUIREMENT = {'category': 'functional', 'title': 'T', 'description': 'D', 'priority': 'must'}
 BRIEF = {'requirements': [{**REQUIREMENT, 'id': 'FR-2'}, {**REQUIREMENT, 'id': 'FR-3'}],
          'requirements_document': '# Brief', 'retired': []}

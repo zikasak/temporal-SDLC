@@ -183,6 +183,7 @@ def _scan(source: str, position: int, jsx: bool,
         except ValueError as exc:
             raise ValueError(f"line {line}: {exc}") from None
         if end is not None:
+            assert kind is not None  # set with `end`
             value = source[position:end]
             # An element's layout is not a change; a template's is part of its value.
             tokens.append(_Token(kind, " ".join(value.split()) if kind == "jsx" else value,
@@ -194,6 +195,7 @@ def _scan(source: str, position: int, jsx: bool,
         if match is None:
             raise ValueError(f"line {line}: unreadable character")
         kind, value = match.lastgroup, match.group()
+        assert kind is not None  # every alternative of TOKEN is a named group
         if kind == "op" and value in "\"'":
             raise ValueError(f"line {line}: unterminated literal")
         if kind == "op" and value == "/" and source.startswith("/*", position):
@@ -224,7 +226,7 @@ def _unescape(text: str) -> str:
             return chr(int(escape[2:-1], 16))
         if escape[0] in "ux" and len(escape) > 1:
             return chr(int(escape[1:], 16))
-        return SIMPLE_ESCAPES.get(escape, escape)
+        return SIMPLE_ESCAPES[escape] if escape in SIMPLE_ESCAPES else escape
     value = ESCAPE.sub(replace, text)
     # Escaped surrogate pairs are one character.
     return value.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
@@ -335,7 +337,9 @@ class _Cases:
                 continue
             if name is None or not tracked:
                 continue
-            case = f"{file}#{' > '.join([*(scope[1] for scope in scopes), name])}"
+            # Every scope has a name: the test is tracked.
+            names = [scope[1] for scope in scopes if scope[1] is not None]
+            case = f"{file}#{' > '.join([*names, name])}"
             text = " ".join([*(scope[2] for scope in scopes),
                              *(item.value for item in tokens[index:end + 1])])
             self.cases[case] = f"{self.cases[case]} {text}" if case in self.cases else text

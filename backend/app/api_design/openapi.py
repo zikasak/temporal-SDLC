@@ -82,14 +82,14 @@ def _type_schema(type_name: str) -> dict[str, Any]:
 
 def _property_schema(item: Property) -> dict[str, Any]:
     schema = _type_schema(item["type"])
-    if item.get("format"):
-        schema["format"] = item["format"]
-    if item.get("enum"):
-        schema["enum"] = item["enum"]
+    if value_format := item.get("format"):
+        schema["format"] = value_format
+    if enum := item.get("enum"):
+        schema["enum"] = enum
     if item["array"]:
         schema = {"type": "array", "items": schema}
-    if item.get("description"):
-        schema["description"] = item["description"]
+    if description := item.get("description"):
+        schema["description"] = description
     return schema
 
 
@@ -130,16 +130,16 @@ def _operation(endpoint: Endpoint, operation_id: str) -> dict[str, Any]:
             "name": name, "in": "path", "required": True,
             "schema": {"type": item["type"] if item else "string"},
         }
-        if item and item.get("description"):
-            parameter["description"] = item["description"]
+        if item and (description := item.get("description")):
+            parameter["description"] = description
         parameters.append(parameter)
     for item in endpoint["parameters"]:
         if item["location"] == "path":
             continue
         parameter = {"name": item["name"], "in": item["location"],
                      "required": item["required"], "schema": {"type": item["type"]}}
-        if item.get("description"):
-            parameter["description"] = item["description"]
+        if description := item.get("description"):
+            parameter["description"] = description
         parameters.append(parameter)
     if parameters:
         operation["parameters"] = parameters

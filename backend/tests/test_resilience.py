@@ -1,5 +1,7 @@
 """Work kept in the repository, waits for the provider's limits, the repository's checks
 and their excerpts, decisions about further rounds of fixes, and failure causes."""
+# Assertions read optional fields directly: a None there fails the test anyway.
+# pyright: reportOptionalSubscript=false, reportOptionalMemberAccess=false
 
 import json
 import subprocess
@@ -195,8 +197,9 @@ async def test_failed_agent_output_is_saved_before_the_failure_is_raised(tmp_pat
     monkeypatch.setattr(docker_agents, 'docker', docker)
     with pytest.raises(RuntimeError, match='exited with code 1'):
         await ActivityEnvironment().run(run_stage, _stage(tmp_path, []), 'session', {}, tmp_path)
-    assert saved == [('agent failed: Documentation agent exited with code 1. Log: '
-                      f'{tmp_path}/session/docs-stage/agent.log', {'half.md'})]
+    # The status keeps the first 200 characters of the error, however long tmp_path is.
+    error = f'Documentation agent exited with code 1. Log: {tmp_path}/session/docs-stage/agent.log'
+    assert saved == [('agent failed: ' + error[:200], {'half.md'})]
 
 
 # Work refs.
@@ -233,7 +236,8 @@ async def _token():
     return 'secret', 'app[bot]\n1+app[bot]@users.noreply.github.com'
 
 
-async def test_work_is_committed_to_hidden_refs_on_the_base_commit(session, tmp_path):
+async def test_work_is_committed_to_its_branch_and_published_ref_on_the_base_commit(
+        session, tmp_path):
     session_dir, origin, base = session
     tree = tmp_path / 'service'
     tree.mkdir()
@@ -250,7 +254,8 @@ async def test_work_is_committed_to_hidden_refs_on_the_base_commit(session, tmp_
         session_dir, session_dir.name, 'implementation', tree, include, status='built',
         published=True, token=_token, write_message=write_message)
     ref = f'refs/sdlc/{session_dir.name}/implementation'
-    assert _git('rev-parse', f'{ref}/latest', cwd=origin) == commit
+    branch = 'refs/heads/wip/abc/implementation'
+    assert _git('rev-parse', branch, cwd=origin) == commit
     assert _git('rev-parse', f'{ref}/published', cwd=origin) == commit
     assert _git('rev-parse', f'{commit}^', cwd=origin) == base
     files = set(_git('ls-tree', '-r', '--name-only', commit, cwd=origin).splitlines())
@@ -259,6 +264,8 @@ async def test_work_is_committed_to_hidden_refs_on_the_base_commit(session, tmp_
     message = _git('log', '-1', '--format=%B', commit, cwd=origin)
     assert message.startswith('Change the printed number\n\nIt prints 2 now.')
     assert 'Sdlc-Status: built' in message
+    # Pushing it to a branch must not run the repository's CI on unverified code.
+    assert '[skip ci]' in message
     assert 'app[bot]' in _git('log', '-1', '--format=%an', commit, cwd=origin)
     assert messages[0][:2] == ('implementation', 'built') and 'new.py' in messages[0][2]
     # The checkout itself is left as it was.
@@ -274,6 +281,7 @@ async def test_work_is_committed_to_hidden_refs_on_the_base_commit(session, tmp_
         session_dir, session_dir.name, 'implementation', tree, include,
         status='agent failed: boom', token=_token, write_message=failing)
     assert _git('rev-parse', f'{second}^', cwd=origin) == commit
+    assert _git('rev-parse', branch, cwd=origin) == second
     assert _git('rev-parse', f'{ref}/published', cwd=origin) == commit
     assert _git('log', '-1', '--format=%s', second, cwd=origin) == (
         'WIP implementation: agent failed: boom (app.py)')
@@ -284,6 +292,25 @@ async def test_work_is_committed_to_hidden_refs_on_the_base_commit(session, tmp_
                                         target, include, token=_token)
     assert {item.name for item in target.iterdir()} == {'app.py', 'new.py'}
     assert (target / 'app.py').read_text() == 'print(2)\n'
+
+    # And a stage starting over, from the unfinished work on the branch.
+    latest = tmp_path / 'latest'
+    assert await work_refs.restore_work(session_dir, session_dir.name, 'implementation',
+                                        latest, include, token=_token,
+                                        kind=work_refs.LATEST)
+    assert (latest / 'app.py').read_text() == 'print(3)\n'
+
+
+async def test_unfinished_work_saved_before_it_went_to_a_branch_is_restored(
+        session, tmp_path):
+    session_dir, origin, base = session
+    _git('update-ref', f'refs/sdlc/{session_dir.name}/implementation/latest', base,
+         cwd=origin)
+    target = tmp_path / 'restored'
+    assert await work_refs.restore_work(session_dir, session_dir.name, 'implementation',
+                                        target, lambda _: True, token=_token,
+                                        kind=work_refs.LATEST)
+    assert (target / 'app.py').read_text() == 'print(1)\n'
 
 
 async def test_work_is_saved_without_files_too_large_to_push(session, tmp_path, monkeypatch):
@@ -497,6 +524,13 @@ def test_analysis_is_parsed_or_falls_back_to_what_the_output_says():
                           '"instructions": "None"}')['cause'] == 'environment'
     assert parse_analysis('{"cause": "weather", "instructions": "x"}')['cause'] == 'code'
     assert parse_analysis('no JSON here') is None
+    # A conflict with a review finding the analysis was told of; none with one it was not.
+    conflict = ('{"summary": "s", "instructions": "Keep it.", "conflict": {"finding": 2, '
+                '"tests": ["component-tests/tests/test_x.py::test_y"], "reason": "r"}}')
+    assert parse_analysis(conflict, findings=2)['conflict'] == {
+        'finding': 2, 'tests': ['component-tests/tests/test_x.py::test_y'], 'reason': 'r'}
+    assert 'conflict' not in parse_analysis(conflict, findings=1)
+    assert 'conflict' not in parse_analysis(conflict)
     fallback = fallback_analysis('noise\nE   KeyError: x\nmore')
     assert fallback['summary'] == 'E   KeyError: x' and not fallback['analysed']
     assert fallback['cause'] == 'code'

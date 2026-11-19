@@ -8,7 +8,7 @@ from app.api_design.models import ApiDesignState
 from app.api_design.openapi import design_problems
 from app.conversations.models import ConversationMessage
 from app.languages import describe_supported
-from app.llm.questions import message_text
+from app.llm.questions import Question, message_text
 from app.tools.questions import GUIDANCE as QUESTIONS_GUIDANCE
 
 OPENING_FALLBACK = (
@@ -109,7 +109,7 @@ def opening_fallback() -> ConversationMessage:
     """The first message of a session whose first turn failed; a change session has
     none, as its opening is retried instead."""
     return {"role": "assistant", "content": OPENING_FALLBACK,
-            "questions": [{**item, "options": list(item["options"])}
+            "questions": [Question(question=item["question"], options=list(item["options"]))
                           for item in OPENING_QUESTIONS]}
 
 

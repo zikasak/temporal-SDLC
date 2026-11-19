@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from temporalio import activity
@@ -26,7 +26,7 @@ from app.agent_workflows.runtime import ANSWERS_FILENAME, PAUSE_EXIT, STATE_FILE
 from app.llm.limits import LIMIT_FILENAME, MESSAGE_CHARS, PROVIDER_LIMIT_EXIT
 from app.config import OPENAI_API_KEY, OPENAI_BASE_URL, PI_CREDENTIALS_DIR, PI_CREDENTIALS_SHARED
 from app.llm.questions import Question, normalize_questions
-from app.settings.models import ModelSettings, SETTINGS_FILENAME, WORKFLOW_LABELS
+from app.settings.models import ModelSettings, SETTINGS_FILENAME, WORKFLOW_LABELS, WorkflowType
 from app.settings.storage import get_workflow_settings
 from app.tracing import container_trace_environment
 
@@ -240,6 +240,7 @@ async def _follow(name: str, label: str, secrets: list[str]) -> None:
         return
     try:
         # Without a TTY, Docker keeps the container's stdout and stderr apart.
+        assert process.stdout is not None and process.stderr is not None  # both piped
         await asyncio.gather(
             _forward_stream(process.stdout, label, logging.INFO, secrets),
             _forward_stream(process.stderr, label, logging.WARNING, secrets),
@@ -328,6 +329,7 @@ async def docker(*args: str, timeout: int = 1800, env: dict | None = None,
                     logger.info('Docker [%s] output saved to %s', command_id, log_path)
                 except OSError:
                     logger.warning('Could not save Docker [%s] log to %s', command_id, log_path)
+        assert process is not None  # a command that did not start raised above
         if process.returncode:
             raise RuntimeError(f'Docker {args[0]} failed: {output}')
         return output
@@ -536,6 +538,7 @@ async def _save_logs(name: str, log_path: Path) -> None:
         async with asyncio.timeout(120):
             # Read as it arrives, keeping only the end: the output is the repository's
             # script's, as large as it likes.
+            assert process.stdout is not None  # piped
             while chunk := await process.stdout.read(65536):
                 output.extend(chunk)
                 if len(output) > CHECKS_LOG_BYTES:
@@ -596,7 +599,7 @@ async def run_agent(role: str, session_id: str, workspace: Path,
     label = role.replace('_', '-')
     name = f'{label}-{uuid.uuid4().hex}'
     agent_image = _agent_image(role, session_id)
-    settings = await get_workflow_settings(role)
+    settings = await get_workflow_settings(cast(WorkflowType, role))
     # The snapshot travels as input alongside the workspace, never as host selector env vars.
     await run_sync((workspace / SETTINGS_FILENAME).write_text, settings.model_dump_json())
     try:

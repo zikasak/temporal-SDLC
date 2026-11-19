@@ -1,3 +1,5 @@
+# Assertions read optional fields directly: a None there fails the test anyway.
+# pyright: reportOptionalMemberAccess=false
 import asyncio
 import json
 import shlex
@@ -15,10 +17,12 @@ from temporalio.testing import ActivityEnvironment
 from app import docker_agents
 from app.agent_workflows import contracts, runtime
 from app.agent_workflows.host import StageInputs, StageSpec, copy_regular_files, run_stage
+from app.api_design.models import ApiModel
 from app.api_design.openapi import render_openapi
 from app.implementation import activities as implementation
 from app.implementation.agent import validate_completion as validate_implementation
 from app.requirements.document import render_requirements_markdown
+from app.requirements.models import Requirement
 from app.languages import get_language
 from app.test_generation import activities as test_generation
 from app.test_generation.agent import validate_completion as validate_tests
@@ -129,7 +133,7 @@ async def test_agent_executes_tools_and_returns_correlated_errors(profile, scrip
     ])
     await runtime.run_agent(profile)
     assert (profile.root / 'Dockerfile').read_text() == 'FROM scratch'
-    results = {message.tool_call_id: message.content for message in model.messages
+    results = {message.tool_call_id: message.text for message in model.messages
                if isinstance(message, ToolMessage)}
     assert results['written'] == 'Written'
     assert results['missing'].startswith('Tool failed: FileNotFoundError:')
@@ -182,6 +186,7 @@ async def test_review_finishes_on_its_last_tool_turn_only_with_valid_findings(
             await runtime.run_agent(review)
     else:
         await runtime.run_agent(review)
+        assert content is not None
         assert json.loads((profile.root / FINDINGS).read_text()) == json.loads(content)
     assert len(model.requests) == 1
 
@@ -272,10 +277,10 @@ async def test_stale_history_becomes_a_checkpoint_within_the_context_budget(
         assert isinstance(inputs, HumanMessage) and inputs.content == 'requirements'
         assert isinstance(checkpoint, HumanMessage)
         assert f'Files written or edited so far: {files}\n' in checkpoint.content
-        assert checkpoint.content.endswith(f'Remaining: {remaining}')
+        assert checkpoint.text.endswith(f'Remaining: {remaining}')
         assert_calls_and_results_correlate(recent)
     assert [call['id'] for call in third_turn[3].tool_calls] == ['Stock.java']
-    results = {message.tool_call_id: message.content for message in later[-1]
+    results = {message.tool_call_id: message.text for message in later[-1]
                if isinstance(message, ToolMessage)}
     assert set(results) == {'Payments.java', 'missing', 'docker'}
     assert results['missing'].startswith('Tool failed: FileNotFoundError:')
@@ -359,10 +364,11 @@ def test_contract_files_are_read_and_searched_but_never_written(tmp_path):
 def test_large_contracts_are_indexed_and_supplied_whole_on_demand(tmp_path, monkeypatch,
                                                                   prepare_inputs):
     (tmp_path / 'server').mkdir()
-    requirements = [{'id': f'FR-{number}', 'category': 'functional', 'title': f'Rule {number}',
-                     'description': f'Detailed behaviour {number}. ' * 20, 'priority': 'must',
-                     'rationale': f'Reason {number}'} for number in range(1, 31)]
-    api = {
+    requirements: list[Requirement] = [
+        {'id': f'FR-{number}', 'category': 'functional', 'title': f'Rule {number}',
+         'description': f'Detailed behaviour {number}. ' * 20, 'priority': 'must',
+         'rationale': f'Reason {number}'} for number in range(1, 31)]
+    api: ApiModel = {
         'info': {'title': 'Orders', 'version': '1.0.0', 'description': '', 'auth': 'bearer'},
         'schemas': [{'name': 'Order', 'description': 'A placed order', 'properties': [
             {'name': 'total', 'type': 'integer', 'required': True, 'array': False}]}],

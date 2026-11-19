@@ -7,6 +7,7 @@ used instead. Either way the description is the summary, followed by which suite
 each criterion of a routed change and by the open review findings when the delivery has
 any, and the title of an unverified delivery carries the " (unverified)" marker."""
 import re
+from collections.abc import Mapping
 from typing import Any, TypedDict
 
 from app.review.models import commit_findings
@@ -61,7 +62,7 @@ def _title(text: str, verified: bool) -> str:
     return _line(text, TITLE_CHARS - len(UNVERIFIED_MARKER)) + UNVERIFIED_MARKER
 
 
-def _findings(publication: dict[str, Any]) -> list[str]:
+def _findings(publication: Mapping[str, Any]) -> list[str]:
     """The open review findings the pushed commit lists, as the description's last part."""
     findings = list(publication.get('findings') or [])
     count = int(publication.get('findings_count') or len(findings))
@@ -142,8 +143,8 @@ def _proofs(change: dict[str, Any]) -> list[str]:
     return ['', '## How the criteria are proved', *lines] if lines else []
 
 
-def describe(subject: str, change: dict[str, Any], publication: dict[str, Any],
-             text: dict[str, Any] | None = None) -> tuple[str, str]:
+def describe(subject: str, change: dict[str, Any], publication: Mapping[str, Any],
+             text: Mapping[str, Any] | None = None) -> tuple[str, str]:
     """The title and the description of the pull request of `publication`. `text` is the
     title and summary the LLM wrote; without it, the generic `subject` of the task kind
     and the fixed sentence of what the delivery changed are used. `change` holds the

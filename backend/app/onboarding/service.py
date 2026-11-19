@@ -103,6 +103,7 @@ async def fork_onboarding(session_id: str, message_index: int) -> str:
             activity=TURN_ACTIVITY, key=key,
         )
     repository = source.repository
+    assert repository is not None  # an onboarding is of a repository
     fork_id = new_session_id()
     fork = OnboardingState(
         repository=repository,

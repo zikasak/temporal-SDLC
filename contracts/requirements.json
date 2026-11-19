@@ -244,7 +244,7 @@
   },
   {
     "category": "functional",
-    "description": "For every code review round, the delivery progress shows the findings reported and, for each finding, the worker it was sent to (implementation, test generation, or both).",
+    "description": "For every code review round, the delivery progress shows the findings reported and, for each finding, the worker it was sent to (implementation, test generation, or both). A finding left open that no author of the delivery could settle says why: failing repository tests that no author may change assert otherwise, or the review still found it after its corrections.",
     "id": "FR-33",
     "priority": "must",
     "rationale": "User confirmed: show findings for every review round, with the worker each was sent to.",

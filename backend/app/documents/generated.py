@@ -142,6 +142,7 @@ async def create_generated_document(
              session_id, new_expiry()),
         )
         row = await cursor.fetchone()
+    assert row is not None  # the insert returns its row
     logger.info("Created generated document %s %r for session %s (%d bytes)",
                 document_id, filename, session_id, len(encoded))
     return _generated_metadata(row)
@@ -192,6 +193,7 @@ async def edit_generated_document(
                  new_expiry(), document_id),
             )
             changed = await cursor.fetchone()
+    assert changed is not None  # the update returns its row
     logger.info("Edited generated document %s (%s, revision %d)",
                 document_id, edit_mode, changed["revision"])
     return _generated_metadata(changed)

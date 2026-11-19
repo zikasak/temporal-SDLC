@@ -1,4 +1,5 @@
 """Bounded verdict and repair payloads exchanged between verification and authoring."""
+from collections.abc import Mapping
 from typing import Any, Literal, NotRequired, TypedDict
 
 from app.verification.models import TestRef
@@ -38,7 +39,7 @@ class RepairRound(TypedDict):
     suite: NotRequired[RepairSuite]
 
 
-def failed_tests(*verifications: dict[str, Any] | None) -> dict[str, Any]:
+def failed_tests(*verifications: Mapping[str, Any] | None) -> dict[str, Any]:
     """The failing tests of verification results, clipped for a model's context: of one
     run, or of a change's contract and component test runs together."""
     runs = [run for run in verifications if run]
@@ -50,8 +51,8 @@ def failed_tests(*verifications: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def repair_request(diagnosis: dict[str, Any], verification: dict[str, Any] | None,
-                   attempt: int, component: dict[str, Any] | None = None) -> dict[str, Any]:
+def repair_request(diagnosis: dict[str, Any], verification: Mapping[str, Any] | None,
+                   attempt: int, component: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """What the author of the faulty side receives; never the other side's sources.
     `component` is the run of a change's component tests, beside `verification`, the run
     of its contract tests, which is None when it has none: the implementation's author

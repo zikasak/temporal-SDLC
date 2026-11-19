@@ -1,6 +1,8 @@
 """Component contracts and component tests of Java services: stubs read on the host, the
 trusted Stubs.java that compares them with the compiled code, and the author of the
 component tests, which sees the stubs and the tool, never the code."""
+# Assertions read optional fields directly: a None there fails the test anyway.
+# pyright: reportOptionalMemberAccess=false
 import json
 import re
 import shutil
@@ -20,6 +22,7 @@ from app.test_generation import components
 from app.verification import activities as verification
 
 JAVA = get_language('java')
+assert JAVA.component_contract is not None and JAVA.component_suite is not None
 CONTRACT = JAVA.component_contract
 SUITE = JAVA.component_suite
 STUBS = java_components.STUBS_TOOL

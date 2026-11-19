@@ -171,7 +171,7 @@ def _minimal_body(body: list[ast.stmt]) -> bool:
         error = statement.exc
         if isinstance(error, ast.Call) and not error.keywords:
             error = error.func if all(isinstance(item, ast.Constant)
-                                      for item in statement.exc.args) else None
+                                      for item in error.args) else None
         return isinstance(error, ast.Name) and error.id == 'NotImplementedError'
     if isinstance(statement, ast.Return):
         return statement.value is None or isinstance(statement.value, _MINIMAL_RETURN)

@@ -192,7 +192,8 @@ def _pi_messages(messages: list[BaseMessage]) -> list[dict[str, Any]]:
         if isinstance(message, SystemMessage):
             continue
         if isinstance(message, AIMessage):
-            tool_names.update((call['id'], call['name']) for call in message.tool_calls)
+            tool_names.update((call['id'], call['name']) for call in message.tool_calls
+                              if call['id'] is not None)
             calls = [{'type': 'toolCall', 'id': call['id'], 'name': call['name'],
                       'arguments': call['args']} for call in message.tool_calls]
             # Pi needs an origin for every assistant message; this one names no real

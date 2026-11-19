@@ -1,6 +1,7 @@
 """Run Temporal workers as a container's main process."""
 import asyncio
 import signal
+from typing import Any
 
 from temporalio.worker import Worker
 
@@ -19,8 +20,8 @@ async def run_worker(*workers: Worker) -> None:
     stopped = asyncio.Event()
     for signum in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signum, stopped.set)
-    runs = [asyncio.ensure_future(worker.run()) for worker in workers]
-    stop = asyncio.ensure_future(stopped.wait())
+    runs: list[asyncio.Future[Any]] = [asyncio.ensure_future(worker.run()) for worker in workers]
+    stop: asyncio.Future[Any] = asyncio.ensure_future(stopped.wait())
     try:
         await asyncio.wait([*runs, stop], return_when=asyncio.FIRST_COMPLETED)
     finally:

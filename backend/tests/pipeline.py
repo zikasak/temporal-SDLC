@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 from temporalio import activity, workflow
-from temporalio.client import WorkflowFailureError
+from temporalio.client import WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.exceptions import ApplicationError, CancelledError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
@@ -44,14 +44,24 @@ ADDED_SEAM = {"module": "service.rooms", "symbols": ["Rooms.close", "Rooms.merge
               "added": ["Rooms.merged"]}
 SEAM_IMAGE = "sha256:" + "7" * 64
 BROKEN_TEST = {"class_name": "RoomsTest", "name": "lists"}
+# How long `abandoned` waits in real time for a flow session to close.
+ABANDON_POLLS = 400
+ABANDON_POLL_SECONDS = 0.05
 
 
 async def abandoned(handle) -> None:
     """Wait for a flow session that delivered nothing, such as one that expired, failed or
-    was finalized with no part started, to end as cancelled."""
+    was finalized with no part started, to end as cancelled. It ends by asking the server
+    to cancel it and waiting for that request; awaiting its result on the time-skipping
+    server lets that server skip time while the request is on its way, until the run
+    times out. So the close is waited for in real time, and only then its result."""
+    for _ in range(ABANDON_POLLS):
+        if (await handle.describe()).status != WorkflowExecutionStatus.RUNNING:
+            break
+        await asyncio.sleep(ABANDON_POLL_SECONDS)
     with pytest.raises(WorkflowFailureError) as ended:
         await handle.result()
-    assert isinstance(ended.value.cause, CancelledError)
+    assert isinstance(ended.value.cause, CancelledError), repr(ended.value.cause)
 
 
 async def finished(env, session_id: str) -> DeliveryProgress:
@@ -151,6 +161,9 @@ class FakeStages:
         # and the cause it gives.
         self.analysis_limits = 0
         self.analysis_cause = 'code'
+        # The review findings each analysis was told, and the conflict it finds with them.
+        self.analysed_findings: list[list[dict[str, Any]] | None] = []
+        self.analysis_conflict: dict[str, Any] | None = None
         # How many contract tests the repository has.
         self.repository_tests = 3
         self.fail_snapshot = False
@@ -367,6 +380,9 @@ class FakeStages:
             # Tests put back as the repository holds them are no longer rewritten.
             restore = context['repair'].get('review', {}).get('restore', [])
             self.rewritten_tests = [case for case in self.rewritten_tests if case not in restore]
+            # A test a review finding released is rewritten as the finding says.
+            self.rewritten_tests += [case for case in context.get('released', [])
+                                     if case not in self.rewritten_tests]
         if 'brief' not in context:
             changed = {"added_tests": [], "changed_tests": self.rewritten_tests,
                        "removed_tests": []}
@@ -407,16 +423,20 @@ class FakeStages:
                 'error': 'did not finish' if status == 'error' else None}
 
     @activity.defn(name='analyze_checks_failure')
-    async def analyze_checks_failure(self, session_id: str, excerpt: str) -> dict[str, Any]:
+    async def analyze_checks_failure(self, session_id: str, excerpt: str,
+                                     findings: list[dict[str, Any]] | None = None
+                                     ) -> dict[str, Any]:
         if self.analysis_limits:
             self.analysis_limits -= 1
             raise ApplicationError('limits', {'retry_after': 0}, type='ProviderLimitReached',
                                    non_retryable=True)
         self.analysed.append(excerpt)
+        self.analysed_findings.append(findings)
+        conflict = self.analysis_conflict if findings else None
         return {'cause': self.analysis_cause,
                 'summary': 'A test patches a removed attribute.', 'files': ['tests/test_x.py'],
                 'instructions': 'Stop patching TASK_QUEUE in tests/test_x.py.',
-                'analysed': True}
+                'analysed': True, **({'conflict': conflict} if conflict else {})}
 
     @activity.defn(name='build_repository_tests')
     async def build_repository_tests(self, session_id: str, language: str) -> dict[str, Any]:
@@ -516,6 +536,7 @@ class FakeStages:
                    'runner_log': '', 'path': '/verification'}
         if test_image == REPOSITORY_TESTS_IMAGE:
             # The repository's own tests, of which the changed service fails some.
+            assert tracked_tests is not None  # each of them is judged on its own
             self.existing_runs.append((suite_dir, tracked_tests))
             self.existing_services.append(service_image)
             passing = self.still_passing + (
@@ -530,6 +551,7 @@ class FakeStages:
                                 for case in tracked_tests}}
         if service_image in (BASELINE_IMAGE, SEAM_IMAGE):
             self.stages.append('baseline-run')
+            assert tracked_tests is not None  # a baseline judges each added test
             return {**details, **self._baseline(service_image, test_image, tracked_tests)}
         self.stages.append('verification')
         self.verified_languages.append(language)

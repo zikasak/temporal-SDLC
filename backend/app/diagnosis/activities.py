@@ -8,7 +8,7 @@ import tempfile
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -133,7 +133,7 @@ def broken_tests(named: Any, verification: dict[str, Any],
              for item in (named if isinstance(named, list) else [])[:MAX_BROKEN_TESTS]
              if isinstance(item, dict) and all(isinstance(item.get(key), str)
                                                for key in ('class_name', 'name'))}
-    tests = [{'class_name': failed[case]['class_name'], 'name': failed[case]['name']}
+    tests = [TestRef(class_name=failed[case]['class_name'], name=failed[case]['name'])
              for case in sorted(cases & failed.keys())]
     if not tests:
         raise RuntimeError('Diagnosis verdict against the tests names no failing test as broken')
@@ -241,15 +241,16 @@ async def run_diagnosis(session_id: str, context: dict[str, Any]) -> dict[str, A
         verdict = await run_sync(
             read_verdict, output, context.get('verification'), language.test_suite.case_id,
             component, component_case_id, context.get('contract_suite') == SNAPSHOT_DIR)
-        result: Diagnosis = {'session_id': session_id, **verdict,
-                             'path': str(artifact_dir)}
+        result = cast(Diagnosis, {'session_id': session_id, **verdict,
+                                  'path': str(artifact_dir)})
     manifest = artifact_dir / f'{uuid.uuid4().hex}.json'
     await run_sync(
         manifest.write_text, json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8'
     )
     await run_sync(os.replace, manifest, artifact_dir / VERDICT)
     logger.info('Diagnosis finished (session=%s, target=%s)', session_id, result['target'])
-    return result
+    # Workflows read it as the plain mapping it is recorded as.
+    return cast(dict[str, Any], result)
 
 
 @activity.defn

@@ -1,5 +1,7 @@
 """The delivery pipeline, entered directly and through the requirements session that
 delivers a bugfix or a documentation task."""
+# Assertions read optional fields directly: a None there fails the test anyway.
+# pyright: reportOptionalSubscript=false, reportOptionalMemberAccess=false
 import asyncio
 import uuid
 from contextlib import asynccontextmanager
@@ -16,12 +18,12 @@ from temporalio.worker import Replayer, Worker
 
 from app.api.routes.requirements import router
 from app.api_design import service as api_design_service
-from app.api_design.models import empty_api
+from app.api_design.models import ApiModel, empty_api
 from app.architecture.workflows import ArchitectureWorkflow
 from app.delivery import service as delivery_service
 from app.delivery.models import (
     STOPPED, DeliveryProgress, DeliveryState, TaskSpec,
-    delivery_id,
+    delivery_id, interrupted,
 )
 from app.delivery.ci_activities import CHECKS_DENIED, CHECKS_UNAVAILABLE
 from app.github.checkout import SNAPSHOT_DIR
@@ -30,7 +32,7 @@ from app.delivery.workflows import DeliveryWorkflow
 from app.review.models import MAX_STAGE_REVIEW_ROUNDS
 from app.requirements import service as requirements_service
 from app.requirements.document import render_requirements_markdown
-from app.requirements.models import RequirementsState
+from app.requirements.models import Requirement, RequirementsState, TaskKind
 from app.temporal import sessions
 from app.temporal.executions import ensure_search_attributes
 from app.temporal.workflows import ApiDesignWorkflow, RequirementsWorkflow
@@ -44,14 +46,14 @@ from tests.dev_server import start_dev_server
 TASK_QUEUE = "delivery-test"
 DOCUMENT = {"document_id": "0" * 32, "filename": "requirements.md",
             "content_type": "text/markdown", "size_bytes": 10, "revision": 1}
-API = {**empty_api(), "endpoints": [{
+API: ApiModel = {**empty_api(), "endpoints": [{
     "method": "GET", "path": "/rooms", "summary": "S", "description": "", "tag": "",
     "parameters": [], "request_schema": None, "response_status": 200,
     "response_schema": None, "response_array": False, "error_statuses": [],
     "requirement_ids": [],
 }]}
 # What the repository was published with, as opposed to what the bugfix interview records.
-PUBLISHED = [{"id": "FR-1", "category": "functional", "title": "Book rooms",
+PUBLISHED: list[Requirement] = [{"id": "FR-1", "category": "functional", "title": "Book rooms",
               "description": "Guests book rooms.", "priority": "must"}]
 CONTRACT = {
     "language": "java", "api": API, "requirements": PUBLISHED,
@@ -204,7 +206,7 @@ async def workers(env, monkeypatch):
 
 
 async def deliver(env, repository=None, language: str | None = "java",
-                  kind: str = "new_service", session_id: str | None = None):
+                  kind: TaskKind = "new_service", session_id: str | None = None):
     """Start the delivery of a one-endpoint service, as a finished design does."""
     session_id = session_id or f"api-design-session-{uuid.uuid4().hex}"
     spec = TaskSpec(session_id=session_id, requirements=[],
@@ -248,6 +250,48 @@ async def test_failing_checks_are_repaired_from_their_analysis_before_the_push(
     assert not worker.diagnosed
     assert state.checks['status'] == 'passed' and state.verification_error is None
     assert state.publication_status == 'completed' and worker.published
+
+
+CLOSED_FLOWS = 'component-tests/tests/test_closed_flows.py::test_a_mention_starts_a_new_flow'
+
+
+async def test_a_finding_failing_tests_no_author_may_change_contradict_is_left_open_saying_why(
+        env, worker, repository_selection):
+    question = {'summary': 'A question on a closed pull request starts a new fix flow.',
+                'target': 'implementation', 'reason': 'The contract answers it in place.',
+                'path': 'backend/app/delivery/service.py'}
+    # The review words the finding anew each time it reports it again.
+    reworded = {**question, 'summary': 'Questions on closed pull requests still start flows.',
+                'repeats': 1}
+    worker.review_findings = [[question], [reworded]]
+    # The corrected code fails the repository's component tests, which no author of the
+    # delivery may change and which assert what the finding requires to change.
+    worker.checks_results = ['passed', 'failed', 'passed']
+    worker.analysis_conflict = {'finding': 1, 'tests': [CLOSED_FLOWS],
+                                'reason': 'They expect every mention to start a new flow.'}
+    session_id = await deliver(env, repository_selection)
+    state = await delivered(env, session_id)
+    # The analysis of the failure was told the finding being corrected.
+    assert worker.analysed_findings == [[{'summary': question['summary'],
+                                          'path': question['path']}]]
+    # The checks repair keeps what those tests assert; the finding is not sent again.
+    assert [stage for stage, _ in worker.repairs] == ['implementation', 'implementation']
+    assert 'Keep the behaviour they assert' in worker.repairs[1][1]['instructions']
+    assert state.verification_status == 'findings_open' and state.open_findings
+    unresolved = (
+        'Tests of the repository that no author of this delivery may change fail when it is '
+        f'corrected: {CLOSED_FLOWS}. They expect every mention to start a new flow. Change '
+        'those tests, or accept the finding.')
+    assert state.reviews[-1]['findings'][0].get('unresolved') == unresolved
+    assert state.publication_status == 'completed' and worker.published
+
+    # The user's instructions go to the author with the finding; reported again after
+    # them, it is known as the same conflict, not sent for yet another correction.
+    await delivery_service.instruct_findings(session_id, 'Answer questions in place.')
+    state = await delivered(env, session_id)
+    # Only the instructed correction ran, by both authors as instructions go to both.
+    assert sorted(stage for stage, _ in worker.repairs[2:]) == ['implementation', 'tests']
+    assert state.reviews[-1]['findings'][0].get('unresolved') == unresolved
 
 
 async def test_checks_failed_by_the_sandbox_are_reported_not_repaired(
@@ -383,7 +427,7 @@ async def test_a_retried_correction_restores_repository_tests_the_service_passes
     worker.passing_after_correction = [lists]
     session_id = await deliver(env, repository_selection, kind="api_change")
     state = await delivered(env, session_id)
-    assert state.correction_failed and "still passes were changed or removed" in state.verification_error
+    assert state.correction_failed and "still passes were changed or removed" in (state.verification_error or '')
 
     retried = await delivery_service.retry(session_id, 'review')
     # The page sees the correction going on, not its failure.
@@ -408,7 +452,7 @@ async def test_a_retried_correction_tells_the_test_author_which_test_skipped_and
     session_id = await deliver(env, repository_selection, kind="api_change")
     state = await delivered(env, session_id)
     assert state.correction_failed
-    assert 'RoomsTest#books (skip reason: GitHub is not configured)' in state.verification_error
+    assert 'RoomsTest#books (skip reason: GitHub is not configured)' in (state.verification_error or '')
 
     await delivery_service.retry(session_id, 'review')
     state = await delivered(env, session_id)
@@ -420,38 +464,49 @@ async def test_a_retried_correction_tells_the_test_author_which_test_skipped_and
     assert state.publication_status == 'completed'
 
 
-async def test_review_rounds_end_when_a_review_only_repeats_corrected_findings(env, worker, repository_selection):
+async def test_a_finding_reported_again_is_corrected_again_once_then_left_open_saying_why(
+        env, worker, repository_selection):
     unsorted = {'summary': 'Rooms are listed unsorted.', 'target': 'implementation',
                 'reason': 'The service orders them.', 'path': 'service/Rooms.java'}
     again = {**unsorted, 'summary': 'GET /rooms still does not sort.', 'repeats': 1}
     paged = {'summary': 'GET /rooms ignores the page size.', 'target': 'implementation',
              'reason': 'The service pages.'}
-    worker.review_findings = [[unsorted], [again], [paged], []]
+    worker.review_findings = [[unsorted], [again], [again], [paged], []]
     session_id = await deliver(env, repository_selection)
     state = await delivered(env, session_id)
-    # The repeated finding is not sent for another correction: it is left to the user.
-    assert [stage for stage, _ in worker.repairs] == ['implementation']
+    # Reported again after its correction, the finding goes back to its author once, told
+    # so; reported after that second correction too, it is left to the user.
+    assert [stage for stage, _ in worker.repairs] == ['implementation', 'implementation']
+    assert worker.repairs[1][1]['review']['findings'] == [
+        {'summary': again['summary'], 'reason': again['reason'], 'path': again['path'],
+         'reported_again': True}]
     assert state.verification_status == 'findings_open' and state.open_findings
-    assert [item['findings'] for item in state.reviews] == [[unsorted], [again]]
-    # The second review knew what the first had corrected.
+    assert [item['findings'] for item in state.reviews[:2]] == [[unsorted], [again]]
+    assert state.reviews[2]['findings'] == [
+        {**again, 'unresolved': 'Corrected 2 times in this run, and the review still finds it.'}]
+    assert worker.published_findings == state.reviews[2]['findings']
+    # Each review knew the finding as last corrected, under the same number.
     assert 'previous_findings' not in worker.reviewed[0]
     assert worker.reviewed[1]['previous_findings'] == [
         {'number': 1, 'summary': unsorted['summary'], 'target': 'implementation',
+         'path': 'service/Rooms.java'}]
+    assert worker.reviewed[2]['previous_findings'] == [
+        {'number': 1, 'summary': again['summary'], 'target': 'implementation',
          'path': 'service/Rooms.java'}]
 
     await delivery_service.instruct_findings(session_id, 'Sort by room number.')
     state = await delivered(env, session_id)
     # Every round of the instructed run reviews under the user's instructions, and knows
     # the findings corrected from them as well as those corrected since.
-    assert [context['instructions'] for context in worker.reviewed[2:]] == [
+    assert [context['instructions'] for context in worker.reviewed[3:]] == [
         'Sort by room number.'] * 2
-    assert [item['summary'] for item in worker.reviewed[3]['previous_findings']] == [
+    assert [item['summary'] for item in worker.reviewed[4]['previous_findings']] == [
         again['summary'], paged['summary']]
     # The author of the next correction never sees the bookkeeping.
     assert worker.repairs[-1][1]['review']['findings'] == [
         {key: value for key, value in paged.items() if key != 'target'}]
     assert state.verification_status == 'completed' and not state.open_findings
-    assert 'instructions' in state.reviews[2] and 'instructions' not in state.reviews[3]
+    assert 'instructions' in state.reviews[3] and 'instructions' not in state.reviews[4]
 
 
 async def test_only_a_failed_review_or_correction_is_retried(env, worker):
@@ -842,17 +897,17 @@ async def test_a_criterion_no_suite_can_observe_stops_the_bugfix_before_its_test
     assert state.publication_status == 'skipped'
     if found_by == 'failure':
         assert state.routing_status == 'error' and state.routing is None
-        assert 'could not be decided' in state.routing_error
+        assert 'could not be decided' in (state.routing_error or '')
         # An agent's or provider's error is never shown: it may carry credentials.
-        assert 'sk-secret' not in state.routing_error
+        assert 'sk-secret' not in (state.routing_error or '')
     else:
         # The user is told which criterion and why, early and as a matter of the brief.
         assert state.routing_status == 'unobservable'
         assert state.routing['FR-2']['route'] == 'unobservable'
         assert state.routing['FR-2']['source'] == found_by
         reason = 'Route of FR-2.' if found_by == 'routing' else 'Needs a pull request.'
-        assert f'FR-2: {reason}' in state.routing_error
-        assert 'Rephrase' in state.routing_error
+        assert f'FR-2: {reason}' in (state.routing_error or '')
+        assert 'Rephrase' in (state.routing_error or '')
         assert state.routing_error.startswith('The test author found') == (found_by == 'tests')
 
     # Retrying the tests routes the criteria again first.
@@ -890,13 +945,13 @@ async def test_criteria_routed_to_a_seam_get_component_tests_written_from_their_
     if outcome == 'declined':
         assert state.routing_status == 'unobservable' and state.component_tests is None
         assert state.routing['FR-2']['source'] == 'tests'
-        assert 'FR-2: Happens in no stubbed symbol.' in state.routing_error
+        assert 'FR-2: Happens in no stubbed symbol.' in (state.routing_error or '')
         # The seam it was declined at is kept, and the user is pointed at the retry.
-        assert state.routing['FR-2']['seam'] == SEAM
-        assert 'Retry the tests to route them again' in state.routing_error
+        assert state.routing['FR-2'].get('seam') == SEAM
+        assert 'Retry the tests to route them again' in (state.routing_error or '')
     elif outcome == 'failed':
         assert state.component_tests is None
-        assert 'component tests could not be generated' in state.component_tests_error
+        assert 'component tests could not be generated' in (state.component_tests_error or '')
     if outcome == 'written':
         return
 
@@ -1013,8 +1068,8 @@ async def test_a_seam_that_cannot_be_added_stops_the_change_before_its_tests(
             'The seam the acceptance criteria are observed at could not be added to the code '
             'or built. The seam agent left no Dockerfile at the root of the repository.')
     else:
-        assert 'does not match its component contract' in state.seam_error
-        assert 'Rooms.merged is not present at runtime' in state.seam_error
+        assert 'does not match its component contract' in (state.seam_error or '')
+        assert 'Rooms.merged is not present at runtime' in (state.seam_error or '')
     assert state.routing_status == 'routed'
     assert state.component_tests is None and state.implementation is None
     assert state.baseline_status == 'skipped' and state.verification_status == 'skipped'
@@ -1072,7 +1127,7 @@ async def test_a_seam_whose_correction_misses_its_contract_stops_the_change(
     handle, state = await fixed(env, repository_selection)
     assert worker.stages == ['routing', 'seam', 'seam']
     assert state.seam_status == 'error'
-    assert 'does not match its component contract' in state.seam_error
+    assert 'does not match its component contract' in (state.seam_error or '')
     assert state.component_tests is None and state.implementation is None
     assert state.baseline_status == 'skipped' and not worker.published
 
@@ -1164,8 +1219,8 @@ async def test_a_baseline_through_an_added_seam_that_proves_nothing_adds_the_sea
     handle, state = await fixed(env, repository_selection)
     assert state.baseline_status == 'not_reproduced'
     # Said of the code with the seam, which may itself be what made the test pass.
-    assert 'against the code with only the seam the change added' in state.baseline_error
-    assert 'adding the seam already changed what the tests observe' in state.baseline_error
+    assert 'against the code with only the seam the change added' in (state.baseline_error or '')
+    assert 'adding the seam already changed what the tests observe' in (state.baseline_error or '')
     assert state.implementation is None and not worker.published
 
     # Retrying the tests adds the seam again, since the seam itself may be at fault.
@@ -1241,7 +1296,7 @@ async def test_nothing_is_fixed_unless_the_component_tests_fail_without_the_fix(
     handle, state = await fixed(env, repository_selection)
     assert state.baseline_status == status and error in state.baseline_error
     if baseline == 'skipped':
-        assert 'behaviour a seam of the code shows' in state.baseline_error
+        assert 'behaviour a seam of the code shows' in (state.baseline_error or '')
     # A run that could not complete runs once more before it is judged.
     assert worker.stages.count('component-baseline') == (
         2 if baseline == 'error' else 1 + MAX_REPRODUCE_ROUNDS * (baseline == 'not_reproduced'))
@@ -1280,7 +1335,7 @@ async def test_component_tests_that_keep_hanging_stop_the_delivery(
     assert worker.stages.count('component-baseline') == MAX_BOUND_ROUNDS + 1
     assert state.baseline_status == 'error' and (
         'Component tests: Tests the runner stopped at its per-test time limit in the '
-        f'baseline run: {ADDED_COMPONENT_TESTS[0]} (1)') in state.baseline_error
+        f'baseline run: {ADDED_COMPONENT_TESTS[0]} (1)') in (state.baseline_error or '')
     assert 'implementation' not in worker.stages and not worker.published
 
 
@@ -1292,7 +1347,7 @@ async def test_a_change_with_component_tests_is_not_green_while_one_of_its_tests
     _, state = await fixed(env, repository_selection)
     assert state.baseline_status == 'reproduced' and state.verification_status == 'completed'
     assert 'Component tests: Tests skipped in the run against the changed service: 1' in (
-        state.verification_error)
+        state.verification_error or '')
     # A skip is no failure to diagnose: nothing is repaired, reviewed or pushed.
     assert worker.diagnosed == [] and worker.repairs == [] and worker.reviewed == []
     assert state.publication_status == 'skipped' and state.publication_error is None
@@ -1422,7 +1477,7 @@ async def test_a_fix_that_breaks_its_component_contract_is_written_again(
     assert state.baseline_status == 'reproduced'
     # The fix is at fault: nothing is run against it, and its stage is the one retried.
     assert state.implementation_error.startswith(worker.conformance_error)
-    assert 'Retry the implementation' in state.implementation_error
+    assert 'Retry the implementation' in (state.implementation_error or '')
     assert state.verification_status == 'skipped' and state.verification_error is None
     assert state.verification is None and state.component_verification is None
     assert worker.stages[-2:] == ['implementation', 'component-runner']
@@ -1448,7 +1503,7 @@ async def test_more_component_tests_than_a_baseline_tracks_are_not_judged_in_par
     _, state = await fixed(env, repository_selection)
     assert state.baseline_status == 'error'
     assert 'added 1001 tests, more than one baseline run reports on singly (1000)' in (
-        state.baseline_error)
+        state.baseline_error or '')
     # Nothing is run: a baseline of some of them would not prove the rest.
     assert worker.component_runs == [] and 'baseline' not in worker.stages
     assert state.implementation is None and not worker.published
@@ -1463,7 +1518,7 @@ async def test_bugfix_is_not_published_until_every_test_is_seen_to_pass(env, wor
     assert state.baseline_status == 'reproduced'
     if outcome == 'skipped':
         assert state.verification['status'] == 'passed'
-        assert 'Tests skipped in the run against the changed service: 1' in state.verification_error
+        assert 'Tests skipped in the run against the changed service: 1' in (state.verification_error or '')
     else:
         assert state.verification['status'] == 'error' and state.verification_error is None
     assert state.publication_status == 'skipped' and not worker.published
@@ -1574,6 +1629,25 @@ async def test_api_change_has_the_repository_tests_its_service_still_passes_put_
     assert state.verification_status == "completed" and state.publication_status == "completed"
 
 
+async def test_a_kept_test_a_review_finding_names_may_be_rewritten(env, worker, repository_selection):
+    worker.rewritten_tests, worker.still_passing = [LISTS, BOOKS], [LISTS]
+    # The test the changed service still passes was put back; the review then finds it
+    # asserting what the contract no longer says, which it passed only by never asserting.
+    wrong = {'summary': 'RoomsTest#lists still expects rooms in insertion order; when the '
+                        'listing is empty its assertions never run.',
+             'target': 'tests', 'reason': 'Only the test is wrong.',
+             'path': 'tests/src/test/java/com/example/RoomsTest.java'}
+    worker.review_findings = [[wrong], []]
+    state = await delivered(env, await deliver(env, repository_selection, kind="api_change"))
+    # Its author may now change it, told why, and it is not proved unsupported again.
+    corrected = worker.test_contexts[-1]
+    assert corrected['repair']['review']['findings'][0]['summary'] == wrong['summary']
+    assert corrected['released'] == [LISTS] and 'keep' not in corrected
+    assert worker.existing_runs[-1] == ("repository-tests", [BOOKS])
+    assert state.verification_error is None and state.verification_status == "completed"
+    assert state.publication_status == "completed"
+
+
 async def test_a_suite_still_keeping_tests_after_the_restore_rounds_is_retried_with_the_restore(env, worker, repository_selection, monkeypatch):
     worker.rewritten_tests, worker.still_passing = [LISTS, BOOKS], [LISTS]
     worker.__class__ = IgnoresRestore
@@ -1581,7 +1655,7 @@ async def test_a_suite_still_keeping_tests_after_the_restore_rounds_is_retried_w
     state = await delivered(env, session_id)
     # Two restore rounds, each verified again, and the suite still rewrites the test.
     assert [stage for stage, _ in worker.repairs] == ["tests", "tests"]
-    assert len(worker.existing_runs) == 3 and KEPT in state.verification_error
+    assert len(worker.existing_runs) == 3 and KEPT in (state.verification_error or '')
     assert state.publication_status == "skipped" and not worker.published and not state.reviews
 
     worker.__class__ = FakeActivities
@@ -1607,7 +1681,7 @@ async def test_a_suite_still_keeping_tests_after_the_restore_rounds_is_retried_w
 async def test_api_change_is_not_published_with_a_test_that_did_not_run(env, worker, repository_selection):
     worker.verification_result = "skipped"
     state = await delivered(env, await deliver(env, repository_selection, kind="api_change"))
-    assert "Tests skipped" in state.verification_error
+    assert "Tests skipped" in (state.verification_error or '')
     assert state.publication_status == "skipped" and not worker.published
 
 
@@ -1692,7 +1766,7 @@ async def test_a_session_blocked_on_its_contract_goes_on_from_the_latest_commit(
     worker.fail_checkout = True
     await requirements_service.update_checkout(handle.id)
     state = await wait_until(handle, lambda state: state.status == "interviewing")
-    assert state.checkout == {"commit": "1" * 40} and "checked out again" in state.error
+    assert state.checkout == {"commit": "1" * 40} and "checked out again" in (state.error or '')
 
     worker.fail_checkout = False
     await requirements_service.update_checkout(handle.id)
@@ -1829,6 +1903,8 @@ async def test_a_stopped_delivery_is_retried_from_the_stage_it_stopped_in(server
     await delivery(server, handle.id).terminate()
     progress = await delivery_service.get_progress(handle.id)
     assert progress.tests_error == STOPPED and progress.verification_status == "error"
+    # Nothing after it reports itself as still to come: the page offers the retry.
+    assert progress.publication_status == progress.pull_request_status == "skipped"
     assert (await handle.describe()).status == WorkflowExecutionStatus.RUNNING
 
     live.release_tests.set()
@@ -1846,6 +1922,18 @@ async def test_a_stopped_delivery_is_retried_from_the_stage_it_stopped_in(server
         raise AssertionError("the delivery outlived its session")
 
 
+def test_a_delivery_stopped_before_its_push_offers_the_push_again():
+    """Stopped between a passed verification and its push: the push is what failed."""
+    spec = TaskSpec(session_id="stopped", requirements=[], requirements_document="",
+                    api=API, document_id="0" * 32, kind="new_service", language="java",
+                    checkout={"commit": "1" * 40})
+    progress = DeliveryProgress(verification_status="completed", publication_status="waiting",
+                                pull_request_status="waiting")
+    progress = interrupted(DeliveryState(spec=spec, progress=progress)).progress
+    assert progress.publication_error == STOPPED and progress.publication_status == "error"
+    assert progress.pull_request_status == "skipped"
+
+
 def delivery(env, session_id: str) -> Any:
     return env.client.get_workflow_handle(delivery_id(session_id))
 
@@ -1858,9 +1946,10 @@ async def test_only_the_first_of_answers_sent_together_resumes_the_agent():
     agent._questions = [{"question": "Which database?", "options": ["Postgres", "MySQL"]}]
     agent.validate_answer_questions(["Postgres"])
     agent.validate_answer_questions(["MySQL"])
-    await agent.answer_questions(["Postgres"])
+    # Temporal's update decorator is typed as an unbound, synchronous method.
+    await agent.answer_questions(["Postgres"])  # pyright: ignore[reportCallIssue]
     with pytest.raises(ApplicationError, match="not waiting"):
-        await agent.answer_questions(["MySQL"])
+        await agent.answer_questions(["MySQL"])  # pyright: ignore[reportCallIssue]
     assert agent._answers == ["Postgres"]
 
 
