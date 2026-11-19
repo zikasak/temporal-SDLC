@@ -3,7 +3,6 @@
 import base64
 import binascii
 import logging
-import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -28,6 +27,7 @@ from app.temporal.execution_fields import (
     REPOSITORY_ATTRIBUTE,
     REPOSITORY_MEMO,
     TASK_NAME_ATTRIBUTE,
+    TASK_ORIGIN_ATTRIBUTE,
     UNRESOLVED_ATTRIBUTE,
     WAITING_ATTRIBUTE,
 )
@@ -39,6 +39,7 @@ WORKFLOW_TYPES = (
     "LLMRequestWorkflow",
     "TaskWorkflow",
     "RequirementsWorkflow",
+    "RequirementsReviewWorkflow",
     "ArchitectureWorkflow",
     "ApiDesignWorkflow",
     "OnboardingWorkflow",
@@ -46,7 +47,11 @@ WORKFLOW_TYPES = (
     "CodegenWorkflow",
 )
 PAGE_SIZE = 50
-ONBOARDING_ID_PATTERN = re.compile(r"onboarding-session-[0-9a-f]{32}")
+# The values of the origin filter and field: what started a task flow.
+ORIGINS = ("requirements", "onboarding")
+# Task flows started before their origin was recorded were all started by a requirements
+# interview, or a fork or fix round of one.
+DEFAULT_ORIGIN = "requirements"
 MAX_BRANCH_LENGTH = 255
 MAX_WORKFLOW_ID_LENGTH = 1000
 # The one-time removal of executions started before they recorded these fields.
@@ -72,7 +77,7 @@ def _quote(value: str) -> str:
 
 
 def check_filters(repository: str | None, branch: str | None,
-                  onboarding_id: str | None, parent: str | None = None,
+                  origin: str | None = None, parent: str | None = None,
                   top_level: bool = False) -> None:
     """Raise InvalidFilter for a malformed filter value; None means no filter."""
     if parent is not None:
@@ -88,13 +93,12 @@ def check_filters(repository: str | None, branch: str | None,
             raise InvalidFilter("branch must not be empty.")
         if len(branch) > MAX_BRANCH_LENGTH or any(ord(c) < 32 or ord(c) == 127 for c in branch):
             raise InvalidFilter("branch is not a valid branch name.")
-    if onboarding_id is not None and not ONBOARDING_ID_PATTERN.fullmatch(onboarding_id):
-        raise InvalidFilter(
-            "onboarding_id must be onboarding-session- followed by 32 hex digits.")
+    if origin is not None and origin not in ORIGINS:
+        raise InvalidFilter("origin must be requirements or onboarding.")
 
 
 def _query(workflow_type: str | None, repository: str | None, branch: str | None,
-           onboarding_id: str | None, parent: str | None = None,
+           origin: str | None, parent: str | None = None,
            top_level: bool = False, linked: list[str] | None = None) -> str | None:
     # Records of acceptances of closed deliveries' findings are not flows.
     clauses = [f"WorkflowType != '{ACCEPTANCE_RECORD_TYPE}'"]
@@ -128,8 +132,15 @@ def _query(workflow_type: str | None, repository: str | None, branch: str | None
         clauses.append(f"{REPOSITORY_ATTRIBUTE.name} = {_quote(repository.lower())}")
     if branch is not None:
         clauses.append(f"{BRANCH_ATTRIBUTE.name} = {_quote(branch)}")
-    if onboarding_id is not None:
-        clauses.append(f"{ONBOARDING_ATTRIBUTE.name} = {_quote(onboarding_id)}")
+    if origin is not None:
+        # Only task flows have an origin; those from before it was recorded count as
+        # started by a requirements interview.
+        clauses.append("WorkflowType = 'TaskWorkflow'")
+        if origin == DEFAULT_ORIGIN:
+            clauses.append(f"({TASK_ORIGIN_ATTRIBUTE.name} = {_quote(origin)} "
+                           f"OR {TASK_ORIGIN_ATTRIBUTE.name} IS NULL)")
+        else:
+            clauses.append(f"{TASK_ORIGIN_ATTRIBUTE.name} = {_quote(origin)}")
     return " AND ".join(clauses) or None
 
 
@@ -152,8 +163,9 @@ async def _repository(item: WorkflowExecution) -> dict[str, Any] | None:
 
 
 # Executions that can wait for the user, and those that have a delivery.
-WAITING_TYPES = ("TaskWorkflow", "RequirementsWorkflow", "ArchitectureWorkflow",
-                 "ApiDesignWorkflow", "OnboardingWorkflow", "DeliveryWorkflow")
+WAITING_TYPES = ("TaskWorkflow", "RequirementsWorkflow", "RequirementsReviewWorkflow",
+                 "ArchitectureWorkflow", "ApiDesignWorkflow", "OnboardingWorkflow",
+                 "DeliveryWorkflow")
 FINDINGS_TYPES = ("TaskWorkflow", "OnboardingWorkflow", "DeliveryWorkflow")
 OPEN_STATUSES = ("running", "continued_as_new")
 
@@ -239,9 +251,10 @@ async def _execution(item: WorkflowExecution, client: Client | None = None,
         "close_time": item.close_time.isoformat() if item.close_time else None,
         "repository": repository,
         "branch": branch or (attributes.get(BRANCH_ATTRIBUTE) if repository else None),
-        "onboarding_id": attributes.get(ONBOARDING_ATTRIBUTE),
         "name": (attributes.get(TASK_NAME_ATTRIBUTE)
                  if item.workflow_type == "TaskWorkflow" else None),
+        "origin": ((attributes.get(TASK_ORIGIN_ATTRIBUTE) or DEFAULT_ORIGIN)
+                   if item.workflow_type == "TaskWorkflow" else None),
         "linked": item.id in linked,
         "waiting_for_user": waiting if item.workflow_type in WAITING_TYPES else None,
         "unresolved_findings": unresolved if item.workflow_type in FINDINGS_TYPES else None,
@@ -251,17 +264,16 @@ async def _execution(item: WorkflowExecution, client: Client | None = None,
 async def list_executions(
     workflow_type: str | None = None, page_token: str | None = None, *,
     repository: str | None = None, branch: str | None = None,
-    onboarding_id: str | None = None, parent: str | None = None, top_level: bool = False,
+    origin: str | None = None, parent: str | None = None, top_level: bool = False,
 ) -> dict[str, Any]:
-    check_filters(repository, branch, onboarding_id, parent, top_level)
+    check_filters(repository, branch, origin, parent, top_level)
     try:
         token = base64.b64decode(page_token, altchars=b"-_", validate=True) if page_token else None
     except (binascii.Error, ValueError) as exc:
         raise InvalidPageToken("Invalid page token.") from exc
     client = await connect_temporal()
     linked = await _linked_stages(client, parent) if parent is not None else []
-    query = _query(workflow_type, repository, branch, onboarding_id, parent, top_level,
-                   linked)
+    query = _query(workflow_type, repository, branch, origin, parent, top_level, linked)
     executions = client.list_workflows(query, page_size=PAGE_SIZE, next_page_token=token)
     await executions.fetch_next_page()
     next_token = executions.next_page_token

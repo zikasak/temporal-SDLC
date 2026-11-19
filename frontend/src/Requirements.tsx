@@ -13,6 +13,9 @@ import { repositoryCheckout, repositorySelection, selectionInput, type Repositor
 import {
   ConversationMarkdown, RequirementLookupProvider, lookupRequirementList, type LookupRequirement,
 } from "./RequirementLookup";
+import {
+  ForceDialog, MessageBox, ReviewPanel, messageWarning, requirementsReview, type RequirementsReview,
+} from "./RequirementsReview";
 import { flowStepsLink, rememberSessionId, urlParam } from "./url";
 
 type SessionStatus = "preparing" | "interviewing" | "turn_running" | "finalizing" | "completed" | "failed";
@@ -46,6 +49,9 @@ type Session = {
   // Every requirement a mentioned requirement ID can refer to, shown on hover or tap.
   lookup_requirements: LookupRequirement[];
   kind: TaskKind | null;
+  // The requirements review of a new service, API change or bugfix: the document is
+  // written once it finds no contradictions, or when the user continues despite them.
+  review: RequirementsReview;
   document: RequirementsDocument | null;
   error: string | null;
   // The top-level task flow the session is a stage of; null for sessions from before.
@@ -154,6 +160,7 @@ function sessionRecord(value: unknown): Session {
     kind: "kind" in value && typeof value.kind === "string" && value.kind in kindLabels
       ? (value.kind as TaskKind)
       : null,
+    review: requirementsReview("review" in value ? value.review : null),
     document,
     error: "error" in value && typeof value.error === "string" ? value.error : null,
     task_flow_id: "task_flow_id" in value && typeof value.task_flow_id === "string"
@@ -190,6 +197,8 @@ export default function Requirements() {
   const [error, setError] = useState("");
   const [repositoryChoice, setRepositoryChoice] = useState<RepositorySelection | null>(null);
   const [onboarding, setOnboarding] = useState(false);
+  // Whether the warning before continuing despite the requirements review is shown.
+  const [confirmingForce, setConfirmingForce] = useState(false);
   const conversation = useRef<HTMLDivElement>(null);
   const chatEnd = useRef<HTMLDivElement>(null);
 
@@ -288,10 +297,16 @@ export default function Requirements() {
     }
   }
 
-  async function sendMessage(event: FormEvent<HTMLFormElement>) {
+  function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    void sendText();
+  }
+
+  async function sendText() {
     const content = message.trim();
     if (!session || !content) return;
+    const warning = messageWarning(session.review);
+    if (warning && !window.confirm(warning)) return;
     setSubmitting(true);
     setError("");
     try {
@@ -400,16 +415,40 @@ export default function Requirements() {
     }
   }
 
-  async function generateDocument() {
+  async function generateDocument(force = false) {
     if (!session) return;
+    // While the review's questions are open, the document is only written despite them.
+    if (!force && session.review.questions_open) {
+      setConfirmingForce(true);
+      return;
+    }
     setSubmitting(true);
     setError("");
     try {
-      await post(`/${encodeURIComponent(session.session_id)}/finalize`);
+      await post(`/${encodeURIComponent(session.session_id)}/finalize${force ? "?force=true" : ""}`);
+      setConfirmingForce(false);
       setSession({ ...session, status: "finalizing", error: null });
       setRefreshKey((value) => value + 1);
     } catch (caught) {
       setError(failure(caught, "Could not generate the document."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function retryReview() {
+    if (!session || submitting) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      await post(`/${encodeURIComponent(session.session_id)}/review/retry`);
+      setSession({
+        ...session, status: "finalizing", error: null,
+        review: { ...session.review, status: "running", error: null },
+      });
+      setRefreshKey((value) => value + 1);
+    } catch (caught) {
+      setError(failure(caught, "Could not retry the review round."));
     } finally {
       setSubmitting(false);
     }
@@ -484,6 +523,11 @@ export default function Requirements() {
   const asked = last?.role === "assistant" ? last.questions : [];
   const forkedFrom = session?.forked_from ?? null;
   const canFinalize = canCompose && session.kind !== null && session.requirements.length > 0;
+  const reviewing = session?.review.status === "running";
+  // Continuing despite the review is possible while a round runs, too.
+  const canForce = Boolean(session) && !submitting && session!.kind !== null &&
+    session!.requirements.length > 0 && !unanswered &&
+    (session!.status === "interviewing" || (session!.status === "finalizing" && reviewing));
   const canUpdateCheckout = canCompose && Boolean(session.checkout);
   const status = error ? "error" : session ? session.status : sessionId ? "loading" : "idle";
   const documentUrl = session
@@ -514,13 +558,23 @@ export default function Requirements() {
               <QuestionForm key={session.messages.length} questions={asked}
                 disabled={!canCompose} submitting={submitting}
                 onSubmit={answerQuestions} />
+              {session.review.questions_open && (
+                <p className="field-hint">
+                  Or write a message below the questions instead: it drops them, and the
+                  next review round starts when you generate the document again.
+                </p>
+              )}
+              {session.review.questions_open && (
+                <MessageBox message={message} onChange={setMessage} disabled={!canCompose}
+                  submitting={submitting} onSend={() => void sendText()} />
+              )}
               <button
                 className="generate-button"
                 type="button"
-                onClick={generateDocument}
-                disabled={!canFinalize}
+                onClick={() => void generateDocument()}
+                disabled={session.review.questions_open ? !canForce : !canFinalize}
               >
-                Generate document
+                {session.review.questions_open ? "Generate document anyway…" : "Generate document"}
               </button>
             </div>
           ) : session ? (
@@ -552,10 +606,11 @@ export default function Requirements() {
               <button
                 className="generate-button"
                 type="button"
-                onClick={generateDocument}
+                onClick={() => void generateDocument()}
                 disabled={!canFinalize}
               >
-                Generate document
+                {session.review.status === "contradictions_found" || session.review.status === "failed"
+                  ? "Generate document (review again)" : "Generate document"}
               </button>
             </form>
           ) : (
@@ -617,7 +672,7 @@ export default function Requirements() {
               {status === "idle" && "Waiting"}
               {status === "loading" && "Loading"}
               {status === "error" && "Error"}
-              {session && !error && statusLabels[session.status]}
+              {session && !error && (reviewing ? "Reviewing requirements" : statusLabels[session.status])}
             </span>
           </div>
 
@@ -687,11 +742,19 @@ export default function Requirements() {
               </ol>
             )}
 
+            {session && (
+              <ReviewPanel review={session.review} disabled={submitting}
+                onRetry={() => void retryReview()}
+                onForce={canForce ? () => setConfirmingForce(true) : undefined} />
+            )}
+
             {session && pendingStatuses.includes(session.status) && (
               <div className="pending-answer" role="status">
                 <span className="loading-line" aria-hidden="true" />
                 <p>
-                  {session.status === "finalizing"
+                  {session.status === "finalizing" && reviewing
+                    ? "Reviewing the requirements for contradictions…"
+                    : session.status === "finalizing"
                     ? "Writing the requirements document…"
                     : session.status === "preparing"
                       ? "Checking out the repository…"
@@ -817,6 +880,11 @@ export default function Requirements() {
           </div>
         </section>
       </div>
+      {session && (
+        <ForceDialog open={confirmingForce} review={session.review} busy={submitting}
+          what="write the requirements document and start the next stage"
+          onConfirm={() => void generateDocument(true)} onCancel={() => setConfirmingForce(false)} />
+      )}
     </main>
     </RequirementLookupProvider>
   );

@@ -4,12 +4,14 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 WorkflowType = Literal[
-    'chat', 'requirements', 'api_design', 'implementation', 'test_generation',
-    'diagnosis', 'documentation', 'review', 'routing',
+    'chat', 'requirements', 'requirements_review', 'api_design', 'implementation',
+    'test_generation', 'diagnosis', 'documentation', 'review', 'routing',
 ]
 Adapter = Literal['pi', 'openai', 'claude']
 WORKFLOW_LABELS: dict[str, str] = {
-    'chat': 'Chat', 'requirements': 'Requirements', 'api_design': 'API design',
+    'chat': 'Chat', 'requirements': 'Requirements',
+    # The requirements reviewer of tasks and onboardings, apart from the code review.
+    'requirements_review': 'Requirements review', 'api_design': 'API design',
     'implementation': 'Implementation', 'test_generation': 'Test generation',
     'diagnosis': 'Diagnosis', 'documentation': 'Documentation', 'review': 'Review',
     'routing': 'Routing',

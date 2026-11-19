@@ -15,7 +15,10 @@ import {
 import {
   ConversationMarkdown, RequirementLookupProvider, lookupRequirementList, type LookupRequirement,
 } from "./RequirementLookup";
-import { rememberSessionId, urlParam } from "./url";
+import {
+  ForceDialog, MessageBox, ReviewPanel, messageWarning, requirementsReview, type RequirementsReview,
+} from "./RequirementsReview";
+import { flowStepsLink, rememberSessionId, urlParam } from "./url";
 
 type OnboardingStatus =
   | "preparing"
@@ -46,6 +49,11 @@ type Session = {
   session_id: string;
   status: OnboardingStatus;
   repository: RepositorySelection | null;
+  // The top-level task flow the onboarding interview is a stage of, with its requirements
+  // review and delivery; null for onboardings from before.
+  task_flow_id: string | null;
+  // The requirements review of the drafted requirements, run when finalizing.
+  review: RequirementsReview;
   checkout: RepositoryCheckout | null;
   forked_from: { session_id: string; message_index: number } | null;
   existing_contract: boolean;
@@ -153,6 +161,8 @@ function sessionRecord(value: unknown): Session {
     session_id: value.session_id,
     status: value.status as OnboardingStatus,
     repository,
+    task_flow_id: typeof value.task_flow_id === "string" ? value.task_flow_id : null,
+    review: requirementsReview(value.review),
     checkout: repositoryCheckout(value.checkout),
     forked_from:
       isObject(value.forked_from) && typeof value.forked_from.session_id === "string" &&
@@ -195,6 +205,8 @@ export default function Onboarding() {
   const [retryingGeneration, setRetryingGeneration] = useState<GenerationStage | null>(null);
   const [error, setError] = useState("");
   const [repositoryChoice, setRepositoryChoice] = useState<RepositorySelection | null>(null);
+  // Whether the warning before finalizing despite the requirements review is shown.
+  const [confirmingForce, setConfirmingForce] = useState(false);
   const conversation = useRef<HTMLDivElement>(null);
   const chatEnd = useRef<HTMLDivElement>(null);
 
@@ -285,10 +297,16 @@ export default function Onboarding() {
     }
   }
 
-  async function sendMessage(event: FormEvent<HTMLFormElement>) {
+  function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    void sendText();
+  }
+
+  async function sendText() {
     const content = message.trim();
-    if (!content) return;
+    if (!content || !session) return;
+    const warning = messageWarning(session.review);
+    if (warning && !window.confirm(warning)) return;
     const sent = await act((id) => post(`/${id}/messages`, { message: content }), (current) => ({
       ...current, status: "turn_running", error: null,
       messages: [...current.messages, { role: "user", content, questions: [] }],
@@ -327,10 +345,24 @@ export default function Onboarding() {
     }), "Could not update the checkout.");
   }
 
-  function finalize() {
-    return act((id) => post(`/${id}/finalize`), (current) => ({
+  async function finalize(force = false) {
+    // While the review's questions are open, the onboarding is only finalized despite them.
+    if (!force && session?.review.questions_open) {
+      setConfirmingForce(true);
+      return false;
+    }
+    const done = await act((id) => post(`/${id}/finalize${force ? "?force=true" : ""}`), (current) => ({
       ...current, error: null, status: "finalizing",
     }), "Could not finalize the onboarding.");
+    if (done) setConfirmingForce(false);
+    return done;
+  }
+
+  function retryReview() {
+    return act((id) => post(`/${id}/review/retry`), (current) => ({
+      ...current, error: null, status: "finalizing",
+      review: { ...current.review, status: "running", error: null },
+    }), "Could not retry the review round.");
   }
 
   function answerAgent(workflowId: string, answers: string[]) {
@@ -408,17 +440,24 @@ export default function Onboarding() {
   const asked = last?.role === "assistant" ? last.questions : [];
   const canRetry = session?.status === "interviewing" && (!isDrafted || unanswered) && !submitting;
   const canFinalize = canCompose && session.problems.length === 0;
+  const reviewing = session?.review.status === "running";
+  // Finalizing despite the review is possible while a round runs, too.
+  const canForce = Boolean(session) && !submitting && !unanswered && isDrafted &&
+    session!.problems.length === 0 &&
+    (session!.status === "interviewing" || (session!.status === "finalizing" && reviewing));
   const canUpdateCheckout = Boolean(session?.checkout) && !submitting && !unanswered &&
     (session?.status === "interviewing" || session?.status === "awaiting_confirmation");
   const canFork = Boolean(session) && !submitting &&
-    (session?.status === "interviewing" || session?.status === "awaiting_confirmation");
+    (session?.status === "interviewing" || session?.status === "awaiting_confirmation" || reviewing);
   const status = error ? "error" : session ? session.status : sessionId ? "loading" : "idle";
 
   const finalizeButton = session && !finishedStatuses.includes(session.status) && (
     <button className="generate-button" type="button" onClick={() => void finalize()}
-      disabled={!canFinalize}
+      disabled={session.review.questions_open ? !canForce : !canFinalize}
       title={session.problems.length ? "Resolve the open problems first" : undefined}>
-      Finalize and deliver
+      {session.review.questions_open ? "Finalize anyway…"
+        : session.review.status === "contradictions_found" || session.review.status === "failed"
+          ? "Finalize (review again)" : "Finalize and deliver"}
     </button>
   );
 
@@ -474,6 +513,16 @@ export default function Onboarding() {
               <QuestionForm key={session.messages.length} questions={asked}
                 disabled={!canCompose} submitting={submitting}
                 onSubmit={answerQuestions} />
+              {session.review.questions_open && (
+                <>
+                  <p className="field-hint">
+                    Or write a message instead: it drops the questions, and the next review
+                    round starts when you finalize again.
+                  </p>
+                  <MessageBox message={message} onChange={setMessage} disabled={!canCompose}
+                    submitting={submitting} onSend={() => void sendText()} />
+                </>
+              )}
               {finalizeButton}
             </div>
           ) : session ? (
@@ -534,7 +583,7 @@ export default function Onboarding() {
             </div>
           </form>
           <p className="field-hint">
-            <a href="?type=OnboardingWorkflow">All onboardings</a>
+            <a href="?type=TaskWorkflow&origin=onboarding">All onboardings</a>
           </p>
         </section>
 
@@ -548,7 +597,7 @@ export default function Onboarding() {
               {status === "idle" && "Waiting"}
               {status === "loading" && "Loading"}
               {status === "error" && "Error"}
-              {session && !error && statusLabels[session.status]}
+              {session && !error && (reviewing ? "Reviewing requirements" : statusLabels[session.status])}
             </span>
           </div>
 
@@ -566,6 +615,13 @@ export default function Onboarding() {
               The branch had {artifactList(session.existing_artifacts)}
               {session.replaced_contract ? "; the onboarding replaces it."
                 : session.architecture_only ? "; the onboarding adds only its architecture." : "."}
+            </p>
+          )}
+
+          {session?.task_flow_id && (
+            <p className="request-id">
+              Part of a task flow:{" "}
+              <a href={flowStepsLink(session.task_flow_id)}>show all its steps</a>
             </p>
           )}
 
@@ -615,11 +671,19 @@ export default function Onboarding() {
               </ol>
             )}
 
+            {session && !session.architecture_only && (
+              <ReviewPanel review={session.review} disabled={submitting}
+                onRetry={() => void retryReview()}
+                onForce={canForce ? () => setConfirmingForce(true) : undefined} />
+            )}
+
             {session && pendingStatuses.includes(session.status) && (
               <div className="pending-answer" role="status">
                 <span className="loading-line" aria-hidden="true" />
                 <p>
-                  {session.status === "preparing"
+                  {session.status === "finalizing" && reviewing
+                    ? "Reviewing the drafted requirements for contradictions…"
+                    : session.status === "preparing"
                     ? "Checking out the repository…"
                     : session.status === "drafting"
                       ? session.architecture_only
@@ -726,6 +790,11 @@ export default function Onboarding() {
           </div>
         </section>
       </div>
+      {session && (
+        <ForceDialog open={confirmingForce} review={session.review} busy={submitting}
+          what="fix the drafts as the contract and start the delivery"
+          onConfirm={() => void finalize(true)} onCancel={() => setConfirmingForce(false)} />
+      )}
     </main>
     </RequirementLookupProvider>
   );

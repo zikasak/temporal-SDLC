@@ -10,6 +10,7 @@ from temporalio.exceptions import (
 
 from app.temporal.flags import FlowFlags, PendingStage
 from app.temporal.interview import Interview, assistant_message, pending_questions
+from app.requirements_review.interview import ReviewedInterview
 
 with workflow.unsafe.imports_passed_through():
     from app.tasks.models import DesignResult, RequirementsResult
@@ -29,6 +30,9 @@ with workflow.unsafe.imports_passed_through():
         numbered_after,
     )
     from app.requirements.prompt import opening_message
+    from app.requirements_review.models import (
+        CLEARED, REVIEWED_KINDS, ROUND_RUNNING, ReviewRoundResult,
+    )
     from app.temporal.activities import (
         api_design_turn,
         checkout_repository,
@@ -224,13 +228,20 @@ def _interview_flags(state: RequirementsState | ApiDesignState) -> tuple[bool, N
 
 
 @workflow.defn
-class RequirementsWorkflow(Interview[RequirementsState], _Delivering, FlowFlags):
+class RequirementsWorkflow(Interview[RequirementsState], ReviewedInterview, _Delivering,
+                           FlowFlags):
     """One requirements interview: each user message is an update, and the
     finalize update turns the gathered requirements into a document. A task that
     leaves the API as it is has no API design to follow, so the session then hands
     it to a DeliveryWorkflow itself; any other task's API designs, and through them
     their deliveries, are this session's children. The session is the root of its
-    task, open while any part of it is."""
+    task, open while any part of it is.
+
+    In a task flow, finalizing a new service, an API change or a bugfix first hands the
+    requirements to the task's requirements review (RequirementsReviewWorkflow): each
+    contradiction it finds is asked as a question, the answers lead to the next round, and
+    the document is written once a round finds none, or when the user finalizes with
+    force despite them."""
 
     INTERVIEWER = "analyst"
     TOO_LONG = INTERVIEW_TOO_LONG
@@ -263,7 +274,67 @@ class RequirementsWorkflow(Interview[RequirementsState], _Delivering, FlowFlags)
         self._init_flags()
 
     def _flags(self) -> tuple[bool | None, bool | None]:
-        return _interview_flags(self.state)
+        waiting, unresolved = _interview_flags(self.state)
+        # A failed review round waits for the user to retry it or continue anyway.
+        failed = (self.state.status == "interviewing" and self._review_applies()
+                  and self._review().status == "failed")
+        return waiting or failed, unresolved
+
+    # The requirements review.
+
+    def _review_applies(self) -> bool:
+        return bool(self.state.review_id) and self.state.kind in REVIEWED_KINDS
+
+    async def _review_existing(self) -> tuple[list[Any], bool]:
+        """The existing service's requirements the task does not retire."""
+        contract = self.state.contract
+        if not contract or self.state.kind not in CHANGE_KINDS:
+            return [], False
+        ended = {item["id"] for item in self.state.retired}
+        return [item for item in contract.get("requirements") or []
+                if item.get("id") not in ended], False
+
+    async def _review_cleared(self) -> None:
+        self._finalized = await self._write_document()
+
+    def _questions_open(self) -> bool:
+        # A message may drop the review's contradiction questions instead of answering.
+        if self._review_questions_open():
+            return False
+        return super()._questions_open()
+
+    def _answers_given(self, answers: list[str]) -> None:
+        self._review_answers(answers)
+
+    def _user_replies(self) -> None:
+        self._review_replied()
+
+    async def _after_turn(self, ok: Any) -> None:
+        await self._review_after_turn(bool(ok))
+
+    @workflow.signal
+    async def review_result(self, result: ReviewRoundResult) -> None:
+        """The result of a round of the task's requirements review."""
+        async with self._turn_lock:
+            await self._review_result(result)
+
+    @workflow.update
+    async def retry_review(self) -> None:
+        """Run the failed review round again with its original input."""
+        self._updates += 1
+        async with self._turn_lock:
+            if not self._review_failed():
+                raise ApplicationError("The last requirements review round did not fail.")
+            await self._start_review_round(retry=True)
+
+    @retry_review.validator
+    def validate_retry_review(self) -> None:
+        if not self._review_failed():
+            raise ValueError("The last requirements review round did not fail.")
+
+    def _review_failed(self) -> bool:
+        return (self.state.status == "interviewing" and self._review_applies()
+                and self._review().status == "failed")
 
     @workflow.run
     async def run(self, state: RequirementsState | None = None) -> Any:
@@ -483,6 +554,8 @@ class RequirementsWorkflow(Interview[RequirementsState], _Delivering, FlowFlags)
         return self.state
 
     def _check_open(self) -> None:
+        if self._review_running():
+            raise ValueError(ROUND_RUNNING)
         if self.state.status != "interviewing" or self.state.messages[-1]["role"] == "user":
             raise ValueError("Retry the unanswered message before sending another.")
 
@@ -492,7 +565,7 @@ class RequirementsWorkflow(Interview[RequirementsState], _Delivering, FlowFlags)
         async with self._turn_lock:
             if self.state.status != "interviewing" or self.state.messages[-1]["role"] != "user":
                 raise ApplicationError("There is no unanswered message to retry.")
-            await self._turn()
+            await self._after_turn(await self._turn())
 
     @retry_message.validator
     def validate_retry_message(self) -> None:
@@ -500,18 +573,40 @@ class RequirementsWorkflow(Interview[RequirementsState], _Delivering, FlowFlags)
             raise ValueError("There is no unanswered message to retry.")
 
     @workflow.update
-    async def finalize(self) -> None:
+    async def finalize(self, force: bool = False) -> None:
+        """Write the requirements document; for a task its requirements review clears
+        first, unless `force` continues despite it."""
         self._updates += 1
         async with self._turn_lock:
-            if self.state.status != "interviewing":
+            if not (self.state.status == "interviewing"
+                    or force and self._review_running()):
                 raise ApplicationError("This session is no longer accepting changes.")
-            workflow.logger.info("Finalize requested")
+            workflow.logger.info("Finalize requested%s", " with force" if force else "")
+            if self._review_applies() and self._review().status not in CLEARED:
+                if not force:
+                    self.state.status = "finalizing"
+                    self.state.error = None
+                    if not await self._prepare_contract():
+                        self.state.status = "interviewing"
+                        return
+                    await self._start_review_round()
+                    return
+                await self._force_review()
+            elif self.state.review_id and not self._review_applies():
+                # A documentation task is not reviewed.
+                self._review_skipped()
             self._finalized = await self._write_document()
 
     @finalize.validator
-    def validate_finalize(self) -> None:
-        if self.state.status != "interviewing" or self.state.messages[-1]["role"] == "user":
-            raise ValueError("Retry the unanswered message before generating the document.")
+    def validate_finalize(self, force: bool = False) -> None:
+        if not (force and self._review_running()):
+            if (self.state.status != "interviewing"
+                    or self.state.messages[-1]["role"] == "user"):
+                if self._review_running():
+                    raise ValueError(ROUND_RUNNING)
+                raise ValueError(
+                    "Retry the unanswered message before generating the document.")
+            self._review_check(force)
         if not self.state.kind:
             raise ValueError(KIND_PROBLEM)
         if not self.state.requirements:
@@ -616,22 +711,34 @@ class RequirementsWorkflow(Interview[RequirementsState], _Delivering, FlowFlags)
                               if item["id"] in ended]
         return True
 
-    async def _write_document(self) -> bool:
-        self.state.status = "finalizing"
-        self.state.error = None
+    async def _prepare_contract(self) -> bool:
+        """Read the contract a task on an existing service is specified against; False
+        when it cannot be read, with the reason in the state's error."""
         # Only a task on an existing service keeps a contract, whatever kind it was before,
         # and only a change to that service ends requirements of it.
         self.state.contract = None
         if self.state.kind not in CHANGE_KINDS:
             self.state.retired = []
         if self.state.kind in CONTRACT_KINDS and not await self._read_contract():
+            return False
+        return True
+
+    async def _write_document(self) -> bool:
+        self.state.status = "finalizing"
+        self.state.error = None
+        if not await self._prepare_contract():
             self.state.status = "interviewing"
             return False
+        args: list[Any] = [workflow.info().workflow_id, self.state.messages,
+                           self.state.requirements, self.state.retired]
+        contradictions = self._remaining_contradictions()
+        if contradictions:
+            # Those the user continued despite are listed in the document.
+            args.append(contradictions)
         try:
             self.state.document = await workflow.execute_activity(
                 write_requirements_document,
-                args=[workflow.info().workflow_id, self.state.messages, self.state.requirements,
-                      self.state.retired],
+                args=args,
                 start_to_close_timeout=timedelta(minutes=6),
                 schedule_to_close_timeout=timedelta(minutes=13),
                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -669,9 +776,12 @@ class RequirementsWorkflow(Interview[RequirementsState], _Delivering, FlowFlags)
         new service or an API change, or the delivery of a bugfix or documentation task.
         A document written because the session was idle leads to none."""
         finalized = self._finalized and self.state.status == "completed"
+        if not finalized:
+            self._review_skipped()
         result = RequirementsResult(finalized=finalized, kind=self.state.kind,
                                     requirements=list(self.state.requirements),
-                                    document=self.state.document)
+                                    document=self.state.document,
+                                    reviewed=finalized and self._review_reported())
         if finalized and self.state.repository:
             if self.state.kind in DIRECT_KINDS:
                 result.delivery = await self._delivery_state()
@@ -721,6 +831,8 @@ class RequirementsWorkflow(Interview[RequirementsState], _Delivering, FlowFlags)
         """After a day without messages, keep whatever was gathered."""
         workflow.logger.info("Requirements session idle, expiring")
         self._expired = True
+        # A document written because the session was idle is not reviewed.
+        self._review_skipped()
         complete = bool(self.state.kind and self.state.requirements)
         if complete and await self._write_document():
             return

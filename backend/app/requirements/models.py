@@ -4,6 +4,7 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 from app.conversations.models import ConversationMessage, ForkOrigin
 from app.github.models import RepositoryCheckout, RepositorySelection
+from app.requirements_review.models import RequirementsReview
 
 Category = Literal["functional", "non_functional", "technical"]
 Priority = Literal["must", "should", "could"]
@@ -85,6 +86,10 @@ class RequirementsState:
     task_flow_id: str | None = None
     # The architecture session the task flow reserved for the task.
     next_session_id: str | None = None
+    # The task flow's requirements review (RequirementsReviewWorkflow) of this session, and
+    # its state; None for sessions started before the review, which is then never run.
+    review_id: str | None = None
+    review: RequirementsReview = field(default_factory=RequirementsReview)
 
 
 def numbered_after(requirements: list[Requirement], published: Iterable[str],

@@ -1,13 +1,45 @@
 # Task flows
 
-Every new requirements interview starts a top-level **task flow** (`TaskWorkflow`,
-`app/tasks/workflows.py`). The task's stages are its direct children; none of them is a
-child of another stage.
+Every new requirements interview and every onboarding starts a top-level **task flow**
+(`TaskWorkflow`, `app/tasks/workflows.py`). The task's stages are its direct children; none
+of them is a child of another stage. The task flow carries the `TaskOrigin` search attribute
+(`requirements` or `onboarding`), which GET /workflows returns as `origin` and filters on.
 
 | Kind of task | Stages created when the task flow starts |
 | --- | --- |
-| New service, API change | requirements, architecture, API design, delivery |
-| Bugfix, documentation | requirements, delivery |
+| New service, API change | requirements, requirements review, architecture, API design, delivery |
+| Bugfix | requirements, requirements review, delivery |
+| Documentation | requirements, delivery |
+| Onboarding | onboarding interview, requirements review, delivery |
+
+## The requirements review
+
+The requirements review (`RequirementsReviewWorkflow`, `app/requirements_review/`) is named
+after the interview it checks: `requirements-review-<id>` for `requirements-session-<id>`,
+`onboarding-review-<id>` for `onboarding-session-<id>`. It runs every round in one
+execution, with the `requirements_review` model settings.
+
+- Finalizing a new service, API change or bugfix (or a full onboarding) hands the first
+  round to the task flow (`review_round` signal), which starts the pending review with it.
+  The interview's status is `finalizing` while a round runs.
+- Each round an LLM (`review_requirements` activity) checks the requirements against each
+  other and against the existing service's requirements the task does not retire (for an
+  onboarding that replaces a contract, that contract's). From the second round on it is
+  given the diff of the requirements since the previous round and the previous round's
+  contradictions with the user's answers, or marked unanswered. At most five contradictions
+  are reported per round; IDs (`C-1`, `C-2`, …) stay stable across rounds.
+- The review signals the result back (`review_result`). Contradictions are asked as one
+  assistant message with one question per contradiction. Answering them runs an interviewer
+  turn that applies the answers, then the next round; a free message drops them, and
+  finalizing again starts the next round. Rounds are unlimited.
+- A round whose activity fails for good is reported `failed`; `POST …/review/retry` runs it
+  again with the same input, finalizing starts a new round on the current requirements.
+- When a round finds no contradictions the review closes as passed and the document is
+  written. `finalize?force=true` writes it at once whatever the review's state: a running
+  round is cancelled, and the review closes as continued anyway with the last finished
+  round's contradictions, which the requirements document lists.
+- Documentation tasks, architecture-only onboardings and sessions written because they were
+  idle are not reviewed: the review is skipped (or never created for documentation).
 
 ## Pending, started and skipped stages
 
@@ -20,9 +52,10 @@ Stages hand the task on to the task flow by their result instead of starting the
 themselves:
 
 - the requirements stage returns `RequirementsResult`: the architecture to start for a new
-  service or an API change, or the delivery of a bugfix or documentation task. A document
-  written because the session was idle for a day starts nothing, and the later stages are
-  skipped;
+  service or an API change, or the delivery of a bugfix or documentation task, and whether
+  the review decided (otherwise the task flow closes it as skipped). A document written
+  because the session was idle for a day starts nothing, and the later stages are skipped;
+- the onboarding interview returns `OnboardingResult` with the delivery of its contract;
 - the architecture stage returns `ArchitectureResult` once finalized or its skip was
   confirmed (the stage is then listed as skipped);
 - the API design stage returns `DesignResult` with the delivery to start.
@@ -55,6 +88,8 @@ including when the delivery was skipped.
 - A task's delivery started again on its own after its task flow closed carries
   `LinkedTaskFlows=[task flow]` and stays listed under that task flow.
 
-Onboardings keep their own top-level `OnboardingWorkflow`. Executions started before task
-flows existed keep their old shape (stages under a `RequirementsWorkflow`), are listed
-without a waiting highlight or marker, and are opened as before.
+Executions started before task flows existed keep their old shape (stages under a
+`RequirementsWorkflow`), are listed without a waiting highlight or marker, and are opened as
+before. Top-level `OnboardingWorkflow`s from before onboardings ran under task flows are
+cancelled once when the API starts (`cancel_old_shape_onboardings`); they stay listed and
+readable.

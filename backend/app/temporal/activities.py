@@ -622,7 +622,9 @@ async def _save_session_document(
 async def write_requirements_document(
     session_id: str, messages: list[dict[str, Any]], requirements: list[dict[str, Any]],
     retired: list[dict[str, Any]] | None = None,
+    contradictions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """The requirements document; `contradictions` are those the user continued despite."""
     try:
         model = await get_model('requirements')
         answer = await model.ainvoke(
@@ -637,7 +639,8 @@ async def write_requirements_document(
         activity.logger.exception("Could not write the requirements overview")
         narrative = None
     content = render_requirements_markdown(cast(list[Requirement], requirements), narrative,
-                                           cast(list[Requirement] | None, retired))
+                                           cast(list[Requirement] | None, retired),
+                                           contradictions)
     return await _save_session_document(session_id, DOCUMENT_FILENAME, content)
 
 

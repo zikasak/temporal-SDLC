@@ -11,6 +11,7 @@ from app.github.models import RepositorySelection
 from app.requirements.lookup import requirements_session_lookup
 from app.requirements.models import DIRECT_KINDS, RequirementsState, TaskKind
 from app.requirements.prompt import intake_messages, opening_message
+from app.requirements_review.models import forked_review, review_id, review_view
 from app.tasks.models import FORK_SUFFIX, TaskFlowState
 from app.tasks.service import (
     derived_name, fork_name_source, new_ids, start_task_flow, task_queue_of,
@@ -43,11 +44,14 @@ async def create_session(
     session_id = ids["requirements_session_id"]
     state.task_flow_id = ids["task_flow_id"]
     state.next_session_id = ids["architecture_session_id"]
+    # The task flow's requirements review of this session.
+    state.review_id = review_id(session_id)
     client = await connect_temporal()
     task_flow_id = await start_task_flow(ids["task_flow_id"], TaskFlowState(
         kind=state.kind, repository=state.repository, task=task.strip(), name=name,
         origin=origin,  # type: ignore[arg-type]
         requirements_session_id=session_id,
+        review_session_id=state.review_id,
         architecture_session_id=ids["architecture_session_id"],
         api_design_session_id=ids["api_design_session_id"],
         requirements=state,
@@ -100,6 +104,8 @@ async def fork(session_id: str, message_index: int) -> dict[str, str]:
         retired=source.retired,
         repository=source.repository,
         forked_from={"session_id": session_id, "message_index": message_index},
+        # The review continues from the round the original had reached.
+        review=forked_review(source.review, messages),
     ), name=name, origin="fork",
         task_queue=await task_queue_of(session_id, await connect_temporal()))
     logger.info("Forked requirements session %s after message %d as %s",
@@ -129,9 +135,16 @@ async def retry_message(session_id: str) -> None:
     logger.info("Retrying message in requirements session %s", session_id)
 
 
-async def finalize_session(session_id: str) -> None:
-    await start_update(session_id, "finalize")
-    logger.info("Finalizing requirements session %s", session_id)
+async def finalize_session(session_id: str, force: bool = False) -> None:
+    """Finalize the session; with `force` despite its requirements review."""
+    await start_update(session_id, "finalize", force)
+    logger.info("Finalizing requirements session %s%s", session_id,
+                " with force" if force else "")
+
+
+async def retry_review(session_id: str) -> None:
+    await start_update(session_id, "retry_review")
+    logger.info("Retrying the failed review round of requirements session %s", session_id)
 
 
 async def update_checkout(session_id: str) -> None:
@@ -174,6 +187,8 @@ async def get_session(session_id: str) -> dict[str, Any]:
     # Polled every few seconds; the page shows the task, not the repository's contract.
     # The API design is found through the architecture session.
     del session["contract"], session["api_design_session_id"], session["next_session_id"]
+    del session["review_id"]
+    session["review"] = review_view(state.review)
     delivery = None
     if _delivers(state):
         delivery = dataclasses.asdict(
