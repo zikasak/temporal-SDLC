@@ -150,6 +150,20 @@ Contract ambiguities and how the suite reads them:
   that every requirements and API design session action requires sign-in. The contract does
   not say how an invalid `page_token` is reported before Temporal is contacted, so it is not
   tested.
+- Task flows (FR-125 to FR-143, `tests/test_task_flows.py`): a `TaskWorkflow` is started by
+  `POST /requirements/sessions` (or a fork, or a fix round), which needs GitHub, Temporal and
+  an LLM, so task flow creation, pending/skipped children, naming, fork/fix flows and the
+  `unresolved_findings` marker cannot be exercised. The suite checks that `TaskWorkflow` is a
+  documented `type`, that `top_level`, `parent`, `type`, `repository`, `branch` and
+  `onboarding_id` combine (200, or 503 without Temporal), that a malformed filter next to
+  `parent` or `top_level` is still a 422, that `parent` with `top_level=true` is a 422, that
+  the listing needs sign-in, and, only when Temporal does answer, that the executions carry
+  `name`, `linked`, `waiting_for_user` and `unresolved_findings` and that task flows and stages
+  are shaped as described. The contract does not name the format of a task flow's
+  `workflow_id`, so the `parent` filter is tried with an arbitrary well-formed ID. It does
+  not say whether `parent` with `top_level=false` is rejected, so that is not tested.
+  The contract says a malformed `page_token` answers 422 but not whether this is detected
+  before Temporal is contacted, so it is not tested.
 - Unknown IDs are well formed (prefix and 32 hex digits) so that they are treated as
   unknown rather than malformed.
 

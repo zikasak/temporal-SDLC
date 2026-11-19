@@ -2,7 +2,6 @@
 
 import dataclasses
 import logging
-import uuid
 from typing import Any
 
 from app.config import TASK_QUEUE
@@ -12,8 +11,11 @@ from app.github.models import RepositorySelection
 from app.requirements.lookup import requirements_session_lookup
 from app.requirements.models import DIRECT_KINDS, RequirementsState, TaskKind
 from app.requirements.prompt import intake_messages, opening_message
+from app.tasks.models import FORK_SUFFIX, TaskFlowState
+from app.tasks.service import (
+    derived_name, fork_name_source, new_ids, start_task_flow, task_queue_of,
+)
 from app.temporal.client import connect_temporal
-from app.temporal.execution_fields import execution_fields
 from app.temporal.registry import register
 from app.temporal.sessions import (
     FLOW_CLOSED, SessionBusy, flow_closed, fork_messages, start_update, state_at_message,
@@ -22,12 +24,14 @@ from app.temporal.sessions import (
 logger = logging.getLogger(__name__)
 
 
-async def start_session(
+async def create_session(
     state: RequirementsState | None = None, *, repository: RepositorySelection | None = None,
     kind: TaskKind | None = None, answers: list[str] | None = None, task: str = "",
-) -> str:
-    """Start a new interview in `repository` from the user's answers to the intake
-    questions of `kind` and their `task`, or a prepared `state` such as a fork."""
+    name: str = "", origin: str = "new", task_queue: str | None = None,
+) -> dict[str, str | None]:
+    """Start a new top-level task flow whose requirements stage interviews in `repository`
+    from the user's answers to the intake questions of `kind` and their `task`, or from a
+    prepared `state` such as a fork. Returns the session's and the task flow's IDs."""
     if state is None:
         if repository is None:
             raise ValueError("A requirements session needs a repository.")
@@ -35,26 +39,47 @@ async def start_session(
             raise ValueError("A requirements session starts from the intake questions.")
         state = RequirementsState(messages=intake_messages(kind, answers, task), kind=kind,
                                   repository=repository)
-    session_id = f"requirements-session-{uuid.uuid4().hex}"
+    ids = new_ids()
+    session_id = ids["requirements_session_id"]
+    state.task_flow_id = ids["task_flow_id"]
+    state.next_session_id = ids["architecture_session_id"]
     client = await connect_temporal()
-    handle = await client.start_workflow(
-        "RequirementsWorkflow",
-        state,
-        id=session_id,
-        task_queue=TASK_QUEUE,
-        **execution_fields(state.repository),
-    )
-    await register(handle.id)
-    logger.info("Started requirements session %s", session_id)
-    return handle.id
+    task_flow_id = await start_task_flow(ids["task_flow_id"], TaskFlowState(
+        kind=state.kind, repository=state.repository, task=task.strip(), name=name,
+        origin=origin,  # type: ignore[arg-type]
+        requirements_session_id=session_id,
+        architecture_session_id=ids["architecture_session_id"],
+        api_design_session_id=ids["api_design_session_id"],
+        requirements=state,
+    ), client, task_queue or TASK_QUEUE, session_id)
+    await register(session_id)
+    logger.info("Started requirements session %s in task flow %s", session_id,
+                task_flow_id)
+    return {"session_id": session_id,
+            **({"task_flow_id": task_flow_id} if task_flow_id else {})}
+
+
+async def start_session(
+    state: RequirementsState | None = None, *, repository: RepositorySelection | None = None,
+    kind: TaskKind | None = None, answers: list[str] | None = None, task: str = "",
+) -> str:
+    """create_session, returning the session's ID alone."""
+    created = await create_session(state, repository=repository, kind=kind,
+                                   answers=answers, task=task)
+    return created["session_id"]
 
 
 async def fork_session(session_id: str, message_index: int) -> str:
-    """A new session with the conversation up to the message, and the
-    requirements as they were at that point; 409 once the session's flow has completed
-    or been cancelled."""
+    """fork, returning the new session's ID alone."""
+    return (await fork(session_id, message_index))["session_id"]
+
+
+async def fork(session_id: str, message_index: int) -> dict[str, str]:
+    """A new session with the conversation up to the message, and the requirements as
+    they were at that point, in a new top-level task flow of its own named after the
+    original's; 409 once the session's flow has completed or been cancelled."""
     source = await get_state(session_id)
-    if await flow_closed(session_id):
+    if await flow_closed(source.task_flow_id or session_id):
         raise SessionBusy(FLOW_CLOSED)
     messages = fork_messages(source.messages, message_index)
     requirements = await state_at_message(
@@ -64,7 +89,10 @@ async def fork_session(session_id: str, message_index: int) -> str:
         activity="requirements_turn",
         key="requirements",
     )
-    fork_id = await start_session(RequirementsState(
+    name = await derived_name(
+        source.task_flow_id, fork_name_source(source.requirements, "Requirements"),
+        FORK_SUFFIX, await connect_temporal())
+    created = await create_session(RequirementsState(
         messages=messages,
         requirements=requirements,
         # The choice is kept even when the fork point precedes it; the user can change it.
@@ -72,10 +100,11 @@ async def fork_session(session_id: str, message_index: int) -> str:
         retired=source.retired,
         repository=source.repository,
         forked_from={"session_id": session_id, "message_index": message_index},
-    ))
+    ), name=name, origin="fork",
+        task_queue=await task_queue_of(session_id, await connect_temporal()))
     logger.info("Forked requirements session %s after message %d as %s",
-                session_id, message_index, fork_id)
-    return fork_id
+                session_id, message_index, created["session_id"])
+    return created
 
 
 async def send_message(session_id: str, message: str) -> None:
@@ -144,7 +173,7 @@ async def get_session(session_id: str) -> dict[str, Any]:
     session = dataclasses.asdict(state)
     # Polled every few seconds; the page shows the task, not the repository's contract.
     # The API design is found through the architecture session.
-    del session["contract"], session["api_design_session_id"]
+    del session["contract"], session["api_design_session_id"], session["next_session_id"]
     delivery = None
     if _delivers(state):
         delivery = dataclasses.asdict(

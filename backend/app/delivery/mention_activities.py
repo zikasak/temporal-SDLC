@@ -3,6 +3,7 @@ classifies it, answers a question from the delivery's session and code as last p
 and the app replies in the pull request."""
 
 import json
+import logging
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,8 @@ from app.llm.model import get_model
 from app.temporal.activities import _github_token
 from app.tools import repository as repository_tools
 from app.tracing import langchain_config
+
+logger = logging.getLogger(__name__)
 
 CLASSES = ('fix', 'clarification', 'unclear')
 # Bounds of what the LLM receives and what is replied. The comment itself is never cut:
@@ -68,6 +71,13 @@ def parse_classification(reply: str) -> str:
 @activity.defn
 async def classify_mention(session_id: str, body: str) -> str:
     """Whether the comment asks for a fix, for a clarification, or is unclear."""
+    return await classify(session_id, body)
+
+
+async def classify(session_id: str, body: str) -> str:
+    """Whether the comment asks for a fix, for a clarification, or is unclear; also used
+    outside an activity, such as for a mention on a closed delivery's pull request, which
+    starts a flow of its own only when it asks for a fix."""
     try:
         model = await get_model('review')
         graph = get_message_graph([], model=model)
@@ -80,8 +90,7 @@ async def classify_mention(session_id: str, body: str) -> str:
     except ValueError as exc:
         raise ApplicationError(str(exc), non_retryable=True) from exc
     choice = parse_classification(final_reply(result['messages']))
-    activity.logger.info('Mention on the pull request of %s classified as %s', session_id,
-                         choice)
+    logger.info('Mention on the pull request of %s classified as %s', session_id, choice)
     return choice
 
 
@@ -90,6 +99,12 @@ async def answer_mention(session_id: str, body: str, context: dict[str, Any]) ->
     """An answer to a question about the delivery, from its session and its code as last
     pushed: a copy of the published commit of its own, never the session's working copy,
     which a running fix round or publication changes."""
+    return await answer(session_id, body, context)
+
+
+async def answer(session_id: str, body: str, context: dict[str, Any]) -> str:
+    """answer_mention's answer; also used outside an activity, such as for a question on
+    a closed delivery's pull request."""
     session_dir = GENERATED_CODE_DIR / session_id
     await run_sync(session_dir.mkdir, parents=True, exist_ok=True)
     async with async_context(tempfile.TemporaryDirectory, prefix='mention-',
@@ -116,7 +131,7 @@ async def _published_tools(session_dir: Path, context: dict[str, Any],
     try:
         await repository_checkout.snapshot(session_dir, repository, commit, root, token)
     except (repository_checkout.CheckoutError, ApplicationError, OSError) as exc:
-        activity.logger.warning('The pushed commit could not be read: %s', exc)
+        logger.warning('The pushed commit could not be read: %s', exc)
         return []
     return repository_tools.build(root)
 
@@ -180,14 +195,22 @@ async def reply_to_mention(full_name: str, number: int, comment_type: str, comme
     takes replies to, even when the mention was a reply in that thread. Returns the
     reply's link."""
     token, _ = await _github_token()
-    body = f'@{author} {text}' if comment_type == 'conversation' else text
     try:
-        if comment_type == 'review':
-            return await github_client.reply_to_review_comment(
-                token, full_name, number, comment_id, body)
-        return await github_client.comment_on_pull_request(token, full_name, number, body)
+        return await post_reply(token, full_name, number, comment_type, comment_id, author,
+                                text)
     except GitHubError as exc:
-        activity.logger.warning('Could not reply in pull request #%d of %s: %s', number,
-                                full_name, exc)
+        logger.warning('Could not reply in pull request #%d of %s: %s', number,
+                       full_name, exc)
         raise ApplicationError(
             str(exc), non_retryable=exc.status_code in (401, 403, 404, 409, 422)) from exc
+
+
+async def post_reply(token: str, full_name: str, number: int, comment_type: str,
+                     comment_id: int, author: str, text: str) -> str:
+    """Post the reply of reply_to_mention with `token`; its link. GitHubError when
+    GitHub does not take it."""
+    body = f'@{author} {text}' if comment_type == 'conversation' else text
+    if comment_type == 'review':
+        return await github_client.reply_to_review_comment(
+            token, full_name, number, comment_id, body)
+    return await github_client.comment_on_pull_request(token, full_name, number, body)

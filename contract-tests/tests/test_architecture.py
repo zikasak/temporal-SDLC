@@ -106,15 +106,13 @@ def test_architecture_fork_needs_a_message_index(admin, body):
 # Architecture stage in the workflow listing (FR-87, FR-90, FR-91)
 
 def test_workflow_listing_accepts_the_architecture_type(admin):
-    response = admin.get("/workflows", params={"type": "ArchitectureWorkflow"})
-    # 200 with Temporal, 503 without it; the type itself is a documented one, not a 422.
+    response = admin.get('/workflows', params={'type': 'ArchitectureWorkflow'})
     assert response.status_code in (200, 503), response.text
     body = response.json()
     if response.status_code == 503:
-        assert isinstance(body["detail"], str) and body["detail"]
+        assert isinstance(body['detail'], str) and body['detail']
         return
-    for item in body["workflows"]:
-        assert item["workflow_type"] == "ArchitectureWorkflow", item
-        assert item["workflow_id"].startswith("architecture-session-"), item
-        # A child of its requirements session.
-        assert item["parent_workflow_id"].startswith("requirements-session-"), item
+    for item in body['workflows']:
+        assert item['workflow_type'] == 'ArchitectureWorkflow', item
+        assert item['workflow_id'].startswith('architecture-session-'), item
+        assert item['parent_workflow_id'].startswith('requirements-session-'), item

@@ -15,7 +15,7 @@ import {
 import {
   ConversationMarkdown, RequirementLookupProvider, lookupRequirementList, type LookupRequirement,
 } from "./RequirementLookup";
-import { rememberSessionId, urlParam } from "./url";
+import { flowStepsLink, rememberSessionId, urlParam } from "./url";
 
 type SessionStatus = "preparing" | "interviewing" | "turn_running" | "finalizing" | "completed" | "failed";
 
@@ -49,6 +49,8 @@ type Session = DeliveryProgress & {
   problems: string[];
   document: OpenApiDocument | null;
   error: string | null;
+  // The top-level task flow the session is a stage of; null for sessions from before.
+  task_flow_id: string | null;
   forked_from: { session_id: string; message_index: number } | null;
   repository: RepositorySelection | null;
   checkout: RepositoryCheckout | null;
@@ -123,6 +125,8 @@ function sessionRecord(value: unknown): Session {
     problems: value.problems.filter((item): item is string => typeof item === "string"),
     document,
     error: typeof value.error === "string" ? value.error : null,
+    task_flow_id: "task_flow_id" in value && typeof value.task_flow_id === "string"
+      ? value.task_flow_id : null,
     forked_from:
       isObject(value.forked_from) &&
       typeof value.forked_from.session_id === "string" &&
@@ -503,6 +507,13 @@ export default function ApiDesign() {
           {sessionId && (
             <p className="request-id">
               Session ID <code>{sessionId}</code>
+            </p>
+          )}
+
+          {session?.task_flow_id && (
+            <p className="request-id">
+              Part of a task flow:{" "}
+              <a href={flowStepsLink(session.task_flow_id)}>show all its steps</a>
             </p>
           )}
 

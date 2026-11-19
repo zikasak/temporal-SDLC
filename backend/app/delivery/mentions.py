@@ -102,6 +102,18 @@ async def body(session_id: str, comment_type: str, comment_id: int) -> str | Non
     return row['body'] if row else None
 
 
+async def find(session_id: str, comment_type: str,
+               comment_id: int) -> dict[str, Any] | None:
+    """A recorded mention of the delivery as far as it has come; None when not recorded."""
+    async with await connect() as conn:
+        cursor = await conn.execute("""
+            SELECT mention FROM app.delivery_mentions
+            WHERE session_id = %s AND comment_type = %s AND comment_id = %s
+        """, (session_id, comment_type, comment_id))
+        row = await cursor.fetchone()
+    return dict(row['mention']) if row else None
+
+
 async def history(session_id: str) -> list[dict[str, Any]]:
     """Every mention the delivery received, oldest first."""
     async with await connect() as conn:

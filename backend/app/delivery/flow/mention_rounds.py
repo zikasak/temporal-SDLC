@@ -9,7 +9,8 @@ from app.delivery.flow.base import FlowBase
 
 with workflow.unsafe.imports_passed_through():
     from app.delivery.models import (
-        DELIVERY_CLOSING, MENTION_HANDLED, OUTCOME_OWED, STOPPED, is_mention, mention_key,
+        DELIVERY_CLOSING, MENTION_HANDLED, OUTCOME_OWED, STOPPED, is_mention, mention_context,
+        mention_key,
     )
     from app.github.models import PullRequestMention
 
@@ -43,6 +44,9 @@ class MentionRounds(FlowBase):
         that runs after the current one, in the order the requests arrived. Its full text
         is kept in the mention history, never in the workflow's state."""
         body = mention['body']
+        # A mention on a closed delivery's pull request was classified as a fix before
+        # the flow that carries it on was started for it.
+        preset = mention.get('classification')
         self._handed_over = True
         entry: PullRequestMention = {
             **{key: value for key, value in mention.items() if key != 'body'},
@@ -76,22 +80,26 @@ class MentionRounds(FlowBase):
                                         if not is_mention(entry, mention_key(item))]
             self._start_queued()
             raise ApplicationError(MENTION_HANDLED, non_retryable=True)
-        await self._handle_mention(entry, body)
+        await self._handle_mention(entry, body, preset)
         if entry['status'] in MENTION_ENDED:
             await self._settle(entry)
 
-    async def _handle_mention(self, entry: PullRequestMention, body: str) -> None:
-        try:
-            classification = await workflow.execute_activity(
-                'classify_mention', args=[self.spec.session_id, body],
-                result_type=str, start_to_close_timeout=timedelta(minutes=5),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-        except ActivityError as exc:
-            workflow.logger.warning('Mention not classified: %s', exc.cause or exc)
-            await self._mention_failed(entry, 'The comment could not be classified.')
-            self._start_queued()
-            return
+    async def _handle_mention(self, entry: PullRequestMention, body: str,
+                              preset: object = None) -> None:
+        if preset == 'fix' and workflow.patched('classified-fix-mentions'):
+            classification = 'fix'
+        else:
+            try:
+                classification = await workflow.execute_activity(
+                    'classify_mention', args=[self.spec.session_id, body],
+                    result_type=str, start_to_close_timeout=timedelta(minutes=5),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            except ActivityError as exc:
+                workflow.logger.warning('Mention not classified: %s', exc.cause or exc)
+                await self._mention_failed(entry, 'The comment could not be classified.')
+                self._start_queued()
+                return
         if classification not in MENTION_CLASSES:
             classification = 'unclear'
         entry['classification'] = classification
@@ -197,19 +205,7 @@ class MentionRounds(FlowBase):
 
     def _mention_context(self) -> dict[str, Any]:
         """What a reply to a question about the delivery is based on, besides its code."""
-        brief = self.spec.brief
-        return {
-            'kind': self.spec.kind,
-            'language': self.spec.language,
-            'requirements': brief['requirements'] if brief else self.spec.requirements,
-            'retired': brief['retired'] if brief else [],
-            # The pushed commit the answer reads the code of.
-            'repository': self.spec.repository,
-            'publication': self.progress.publication,
-            'verification_status': self.progress.verification_status,
-            'reviews': self.progress.reviews[-3:],
-            'open_findings': self.progress.open_findings,
-        }
+        return mention_context(self.spec, self.progress)
 
     async def _reply(self, entry: PullRequestMention, text: str) -> bool:
         """Reply to the mention in the pull request it was made on, even when the delivery

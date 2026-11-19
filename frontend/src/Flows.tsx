@@ -2,11 +2,10 @@ import { useEffect, useState } from "react";
 import { errorMessage, failure, isObject, readBody } from "./api";
 import { repositorySelection, type RepositorySelection } from "./github";
 import { onboardingLink } from "./Onboarding";
-import { questionList } from "./Questions";
 
 type FlowType =
   | "LLMRequestWorkflow"
-  | "RequirementsWorkflow"
+  | "TaskWorkflow"
   | "ArchitectureWorkflow"
   | "ApiDesignWorkflow"
   | "OnboardingWorkflow";
@@ -24,34 +23,40 @@ type Flow = {
   repository: RepositorySelection | null;
   branch: string | null;
   onboarding_id: string | null;
+  // A task flow's current short name; null for any other flow.
+  name: string | null;
+  // Listed under a forked or fix-round task flow as an earlier stage of another task.
+  linked: boolean;
+  // As the backend reports them; null for flows from before it did, and for flows that
+  // cannot wait or have no delivery.
+  waiting_for_user: boolean | null;
+  unresolved_findings: boolean | null;
 };
 
 type Page = { workflows: Flow[]; next_page_token: string | null };
 
-// Filters on the type, repository (owner/name), source branch and onboarding; empty for none.
-type Filters = { type: FlowType | ""; repository: string; branch: string; onboarding_id: string };
-const filterNames = ["repository", "branch", "onboarding_id"] as const;
+// Filters on the type, repository (owner/name), source branch, onboarding and the flow whose
+// children are listed; empty for none.
+type Filters = {
+  type: FlowType | "";
+  repository: string;
+  branch: string;
+  onboarding_id: string;
+  parent: string;
+};
+const filterNames = ["repository", "branch", "onboarding_id", "parent"] as const;
 const filterLabels: Record<(typeof filterNames)[number], string> = {
   repository: "Repository",
   branch: "Branch",
   onboarding_id: "Onboarding",
+  parent: "Steps of",
 };
 
-/** Something a flow waits for from the user, and the session view that asks for it. */
-type Attention = {
-  // The workflow that asks, and the row it is shown on: the session for its own questions,
-  // its delivery for the delivery's agents and findings.
-  workflow_id: string;
-  scope: string;
-  label: string;
-  link: string;
-};
-
-// The flows the type filter offers: those a user starts, and the architecture sessions and
-// API designs that finished requirements start.
+// The flows the type filter offers: those a user starts (a requirements interview starts a
+// task flow), and the architecture sessions and API designs of tasks.
 const flowTypes: [FlowType, string][] = [
   ["LLMRequestWorkflow", "Chat"],
-  ["RequirementsWorkflow", "Requirements"],
+  ["TaskWorkflow", "Requirements"],
   ["ArchitectureWorkflow", "Architecture"],
   ["ApiDesignWorkflow", "API design"],
   ["OnboardingWorkflow", "Onboarding"],
@@ -59,6 +64,8 @@ const flowTypes: [FlowType, string][] = [
 
 const typeLabels: Record<string, string> = {
   ...Object.fromEntries(flowTypes),
+  TaskWorkflow: "Task",
+  RequirementsWorkflow: "Requirements",
   DeliveryWorkflow: "Delivery",
   CodegenWorkflow: "Code generation",
   ImplementationWorkflow: "Implementation",
@@ -70,18 +77,12 @@ const typeLabels: Record<string, string> = {
 };
 
 // Flows that start flows of their own; the others are single steps.
-const parentTypes = ["RequirementsWorkflow", "ApiDesignWorkflow", "OnboardingWorkflow", "DeliveryWorkflow"];
+const parentTypes = ["TaskWorkflow", "RequirementsWorkflow", "ApiDesignWorkflow", "OnboardingWorkflow",
+  "DeliveryWorkflow"];
 
-// Flows that are always children of a requirements session: filtering by them lists every
-// one, not only the top-level flows.
+// Flows that are always stages of a task: filtering by them lists every one, not only the
+// top-level flows.
 const childTypes: string[] = ["ArchitectureWorkflow", "ApiDesignWorkflow"];
-
-const sessionPaths: Record<string, string> = {
-  RequirementsWorkflow: "/api/requirements/sessions/",
-  ArchitectureWorkflow: "/api/architecture/sessions/",
-  ApiDesignWorkflow: "/api/api-design/sessions/",
-  OnboardingWorkflow: "/api/onboarding/sessions/",
-};
 
 const statusLabels: Record<string, string> = {
   running: "Running",
@@ -91,6 +92,9 @@ const statusLabels: Record<string, string> = {
   terminated: "Terminated",
   timed_out: "Timed out",
   continued_as_new: "Continued as new",
+  // A stage of a task waiting for the stages it depends on, and one that will never run.
+  pending: "Pending",
+  skipped: "Skipped",
 };
 
 const POLL_MS = 10000;
@@ -103,6 +107,11 @@ function typeLabel(type: string) {
   return typeLabels[type] ?? type.replace(/Workflow$/, "");
 }
 
+/** The label of a type filter, as its button names it. */
+function filterLabel(type: string) {
+  return flowTypes.find(([item]) => item === type)?.[1] ?? typeLabel(type);
+}
+
 export function filtersFromSearch(search: string): Filters {
   const params = new URLSearchParams(search);
   const type = params.get("type");
@@ -111,7 +120,12 @@ export function filtersFromSearch(search: string): Filters {
     repository: params.get("repository") ?? "",
     branch: params.get("branch") ?? "",
     onboarding_id: params.get("onboarding_id") ?? "",
+    parent: params.get("parent") ?? "",
   };
+}
+
+function flag(value: unknown) {
+  return typeof value === "boolean" ? value : null;
 }
 
 function filterSearch(filters: Filters) {
@@ -153,6 +167,10 @@ function pageRecord(value: unknown): Page {
         repository,
         branch: text(item.branch) ?? repository?.branch ?? null,
         onboarding_id: text(item.onboarding_id),
+        name: text(item.name),
+        linked: item.linked === true,
+        waiting_for_user: flag(item.waiting_for_user),
+        unresolved_findings: flag(item.unresolved_findings),
       } as Flow;
     }),
     next_page_token: typeof value.next_page_token === "string" ? value.next_page_token : null,
@@ -173,7 +191,9 @@ async function fetchPage(params: URLSearchParams, signal?: AbortSignal) {
 }
 
 function listParams(filters: Filters, pageToken: string | null) {
-  const params = new URLSearchParams(childTypes.includes(filters.type) ? {} : { top_level: "true" });
+  // A stage type, or the children of one flow, are listed wherever they are in the tree.
+  const params = new URLSearchParams(
+    childTypes.includes(filters.type) || filters.parent ? {} : { top_level: "true" });
   if (filters.type) params.set("type", filters.type);
   for (const name of filterNames) if (filters[name]) params.set(name, filters[name]);
   if (pageToken) params.set("page_token", pageToken);
@@ -198,18 +218,6 @@ async function fetchChildren(parent: string, signal?: AbortSignal, type?: string
 
 // The session ID prefix of a flow that carries on a closed delivery on a new branch.
 const followUpPrefix = "fix-session-";
-
-/** The session endpoint that reports `flow` and the session ID it is reported under: a
- * session's own, or for a fix flow of a closed delivery the session it runs as. */
-function sessionOf(flow: Flow): { path: string; id: string } | null {
-  const path = sessionPaths[flow.workflow_type];
-  if (path) return { path, id: flow.workflow_id };
-  if (flow.workflow_type === "DeliveryWorkflow" &&
-      flow.workflow_id.startsWith(`delivery-${followUpPrefix}`)) {
-    return { path: sessionPaths.RequirementsWorkflow, id: flow.workflow_id.replace(/^delivery-/, "") };
-  }
-  return null;
-}
 
 /** A delivery is named after the session whose task it builds, and shown in its view. */
 function deliveryLink(workflowId: string): string | null {
@@ -248,130 +256,100 @@ function flowLink(item: Flow) {
   }
 }
 
-function plural(count: number, word: string) {
-  return `${count} ${word}${count === 1 ? "" : "s"}`;
+// Statuses of a flow that has closed: merged, or closed unmerged.
+const closedStatuses = ["completed", "canceled", "cancelled"];
+
+/** The first flow of `flow`'s tree, `flow` included, that waits for the user and has a view
+ * to answer it in, as the backend reports it. */
+async function waitingFlow(flow: Flow, signal: AbortSignal, depth = 0): Promise<Flow | null> {
+  if (flow.waiting_for_user !== true) return null;
+  if (flow.workflow_type !== "TaskWorkflow" && flowLink(flow)) return flow;
+  if (depth > 2 || !parentTypes.includes(flow.workflow_type)) return null;
+  for (const child of await fetchChildren(flow.workflow_id, signal)) {
+    if (child.linked) continue;
+    const found = await waitingFlow(child, signal, depth + 1);
+    if (found) return found;
+  }
+  return flowLink(flow) ? flow : null;
 }
 
-/** What the session `body` of `flow` waits for from the user. */
-function sessionAttention(flow: Flow, body: unknown): Attention[] {
-  if (!isObject(body)) return [];
-  const sessionId = sessionOf(flow)?.id ?? flow.workflow_id;
-  const link = flowLink(flow) ?? "";
-  const items: Attention[] = [];
-  const messages = Array.isArray(body.messages) ? body.messages : [];
-  const last = messages.at(-1);
-  if (body.status === "awaiting_confirmation") {
-    items.push({ workflow_id: sessionId, scope: sessionId, link,
-      label: body.architecture_missing === true
-        ? "Decide whether to replace the contract the branch already has or add only its architecture"
-        : "Decide whether to replace the contract the branch already has" });
-  } else if (body.status === "interviewing" && isObject(body.skip_proposal)) {
-    items.push({ workflow_id: sessionId, scope: sessionId, link,
-      label: "Confirm or decline skipping the architecture stage" });
-  } else if (body.status === "interviewing" && isObject(last) && last.role === "assistant") {
-    const asked = questionList(last.questions).length;
-    items.push({ workflow_id: sessionId, scope: sessionId, link,
-      label: asked ? `${plural(asked, "question")} to answer` : "Waiting for your reply" });
-  }
-  const delivery = sessionDelivery(flow, body);
-  if (delivery) {
-    const scope = `delivery-${sessionId}`;
-    for (const item of Array.isArray(delivery.agent_questions) ? delivery.agent_questions : []) {
-      if (!isObject(item) || typeof item.workflow_id !== "string") continue;
-      const asked = questionList(item.questions).length;
-      if (!asked) continue;
-      items.push({ workflow_id: item.workflow_id, scope, link,
-        label: `The ${typeof item.stage === "string" ? item.stage : "coding"} agent asks ${plural(asked, "question")}` });
+type Attention = { waiting_for_user: boolean; unresolved_findings: boolean };
+
+/** The session endpoint that shows how a flow from before the backend reported its flags
+ * stands; null for flows without one, such as task flows and single steps. */
+function sessionEndpoint(flow: Flow): string | null {
+  const id = encodeURIComponent(flow.workflow_id);
+  switch (flow.workflow_type) {
+    case "RequirementsWorkflow":
+      return `/api/requirements/sessions/${id}`;
+    case "ArchitectureWorkflow":
+      return `/api/architecture/sessions/${id}`;
+    case "ApiDesignWorkflow":
+      return `/api/api-design/sessions/${id}`;
+    case "OnboardingWorkflow":
+      return `/api/onboarding/sessions/${id}`;
+    case "DeliveryWorkflow": {
+      // Only a fix round's own flow has a session of its own to read.
+      const sessionId = flow.workflow_id.replace(/^delivery-/, "");
+      return sessionId.startsWith(followUpPrefix)
+        ? `/api/requirements/sessions/${encodeURIComponent(sessionId)}` : null;
     }
-    if (delivery.open_findings === true) {
-      items.push({ workflow_id: scope, scope, link,
-        label: "Review findings wait for your decision" });
-    }
+    default:
+      return null;
   }
-  return items;
 }
 
-async function fetchAttention(flow: Flow, signal: AbortSignal): Promise<Attention[]> {
-  const session = sessionOf(flow);
-  if (!session || flow.status !== "running") return [];
-  const response = await fetch(`${session.path}${encodeURIComponent(session.id)}`, { signal });
-  const body = await readBody(response);
-  if (!response.ok) throw new Error(errorMessage(body, response.status));
-  const items = sessionAttention(flow, body);
-  // A requirements session's architecture sessions and API designs are flows of their own,
-  // asking their own questions.
-  if (flow.workflow_type === "RequirementsWorkflow") {
-    const children = (await fetchChildren(flow.workflow_id, signal))
-      .filter((child) => childTypes.includes(child.workflow_type));
-    const nested = await Promise.all(children.map((child) => fetchAttention(child, signal)));
-    items.push(...nested.flat());
-  }
-  return items;
+/** Whether a session waits for the user (the interviewer's or an agent's questions, open
+ * review findings, a skip proposal or a contract decision) and whether its delivery has
+ * open review findings that were not accepted. */
+function sessionAttention(session: unknown): Attention {
+  if (!isObject(session)) return { waiting_for_user: false, unresolved_findings: false };
+  const delivery = isObject(session.delivery) ? session.delivery : null;
+  const unresolved = delivery?.open_findings === true;
+  const messages = Array.isArray(session.messages) ? session.messages : [];
+  const last = messages[messages.length - 1];
+  const asked = session.status === "interviewing" && isObject(last) && last.role === "assistant" &&
+    Array.isArray(last.questions) && last.questions.length > 0;
+  const agentQuestions = Array.isArray(delivery?.agent_questions) && delivery.agent_questions.length > 0;
+  const waiting = asked || agentQuestions || unresolved || isObject(session.skip_proposal) ||
+    session.status === "awaiting_confirmation";
+  return { waiting_for_user: waiting, unresolved_findings: unresolved };
 }
 
-// Statuses of a flow that has closed with its pull request: merged, or closed unmerged.
-const closedStatuses = ["completed", "canceled"];
+/** The flow with the flags the backend reports, or for a flow from before it did (null),
+ * as its session shows them. */
+function useAttention(flow: Flow, tick: number): Flow {
+  const endpoint = flow.waiting_for_user === null || flow.unresolved_findings === null
+    ? sessionEndpoint(flow) : null;
+  const inactive = flow.status === "pending" || flow.status === "skipped";
+  const [derived, setDerived] = useState<Attention | null>(null);
 
-/** The delivery progress the session `body` of `flow` reports, if any. */
-function sessionDelivery(flow: Flow, body: unknown): Record<string, unknown> | null {
-  if (!isObject(body)) return null;
-  // An API design reports its delivery's progress with its own fields.
-  return isObject(body.delivery) ? body.delivery
-    : flow.workflow_type === "ApiDesignWorkflow" ? body : null;
-}
-
-/** Whether a delivery of the closed `flow`, or of its architecture sessions and API
- * designs, still has open review findings: shown as unresolved, not as waiting. */
-async function fetchUnresolved(flow: Flow, signal: AbortSignal): Promise<boolean> {
-  const session = sessionOf(flow);
-  if (!session) return false;
-  const response = await fetch(`${session.path}${encodeURIComponent(session.id)}`, { signal });
-  const body = await readBody(response);
-  if (!response.ok) throw new Error(errorMessage(body, response.status));
-  if (sessionDelivery(flow, body)?.open_findings === true) return true;
-  if (flow.workflow_type === "RequirementsWorkflow") {
-    const children = (await fetchChildren(flow.workflow_id, signal))
-      .filter((child) => childTypes.includes(child.workflow_type));
-    const nested = await Promise.all(children.map((child) => fetchUnresolved(child, signal)));
-    return nested.some(Boolean);
-  }
-  return false;
-}
-
-/** What a running top-level flow waits for, checked again on every `tick`; for one that
- * has completed or been cancelled, whether it closed with review findings unresolved. */
-function useAttention(flow: Flow, tick: number) {
-  const [attention, setAttention] = useState<Attention[]>([]);
-  const [unresolved, setUnresolved] = useState(false);
-  const closed = closedStatuses.includes(flow.status);
   useEffect(() => {
-    if (!sessionOf(flow) || (flow.status !== "running" && !closed)) {
-      setAttention([]);
-      setUnresolved(false);
+    if (!endpoint || inactive) {
+      setDerived(null);
       return;
     }
     const controller = new AbortController();
-    if (closed) {
-      // A closed flow waits for nothing; its findings are only marked.
-      setAttention([]);
-      fetchUnresolved(flow, controller.signal)
-        .then((found) => {
-          if (!controller.signal.aborted) setUnresolved(found);
-        })
-        .catch(() => undefined);
-    } else {
-      setUnresolved(false);
-      fetchAttention(flow, controller.signal)
-        .then((items) => {
-          if (!controller.signal.aborted) setAttention(items);
-        })
-        // Keep the last answer; the next tick tries again.
-        .catch(() => undefined);
-    }
+    fetch(endpoint, { signal: controller.signal })
+      .then(async (response) => {
+        const body = await readBody(response);
+        if (!controller.signal.aborted && response.ok) setDerived(sessionAttention(body));
+      })
+      .catch(() => {
+        // Shown without highlight or marker until the session can be read.
+      });
     return () => controller.abort();
-    // A closed flow's findings change only when the user accepts them: checked on each tick.
-  }, [flow.workflow_id, flow.run_id, flow.status, flow.workflow_type, tick]);
-  return { attention, unresolved };
+    // A running flow is read again on every tick, and a closed one while its findings
+    // are unresolved, until they are accepted.
+  }, [endpoint, inactive, flow.run_id, flow.status,
+    flow.status === "running" || derived?.unresolved_findings ? tick : 0]);
+
+  if (!derived) return flow;
+  return {
+    ...flow,
+    waiting_for_user: flow.waiting_for_user ?? derived.waiting_for_user,
+    unresolved_findings: flow.unresolved_findings ?? derived.unresolved_findings,
+  };
 }
 
 const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
@@ -396,27 +374,41 @@ function Status({ status }: { status: string }) {
   );
 }
 
-function AttentionList({ items, onOpen }: { items: Attention[]; onOpen: (link: string) => void }) {
-  if (items.length === 0) return null;
+/** Opens the questions of the first flow of `flow`'s tree that waits for the user. */
+function QuestionsButton({ flow, onOpen }: { flow: Flow; onOpen: (link: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function open() {
+    setBusy(true);
+    setError("");
+    try {
+      const controller = new AbortController();
+      const found = await waitingFlow(flow, controller.signal);
+      const link = found && flowLink(found);
+      if (link) onOpen(link);
+      else setError("The questions have been answered meanwhile.");
+    } catch (caught) {
+      setError(failure(caught, "Could not find the questions."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <ul className="flow-attention-list" aria-label="Waiting for your input">
-      {items.map((item) => (
-        <li key={`${item.workflow_id}/${item.label}`}>
-          <span>{item.label}</span>
-          <button type="button" className="flow-questions-button" onClick={() => onOpen(item.link)}>
-            Open questions
-          </button>
-        </li>
-      ))}
-    </ul>
+    <>
+      <button type="button" className="flow-questions-button" disabled={busy} onClick={() => void open()}>
+        {busy ? "Opening…" : "Open questions"}
+      </button>
+      {error && <span className="connector-error" role="alert">{error}</span>}
+    </>
   );
 }
 
 /** The child flows and steps of `parent`, each one expandable when it has its own. */
-function FlowChildren({ parent, link, attention, tick, onOpen }: {
+function FlowChildren({ parent, link, tick, onOpen }: {
   parent: Flow;
   link: string | null;
-  attention: Attention[];
   tick: number;
   onOpen: (link: string) => void;
 }) {
@@ -444,38 +436,40 @@ function FlowChildren({ parent, link, attention, tick, onOpen }: {
   return (
     <ol className="flow-children">
       {children.map((child) => (
-        <FlowRow key={child.workflow_id} flow={child} inheritedLink={link} attention={attention}
-          tick={tick} onOpen={onOpen} />
+        <FlowRow key={child.workflow_id} flow={child} inheritedLink={link} tick={tick} onOpen={onOpen} />
       ))}
     </ol>
   );
 }
 
-/** A flow and, once opened, its steps; `attention` is what the whole tree waits for. */
-function FlowRow({ flow, inheritedLink, attention, tick, onOpen, onFilter, unresolved = false,
-  topLevel = false }: {
+/** A flow and, once opened, its steps. Whether it waits for the user and whether it closed
+ * with unresolved review findings are as the backend reports them, or for flows from before
+ * it did, as their sessions show them. */
+function FlowRow({ flow: listed, inheritedLink, tick, onOpen, onFilter, topLevel = false }: {
   flow: Flow;
   inheritedLink: string | null;
-  attention: Attention[];
   tick: number;
   onOpen: (link: string) => void;
   // Narrows the list to the flow's repository or branch; top-level flows only.
   onFilter?: (next: Partial<Filters>) => void;
-  // A closed flow whose review findings were neither accepted nor acted on.
-  unresolved?: boolean;
   topLevel?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const link = flowLink(flow) ?? inheritedLink;
-  // A top-level flow is highlighted for anything in its tree; a step for what it asks itself.
-  const asking = topLevel ? attention : attention.filter(
-    (item) => item.scope === flow.workflow_id || item.workflow_id === flow.workflow_id);
-  const expandable = topLevel || parentTypes.includes(flow.workflow_type);
+  const flow = useAttention(listed, tick);
+  const ownLink = flowLink(flow);
+  const link = ownLink ?? inheritedLink;
+  const closed = closedStatuses.includes(flow.status);
+  // A closed flow never waits; with open review findings left it is only marked.
+  const asking = flow.waiting_for_user === true && !closed && flow.status !== "pending";
+  const unresolved = flow.unresolved_findings === true && closed;
+  // A linked stage belongs to another task: its own steps are listed under that task.
+  const expandable = (topLevel || parentTypes.includes(flow.workflow_type)) && !flow.linked;
   const took = duration(flow.start_time, flow.close_time);
   const childrenId = `flow-children-${flow.workflow_id}`;
 
   return (
-    <li className={`flow-item${asking.length ? " flow-needs-input" : ""}${topLevel ? " flow-top" : ""}`}>
+    <li className={`flow-item${asking ? " flow-needs-input" : ""}${topLevel ? " flow-top" : ""}${
+      flow.status === "pending" || flow.status === "skipped" ? " flow-inactive" : ""}`}>
       <div className="flow-row">
         {expandable ? (
           <button type="button" className="flow-toggle" aria-expanded={expanded}
@@ -488,7 +482,11 @@ function FlowRow({ flow, inheritedLink, attention, tick, onOpen, onFilter, unres
             <span className="flow-type">{typeLabel(flow.workflow_type)}</span>
           </span>
         )}
-        <code className="flow-id" title={flow.workflow_id}>{flow.workflow_id}</code>
+        {flow.name ? (
+          <span className="flow-name" title={flow.workflow_id}>{flow.name}</span>
+        ) : (
+          <code className="flow-id" title={flow.workflow_id}>{flow.workflow_id}</code>
+        )}
         <span className="flow-meta">
           {flow.repository && (onFilter ? (
             <span>
@@ -509,26 +507,26 @@ function FlowRow({ flow, inheritedLink, attention, tick, onOpen, onFilter, unres
           {took && <span>{took}</span>}
         </span>
         <Status status={flow.status} />
+        {flow.linked && (
+          <span className="flow-linked" title="An earlier stage of the task this one was forked or fixed from">
+            linked from another task
+          </span>
+        )}
         {unresolved && (
           <span className="flow-unresolved" title="Closed with open review findings">
             unresolved findings
           </span>
         )}
         <span className="flow-actions">
-          {asking.length > 0 && (
-            <button type="button" className="flow-questions-button" onClick={() => onOpen(asking[0].link)}>
-              Open questions
-            </button>
-          )}
-          {topLevel && link && (
-            <button type="button" className="flow-open-button" onClick={() => onOpen(link)}>Open</button>
+          {asking && <QuestionsButton flow={flow} onOpen={onOpen} />}
+          {ownLink && flow.status !== "pending" && flow.status !== "skipped" && (
+            <button type="button" className="flow-open-button" onClick={() => onOpen(ownLink)}>Open</button>
           )}
         </span>
       </div>
       {expanded && (
         <div id={childrenId} className="flow-body">
-          {topLevel && <AttentionList items={attention} onOpen={onOpen} />}
-          <FlowChildren parent={flow} link={link} attention={attention} tick={tick} onOpen={onOpen} />
+          <FlowChildren parent={flow} link={link} tick={tick} onOpen={onOpen} />
         </div>
       )}
     </li>
@@ -541,9 +539,7 @@ export function TopLevelFlow({ flow, tick, onOpen, onFilter }: {
   onOpen: (link: string) => void;
   onFilter: (next: Partial<Filters>) => void;
 }) {
-  const { attention, unresolved } = useAttention(flow, tick);
-  return <FlowRow flow={flow} inheritedLink={null} attention={attention} tick={tick} onOpen={onOpen}
-    onFilter={onFilter} unresolved={unresolved} topLevel />;
+  return <FlowRow flow={flow} inheritedLink={null} tick={tick} onOpen={onOpen} onFilter={onFilter} topLevel />;
 }
 
 /** Every top-level flow, newest first; each opens into its steps and its view. */
@@ -640,7 +636,7 @@ export default function Flows({ search, refreshKey, onNavigate }: {
       <section className="workflows-panel" aria-labelledby="flows-title">
         <div className="workflows-toolbar">
           <div className="section-heading">
-            <h2 id="flows-title">{filters.type ? typeLabel(filters.type) : "All flows"}</h2>
+            <h2 id="flows-title">{filters.type ? filterLabel(filters.type) : "All flows"}</h2>
           </div>
           <div className="flow-start" role="group" aria-label="Start a flow">
             <span>Start</span>
@@ -674,7 +670,7 @@ export default function Flows({ search, refreshKey, onNavigate }: {
                 {filterLabels[name]}: {filters[name]} ×
               </button>
             ))}
-            <button type="button" onClick={() => filter({ repository: "", branch: "", onboarding_id: "" })}>
+            <button type="button" onClick={() => filter({ repository: "", branch: "", onboarding_id: "", parent: "" })}>
               Clear filters
             </button>
           </div>
@@ -700,7 +696,7 @@ export default function Flows({ search, refreshKey, onNavigate }: {
               {filtered
                 ? "No flows match these filters."
                 : filters.type
-                  ? `No ${typeLabel(filters.type)} flows have been started.`
+                  ? `No ${filterLabel(filters.type)} flows have been started.`
                   : "Start a chat, a requirements interview or an onboarding to see it here."}
             </span>
           </div>

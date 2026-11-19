@@ -10,7 +10,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from temporalio.client import Client, WorkflowExecutionDescription, WorkflowExecutionStatus
-from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+from temporalio.common import (
+    SearchAttributePair, TypedSearchAttributes, WorkflowIDConflictPolicy, WorkflowIDReusePolicy,
+)
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -26,10 +28,17 @@ from app.github.errors import GitHubError
 from app.github.models import PullRequestMention
 from app.requirements.lookup import lookup_requirements
 from app.requirements.models import CHANGE_KINDS
+from app.tasks.service import (
+    fork_name_source, stage_ids, start_fix_flow, task_flow_state, wait_for_stage,
+)
 from app.routing.models import SEAM_MISMATCH
 from app.temporal import registry
 from app.temporal.client import connect_temporal
-from app.temporal.execution_fields import task_fields
+from app.temporal.search_attributes import start_workflow
+from app.temporal.execution_fields import (
+    LINKED_ATTRIBUTE, task_fields,
+)
+from app.temporal.flags import TASK_FLOW_PREFIX
 from app.temporal.sessions import (
     SessionBusy, SessionEnded, SessionNotFound, is_running, start_update,
 )
@@ -67,7 +76,26 @@ async def get_state(session_id: str) -> DeliveryState | None:
         state = interrupted(state)
     state = await _with_acceptance(client, session_id, description, state)
     state.progress = await with_mention_history(session_id, state.progress)
+    state.progress.fix_flow_ids = await fix_flow_ids(client, session_id)
     return state
+
+
+async def fix_flow_ids(client: Client, session_id: str) -> list[str]:
+    """The top-level flows the fix rounds after the delivery's flow closed started, oldest
+    first: the task flow that holds a task's fix delivery, or an onboarding's fix delivery
+    itself."""
+    found: list[str] = []
+    for number in range(1, MAX_FOLLOW_UPS + 1):
+        workflow_id = delivery_id(follow_up_session_id(session_id, number))
+        try:
+            description = await client.get_workflow_handle(workflow_id).describe()
+        except RPCError as exc:
+            if exc.status != RPCStatusCode.NOT_FOUND:
+                raise
+            break
+        parent = description.parent_id
+        found.append(parent if parent and parent.startswith(TASK_FLOW_PREFIX) else workflow_id)
+    return found
 
 
 async def follow_up_session(session_id: str) -> dict:
@@ -121,7 +149,8 @@ async def with_mention_history(session_id: str,
     """The progress with every mention of the delivery, oldest first, from the mention
     history, as the workflow last reported those it still works on, and with the text of
     the comments that review rounds refer to as their instructions."""
-    history = await mention_history.history(session_id)
+    history = [await _as_handed(item) if item.get(HANDED_TO) else item
+               for item in await mention_history.history(session_id)]
     key = lambda item: (item['comment_type'], item['comment_id'])  # noqa: E731
     texts = {key(item): item.get('body', '') for item in history}
     current = {key(item): item for item in progress.mentions}
@@ -137,6 +166,64 @@ async def with_mention_history(session_id: str,
     progress.reviews = [
         _with_instructions(item, texts) for item in progress.reviews]
     return progress
+
+
+HANDED_TO = 'handed_to'
+# Fields of a handed-over mention that the flow carrying it on reports how far it has come.
+HANDED_FIELDS = ('classification', 'status', 'reply_url', 'error')
+
+
+async def _as_handed(item: dict) -> dict:
+    """A mention of a closed delivery handed to the flow that carries it on, as far as
+    that flow's delivery has brought it. Its fix round is in that flow: it has no round
+    here, but the flow's fix_flow_id, which a mention answered as a clarification or as
+    unclear, which started no fix, has not."""
+    result = {name: value for name, value in item.items() if name not in (HANDED_TO, 'round')}
+    try:
+        live = await mention_history.find(item[HANDED_TO], item['comment_type'],
+                                          item['comment_id'])
+    except Exception as exc:  # noqa: BLE001 - the recorded state is shown instead
+        logger.warning('Mention %s handed to %s not read: %s',
+                       item.get('comment_id'), item.get(HANDED_TO), exc)
+        live = None
+    for name in HANDED_FIELDS:
+        if live and name in live:
+            result[name] = live[name]
+    if result.get('classification') in ('clarification', 'unclear'):
+        result.pop('fix_flow_id', None)
+    return result
+
+
+async def _top_level_flow(client: Client, session_id: str) -> str:
+    """The top-level flow of the delivery of `session_id`: the task flow holding it, or
+    the delivery itself, such as an onboarding's."""
+    workflow_id = delivery_id(session_id)
+    description = await client.get_workflow_handle(workflow_id).describe()
+    parent = description.parent_id
+    return parent if parent and parent.startswith(TASK_FLOW_PREFIX) else workflow_id
+
+
+async def _record_handover(client: Client, session_id: str, target: str,
+                           mention: PullRequestMention) -> None:
+    """Keep a mention handed to the flow `target` that carries on the closed delivery of
+    `session_id` in that delivery's history too, with the flow it started as fix_flow_id,
+    so the original delivery's progress links the mention to that flow. The flow that
+    took the mention already holds it durably, so this link is best effort: when it
+    cannot be stored the handover still stands."""
+    try:
+        fix_flow = await _top_level_flow(client, target)
+    except RPCError as exc:
+        logger.warning('Flow of the delivery of %s not read: %s', target, exc)
+        fix_flow = delivery_id(target)
+    record = {name: value for name, value in mention.items()
+              if name not in (OUTCOME_OWED, 'round')}
+    record['fix_flow_id'] = fix_flow
+    record[HANDED_TO] = target
+    try:
+        await mention_history.save(session_id, record)
+    except Exception as exc:  # noqa: BLE001 - the handover itself already succeeded
+        logger.warning('Mention %s handed to %s not recorded for session %s: %s',
+                       mention.get('comment_id'), target, session_id, exc)
 
 
 def _with_instructions(round_: dict, texts: dict) -> dict:
@@ -213,15 +300,35 @@ async def _restart(finished: _Finished, session_id: str) -> None:
             raise SessionBusy(busy) from exc
         return
     try:
-        await finished.client.start_workflow(
-            'DeliveryWorkflow', finished.state, id=workflow_id,
+        await start_workflow(
+            finished.client, 'DeliveryWorkflow', finished.state, id=workflow_id,
             task_queue=description.task_queue,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
             id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
-            **task_fields(finished.state.spec),
+            **_own_fields(finished.state, _task_flow_of(description)),
         )
     except WorkflowAlreadyStartedError as exc:
         raise SessionBusy(busy) from exc
+
+
+def _task_flow_of(description: WorkflowExecutionDescription) -> str | None:
+    """The task flow the delivery is a stage of: its parent, or for one started again on
+    its own the task flow it is listed under."""
+    parent = description.parent_id
+    if parent and parent.startswith(TASK_FLOW_PREFIX):
+        return parent
+    linked = description.typed_search_attributes.get(LINKED_ATTRIBUTE) or []
+    return next((item for item in linked if item.startswith(TASK_FLOW_PREFIX)), None)
+
+
+def _own_fields(state: DeliveryState, task_flow_id: str | None) -> dict:
+    """The fields of a delivery started on its own: still listed under its task flow."""
+    fields = task_fields(state.spec)
+    if task_flow_id:
+        pairs = list(fields.get('search_attributes') or [])
+        pairs.append(SearchAttributePair(LINKED_ATTRIBUTE, [task_flow_id]))
+        fields['search_attributes'] = TypedSearchAttributes(pairs)
+    return fields
 
 
 CLOSED_STATUSES = (WorkflowExecutionStatus.COMPLETED, WorkflowExecutionStatus.CANCELED)
@@ -325,7 +432,7 @@ def _follow_up_state(state: DeliveryState, session_id: str) -> DeliveryState:
     spec = dataclasses.replace(state.spec, session_id=session_id)
     progress = dataclasses.replace(
         state.progress, mentions=[], agent_questions=[], pull_request=None,
-        pull_request_error=None, pull_request_status='skipped')
+        pull_request_error=None, pull_request_status='skipped', fix_flow_ids=[])
     return dataclasses.replace(
         state, spec=spec, progress=progress, retry_stage=None, instructions=None,
         record_only=True, mention=None, mention_type=None, mention_queue=[],
@@ -373,9 +480,21 @@ async def _follow_up(finished: _Finished, session_id: str,
         if prepare is not None:
             prepare(state)
         await _copy_workspace(session_id, follow_up)
+        if not state.spec.onboarding:
+            # A task's fix round runs as the delivery of a new task flow of its own, which
+            # links to the original task's stages.
+            started = await _start_fix_task_flow(finished, session_id, follow_up, state)
+            if not await wait_for_stage(workflow_id, client):
+                raise GitHubError(503, 'The fix round of this closed flow has not started yet.')
+            if not started:
+                return follow_up, False
+            await registry.register(workflow_id)
+            logger.info('Delivery of session %s closed; carried on in a new task flow by %s',
+                        session_id, workflow_id)
+            return follow_up, True
         try:
-            await client.start_workflow(
-                'DeliveryWorkflow', state, id=workflow_id,
+            await start_workflow(
+                client, 'DeliveryWorkflow', state, id=workflow_id,
                 task_queue=finished.description.task_queue,
                 id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
                 id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
@@ -389,6 +508,24 @@ async def _follow_up(finished: _Finished, session_id: str,
                     session_id, workflow_id)
         return follow_up, True
     raise SessionBusy('This closed flow has been carried on too often.')
+
+
+async def _start_fix_task_flow(finished: _Finished, session_id: str, follow_up: str,
+                               state: DeliveryState) -> bool:
+    """Start the task flow of the fix round `follow_up` on the closed delivery of
+    `session_id`; false when it had been started before."""
+    original = _task_flow_of(finished.description)
+    linked = stage_ids(await task_flow_state(original, finished.client))
+    if not linked:
+        # A delivery from before task flows: its session is the task's stage.
+        linked = [item for item in (finished.description.parent_id, delivery_id(session_id))
+                  if item]
+    brief = state.spec.brief or {}
+    requirements = list(brief.get('requirements') or state.spec.requirements or [])
+    return await start_fix_flow(finished.client, follow_up, state, original, linked,
+                                fork_name_source(requirements, 'Fix'),
+                                finished.description.task_queue, delivery_id(follow_up),
+                                registrar=registry.register)
 
 
 async def _flagged(session_id: str) -> _Finished:
@@ -687,13 +824,44 @@ async def _admitted(session_id: str, mention: PullRequestMention, update_id: str
     raise GitHubError(503, 'The delivery has not recorded the mention yet.')
 
 
+async def _open_follow_up(client: Client, session_id: str) -> str | None:
+    """The session of the flow that carries on the closed delivery of `session_id` and
+    still runs, if there is one."""
+    for number in range(1, MAX_FOLLOW_UPS + 1):
+        follow_up = follow_up_session_id(session_id, number)
+        try:
+            description = await client.get_workflow_handle(delivery_id(follow_up)).describe()
+        except RPCError as exc:
+            if exc.status != RPCStatusCode.NOT_FOUND:
+                raise
+            return None
+        if description.status == WorkflowExecutionStatus.RUNNING:
+            return follow_up
+    return None
+
+
+async def _handed_before(session_id: str, mention: PullRequestMention) -> bool:
+    """Whether the closed delivery of `session_id` already recorded the mention, such as
+    one handed over before. Only a guard: the flow that carries the delivery on rejects
+    a comment it already has, so when the history cannot be read the handover goes on."""
+    try:
+        found = await mention_history.find(session_id, mention['comment_type'],
+                                           mention['comment_id'])
+    except Exception as exc:  # noqa: BLE001 - the carrying flow rejects duplicates itself
+        logger.warning('Mention history of session %s not read: %s', session_id, exc)
+        return False
+    return found is not None
+
+
 async def receive_mention(session_id: str, mention: PullRequestMention) -> bool:
     """Hand an authorised mention of the app on the delivery's pull request to the
     delivery, which classifies it and replies or queues its fix round. A delivery that
     closed, such as one idle for long, runs again first, changing nothing; concurrent
     mentions that find it closed each hand theirs to the run that one of them started.
-    False when the session has no delivery; MentionHandled when it already has the
-    mention."""
+    On a delivery whose flow closed with its pull request, the mention goes to the fix
+    flow that carries it on while one runs, or else to a new top-level flow that carries
+    it on, on a new branch. False when the session has no delivery;
+    MentionHandled when it already has the mention."""
     client = await connect_temporal()
     workflow_id = delivery_id(session_id)
     # Which branch takes the fix is decided by the pull request's actual state: its own
@@ -732,12 +900,23 @@ async def receive_mention(session_id: str, mention: PullRequestMention) -> bool:
                 workflow_id, run_id=description.run_id,
             ).query('get_state', result_type=DeliveryState)
             state = await _with_acceptance(client, session_id, description, state)
+            running = await _open_follow_up(client, session_id)
+            if running is not None:
+                # A fix flow that carries the closed delivery on still runs: it takes
+                # every mention, which it classifies and answers or queues itself.
+                target = running
+            else:
+                # A new top-level flow carries the closed delivery on, on a new branch:
+                # its delivery classifies the mention, as every delivery does, and runs
+                # its fix round or answers it.
+                if await _handed_before(session_id, mention):
+                    raise MentionHandled(MENTION_HANDLED)
 
-            def mentioned(follow_up: DeliveryState) -> None:
-                # Its fix round is the comment's, not the closed delivery's findings.
-                follow_up.progress.open_findings = False
-            target, _ = await _follow_up(_Finished(client, description, state),
-                                         session_id, mentioned)
+                def mentioned(follow_up: DeliveryState) -> None:
+                    # Its fix round is the comment's, not the closed delivery's findings.
+                    follow_up.progress.open_findings = False
+                target, _ = await _follow_up(_Finished(client, description, state),
+                                             session_id, mentioned)
         elif description.status != WorkflowExecutionStatus.RUNNING:
             await _reopen(client, description, session_id)
         update_id = f'mention-{uuid.uuid4().hex}'
@@ -764,7 +943,16 @@ async def receive_mention(session_id: str, mention: PullRequestMention) -> bool:
             raise
         # Accepted is not yet admitted: a comment the delivery handled before, which has
         # left its live state, is only found by its durable recording.
-        await _admitted(target, mention, update_id)
+        try:
+            await _admitted(target, mention, update_id)
+        except MentionHandled:
+            # Handed over before, perhaps by a delivery of the webhook whose recording
+            # here did not happen: the original delivery still links it to its flow.
+            if target != session_id:
+                await _record_handover(client, session_id, target, mention)
+            raise
+        if target != session_id:
+            await _record_handover(client, session_id, target, mention)
         logger.info('Mention %s on the pull request of session %s handed to the delivery '
                     'of %s', mention['comment_id'], session_id, target)
         return True

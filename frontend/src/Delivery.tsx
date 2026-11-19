@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import { repositoryPublication, type RepositoryPublication, type RepositorySelection } from "./github";
 import { QuestionForm, questionList, type Question } from "./Questions";
 import { isObject } from "./api";
+import { flowStepsLink } from "./url";
 
 type GeneratedCode = {
   server: { path: string; files: number };
@@ -147,6 +148,8 @@ export type DeliveryProgress = {
   existing_code_changed: boolean;
   // The repository's CI on the last pushed commit.
   ci: CiChecks | null;
+  // The new top-level flows that fix rounds started after the flow closed, oldest first.
+  fix_flow_ids: string[];
 };
 
 const ciStatuses = ["pending", "passed", "failed", "inconclusive", "none", "timed_out", "unavailable"] as const;
@@ -433,6 +436,9 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     mentions: pullRequestMentions(value.mentions),
     existing_code_changed: value.existing_code_changed === true,
     ci: ciChecks(value.ci),
+    fix_flow_ids: Array.isArray(value.fix_flow_ids)
+      ? value.fix_flow_ids.filter((item): item is string => typeof item === "string" && item !== "")
+      : [],
   };
 }
 
@@ -896,6 +902,15 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
           {mention.round !== null && <> — review round {mention.round}</>}
           {mention.reply_url && <> — <a href={mention.reply_url} target="_blank" rel="noreferrer">reply</a></>}
           {mention.error && <p role="alert">{mention.error}</p>}
+        </li>)}
+      </ul>
+    </section>}
+    {progress.fix_flow_ids.length > 0 && <section aria-label="Fix rounds after the flow closed">
+      <h3>Fix rounds after the flow closed</h3>
+      <p>Each runs as a new flow of its own, pushed to a new branch with a new pull request.</p>
+      <ul>
+        {progress.fix_flow_ids.map((id) => <li key={id}>
+          <a href={flowStepsLink(id)}><code>{id}</code></a>
         </li>)}
       </ul>
     </section>}

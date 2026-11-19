@@ -184,7 +184,10 @@ paths:
       summary: Accept the delivery with open review findings
       description: Clears the open-findings flag, keeps the pushed delivery as it
         is and records findings_acceptance (when and by whom) in the delivery progress.
-        The publication stays marked as unverified. 409 while no flag is raised.
+        The publication stays marked as unverified. Also allowed after the pull request
+        was merged or closed; the unresolved findings marker (unresolved_findings
+        in GET /workflows) then disappears from both the delivery and its task flow.
+        409 while no flag is raised.
       tags:
       - api-design
       parameters:
@@ -227,15 +230,22 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-30
+      - FR-142
+      - FR-143
   /api-design/sessions/{session_id}/delivery/findings/instructions:
     post:
       operationId: postApiDesignSessionsBySessionIdDeliveryFindingsInstructions
       summary: Give instructions about open review findings
       description: Starts a fix round from the instructions, then verification and
-        code review, pushing the result to the same branch. The instructions are recorded
-        on the review round they start. If verification fails for good, verification_status
-        becomes error, the branch keeps the earlier unverified push and the flag stays
-        raised. 409 while no flag is raised.
+        code review. While the delivery's pull request is open, the result is pushed
+        to the same branch. The instructions are recorded on the review round they
+        start. If verification fails for good, verification_status becomes error,
+        the branch keeps the earlier unverified push and the flag stays raised. Once
+        the pull request was merged or closed (the flow completed or was cancelled),
+        the fix round runs as the delivery child of a new top-level task flow named
+        after the original with a " (fix)" suffix, which links to the original task's
+        stages; its ID is appended to fix_flow_ids, and its result is pushed to a
+        new branch with a new pull request. 409 while no flag is raised.
       tags:
       - api-design
       parameters:
@@ -296,6 +306,8 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-30
+      - FR-113
+      - FR-142
   /api-design/sessions/{session_id}/document:
     get:
       operationId: getApiDesignSessionsBySessionIdDocument
@@ -336,7 +348,8 @@ paths:
       operationId: postApiDesignSessionsBySessionIdFinalize
       summary: Finalize the API design session
       description: Writes the OpenAPI document; the session is completed once it is
-        ready.
+        ready, and the task flow then starts its pending delivery child, which runs
+        as a child of the task flow, not of the design.
       tags:
       - api-design
       parameters:
@@ -359,12 +372,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
         '404':
           description: Not Found
           content:
@@ -377,11 +384,25 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-126
+      - FR-127
   /api-design/sessions/{session_id}/fork:
     post:
       operationId: postApiDesignSessionsBySessionIdFork
       summary: Fork the session
-      description: Starts a new session with the conversation up to the given message.
+      description: Starts a new session with the conversation up to the given message,
+        in a new top-level task flow of its own (task_flow_id) named after the original
+        with a " (fork)" suffix, which links to the original task's requirements and
+        architecture sessions and holds a pending delivery child; the original task
+        flow and its children are left unchanged. 409 when the session's flow has
+        completed or been cancelled.
       tags:
       - api-design
       parameters:
@@ -410,12 +431,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
         '404':
           description: Not Found
           content:
@@ -434,6 +449,16 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-112
+      - FR-137
+      - FR-140
   /api-design/sessions/{session_id}/generation/retry:
     post:
       operationId: postApiDesignSessionsBySessionIdGenerationRetry
@@ -660,7 +685,6 @@ paths:
       - FR-78
       - FR-79
       - FR-80
-      - FR-81
       - FR-84
       - FR-86
       - FR-118
@@ -786,8 +810,8 @@ paths:
       operationId: postArchitectureSessionsBySessionIdFinalize
       summary: Finalize the architecture session
       description: Writes the architecture document; once it is ready the session
-        is completed and starts the task's API design (api_design_session_id), which
-        drafts the API at once using the finalized architecture. 409 while problems
+        is completed and the task flow starts its pending API design child (api_design_session_id),
+        which drafts the API at once using the finalized architecture. 409 while problems
         remain, a turn is running or the session is finalized or skipped.
       tags:
       - architecture
@@ -830,20 +854,22 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
       x-requirements:
-      - FR-82
       - FR-83
       - FR-84
       - FR-85
       - FR-86
+      - FR-126
+      - FR-134
   /architecture/sessions/{session_id}/fork:
     post:
       operationId: postArchitectureSessionsBySessionIdFork
       summary: Fork the session
-      description: 'Starts a new architecture session of the same requirements session
-        with the conversation up to the given message. The original stays open: each
-        fork, when finalized or its skip confirmed, starts its own API design, a child
-        of the requirements session like the others. 409 once the session''s API design
-        has started.'
+      description: Starts a new architecture session with the conversation up to the
+        given message, in a new top-level task flow of its own (task_flow_id) named
+        after the original with a " (fork)" suffix, which links to the original task's
+        requirements session and holds pending API design and delivery children; the
+        original task flow and its children are left unchanged. 409 once the session's
+        API design has started or its flow has completed or been cancelled.
       tags:
       - architecture
       parameters:
@@ -899,6 +925,9 @@ paths:
       x-requirements:
       - FR-86
       - FR-88
+      - FR-112
+      - FR-137
+      - FR-140
   /architecture/sessions/{session_id}/messages:
     post:
       operationId: postArchitectureSessionsBySessionIdMessages
@@ -1022,12 +1051,13 @@ paths:
       summary: Skip the architecture stage
       description: Skips the stage of an API change, confirming the open skip proposal
         or, without one, at the user's own request (also after a declined proposal
-        or once a draft exists, which is then discarded). The session ends as skipped,
-        the repository's existing contracts/architecture.md (and contracts/architecture.json)
-        are kept unchanged and are the architecture given to the API design and coding
-        agents, and the task's API design starts (api_design_session_id). 409 for
-        a new service, while drafting or a turn is running, or once the session is
-        finalized, skipped or failed.
+        or once a draft exists, which is then discarded). The session ends as skipped
+        and is listed by GET /workflows with status skipped, the repository's existing
+        contracts/architecture.md (and contracts/architecture.json) are kept unchanged
+        and are the architecture given to the API design and coding agents, and the
+        task flow starts its pending API design child (api_design_session_id). 409
+        for a new service, while drafting or a turn is running, or once the session
+        is finalized, skipped or failed.
       tags:
       - architecture
       parameters:
@@ -1070,9 +1100,10 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-80
-      - FR-82
       - FR-85
       - FR-86
+      - FR-134
+      - FR-135
   /auth/login:
     post:
       operationId: postAuthLogin
@@ -1614,21 +1645,30 @@ paths:
         mentions the app when it contains @<app slug> or @<app slug>[bot], case-insensitive,
         as a whole word. Answers 202 with no body when the delivery was accepted and
         is acted on: a newly created comment (action created) mentioning the app in
-        an issue_comment or pull_request_review_comment event on an open pull request
-        the app opened for a delivery or an onboarding, by an author with write access,
-        which is then classified and handled; mentions on an onboarding''s pull request
-        are handled exactly like those on a delivery''s and shown in the onboarding''s
-        delivery progress. A clarification is answered right away from the code as
-        last pushed, even while a fix round of the delivery is running or queued.
-        Answers 204 with no body when a correctly signed delivery is ignored: other
-        events, edited or deleted comments, mentions on a closed or merged pull request,
-        and mentions that are not authorised or not on the app''s pull requests. Ignored
-        mentions are only logged on the server and not shown in any delivery. Fix
-        requests already queued when the pull request is closed or merged still run.
-        Answers 401 without acting on it when the delivery is unsigned or wrongly
-        signed, or while the connection has no webhook secret. Answers 409 when the
-        delivery (the same X-GitHub-Delivery) or its comment was already handled,
-        such as a GitHub redelivery.'
+        an issue_comment or pull_request_review_comment event on a pull request the
+        app opened for a delivery or an onboarding, open, merged or closed, by an
+        author with write access, which is then classified and handled; mentions on
+        an onboarding''s pull request are handled exactly like those on a delivery''s
+        and shown in the onboarding''s delivery progress. A clarification or an unclear
+        mention is answered in the pull request right away from the code as last pushed,
+        the same on a merged or closed pull request as on an open one, even while
+        a fix round of the delivery is running or queued. A fix request on a merged
+        or closed pull request (whose delivery or onboarding has completed or been
+        cancelled) still runs a fix round, followed by verification and code review:
+        for a task''s delivery as the delivery child of a new top-level task flow
+        named after the original with a " (fix)" suffix, linking to the original task''s
+        stages; for an onboarding as a new top-level flow of its own. Its ID is appended
+        to the original delivery progress''s fix_flow_ids and recorded as the mention''s
+        fix_flow_id, its result is pushed to a new branch with a new pull request,
+        and the app replies on the old pull request with a link to the new one. Answers
+        204 with no body when a correctly signed delivery is ignored: other events,
+        edited or deleted comments, and mentions that are not authorised or not on
+        the app''s pull requests. Ignored mentions are only logged on the server and
+        not shown in any delivery. Fix requests already queued when the pull request
+        is closed or merged still run. Answers 401 without acting on it when the delivery
+        is unsigned or wrongly signed, or while the connection has no webhook secret.
+        Answers 409 when the delivery (the same X-GitHub-Delivery) or its comment
+        was already handled, such as a GitHub redelivery.'
       tags:
       - github
       parameters:
@@ -1702,6 +1742,7 @@ paths:
       - FR-48
       - FR-49
       - FR-64
+      - FR-141
   /connectors/github/repositories:
     get:
       operationId: getConnectorsGithubRepositories
@@ -2445,7 +2486,9 @@ paths:
       operationId: postOnboardingSessionsBySessionIdDeliveryFindingsAccept
       summary: Accept the onboarding with open review findings
       description: 'As for a delivery: clears the open-findings flag and records findings_acceptance;
-        the publication stays unverified. 409 while no flag is raised.'
+        the publication stays unverified. Also allowed after the pull request was
+        merged or closed, which clears the unresolved findings marker in GET /workflows.
+        409 while no flag is raised.'
       tags:
       - onboarding
       parameters:
@@ -2486,13 +2529,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-142
   /onboarding/sessions/{session_id}/delivery/findings/instructions:
     post:
       operationId: postOnboardingSessionsBySessionIdDeliveryFindingsInstructions
       summary: Give instructions about open review findings
       description: 'As for a delivery: starts a fix round from the instructions, then
-        verification and code review, pushing to the same branch. 409 while no flag
-        is raised.'
+        verification and code review, pushing to the same branch while the pull request
+        is open. Once the pull request was merged or closed, the fix round runs as
+        a new top-level flow of its own (no task flow), whose ID is appended to the
+        delivery progress''s fix_flow_ids, and its result is pushed to a new branch
+        with a new pull request. 409 while no flag is raised.'
       tags:
       - onboarding
       parameters:
@@ -2551,6 +2599,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-142
   /onboarding/sessions/{session_id}/finalize:
     post:
       operationId: postOnboardingSessionsBySessionIdFinalize
@@ -2877,7 +2927,12 @@ paths:
     post:
       operationId: postRequirementsSessions
       summary: Start a requirements session
-      description: Starts the interview in the repository from the intake's answers.
+      description: 'Starts a new top-level task flow (TaskWorkflow, its ID returned
+        as task_flow_id), named by an LLM from the intake''s task, which starts the
+        interview in the repository from the intake''s answers as its requirements
+        child. It creates its other children up front as pending: architecture, API
+        design and delivery for a new service or an API change, delivery for a bugfix
+        or a documentation change.'
       tags:
       - requirements
       requestBody:
@@ -2895,12 +2950,6 @@ paths:
                 $ref: '#/components/schemas/SessionCreated'
         '401':
           description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
           content:
             application/json:
               schema:
@@ -2923,8 +2972,19 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
       x-requirements:
       - NFR-5
+      - FR-125
+      - FR-126
+      - FR-128
+      - FR-129
+      - FR-130
   /requirements/sessions/{session_id}:
     get:
       operationId: getRequirementsSessionsBySessionId
@@ -2975,7 +3035,6 @@ paths:
       - FR-52
       - FR-54
       - FR-55
-      - FR-81
       - FR-118
       - FR-119
       - FR-120
@@ -3152,7 +3211,10 @@ paths:
       summary: Accept the delivery with open review findings
       description: Clears the open-findings flag, keeps the pushed delivery as it
         is and records findings_acceptance (when and by whom) in the delivery progress.
-        The publication stays marked as unverified. 409 while no flag is raised.
+        The publication stays marked as unverified. Also allowed after the pull request
+        was merged or closed; the unresolved findings marker (unresolved_findings
+        in GET /workflows) then disappears from both the delivery and its task flow.
+        409 while no flag is raised.
       tags:
       - requirements
       parameters:
@@ -3195,15 +3257,23 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-30
+      - FR-142
+      - FR-143
   /requirements/sessions/{session_id}/delivery/findings/instructions:
     post:
       operationId: postRequirementsSessionsBySessionIdDeliveryFindingsInstructions
       summary: Give instructions about open review findings
       description: Starts a fix round from the instructions, then verification and
-        code review, pushing the result to the same branch. The instructions are recorded
-        on the review round they start. If verification fails for good, verification_status
-        becomes error, the branch keeps the earlier unverified push and the flag stays
-        raised. 409 while no flag is raised.
+        code review. While the delivery's pull request is open, the result is pushed
+        to the same branch. The instructions are recorded on the review round they
+        start. If verification fails for good, verification_status becomes error,
+        the branch keeps the earlier unverified push and the flag stays raised. Once
+        the pull request was merged or closed (the flow completed or was cancelled),
+        the fix round runs as the delivery child of a new top-level task flow named
+        after the original with a " (fix)" suffix, which links to the original task's
+        stages; its ID is appended to the delivery progress's fix_flow_ids, and its
+        result is pushed to a new branch with a new pull request. 409 while no flag
+        is raised.
       tags:
       - requirements
       parameters:
@@ -3264,6 +3334,8 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-30
+      - FR-113
+      - FR-142
   /requirements/sessions/{session_id}/document:
     get:
       operationId: getRequirementsSessionsBySessionIdDocument
@@ -3305,14 +3377,18 @@ paths:
       operationId: postRequirementsSessionsBySessionIdFinalize
       summary: Finalize the requirements session
       description: Writes the requirements document; the session is completed once
-        it is ready. A new service or an API change on a repository then starts its
-        architecture session by itself (architecture_session_id), no longer the API
-        design. An API change, bugfix or documentation task is specified against the
-        repository's contract in contracts/, which must include contracts/architecture.md
-        and contracts/architecture.json; 409 when the contract is missing or unreadable,
-        including when either architecture file is missing. The coding agents of a
-        bugfix or documentation delivery receive the repository's existing contracts/architecture.md
-        and contracts/architecture.json read-only, as context, and never change them.
+        it is ready, and the task flow's name is rewritten by the LLM from the finalized
+        requirements. For a new service or an API change on a repository, the task
+        flow then starts its pending architecture child (architecture_session_id),
+        which drafts the architecture at once. An API change, bugfix or documentation
+        task is specified against the repository's contract in contracts/, which must
+        include contracts/architecture.md and contracts/architecture.json; 409 when
+        the contract is missing or unreadable, including when either architecture
+        file is missing. The coding agents of a bugfix or documentation delivery receive
+        the repository's existing contracts/architecture.md and contracts/architecture.json
+        read-only, as context, and never change them. When the document is written
+        because the session was idle for a day, no stage is started and the task flow's
+        pending children close as skipped.
       tags:
       - requirements
       parameters:
@@ -3355,14 +3431,20 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-78
-      - FR-81
       - FR-85
       - FR-92
+      - FR-126
+      - FR-128
+      - FR-133
   /requirements/sessions/{session_id}/fork:
     post:
       operationId: postRequirementsSessionsBySessionIdFork
       summary: Fork the session
-      description: Starts a new session with the conversation up to the given message.
+      description: Starts a new session with the conversation up to the given message,
+        in a new top-level task flow of its own (task_flow_id) named after the original
+        with a " (fork)" suffix, with pending children for the stages after requirements;
+        the original task flow and its children are left unchanged. 409 when the session's
+        flow has completed or been cancelled.
       tags:
       - requirements
       parameters:
@@ -3391,12 +3473,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
         '404':
           description: Not Found
           content:
@@ -3415,6 +3491,16 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-112
+      - FR-114
+      - FR-137
   /requirements/sessions/{session_id}/generation/retry:
     post:
       operationId: postRequirementsSessionsBySessionIdGenerationRetry
@@ -3599,27 +3685,35 @@ paths:
     get:
       operationId: getWorkflows
       summary: List workflow executions
-      description: Newest first, 50 per page. type OnboardingWorkflow lists onboardings,
-        whose workflow_id is the onboarding's session_id, as RequirementsWorkflow
-        lists requirements sessions and ArchitectureWorkflow lists architecture sessions.
-        Every execution also carries repository, branch and onboarding_id, each null
-        when it does not apply; the existing fields keep their names and meaning.
-        The optional repository, branch and onboarding_id filters combine with type
-        and with each other (all must match); executions whose field is null never
-        match a filter on it. The repository filter is compared case-insensitively,
+      description: 'Newest first, 50 per page. type TaskWorkflow lists only task flows
+        (the top-level flow of each task, not RequirementsWorkflow executions); type
+        OnboardingWorkflow lists onboardings, whose workflow_id is the onboarding''s
+        session_id, as RequirementsWorkflow lists requirements sessions and ArchitectureWorkflow
+        lists architecture sessions. Every execution also carries repository, branch,
+        onboarding_id, name, linked, waiting_for_user and unresolved_findings, each
+        null when it does not apply; the existing fields keep their names and meaning,
+        and status additionally takes the values pending and skipped for stages of
+        a task flow. The optional repository, branch and onboarding_id filters combine
+        with type and with each other (all must match); executions whose field is
+        null never match a filter on it. The repository filter is compared case-insensitively,
         as on GitHub; the branch and onboarding_id filters must match exactly. A malformed
         filter value (a repository that is not owner/name, an empty branch, or an
         onboarding_id not of the form onboarding-session- followed by 32 hex digits)
         answers 422 with a detail, like an invalid type or page_token. Pass the same
-        filters with page_token when continuing. Executions started before this change,
-        which have no recorded repository, branch or onboarding ID, are deleted from
-        the namespace when the change is deployed (the instance has no users yet),
-        so they are not listed. top_level=true lists only the flows without a parent,
-        and parent=<workflow_id> only the children of one (and its session's delivery
-        runs); they cannot be combined. An ArchitectureWorkflow is a child of its
-        requirements session, and the ApiDesignWorkflow an architecture session starts
-        is also a child of that requirements session, so parent=<requirements workflow_id>
-        lists both.
+        filters with page_token when continuing. top_level=true lists only executions
+        without a parent: task flows, onboardings, chats and the requirements flows
+        started before task flows existed; no stage of a task (requirements, architecture,
+        API design or delivery, including a delivery started again on its own) is
+        ever top-level. parent=<workflow_id> lists only the direct children of that
+        execution: for a task flow, its requirements, architecture, API design and
+        delivery children (including a delivery started again on its own) and, for
+        a forked or fix-round task flow, the original task''s earlier stages it links
+        to, with linked true; parent=<a stage''s workflow_id> never lists another
+        stage of the task (a requirements or API design session lists none, a delivery
+        its code generation and stage workflows). For a requirements flow started
+        before task flows existed, parent lists its children and its session''s delivery
+        runs as before. parent and top_level cannot be combined; an empty or malformed
+        parent, or parent with top_level, answers 422.'
       tags:
       - workflows
       parameters:
@@ -3628,7 +3722,7 @@ paths:
         required: false
         schema:
           type: string
-        description: A workflow type to list only.
+        description: A workflow type to list only, such as TaskWorkflow.
       - name: page_token
         in: query
         required: false
@@ -3661,16 +3755,17 @@ paths:
         required: false
         schema:
           type: string
-        description: Only the children of this workflow execution, together with the
-          runs of its delivery (delivery- followed by the ID); 422 when empty or malformed,
-          or combined with top_level.
+        description: Only the direct children of this workflow execution and, for
+          a forked or fix-round task flow, the earlier stages it links to (linked
+          true); 422 when empty or malformed, or combined with top_level.
       - name: top_level
         in: query
         required: false
         schema:
           type: boolean
-        description: true lists only executions without a parent workflow; a DeliveryWorkflow
-          is never listed, as it is listed under its session.
+        description: 'true lists only executions without a parent workflow: task flows,
+          onboardings, chats and requirements flows started before task flows existed;
+          a stage of a task is never listed.'
       responses:
         '200':
           description: OK
@@ -3704,11 +3799,19 @@ paths:
       - FR-73
       - FR-74
       - NFR-7
-      - FR-76
-      - FR-87
       - FR-89
       - FR-90
-      - FR-91
+      - FR-125
+      - FR-127
+      - FR-128
+      - FR-129
+      - FR-131
+      - FR-132
+      - FR-135
+      - FR-136
+      - FR-139
+      - FR-140
+      - FR-143
 security:
 - bearer: []
 components:
@@ -4062,6 +4165,12 @@ components:
       properties:
         session_id:
           type: string
+        task_flow_id:
+          type: string
+          description: 'The workflow_id of the top-level task flow that holds the
+            session: the new task flow started by POST /requirements/sessions or by
+            a fork of a requirements, architecture or API design session. Absent for
+            other responses.'
       required:
       - session_id
     MessageInput:
@@ -4240,27 +4349,36 @@ components:
           type: object
         contract_commit:
           type: string
+        task_flow_id:
+          type: string
+          description: The workflow_id of the top-level task flow (TaskWorkflow) the
+            session is a child of. Null only for sessions started before task flows
+            existed. The delivery of a bugfix or documentation task, which the task
+            flow starts once the requirements are finalized, is found with GET /workflows?parent=<task_flow_id>;
+            no separate delivery ID is returned.
         architecture_session_id:
           type: string
-          description: 'The architecture session the session started by itself once
-            the user generated the document of a new service or an API change; it
-            drafts the architecture at once, as a child of the session, and later
-            starts the API design. Null until then, for any other kind of task, for
-            a session without a repository, and for one whose document was written
-            because it expired. Replaces api_design_session_id, which is no longer
-            returned: the API design is found through the architecture session.'
+          description: The architecture session the task flow started from its pending
+            architecture child once the user generated the document of a new service
+            or an API change; it drafts the architecture at once, as a child of the
+            task flow (task_flow_id). Null until then, for any other kind of task,
+            for a session without a repository, and for one whose document was written
+            because it was idle for a day (its later stages are then skipped). The
+            API design is found through the architecture session.
         delivery:
           type: object
-          description: Progress of the delivery of a bugfix or documentation task.
-            A bugfix's progress also holds reviews (ReviewRound list), review_error,
-            the open_findings flag, findings_acceptance (FindingsAcceptance), the
-            reviewing and findings_open verification_status values and the publication
-            (RepositoryPublication) with its verified flag, the first 20 open findings
-            its commit message lists and findings_count, as in ApiDesignSession. Every
-            delivery's progress also holds pull_request_status and, once a pushed
-            delivery's pull request is open, pull_request (PullRequest), pull_request_error,
-            pull_request_text_error, and mentions (PullRequestMention list) of the
-            app on that pull request, as in ApiDesignSession.
+          description: Progress of the delivery of a bugfix or documentation task,
+            which runs as the delivery child of the task flow. A bugfix's progress
+            also holds reviews (ReviewRound list), review_error, the open_findings
+            flag, findings_acceptance (FindingsAcceptance), the reviewing and findings_open
+            verification_status values and the publication (RepositoryPublication)
+            with its verified flag, the first 20 open findings its commit message
+            lists and findings_count, as in ApiDesignSession. Every delivery's progress
+            also holds pull_request_status and, once a pushed delivery's pull request
+            is open, pull_request (PullRequest), pull_request_error, pull_request_text_error,
+            mentions (PullRequestMention list) of the app on that pull request and
+            fix_flow_ids (the new task flows started by fix rounds after the flow
+            closed), as in ApiDesignSession.
       required:
       - session_id
       - status
@@ -4285,11 +4403,18 @@ components:
           - failed
         source_session_id:
           type: string
+          description: The requirements session of the task.
+        task_flow_id:
+          type: string
+          description: The workflow_id of the top-level task flow (TaskWorkflow) the
+            design is a child of; the delivery started when the design is finalized
+            is a child of the same task flow. Null only for designs started before
+            task flows existed.
         architecture_session_id:
           type: string
-          description: The architecture session that started this design when it was
-            finalized or skipped; the design remains a child of the requirements session
-            (source_session_id).
+          description: The architecture session whose finalization or confirmed skip
+            made the task flow start this design; both are children of the task flow
+            (task_flow_id).
         architecture:
           type: string
           description: 'The architecture the design and the delivery''s coding agents
@@ -4456,6 +4581,18 @@ components:
             or reply it led to. Fix rounds a mention starts are recorded in reviews
             like rounds started by instructions, with the comment's text as their
             instructions.
+        fix_flow_ids:
+          type: array
+          items:
+            type: string
+          description: 'The workflow_ids of the new top-level flows started by fix
+            rounds after this delivery''s flow completed or was cancelled, oldest
+            first: one per instructions given about its open review findings and per
+            fix request mentioned on its closed or merged pull request. For a task''s
+            delivery each is a new TaskWorkflow (named after the original with a "
+            (fix)" suffix) that holds the fix delivery as its child and links to the
+            original task''s stages; for an onboarding, the fix round''s own top-level
+            flow. Empty or absent while none was started.'
       required:
       - session_id
       - status
@@ -4534,12 +4671,26 @@ components:
           type: string
         workflow_type:
           type: string
+          description: Includes TaskWorkflow, the top-level flow of a task started
+            by a new requirements interview, a fork of a requirements, architecture
+            or API design session, or a fix round on a closed task's delivery.
         status:
           type: string
+          description: The Temporal status in lower case (running, completed, cancelled,
+            ...), except that a stage child of a task flow that was created but still
+            waits for the stages it depends on is listed as pending, and one that
+            will never run (such as a confirmed architecture skip, or the stages after
+            a requirements session whose document was written because it was idle
+            for a day) as skipped. An open task flow is running; it closes with its
+            delivery child's status (cancelled when the delivery was skipped) once
+            every child, linked earlier stages included, has closed.
         task_queue:
           type: string
         parent_workflow_id:
           type: string
+          description: For a stage of a task, the task flow's workflow_id. For a linked
+            earlier stage listed under a forked or fix-round task flow, still its
+            own task flow.
         start_time:
           type: string
           format: date-time
@@ -4550,15 +4701,15 @@ components:
           $ref: '#/components/schemas/RepositorySelection'
           description: Always present. The repository the execution works in, as in
             the session's repository (provider, repository_id, full_name, html_url,
-            private and the source branch), for OnboardingWorkflow, RequirementsWorkflow,
-            ArchitectureWorkflow, ApiDesignWorkflow and DeliveryWorkflow executions,
-            and for CodegenWorkflow executions the repository of the delivery that
-            started them; null for any other execution.
+            private and the source branch), for TaskWorkflow, OnboardingWorkflow,
+            RequirementsWorkflow, ArchitectureWorkflow, ApiDesignWorkflow and DeliveryWorkflow
+            executions, and for CodegenWorkflow executions the repository of the delivery
+            that started them; null for any other execution.
         branch:
           type: string
           description: Always present. The branch the execution works in (the source
             branch the session checked out, not a branch the delivery pushes; the
-            same as repository.branch), for OnboardingWorkflow, RequirementsWorkflow,
+            same as repository.branch), for TaskWorkflow, OnboardingWorkflow, RequirementsWorkflow,
             ArchitectureWorkflow, ApiDesignWorkflow and DeliveryWorkflow executions,
             and for CodegenWorkflow executions the branch of the delivery that started
             them; null for any other execution.
@@ -4568,6 +4719,33 @@ components:
             was started for: the OnboardingWorkflow''s own workflow_id, or the onboarding
             that started a DeliveryWorkflow or CodegenWorkflow execution; null for
             an execution not started for an onboarding.'
+        name:
+          type: string
+          description: 'Always present. For a TaskWorkflow, its current short name:
+            written by an LLM from the intake''s task at start and rewritten from
+            the finalized requirements; a task flow started by a fork or a fix round
+            copies the original task''s name with a " (fork)" or " (fix)" suffix.
+            Null for any other execution.'
+        linked:
+          type: boolean
+          description: Always present. True when the execution is listed under parent=<task
+            flow> as an earlier stage of another task that this forked or fix-round
+            task flow links to, not as its own child; false otherwise.
+        waiting_for_user:
+          type: boolean
+          description: Always present. Whether the flow waits for the user (unanswered
+            interviewer questions, a coding agent's questions, open review findings,
+            a skip proposal or a contract decision); for a task flow, whether any
+            of its children does. Always false for a closed flow. Null for executions
+            started before this change and for executions that cannot wait for the
+            user.
+        unresolved_findings:
+          type: boolean
+          description: Always present. Whether the flow's delivery has open review
+            findings that were not accepted; for a task flow, whether its delivery
+            child has. Stays true after the flow closed until the findings are accepted.
+            Null for executions started before this change and for executions without
+            a delivery.
       required:
       - workflow_id
       - run_id
@@ -4783,7 +4961,16 @@ components:
         round:
           type: integer
           description: The first review round of the fix round the mention started,
-            as numbered in reviews.
+            as numbered in reviews. Absent for a fix round that runs in a new flow
+            (see fix_flow_id).
+        fix_flow_id:
+          type: string
+          description: 'The workflow_id of the new top-level flow the mention''s fix
+            request started because the delivery''s flow had completed or been cancelled
+            (merged or closed pull request): a new TaskWorkflow holding the fix delivery
+            as its child for a task''s delivery, or the fix round''s own top-level
+            flow for an onboarding. Also listed in fix_flow_ids. Absent for any other
+            mention.'
         reply_url:
           type: string
           format: uri
@@ -4958,11 +5145,12 @@ components:
             (including a coding agent''s question whether a failing test reveals a
             bug in the existing code, which waits for an answer without a timeout),
             reviews, review_error, open_findings, findings_acceptance, pull_request_status,
-            pull_request, pull_request_error, pull_request_text_error and mentions.
-            When the existing code was changed after the user confirmed a bug, the
-            result is still verified as usual once the tests pass, and the pushed
-            commit''s message and the pull request''s description say that the existing
-            code was changed. For an architecture-only onboarding, verification_status
+            pull_request, pull_request_error, pull_request_text_error, mentions and
+            fix_flow_ids (the fix rounds'' own top-level flows started after the onboarding
+            closed). When the existing code was changed after the user confirmed a
+            bug, the result is still verified as usual once the tests pass, and the
+            pushed commit''s message and the pull request''s description say that
+            the existing code was changed. For an architecture-only onboarding, verification_status
             is not_applicable, reviews stay empty and open_findings is never raised;
             only the publication of contracts/architecture.md and contracts/architecture.json
             and its pull request are reported.'
@@ -5039,7 +5227,14 @@ components:
             skipped the stage.
         source_session_id:
           type: string
-          description: The requirements session that started this architecture session.
+          description: The requirements session of the task whose finalized requirements
+            this architecture is drafted from (a sibling under the same task flow,
+            or the linked earlier stage of a forked task flow).
+        task_flow_id:
+          type: string
+          description: The workflow_id of the top-level task flow (TaskWorkflow) the
+            session is a child of. Null only for sessions started before task flows
+            existed.
         kind:
           type: string
           enum:
@@ -5100,8 +5295,9 @@ components:
           description: What must be settled before the architecture can be finalized.
         api_design_session_id:
           type: string
-          description: The API design this session started when it was finalized or
-            skipped, as a child of the requirements session; null until then.
+          description: The API design the task flow started from its pending API design
+            child when this session was finalized or its skip confirmed, a child of
+            the task flow (task_flow_id); null until then.
       required:
       - session_id
       - status

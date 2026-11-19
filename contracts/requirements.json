@@ -531,14 +531,6 @@
     "title": "Inapplicable new fields are null"
   },
   {
-    "category": "functional",
-    "description": "GET /workflows takes top_level=true to list only executions without a parent (a session's delivery, even one started again on its own, is never top-level), and parent=<workflow_id> to list only the children of that execution together with the session's delivery runs. They combine with the other filters; parent with top_level, or an empty or malformed parent, answers 422.",
-    "id": "FR-76",
-    "priority": "must",
-    "rationale": "The Flows page lists top-level flows and expands one into its children.",
-    "title": "List top-level flows and a flow's children"
-  },
-  {
     "category": "non_functional",
     "description": "GET /workflows keeps its existing fields (workflow_id, run_id, workflow_type, status, task_queue, parent_workflow_id, start_time, close_time, next_page_token) with their current names and meaning; the change only adds fields.",
     "id": "NFR-7",
@@ -569,22 +561,6 @@
     "priority": "must",
     "rationale": "User chose: the LLM proposes skipping and the user confirms; skipping is allowed only for an API change.",
     "title": "LLM proposes skipping, user confirms (API change only)"
-  },
-  {
-    "category": "functional",
-    "description": "When the user generates the requirements document of a new service or an API change on a repository, the requirements session starts that task's architecture session, which drafts the architecture at once; GET /requirements/sessions/{session_id} returns its ID as architecture_session_id and the web client opens it from there. A session whose document was written because it was idle for a day starts none. The requirements session no longer starts the API design itself.",
-    "id": "FR-81",
-    "priority": "must",
-    "rationale": "Replaces FR-77: user chose that the requirements session starts the architecture session.",
-    "title": "Requirements start the architecture session"
-  },
-  {
-    "category": "functional",
-    "description": "Finalizing the architecture session, or confirming that its stage is skipped, starts the task's API design session, which drafts the API at once; the architecture session returns its ID as api_design_session_id. An API design is never started by hand: there is no POST /api-design/sessions, and the only other design of the same task is a fork of one.",
-    "id": "FR-82",
-    "priority": "must",
-    "rationale": "Replaces FR-77's hand-off: user chose that finalizing or skipping the architecture starts the API design.",
-    "title": "Architecture finalized or skipped starts the API design"
   },
   {
     "category": "functional",
@@ -620,14 +596,6 @@
   },
   {
     "category": "functional",
-    "description": "On the Flows page the architecture session appears as a child flow of its requirements session, opens in the panel, and is highlighted as waiting for the user while it has unanswered questions or a skip proposal to confirm.",
-    "id": "FR-87",
-    "priority": "must",
-    "rationale": "User chose a child flow of the requirements session, highlighted while waiting, including a skip proposal.",
-    "title": "Architecture stage on the Flows page"
-  },
-  {
-    "category": "functional",
     "description": "Forking an architecture session whose API design has already started answers 409.",
     "id": "FR-88",
     "priority": "must",
@@ -649,14 +617,6 @@
     "priority": "must",
     "rationale": "User chose to offer the architecture workflow as a filter.",
     "title": "Architecture filter on the Flows page"
-  },
-  {
-    "category": "functional",
-    "description": "On the Flows page, the API design session started by an architecture session appears as a child flow of the requirements session, next to the architecture session, and GET /workflows?parent=<requirements workflow_id> includes it.",
-    "id": "FR-91",
-    "priority": "must",
-    "rationale": "User chose to keep the API design next to the architecture session under the requirements session.",
-    "title": "API design stays a child of the requirements session"
   },
   {
     "category": "functional",
@@ -788,14 +748,6 @@
   },
   {
     "category": "functional",
-    "description": "When an authorised mention asking for a fix arrives on a pull request whose delivery or onboarding has already completed or been cancelled (the pull request was merged or closed), a new fix round still runs as a new top-level flow of its own on the Flows page, followed by verification and code review; its result is pushed to a new branch, a new pull request is opened from that branch, and the app replies on the old pull request with a link to the new one.",
-    "id": "FR-108",
-    "priority": "must",
-    "rationale": "User chose: new branch, new pull request linked from the old one, shown as a new top-level flow.",
-    "title": "Fix request on a closed flow's pull request uses a new branch"
-  },
-  {
-    "category": "functional",
     "description": "When a comment on a pull request mentions the GitHub App and asks for a fix, the comment's text is passed to a new round of fixes, followed by verification and code review; while the pull request is open, the result is pushed to the pull request's branch, as with the user's instructions on open review findings.",
     "id": "FR-109",
     "priority": "must",
@@ -809,14 +761,6 @@
     "priority": "must",
     "rationale": "User chose: the flow closes and the flag stays visible as unresolved. A closed flow gets a marker only and is not highlighted as waiting.",
     "title": "Open review findings stay visible after the flow closes"
-  },
-  {
-    "category": "functional",
-    "description": "On a delivery or onboarding whose pull request was merged or closed with its open-review-findings flag still raised, the user can still accept the findings, which clears the flag and the unresolved findings marker. The user can also give instructions about them. The instructions start a new fix round as a new top-level flow on the Flows page, followed by verification and code review. Its result is pushed to a new branch, and a new pull request is opened from that branch.",
-    "id": "FR-111",
-    "priority": "must",
-    "rationale": "User: on a closed flow, accepting still clears the flag and instructions start a new flow on a new branch.",
-    "title": "Act on open review findings of a closed flow"
   },
   {
     "category": "functional",
@@ -929,5 +873,157 @@
     "priority": "must",
     "rationale": "User chose to also recognise lowercase forms and forms without the dash.",
     "title": "Recognised forms of requirement IDs"
+  },
+  {
+    "category": "functional",
+    "description": "Starting a new requirements interview starts a separate top-level flow for the task, and the task's requirements, architecture, API design and delivery flows are all its direct children; none of them is a child of another of these flows.",
+    "id": "FR-125",
+    "priority": "must",
+    "rationale": "User: Requirements as the single top-level flow with the other stages as its children looks bad in the UI and is not logical.",
+    "title": "Top-level task flow"
+  },
+  {
+    "category": "functional",
+    "description": "Each child flow of the task flow is created as soon as it is known that the task needs it, and starts working only after the flows it depends on have finished (for example, the architecture flow waits for the requirements flow).",
+    "id": "FR-126",
+    "priority": "must",
+    "rationale": "User: create the flows immediately once they are known to be needed; start them only after the required flows finish.",
+    "title": "Child flows created as soon as they are known to be needed"
+  },
+  {
+    "category": "functional",
+    "description": "After the API design is finalized, the delivery flow runs as a child of the task's top-level flow, not of the API design session.",
+    "id": "FR-127",
+    "priority": "must",
+    "rationale": "User: delivery should start under the top-level flow, not under API design as today.",
+    "title": "Delivery is a child of the task flow"
+  },
+  {
+    "category": "functional",
+    "description": "When the top-level task flow starts, an LLM writes its short name from the intake's \"what needs to be done\", and once the requirements are finalized the LLM updates the name from the finalized requirements; the Flows page shows the current name.",
+    "id": "FR-128",
+    "priority": "must",
+    "rationale": "User chose: an LLM writes it at start and updates it once the requirements are finalized.",
+    "title": "Task flow named after the change"
+  },
+  {
+    "category": "functional",
+    "description": "A child flow that has been created but is still waiting for the flows it depends on is listed by GET /workflows and on the Flows page with a new \"pending\" status.",
+    "id": "FR-129",
+    "priority": "must",
+    "rationale": "User chose a new \"pending\" status for created but not yet started flows.",
+    "title": "Pending status for child flows not yet started"
+  },
+  {
+    "category": "functional",
+    "description": "When the task flow starts, it creates the requirements, architecture, API design and delivery child flows for a new service or an API change, and the requirements and delivery child flows for a bugfix or a documentation change.",
+    "id": "FR-130",
+    "priority": "must",
+    "rationale": "User chose which children are created up front for each kind.",
+    "title": "Children created up front per task kind"
+  },
+  {
+    "category": "functional",
+    "description": "GET /workflows takes top_level=true to list only executions without a parent, and parent=<workflow_id> to list only the direct children of that execution; for a task flow these are its requirements, architecture, API design and delivery flows (including a delivery started again on its own), and parent=<a stage's workflow_id> never lists another stage of the task. They combine with the other filters; parent with top_level, or an empty or malformed parent, answers 422.",
+    "id": "FR-131",
+    "priority": "must",
+    "rationale": "Replaces FR-76: user chose that all stages are listed only under the task flow.",
+    "title": "List top-level flows and a flow's direct children"
+  },
+  {
+    "category": "functional",
+    "description": "On the Flows page the architecture and API design sessions appear as child flows of the task flow, next to its requirements and delivery flows, open in the panel, and the architecture session is highlighted as waiting for the user while it has unanswered questions or a skip proposal to confirm.",
+    "id": "FR-132",
+    "priority": "must",
+    "rationale": "Replaces FR-87 and FR-91: stages are children of the task flow, not of the requirements session.",
+    "title": "Architecture and API design on the Flows page"
+  },
+  {
+    "category": "functional",
+    "description": "When the user generates the requirements document of a new service or an API change on a repository, the task flow starts its pending architecture child, which drafts the architecture at once; GET /requirements/sessions/{session_id} returns its ID as architecture_session_id together with the task flow's ID, and the web client opens the architecture session from there. When the document was written because the session was idle for a day, no stage is started.",
+    "id": "FR-133",
+    "priority": "must",
+    "rationale": "Replaces FR-81: user chose that the task flow starts each pending child, while sessions keep returning the next session's ID as well as the task flow's ID.",
+    "title": "Task flow starts the architecture stage"
+  },
+  {
+    "category": "functional",
+    "description": "When the architecture session is finalized, or its skip is confirmed, the task flow starts its pending API design child, which drafts the API at once; the architecture session returns its ID as api_design_session_id together with the task flow's ID. An API design is never started by hand: there is no POST /api-design/sessions, and the only other design of the same task is a fork of one.",
+    "id": "FR-134",
+    "priority": "must",
+    "rationale": "Replaces FR-82: user chose that the task flow starts each pending child, with the next session's ID still returned.",
+    "title": "Task flow starts the API design stage"
+  },
+  {
+    "category": "functional",
+    "description": "A pending child flow that will never run, such as an architecture stage whose skip was confirmed or the stages after a requirements session whose document was written because it was idle for a day, closes with a new \"skipped\" status, shown by GET /workflows and on the Flows page.",
+    "id": "FR-135",
+    "priority": "must",
+    "rationale": "User chose a \"skipped\" status.",
+    "title": "Skipped status for children that will never run"
+  },
+  {
+    "category": "functional",
+    "description": "The top-level task flow stays open until every one of its child flows has closed, and then closes with the status of its delivery child (completed when the pull request was merged, cancelled when it was closed without merging); when its delivery child was skipped, the task flow closes as cancelled.",
+    "id": "FR-136",
+    "priority": "must",
+    "rationale": "User chose: the task flow takes the delivery's status, and is cancelled when the task ends without a delivery.",
+    "title": "Task flow closes with its delivery's status"
+  },
+  {
+    "category": "functional",
+    "description": "Forking a requirements, architecture or API design session starts a new top-level task flow of its own, which holds the forked session, links to the original task's earlier stages and pending children for the stages after the forked one; the original task flow and its children are left unchanged.",
+    "id": "FR-137",
+    "priority": "must",
+    "rationale": "User chose: every fork starts a new task flow with the forked session, links to the earlier stages and pending later stages.",
+    "title": "A fork starts a new task flow"
+  },
+  {
+    "category": "functional",
+    "description": "Onboardings keep their current flow structure: an OnboardingWorkflow stays a top-level flow with its own delivery and code generation children and gets no task flow.",
+    "id": "FR-138",
+    "priority": "must",
+    "rationale": "User chose: onboarding stays as it is.",
+    "title": "Onboarding flows unchanged"
+  },
+  {
+    "category": "functional",
+    "description": "The task flow is a new workflow type whose executions in GET /workflows include its name, repository and branch; the Flows page has no separate filter for it, and its Requirements filter lists only task flows, not RequirementsWorkflow executions, which are reached by opening their task flow.",
+    "id": "FR-139",
+    "priority": "must",
+    "rationale": "User chose a new workflow type listed by the Requirements filter, which lists only task flows.",
+    "title": "Task flow in GET /workflows and the Flows page"
+  },
+  {
+    "category": "functional",
+    "description": "GET /workflows?parent=<forked task flow> lists the original task's earlier stages that the fork links to as children of the forked task flow too, each marked as linked from another task flow; the Flows page shows them with that mark.",
+    "id": "FR-140",
+    "priority": "must",
+    "rationale": "User chose to list linked earlier stages as children, marked as linked from another task flow.",
+    "title": "Forked task flow lists linked earlier stages"
+  },
+  {
+    "category": "functional",
+    "description": "When an authorised mention asking for a fix arrives on a pull request whose delivery or onboarding has already completed or been cancelled (the pull request was merged or closed), a new fix round still runs, followed by verification and code review; its result is pushed to a new branch, a new pull request is opened from that branch, and the app replies on the old pull request with a link to the new one. For a task's delivery, the fix round runs as the delivery child of a new top-level task flow of its own that links to the original task's stages; for an onboarding, it runs as a new top-level flow of its own.",
+    "id": "FR-141",
+    "priority": "must",
+    "rationale": "Replaces FR-108: user chose that a fix round on a closed task's delivery gets a new task flow with the fix delivery as its child and links to the original's stages.",
+    "title": "Fix request on a closed flow's pull request uses a new branch"
+  },
+  {
+    "category": "functional",
+    "description": "On a delivery or onboarding whose pull request was merged or closed with its open-review-findings flag still raised, the user can still accept the findings, which clears the flag and the unresolved findings marker, or give instructions about them. The instructions start a new fix round, followed by verification and code review, whose result is pushed to a new branch with a new pull request opened from it. For a task's delivery, the fix round runs as the delivery child of a new top-level task flow of its own that links to the original task's stages; for an onboarding, it runs as a new top-level flow of its own.",
+    "id": "FR-142",
+    "priority": "must",
+    "rationale": "Replaces FR-111: user chose that a fix round on a closed task's delivery gets a new task flow with links to the original's stages.",
+    "title": "Act on open review findings of a closed flow"
+  },
+  {
+    "category": "functional",
+    "description": "When a task flow's delivery child has unresolved review findings (FR-110), the task flow also shows the \"unresolved findings\" marker on the Flows page, and the marker disappears from both when the findings are accepted.",
+    "id": "FR-143",
+    "priority": "must",
+    "rationale": "User chose that the task flow carries the marker when its delivery has unresolved findings.",
+    "title": "Unresolved findings marker on the task flow"
   }
 ]

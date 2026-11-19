@@ -20,7 +20,8 @@ with workflow.unsafe.imports_passed_through():
     from app.requirements.document import render_requirements_markdown
     from app.temporal.activities import checkout_repository, update_repository_checkout
     from app.temporal.closing import end_cancelled
-    from app.temporal.interview import Interview, assistant_message
+    from app.temporal.flags import FlowFlags
+    from app.temporal.interview import Interview, assistant_message, pending_questions
     from app.temporal.workflows import (
         FLOW_ABANDONED, FLOW_ABANDONED_PATCH, FLOW_CANCELLED, SESSION_IDLE_TIMEOUT, _Delivering,
         expiry_ends_with_status,
@@ -42,7 +43,7 @@ CONTRACT_UNKNOWN = ("The existing contract could not be read, so only replacing 
 
 
 @workflow.defn
-class OnboardingWorkflow(Interview, _Delivering):
+class OnboardingWorkflow(Interview, _Delivering, FlowFlags):
     """One onboarding of an existing repository: the branch is checked out, the user
     confirms replacing a contract, contract tests or Dockerfile it already has, the LLM
     drafts the requirements, the API and the language from the code, and the user reviews
@@ -65,9 +66,21 @@ class OnboardingWorkflow(Interview, _Delivering):
         self._init_delivery()
         # Set when the onboarding expired without activity.
         self._expired = False
+        self._init_flags()
+
+    def _flags(self) -> tuple[bool | None, bool | None]:
+        """Waiting for the user's contract decision, answers to the interviewer's
+        questions, or whatever its delivery waits for; unresolved with its delivery."""
+        own = (self.state.status == "awaiting_confirmation"
+               or (self.state.status == "interviewing"
+                   and bool(pending_questions(self.state.messages))))
+        unresolved = (any(item for _, item in self._children_flags.values())
+                      if self._children_flags else None)
+        return own or self._children_waiting(), unresolved
 
     @workflow.run
     async def run(self, state: OnboardingState) -> dict[str, Any] | None:
+        self._keep_flags()
         if not self.state.checkout:
             await self._check_out()
             if self.state.status == "preparing":
@@ -95,6 +108,7 @@ class OnboardingWorkflow(Interview, _Delivering):
         await workflow.wait_condition(workflow.all_handlers_finished)
         if self.state.status == "completed":
             await self._deliver()
+            await self._close_flags()
             if self._delivery_cancelled:
                 # Its pull request was closed without merging: the onboarding is cancelled.
                 await end_cancelled(FLOW_CANCELLED)
@@ -103,7 +117,9 @@ class OnboardingWorkflow(Interview, _Delivering):
             # The onboarding ended without running its delivery: it failed, was
             # declined or replaced by a fork. It was abandoned, and shows as cancelled.
             # So does one that expired, with the reason in its state.
+            await self._close_flags()
             await end_cancelled(FLOW_ABANDONED)
+        await self._close_flags()
         return None
 
     async def _check_out(self) -> None:
