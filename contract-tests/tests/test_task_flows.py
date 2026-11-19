@@ -7,7 +7,9 @@ import uuid
 
 import pytest
 
-STAGE_TYPES = {"ArchitectureWorkflow", "ApiDesignWorkflow", "DeliveryWorkflow", "CodegenWorkflow"}
+# A delivery or codegen flow may legitimately be top-level (a delivery of a closed pull request
+# fixed by an onboarding, or one from before task flows existed), so only these two are banned.
+STAGE_TYPES = {"ArchitectureWorkflow", "ApiDesignWorkflow"}
 CLOSED = {"completed", "cancelled", "failed", "terminated", "timed_out", "skipped"}
 
 
