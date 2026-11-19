@@ -666,6 +666,23 @@ def is_mention(entry: dict[str, Any], key: tuple[str | None, int]) -> bool:
         comment_type is None or entry['comment_type'] == comment_type)
 
 
+def mention_context(spec: Any, progress: Any) -> dict[str, Any]:
+    """What a reply to a question about the delivery is based on, besides its code."""
+    brief = spec.brief
+    return {
+        'kind': spec.kind,
+        'language': spec.language,
+        'requirements': brief['requirements'] if brief else spec.requirements,
+        'retired': brief['retired'] if brief else [],
+        # The pushed commit the answer reads the code of.
+        'repository': spec.repository,
+        'publication': progress.publication,
+        'verification_status': progress.verification_status,
+        'reviews': progress.reviews[-3:],
+        'open_findings': progress.open_findings,
+    }
+
+
 STOPPED = 'The delivery was stopped before this stage finished.'
 # Marks a mention whose fix round was stopped: the next run of the delivery replies in
 # the pull request with that outcome before the mention is settled.
