@@ -19,7 +19,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from app.config import GENERATED_CODE_DIR
 from app.delivery.models import (
     DELIVERY_CLOSING, FOLLOW_UP_PREFIX, MENTION_HANDLED, OUTCOME_OWED, RETRY_STAGES, DeliveryProgress, DeliveryState, RetryStage, delivery_id, interrupted,
-    restorable_tests,
+    mention_context, restorable_tests,
 )
 from app.delivery import acceptances
 from app.delivery import mentions as mention_history
@@ -853,14 +853,126 @@ async def _handed_before(session_id: str, mention: PullRequestMention) -> bool:
     return found is not None
 
 
+# Identifies the recording of a mention on a closed delivery's pull request that was
+# answered without a flow of its own; a handover of the same comment tried again, such as
+# by the recovery of an interrupted one, finds its own recording and goes on.
+CLOSED_RECORDING = 'closed-delivery'
+CLASSIFY_ATTEMPTS = 3
+
+
+def _closed_recording(mention: PullRequestMention) -> str:
+    return f"{CLOSED_RECORDING}:{mention['comment_type']}:{mention['comment_id']}"
+
+
+async def _handled_on_closed(session_id: str, mention: PullRequestMention) -> bool:
+    """Whether the closed delivery of `session_id` already handled the mention: it has it
+    in its history, other than as an answer of its own that was interrupted before it
+    ended, which a handover tried again carries on."""
+    if not await _handed_before(session_id, mention):
+        return False
+    try:
+        found = await mention_history.find(session_id, mention['comment_type'],
+                                           mention['comment_id'])
+        recorded_by = await mention_history.recording(
+            session_id, mention['comment_type'], mention['comment_id'])
+    except Exception as exc:  # noqa: BLE001 - treated as handled, never answered twice
+        logger.warning('Mention history of session %s not read: %s', session_id, exc)
+        return True
+    interrupted_answer = (recorded_by == _closed_recording(mention) and found is not None
+                          and found.get('status') == 'classifying')
+    return not interrupted_answer
+
+
+async def _classify_closed(session_id: str, mention: PullRequestMention) -> str | None:
+    """How the LLM classifies a mention on a closed delivery's pull request, before
+    anything starts for it; None when it could not be classified."""
+    from app.delivery import mention_activities
+    from temporalio.exceptions import ApplicationError
+    for attempt in range(1, CLASSIFY_ATTEMPTS + 1):
+        try:
+            choice = await mention_activities.classify(session_id, mention.get('body', ''))
+        except Exception as exc:  # noqa: BLE001 - reported as the mention's error
+            logger.warning('Mention %s on the pull request of %s not classified: %s',
+                           mention.get('comment_id'), session_id, exc)
+            if (isinstance(exc, ApplicationError) and exc.non_retryable) \
+                    or attempt == CLASSIFY_ATTEMPTS:
+                return None
+            continue
+        return choice if choice in ('fix', 'clarification', 'unclear') else 'unclear'
+    return None
+
+
+async def _answer_closed(session_id: str, state: DeliveryState, mention: PullRequestMention,
+                         classification: str | None) -> None:
+    """Answer a clarification or unclear mention on a closed delivery's pull request
+    right away in that pull request, from the delivery's code as last pushed, as an open
+    one does, and keep it in the closed delivery's mention history as replied, with no
+    fix flow. MentionHandled when another handover recorded it first."""
+    from app.delivery import mention_activities
+    from app.delivery.flow.mention_rounds import UNCLEAR_REPLY
+    from app.temporal.activities import _github_token
+    body = mention.get('body', '')
+    entry: PullRequestMention = {
+        **{name: value for name, value in mention.items()
+           if name not in ('body', 'fix_flow_id', 'round', OUTCOME_OWED, 'error',
+                           'reply_url')},
+        'classification': classification or 'pending', 'status': 'classifying'}
+    if not await mention_history.add(session_id, {**entry, 'body': body},
+                                     _closed_recording(mention)):
+        raise MentionHandled(MENTION_HANDLED)
+    error = None
+    text = None
+    if classification is None:
+        error = 'The comment could not be classified.'
+    elif classification == 'clarification':
+        try:
+            text = await mention_activities.answer(
+                session_id, body, mention_context(state.spec, state.progress))
+        except Exception as exc:  # noqa: BLE001 - reported as the mention's error
+            logger.warning('Mention %s on the pull request of %s not answered: %s',
+                           mention.get('comment_id'), session_id, exc)
+            error = 'The question could not be answered.'
+    else:
+        text = UNCLEAR_REPLY
+    if error:
+        text = f'Sorry, this could not be done: {error}'
+    pull = state.progress.pull_request
+    full_name = entry.get('repository') or (
+        state.spec.repository['full_name'] if state.spec.repository else None)
+    number = entry.get('pull_number') or (pull['number'] if pull else None)
+    if not full_name or not number:
+        error = error or 'The delivery has no pull request to reply in.'
+    else:
+        try:
+            token, _ = await _github_token()
+            entry['reply_url'] = await mention_activities.post_reply(
+                token, full_name, number, entry['comment_type'],
+                entry.get('reply_to') or entry['comment_id'], entry['author'], text)
+        except Exception as exc:  # noqa: BLE001 - reported as the mention's error
+            logger.warning('Reply in pull request #%s of %s failed: %s', number,
+                           full_name, exc)
+            error = error or (str(getattr(exc, 'message', '') or exc)[-500:]
+                              or 'The reply could not be posted in the pull request.')
+    if error:
+        entry['status'] = 'error'
+        entry['error'] = error
+    else:
+        entry['status'] = 'replied'
+    await mention_history.save(session_id, entry)
+    logger.info('Mention %s on the closed pull request of session %s answered as %s',
+                entry['comment_id'], session_id, entry['classification'])
+
+
 async def receive_mention(session_id: str, mention: PullRequestMention) -> bool:
     """Hand an authorised mention of the app on the delivery's pull request to the
     delivery, which classifies it and replies or queues its fix round. A delivery that
     closed, such as one idle for long, runs again first, changing nothing; concurrent
     mentions that find it closed each hand theirs to the run that one of them started.
     On a delivery whose flow closed with its pull request, the mention goes to the fix
-    flow that carries it on while one runs, or else to a new top-level flow that carries
-    it on, on a new branch. False when the session has no delivery;
+    flow that carries it on while one runs; otherwise it is classified here: a question
+    or an unclear mention is answered in the pull request right away, and only a fix
+    request starts a new top-level flow that carries it on, on a new branch. False when
+    the session has no delivery;
     MentionHandled when it already has the mention."""
     client = await connect_temporal()
     workflow_id = delivery_id(session_id)
@@ -873,6 +985,8 @@ async def receive_mention(session_id: str, mention: PullRequestMention) -> bool:
     # Set once the delivery rejected the mention because its pull request was merged or
     # closed: a reading of 'open' taken before then no longer holds.
     ended = False
+    # How the mention was classified on a closed delivery's pull request, once it was.
+    classification: str | None = None
     for attempt in range(1, MENTION_HANDOVER_ATTEMPTS + 1):
         try:
             description = await client.get_workflow_handle(workflow_id).describe()
@@ -906,11 +1020,19 @@ async def receive_mention(session_id: str, mention: PullRequestMention) -> bool:
                 # every mention, which it classifies and answers or queues itself.
                 target = running
             else:
-                # A new top-level flow carries the closed delivery on, on a new branch:
-                # its delivery classifies the mention, as every delivery does, and runs
-                # its fix round or answers it.
-                if await _handed_before(session_id, mention):
+                # The mention is classified first. A question or an unclear mention is
+                # answered in the pull request right away from the code as last pushed,
+                # as on an open one; only a fix request starts a new top-level flow,
+                # which carries the closed delivery on, on a new branch, and takes it as
+                # already classified.
+                if await _handled_on_closed(session_id, mention):
                     raise MentionHandled(MENTION_HANDLED)
+                if classification is None:
+                    classification = await _classify_closed(session_id, mention) or ''
+                if classification != 'fix':
+                    await _answer_closed(session_id, state, mention, classification or None)
+                    return True
+                mention = {**mention, 'classification': 'fix'}
 
                 def mentioned(follow_up: DeliveryState) -> None:
                     # Its fix round is the comment's, not the closed delivery's findings.
