@@ -12,7 +12,9 @@ from app.requirements.lookup import requirements_session_lookup
 from app.requirements.models import DIRECT_KINDS, RequirementsState, TaskKind
 from app.requirements.prompt import intake_messages, opening_message
 from app.tasks.models import FORK_SUFFIX, TaskFlowState
-from app.tasks.service import derived_name, fork_name_source, new_ids, start_task_flow
+from app.tasks.service import (
+    derived_name, fork_name_source, new_ids, start_task_flow, task_queue_of,
+)
 from app.temporal.client import connect_temporal
 from app.temporal.registry import register
 from app.temporal.sessions import (
@@ -25,8 +27,8 @@ logger = logging.getLogger(__name__)
 async def create_session(
     state: RequirementsState | None = None, *, repository: RepositorySelection | None = None,
     kind: TaskKind | None = None, answers: list[str] | None = None, task: str = "",
-    name: str = "", origin: str = "new",
-) -> dict[str, str]:
+    name: str = "", origin: str = "new", task_queue: str | None = None,
+) -> dict[str, str | None]:
     """Start a new top-level task flow whose requirements stage interviews in `repository`
     from the user's answers to the intake questions of `kind` and their `task`, or from a
     prepared `state` such as a fork. Returns the session's and the task flow's IDs."""
@@ -42,18 +44,19 @@ async def create_session(
     state.task_flow_id = ids["task_flow_id"]
     state.next_session_id = ids["architecture_session_id"]
     client = await connect_temporal()
-    await start_task_flow(ids["task_flow_id"], TaskFlowState(
+    task_flow_id = await start_task_flow(ids["task_flow_id"], TaskFlowState(
         kind=state.kind, repository=state.repository, task=task.strip(), name=name,
         origin=origin,  # type: ignore[arg-type]
         requirements_session_id=session_id,
         architecture_session_id=ids["architecture_session_id"],
         api_design_session_id=ids["api_design_session_id"],
         requirements=state,
-    ), client, TASK_QUEUE, session_id)
+    ), client, task_queue or TASK_QUEUE, session_id)
     await register(session_id)
     logger.info("Started requirements session %s in task flow %s", session_id,
-                ids["task_flow_id"])
-    return {"session_id": session_id, "task_flow_id": ids["task_flow_id"]}
+                task_flow_id)
+    return {"session_id": session_id,
+            **({"task_flow_id": task_flow_id} if task_flow_id else {})}
 
 
 async def start_session(
@@ -97,7 +100,8 @@ async def fork(session_id: str, message_index: int) -> dict[str, str]:
         retired=source.retired,
         repository=source.repository,
         forked_from={"session_id": session_id, "message_index": message_index},
-    ), name=name, origin="fork")
+    ), name=name, origin="fork",
+        task_queue=await task_queue_of(session_id, await connect_temporal()))
     logger.info("Forked requirements session %s after message %d as %s",
                 session_id, message_index, created["session_id"])
     return created

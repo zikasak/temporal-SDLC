@@ -464,7 +464,8 @@ async def _start_fix_task_flow(finished: _Finished, session_id: str, follow_up: 
     brief = state.spec.brief or {}
     requirements = list(brief.get('requirements') or state.spec.requirements or [])
     return await start_fix_flow(finished.client, follow_up, state, original, linked,
-                                fork_name_source(requirements, 'Fix'))
+                                fork_name_source(requirements, 'Fix'),
+                                finished.description.task_queue, delivery_id(follow_up))
 
 
 async def _flagged(session_id: str) -> _Finished:

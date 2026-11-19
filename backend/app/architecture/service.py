@@ -14,7 +14,9 @@ from app.architecture.models import (
 from app.requirements.lookup import source_session_lookup
 from app.config import TASK_QUEUE
 from app.tasks.models import FORK_SUFFIX, TaskFlowState
-from app.tasks.service import derived_name, fork_name_source, new_ids, start_task_flow
+from app.tasks.service import (
+    derived_name, fork_name_source, new_ids, start_task_flow, task_queue_of,
+)
 from app.temporal.client import connect_temporal
 from app.temporal.registry import register
 from app.temporal.sessions import (
@@ -40,7 +42,8 @@ async def get_state(session_id: str) -> ArchitectureState:
     return await handle.query("get_state", result_type=ArchitectureState)
 
 
-async def _start(state: ArchitectureState, original_task_flow_id: str | None) -> dict[str, str]:
+async def _start(state: ArchitectureState, original_task_flow_id: str | None,
+                 task_queue: str | None = None) -> dict[str, str]:
     """Start the session as the first stage of a new top-level task flow, linked to the
     original task's requirements session, with its API design and delivery pending."""
     ids = new_ids()
@@ -53,18 +56,19 @@ async def _start(state: ArchitectureState, original_task_flow_id: str | None) ->
     name = await derived_name(original_task_flow_id,
                               fork_name_source(state.requirements, "Architecture"),
                               FORK_SUFFIX, client)
-    await start_task_flow(ids["task_flow_id"], TaskFlowState(
+    task_flow_id = await start_task_flow(ids["task_flow_id"], TaskFlowState(
         kind=state.kind, repository=state.repository, name=name, origin="fork",
         requirements_session_id=state.source_session_id or None,
         architecture_session_id=session_id,
         api_design_session_id=ids["api_design_session_id"],
         architecture=state,
         linked=[state.source_session_id] if state.source_session_id else [],
-    ), client, TASK_QUEUE, session_id)
+    ), client, task_queue or TASK_QUEUE, session_id)
     await register(session_id)
     logger.info("Started architecture session %s from %s in task flow %s", session_id,
-                state.source_session_id, ids["task_flow_id"])
-    return {"session_id": session_id, "task_flow_id": ids["task_flow_id"]}
+                state.source_session_id, task_flow_id)
+    return {"session_id": session_id,
+            **({"task_flow_id": task_flow_id} if task_flow_id else {})}
 
 
 async def fork_session(session_id: str, message_index: int) -> str:
@@ -107,7 +111,7 @@ async def fork(session_id: str, message_index: int) -> dict[str, str]:
         checkout=None,
         api_design_session_id=None,
         pending=False,
-    ), source.task_flow_id)
+    ), source.task_flow_id, await task_queue_of(session_id, await connect_temporal()))
     logger.info("Forked architecture session %s after message %d as %s",
                 session_id, message_index, created["session_id"])
     return created
