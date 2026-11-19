@@ -1398,8 +1398,10 @@ stopped by the provider's limits), `<id>` being the one the publication branch
 `component-tests` and `documentation`; each commit holds the repository as the session
 started from it with the stage's files in place, as a publication would write them, and
 the commits of a stage are chained and force-pushed. The `wip/` branches are ordinary
-branches: GitHub lists them and runs the CI that triggers on any push; they never touch
-the pull request. Unfinished work saved before it went to a branch, at
+branches: GitHub lists them; they never touch the pull request. Every saved commit says
+`[skip ci]`, so the CI that triggers on a push (GitHub Actions, GitLab, CircleCI, Travis,
+Bitbucket, Azure Pipelines) does not run the unverified work, nor workflows it changed,
+with the repository's secrets. A CI that ignores the marker still runs on these pushes. Unfinished work saved before it went to a branch, at
 `refs/sdlc/<session-id>/<stage>/latest`, is still restored from there.
 
 The commit is made without the LLM, so a stage whose agent failed is saved too. Its

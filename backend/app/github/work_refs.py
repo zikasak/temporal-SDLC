@@ -48,6 +48,11 @@ SAVE_TIMEOUT = 300
 # and such a file, like a crashed process's core dump, is no source.
 MAX_FILE_BYTES = 50 * 1024 * 1024
 STATUS_TRAILER = 'Sdlc-Status'
+# Every saved commit carries it: the `wip/` branches are ordinary branches, and the CI a
+# push triggers must not run unverified agent-written code, nor workflows it may have
+# changed, with the repository's secrets. GitHub Actions, GitLab, CircleCI, Travis,
+# Bitbucket and Azure Pipelines skip a push whose head commit says so.
+SKIP_CI = '[skip ci]'
 _NAME = re.compile(r'[A-Za-z0-9_-]{1,200}')
 
 # Writes a commit message from (stage, status, diff); None leaves it to the fallback.
@@ -203,7 +208,8 @@ async def _save(session_dir: Path, session_id: str, stage: str, tree: Path,
                     logger.info('No LLM commit message for the %s work of %s: %s', stage,
                                 session_id, type(exc).__name__)
             message = message or fallback_message(stage, status, stat)
-            message += f'\n\nSession: {session_id}\n{STATUS_TRAILER}: {status}'
+            message += (f'\n\n{SKIP_CI}\n\nSession: {session_id}\n'
+                        f'{STATUS_TRAILER}: {status}')
             secret, author = await token()
             name, _, email = author.partition('\n')
             identity = {'GIT_AUTHOR_NAME': name, 'GIT_AUTHOR_EMAIL': email,
