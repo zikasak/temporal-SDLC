@@ -264,6 +264,8 @@ async def test_work_is_committed_to_its_branch_and_published_ref_on_the_base_com
     message = _git('log', '-1', '--format=%B', commit, cwd=origin)
     assert message.startswith('Change the printed number\n\nIt prints 2 now.')
     assert 'Sdlc-Status: built' in message
+    # Pushing it to a branch must not run the repository's CI on unverified code.
+    assert '[skip ci]' in message
     assert 'app[bot]' in _git('log', '-1', '--format=%an', commit, cwd=origin)
     assert messages[0][:2] == ('implementation', 'built') and 'new.py' in messages[0][2]
     # The checkout itself is left as it was.
