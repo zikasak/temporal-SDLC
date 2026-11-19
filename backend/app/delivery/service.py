@@ -906,9 +906,8 @@ async def receive_mention(session_id: str, mention: PullRequestMention) -> bool:
                 # every mention, which it classifies and answers or queues itself.
                 target = running
             else:
-                # A new top-level flow carries the closed delivery on, on a new branch:
-                # its delivery classifies the mention, as every delivery does, and runs
-                # its fix round or answers it.
+                # A new top-level flow carries the closed delivery on, on a new branch,
+                # and takes the mention, which it classifies and answers or queues itself.
                 if await _handed_before(session_id, mention):
                     raise MentionHandled(MENTION_HANDLED)
 

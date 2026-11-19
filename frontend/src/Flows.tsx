@@ -302,9 +302,12 @@ function sessionEndpoint(flow: Flow): string | null {
 /** Whether a session waits for the user (the interviewer's or an agent's questions, open
  * review findings, a skip proposal or a contract decision) and whether its delivery has
  * open review findings that were not accepted. */
-function sessionAttention(session: unknown): Attention {
+function sessionAttention(session: unknown, flowType: string): Attention {
   if (!isObject(session)) return { waiting_for_user: false, unresolved_findings: false };
-  const delivery = isObject(session.delivery) ? session.delivery : null;
+  // An API design session reports its delivery's progress as fields of its own; the other
+  // sessions nest it as `delivery`.
+  const delivery = flowType === "ApiDesignWorkflow" ? session
+    : isObject(session.delivery) ? session.delivery : null;
   const unresolved = delivery?.open_findings === true;
   const messages = Array.isArray(session.messages) ? session.messages : [];
   const last = messages[messages.length - 1];
@@ -316,8 +319,54 @@ function sessionAttention(session: unknown): Attention {
   return { waiting_for_user: waiting, unresolved_findings: unresolved };
 }
 
+/** How `flow`'s session shows its flags; null when it cannot be read. */
+async function readSessionAttention(flow: Flow, signal: AbortSignal): Promise<Attention | null> {
+  const endpoint = sessionEndpoint(flow);
+  if (!endpoint) return null;
+  const response = await fetch(endpoint, { signal });
+  const body = await readBody(response);
+  return response.ok ? sessionAttention(body, flow.workflow_type) : null;
+}
+
+// The stages of a task that a top-level requirements session from before task flows
+// started as its own children.
+const stageTypes = ["ArchitectureWorkflow", "ApiDesignWorkflow"];
+
+/** How a flow from before the backend reported its flags stands, as its session shows it,
+ * combined, for a top-level requirements session, with its architecture and API design
+ * stages, which it started as its children; null when the flow's session cannot be read. */
+async function readAttention(flow: Flow, signal: AbortSignal): Promise<Attention | null> {
+  const own = await readSessionAttention(flow, signal);
+  if (!own || flow.workflow_type !== "RequirementsWorkflow" || flow.parent_workflow_id) return own;
+  let stages: Flow[] = [];
+  try {
+    stages = (await fetchChildren(flow.workflow_id, signal)).filter((child) =>
+      stageTypes.includes(child.workflow_type) && !child.linked &&
+      child.status !== "pending" && child.status !== "skipped");
+  } catch {
+    // Its own session's flags stand until its stages can be listed.
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+  }
+  const found = await Promise.all(stages.map(async (child) => {
+    // A stage that reports its flags is taken as the backend reports it.
+    if (child.waiting_for_user !== null && child.unresolved_findings !== null) {
+      return { waiting_for_user: child.waiting_for_user,
+        unresolved_findings: child.unresolved_findings };
+    }
+    try {
+      return await readSessionAttention(child, signal);
+    } catch {
+      return null;
+    }
+  }));
+  return found.reduce<Attention>((combined, item) => item ? {
+    waiting_for_user: combined.waiting_for_user || item.waiting_for_user,
+    unresolved_findings: combined.unresolved_findings || item.unresolved_findings,
+  } : combined, own);
+}
+
 /** The flow with the flags the backend reports, or for a flow from before it did (null),
- * as its session shows them. */
+ * as its session, and those of the stages a requirements session started, show them. */
 function useAttention(flow: Flow, tick: number): Flow {
   const endpoint = flow.waiting_for_user === null || flow.unresolved_findings === null
     ? sessionEndpoint(flow) : null;
@@ -330,10 +379,9 @@ function useAttention(flow: Flow, tick: number): Flow {
       return;
     }
     const controller = new AbortController();
-    fetch(endpoint, { signal: controller.signal })
-      .then(async (response) => {
-        const body = await readBody(response);
-        if (!controller.signal.aborted && response.ok) setDerived(sessionAttention(body));
+    readAttention(flow, controller.signal)
+      .then((attention) => {
+        if (!controller.signal.aborted && attention) setDerived(attention);
       })
       .catch(() => {
         // Shown without highlight or marker until the session can be read.
