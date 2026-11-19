@@ -6,10 +6,10 @@ import dataclasses
 import hashlib
 import logging
 import uuid
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from temporalio.api.enums.v1 import EventType
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowQueryFailedError
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
@@ -23,7 +23,7 @@ from app.temporal.client import connect_temporal
 from app.temporal.execution_fields import (
     TASK_NAME_ATTRIBUTE, execution_fields, task_fields,
 )
-from app.temporal.registry import register
+from app.temporal import registry
 from app.temporal.search_attributes import start_workflow
 
 logger = logging.getLogger(__name__)
@@ -68,15 +68,19 @@ async def task_queue_of(workflow_id: str | None, client: Client | None = None) -
 
 async def start_task_flow(task_flow_id: str, state: TaskFlowState,
                           client: Client | None = None, task_queue: str | None = None,
-                          first_stage: str | None = None) -> str | None:
+                          first_stage: str | None = None,
+                          registrar: Callable[[str], Awaitable[None]] | None = None,
+                          ) -> str | None:
     """Start the task flow; its first stage starts with it. With `first_stage`, wait until
-    that stage exists, so that it can be served at once.
+    that stage exists, so that it can be served at once. `registrar` records the started
+    workflows, the session registry's by default.
 
     When the workers of the queue cannot run task flows (a worker from before them), the
     task flow is ended and the first stage started on its own as a top-level flow, as it
     was then; None is returned for the task flow then."""
     client = client or await connect_temporal()
     task_queue = task_queue or TASK_QUEUE
+    register = registrar or registry.register
     await start_workflow(
         client, TASK_FLOW_TYPE, state, id=task_flow_id, task_queue=task_queue,
         id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
@@ -175,6 +179,10 @@ async def task_flow_state(task_flow_id: str | None,
     try:
         return await client.get_workflow_handle(task_flow_id).query(
             "get_state", result_type=TaskFlowState)
+    except WorkflowQueryFailedError as exc:
+        # Such as a closed task flow that no worker of its queue can replay.
+        logger.warning("State of task flow %s not read: %s", task_flow_id, exc)
+        return None
     except RPCError as exc:
         if exc.status != RPCStatusCode.NOT_FOUND:
             raise
@@ -238,7 +246,8 @@ def fix_task_flow_id(follow_up_session_id: str) -> str:
 async def start_fix_flow(client: Client, follow_up_session_id: str, delivery: Any,
                          original_task_flow_id: str | None, linked: list[str],
                          fallback: str, task_queue: str | None = None,
-                         delivery_workflow_id: str | None = None) -> bool:
+                         delivery_workflow_id: str | None = None,
+                         registrar: Callable[[str], Awaitable[None]] | None = None) -> bool:
     """Start the new task flow of a fix round on a closed task's delivery on
     `task_queue`: it holds the fix delivery (`delivery`, named after
     `follow_up_session_id`, whose workflow is `delivery_workflow_id`) as its child and
@@ -251,7 +260,8 @@ async def start_fix_flow(client: Client, follow_up_session_id: str, delivery: An
         linked=[item for item in linked if item])
     task_flow_id = fix_task_flow_id(follow_up_session_id)
     try:
-        await start_task_flow(task_flow_id, state, client, task_queue, delivery_workflow_id)
+        await start_task_flow(task_flow_id, state, client, task_queue, delivery_workflow_id,
+                              registrar=registrar)
     except WorkflowAlreadyStartedError:
         return False
     return True
