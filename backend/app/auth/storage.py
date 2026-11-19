@@ -77,7 +77,9 @@ async def save_user(login: str, password_hash: str) -> bool:
                 password_hash = EXCLUDED.password_hash, updated_at = now()
             RETURNING created_at = updated_at AS created
         """, (login, password_hash))
-        return (await cursor.fetchone())["created"]
+        row = await cursor.fetchone()
+        assert row is not None  # the upsert returns its row
+        return row["created"]
 
 
 async def remove_user(login: str) -> bool:

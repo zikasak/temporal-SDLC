@@ -3,6 +3,7 @@ import importlib.util
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from langfuse import propagate_attributes
 
@@ -20,7 +21,9 @@ def main() -> int:
         return 0
     source = Path(__file__).with_name('plugins') / 'langfuse-observability/hooks/langfuse_hook.py'
     spec = importlib.util.spec_from_file_location('langfuse_claude_plugin', source)
-    plugin = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None  # a .py file has a loader
+    # The plugin's own module, which this hook patches: its names are known only at run time.
+    plugin: Any = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = plugin
     spec.loader.exec_module(plugin)
     plugin.create_langfuse_client = lambda config: client

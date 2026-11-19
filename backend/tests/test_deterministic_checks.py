@@ -1,5 +1,7 @@
 """Host checks that skip a review agent's run or decide it where they are certain
 (plans/deterministic-checks.md)."""
+# Assertions read optional fields directly: a None there fails the test anyway.
+# pyright: reportOptionalSubscript=false, reportOptionalIterable=false
 import ast
 import itertools
 import json
@@ -88,7 +90,7 @@ async def test_a_later_round_reviews_only_what_changed_or_was_not_judged_clean(
     monkeypatch.setattr(config, 'REVIEW_SKIP_SETTLED', False)
     await round_(previous)
     _, inputs = await round_(previous)
-    assert 'settled_changes' not in inputs and len(inputs['changes']['service']) == 2
+    assert 'settled_changes' not in (inputs or {}) and len(inputs['changes']['service']) == 2
 
 
 async def test_a_file_with_a_finding_is_reviewed_again_though_unchanged(
@@ -187,6 +189,7 @@ def test_the_host_decides_a_seam_only_where_its_diff_is_certain(tmp_path, monkey
     if decided is None:
         assert prepared.decided is None and prepared.changes['service']
     else:
+        assert prepared.decided is not None
         assert [item['target'] for item in prepared.decided] == ['implementation'] * len(decided)
         assert all(text in item['summary'] for text, item in zip(decided, prepared.decided))
 
@@ -266,7 +269,7 @@ def test_a_generated_stub_has_the_codes_signatures_and_is_a_valid_contract(tmp_p
     assert 'Store' in result.stderr
     text = (tmp_path / 'components/app/rooms.pyi').read_text()
     stub = {node.name: node for node in ast.walk(ast.parse(text))
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
     assert ast.unparse(stub['close'].args) == 'self, room: Room, reason: str | None=None'
     assert ast.unparse(stub['__init__'].args) == 'self, store: Any, limit: int=...'
     assert [ast.unparse(item) for item in stub['state'].decorator_list] == ['property']

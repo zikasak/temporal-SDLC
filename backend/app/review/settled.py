@@ -12,6 +12,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 RECORD = 'reviewed.json'
@@ -90,7 +91,7 @@ def write_pending(artifact_dir: Path, part: int, round_id: str, key: str,
         'files': {path: digest(diff) for path, diff in diffs.items()}})
 
 
-def record_run(artifact_dir: Path, part: int, findings: list[dict[str, Any]]) -> None:
+def record_run(artifact_dir: Path, part: int, findings: Sequence[Mapping[str, Any]]) -> None:
     """Record the run noted by `write_pending` as completed with these findings."""
     pending = artifact_dir / PENDING.format(part=part + 1)
     try:

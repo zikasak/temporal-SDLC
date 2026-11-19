@@ -1,7 +1,10 @@
 """Verification of a change with component tests: the conformance check of the changed
 code against its component contract, the runner built with that code, and the run of the
 component tests, in-process and without a network."""
+# Assertions read optional fields directly: a None there fails the test anyway.
+# pyright: reportOptionalMemberAccess=false
 import dataclasses
+from typing import cast
 import io
 import json
 import os
@@ -19,6 +22,7 @@ from app.delivery.models import (
 )
 from app.languages import get_language
 from app.verification import activities
+from app.verification.models import VerificationResult
 
 RUNNER_IMAGE = 'sha256:' + '9' * 64
 CHANGED_IMAGE = 'sha256:' + 'e' * 64
@@ -237,9 +241,10 @@ async def test_only_a_runner_built_from_the_suite_is_run(session, docker, monkey
     assert not [call for call in docker['calls'] if call[0] == 'create']
 
 
-def result(status: str, tracked: dict, **counts) -> dict:
-    return {'status': status, 'tracked': tracked, 'missing_tests': [], 'skipped': 0,
-            'failures': 0, 'errors': 0, 'test_skips': [], **counts}
+def result(status: str, tracked: dict | None, **counts) -> VerificationResult:
+    return cast(VerificationResult, {
+        'status': status, 'tracked': tracked, 'missing_tests': [], 'skipped': 0,
+        'failures': 0, 'errors': 0, 'test_skips': [], **counts})
 
 
 def test_the_baseline_of_a_change_with_component_tests_is_judged_on_both_suites():
@@ -251,14 +256,14 @@ def test_the_baseline_of_a_change_with_component_tests_is_judged_on_both_suites(
     # A change whose repository has no contract tests is judged on its component tests.
     assert judge_baseline(None, [], [], component_run(red, [ADDED])) == ('reproduced', None)
     status, error = judge_baseline(None, [], [], component_run(green, [ADDED]))
-    assert status == 'not_reproduced' and f'{ADDED} (1 of 1)' in error
+    assert status == 'not_reproduced' and f'{ADDED} (1 of 1)' in (error or '')
     status, error = judge_baseline(result('failed', {}, failures=1), [], [],
                                    component_run(red, [ADDED]))
     assert status == 'error' and error.startswith('Contract tests: Existing tests failing')
     status, error = judge_baseline(contract, [], [], component_run(
         result('failed', {ADDED: {'tests': 1, 'failed': 1}}, failures=1, skipped=1), [ADDED]))
     assert status == 'error' and error.startswith('Component tests: Tests skipped themselves')
-    assert 'the component tests cannot observe' in error
+    assert 'the component tests cannot observe' in (error or '')
 
 
 def test_a_baseline_against_the_code_with_an_added_seam_says_so():
@@ -274,13 +279,13 @@ def test_a_baseline_against_the_code_with_an_added_seam_says_so():
     assert status == 'error' and error.startswith(
         'Contract tests: Existing tests failing against the code with only the seam the '
         'change added: 1.')
-    assert 'retrying the tests adds it again' in error
+    assert 'retrying the tests adds it again' in (error or '')
     status, error = judge_baseline(contract, [], [], component_run(green, [ADDED]), seam=True)
-    assert status == 'not_reproduced' and 'against the code with only the seam' in error
-    assert 'adding the seam already changed what the tests observe' in error
+    assert status == 'not_reproduced' and 'against the code with only the seam' in (error or '')
+    assert 'adding the seam already changed what the tests observe' in (error or '')
     # Without a seam nothing of it is said.
     status, error = judge_baseline(contract, [], [], component_run(green, [ADDED]))
-    assert 'seam' not in error and 'as the repository holds it' in error
+    assert 'seam' not in (error or '') and 'as the repository holds it' in (error or '')
 
 
 def test_only_added_tests_alone_to_blame_for_a_baseline_are_sent_back_to_be_rewritten():
@@ -298,12 +303,14 @@ def test_only_added_tests_alone_to_blame_for_a_baseline_are_sent_back_to_be_rewr
     assert unreproducing_tests(result('passed', {ADDED: {'tests': 0, 'failed': 0}}),
                                [ADDED]) == {'missing': [ADDED]}
     # Anything beyond the added tests is not corrected by rewriting them.
-    for run in (result('error', None), {**green, 'skipped': 1},
-                {**green, 'failures': 1, 'status': 'failed'},
-                {**green, 'missing_tests': [EXISTING]},
-                {**green, 'status': 'failed', 'failures': 1, 'test_failures': [
-                    {'class_name': 'tests.test_rooms', 'name': 'x', 'kind': 'failure',
-                     'message': 'Failed: Timeout >30.0s'}]}):
+    runs: list[VerificationResult] = [
+        result('error', None), {**green, 'skipped': 1},
+        {**green, 'failures': 1, 'status': 'failed'},
+        {**green, 'missing_tests': [EXISTING]},
+        {**green, 'status': 'failed', 'failures': 1, 'test_failures': [
+            {'class_name': 'tests.test_rooms', 'name': 'x', 'kind': 'failure',
+             'message': 'Failed: Timeout >30.0s'}]}]
+    for run in runs:
         assert unreproducing_tests(run, [ADDED]) is None
     # A corrected repository test may fail there.
     assert unreproducing_tests(result('failed', {ADDED: {'tests': 1, 'failed': 0},

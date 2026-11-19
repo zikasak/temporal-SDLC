@@ -2,6 +2,7 @@
 import from workflow code."""
 
 import dataclasses
+from typing import Any, cast
 
 from app.api_design.models import ApiDesignState
 from app.api_design.source import design_state
@@ -41,7 +42,7 @@ def handed_design(state: ArchitectureState, session_id: str) -> ApiDesignState:
     if state.status == "skipped":
         # The repository's architecture stays as it is.
         design.architecture = state.existing_architecture
-        design.architecture_structure = state.existing_structure
+        design.architecture_structure = cast(dict[str, Any] | None, state.existing_structure)
     else:
         structure = normalize_structure(state.structure)
         design.architecture = render_architecture_markdown(structure)

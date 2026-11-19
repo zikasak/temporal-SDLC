@@ -1,6 +1,6 @@
 import asyncio
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -98,7 +98,8 @@ def _await_checkout(state: RequirementsState | ApiDesignState) -> str:
     return status
 
 
-async def _check_out(state: RequirementsState | ApiDesignState, resume_status: str) -> bool:
+async def _check_out(state: RequirementsState | ApiDesignState | ArchitectureState,
+                     resume_status: str) -> bool:
     """Check out the repository of a `preparing` session; False when it cannot go on."""
     if state.status != "preparing":
         return True
@@ -116,7 +117,8 @@ async def _check_out(state: RequirementsState | ApiDesignState, resume_status: s
         state.error = ("The repository could not be checked out. Check the GitHub "
                        "connection and start a new session.")
         return False
-    state.status = resume_status
+    # A status of the session's own kind, which the caller resumes it in.
+    state.status = cast(Any, resume_status)
     return True
 
 
@@ -222,7 +224,7 @@ def _interview_flags(state: RequirementsState | ApiDesignState) -> tuple[bool, N
 
 
 @workflow.defn
-class RequirementsWorkflow(Interview, _Delivering, FlowFlags):
+class RequirementsWorkflow(Interview[RequirementsState], _Delivering, FlowFlags):
     """One requirements interview: each user message is an update, and the
     finalize update turns the gathered requirements into a document. A task that
     leaves the API as it is has no API design to follow, so the session then hands
@@ -580,7 +582,7 @@ class RequirementsWorkflow(Interview, _Delivering, FlowFlags):
         """A task on the service a repository was published with starts from that
         contract, so it cannot be specified for a repository without one."""
         try:
-            self.state.contract = await workflow.execute_activity(
+            contract = await workflow.execute_activity(
                 read_repository_contract,
                 workflow.info().workflow_id,
                 start_to_close_timeout=timedelta(minutes=1),
@@ -589,11 +591,17 @@ class RequirementsWorkflow(Interview, _Delivering, FlowFlags):
             )
         except ActivityError as exc:
             workflow.logger.warning("Repository contract unavailable: %s", exc.cause or exc)
-            unsupported = isinstance(exc.cause, ApplicationError) and exc.cause.type == "ContractError"
-            self.state.error = (exc.cause.message if unsupported
-                                else "The repository's contract could not be read. Try again.")
+            cause = exc.cause
+            if isinstance(cause, ApplicationError) and cause.type == "ContractError":
+                self.state.error = cause.message
+            else:
+                self.state.error = "The repository's contract could not be read. Try again."
             return False
-        self.state.contract_commit = self.state.checkout["commit"]
+        # The session's state keeps the contract as the plain mapping it was recorded as.
+        self.state.contract = cast(dict[str, Any], contract)
+        checkout = self.state.checkout
+        assert checkout is not None  # the repository was checked out before the contract
+        self.state.contract_commit = checkout["commit"]
         if self.state.kind not in CHANGE_KINDS:
             # A documentation task leaves the contract as it is.
             return True
@@ -601,10 +609,10 @@ class RequirementsWorkflow(Interview, _Delivering, FlowFlags):
         # numbers them past the contract's already; this holds whatever it was given.
         self.state.requirements = numbered_after(
             self.state.requirements,
-            [item["id"] for item in self.state.contract["requirements"]])
+            [item["id"] for item in contract["requirements"]])
         # Only what this contract requires can be ended, and as the contract states it.
         ended = {item["id"] for item in self.state.retired}
-        self.state.retired = [item for item in self.state.contract["requirements"]
+        self.state.retired = [item for item in contract["requirements"]
                               if item["id"] in ended]
         return True
 
@@ -639,10 +647,12 @@ class RequirementsWorkflow(Interview, _Delivering, FlowFlags):
 
     async def _requirements_text(self) -> str:
         """The text of the session's requirements document."""
+        document = self.state.document
+        assert document is not None  # delivered only once the document was written
         try:
             return await workflow.execute_activity(
                 read_requirements_document,
-                args=[workflow.info().workflow_id, self.state.document["document_id"]],
+                args=[workflow.info().workflow_id, document["document_id"]],
                 start_to_close_timeout=timedelta(minutes=1),
                 schedule_to_close_timeout=timedelta(minutes=3),
                 retry_policy=RetryPolicy(maximum_attempts=3),
@@ -689,6 +699,7 @@ class RequirementsWorkflow(Interview, _Delivering, FlowFlags):
         session_id = workflow.info().workflow_id
         document = await self._requirements_text()
         contract = self.state.contract
+        assert contract is not None  # a task on an existing service read its contract
         return DeliveryState(spec=TaskSpec(
             session_id=session_id,
             requirements=contract["requirements"],
@@ -724,7 +735,7 @@ class RequirementsWorkflow(Interview, _Delivering, FlowFlags):
 
 
 @workflow.defn
-class ApiDesignWorkflow(Interview, _Delivering, FlowFlags, PendingStage):
+class ApiDesignWorkflow(Interview[ApiDesignState], _Delivering, FlowFlags, PendingStage):
     """One API design discussion based on a finished requirements session: the
     model drafts the API first, or for a change to an existing service applies the
     change to the API its repository holds, each user message is an update, and the
@@ -949,12 +960,14 @@ class ApiDesignWorkflow(Interview, _Delivering, FlowFlags, PendingStage):
         await self._run_delivery(self._delivery_state())
 
     def _delivery_state(self) -> DeliveryState:
+        document = self.state.document
+        assert document is not None  # delivered only once the document was written
         return DeliveryState(spec=TaskSpec(
             session_id=workflow.info().workflow_id,
             requirements=self.state.requirements,
             requirements_document=self.state.requirements_document,
             api=self.state.api,
-            document_id=self.state.document["document_id"],
+            document_id=document["document_id"],
             kind=self.state.kind,
             language=self.state.language,
             repository=self.state.repository,

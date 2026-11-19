@@ -231,6 +231,8 @@ about them, which take precedence over the findings. Correct each finding with t
 edits; do not start over or change tests the findings do not concern. Never weaken a test
 to make it pass. The brief and the stubs remain the authority. The service's source stays
 unavailable.
+A finding marked `reported_again` was sent to you before, and the review found it again
+after your correction: that correction did not settle it. Settle it this time.
 """
 
 COMPONENT_BOUND_PROMPT = """
@@ -343,6 +345,9 @@ take precedence over the findings. Correct each finding with targeted edits; do 
 over or change tests the findings do not concern. Never weaken a test to make it pass. The
 requirements and OpenAPI contract remain the authority. The implementation stays
 unavailable.
+A finding marked `reported_again` was sent to you before, and the review found it again
+after your correction: that correction did not settle it. Read what it says the tests
+still do, and settle it this time.
 When `repair.review` holds `restore`, it maps tests of the repository, by identity
 (`module.Class#test` or `package.Class#method`), to their source as the repository holds
 them, with layout and comments normalized (a method's source may follow the headers of the
@@ -397,8 +402,18 @@ repository's.
 """
 
 
+RELEASED_PROMPT = """
+The `released` entry of the input names tests of the repository, by identity, that the
+changed service passes as the repository holds them but that a code review finding found
+wrong against the contract, such as a test whose assertions never ran. Change each of them
+as the findings say: unlike the other tests of the repository you change, they are not run
+again as they were to prove that the contract no longer supports them.
+"""
+
+
 def repair_prompt(inputs: dict) -> str:
-    keep = KEEP_PROMPT if inputs.get('keep') else ''
+    keep = ((KEEP_PROMPT if inputs.get('keep') else '')
+            + (RELEASED_PROMPT if inputs.get('released') else ''))
     repair = inputs.get('repair')
     if not repair:
         return keep

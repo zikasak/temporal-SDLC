@@ -11,19 +11,23 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, AsyncIterator, Awaitable, Callable, Sequence, TypeVar
+from typing import Any, AsyncIterator, Awaitable, Callable, Sequence, TypeVar, cast
 
 import pytest
 from temporalio import workflow
 from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureError, WorkflowHandle
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
-from app.api_design.models import ApiDesignState
+from app.api_design.models import ApiDesignState, ApiModel
 from app.architecture.models import ArchitectureResult, ArchitectureState
 from app.delivery.models import DeliveryProgress, DeliveryState, TaskSpec
-from app.requirements.models import RequirementsState
+from app.github.models import (
+    PullRequest, PullRequestMention, RepositoryCheckout, RepositoryPublication,
+    RepositorySelection,
+)
+from app.requirements.models import Requirement, RequirementsState, SessionStatus
 
-REPOSITORY: dict[str, Any] = {
+REPOSITORY: RepositorySelection = {
     "provider": "github",
     "repository_id": 1402961137,
     "full_name": "acme/widgets",
@@ -31,7 +35,7 @@ REPOSITORY: dict[str, Any] = {
     "private": True,
     "branch": "main",
 }
-CHECKOUT: dict[str, Any] = {"commit": "0123456789abcdef0123456789abcdef01234567"}
+CHECKOUT: RepositoryCheckout = {"commit": "0123456789abcdef0123456789abcdef01234567"}
 
 HOUR = timedelta(hours=1)
 T = TypeVar("T")
@@ -166,12 +170,12 @@ def delivery_state(
     language: str | None = None,
 ) -> DeliveryState:
     """The state a delivery waits with after its push: a publication and an open pull request."""
-    publication = {
+    publication: RepositoryPublication = {
         "branch": f"delivery/{session_id}", "commit": CHECKOUT["commit"],
         "url": f"https://github.com/acme/widgets/tree/delivery/{session_id}",
         "ignored": [], "ignored_count": 0, "verified": not open_findings,
     }
-    pull_request = {
+    pull_request: PullRequest = {
         "number": number, "title": "Add the widget endpoint",
         "url": f"https://github.com/acme/widgets/pull/{number}",
         "draft": open_findings, "base": "main",
@@ -183,13 +187,14 @@ def delivery_state(
     )
     spec = TaskSpec(
         session_id=session_id,
-        requirements=[{"id": "R1", "title": "Widgets", "description": "Serve widgets"}],
+        requirements=cast(list[Requirement],
+                          [{"id": "R1", "title": "Widgets", "description": "Serve widgets"}]),
         requirements_document="# Requirements\n\nServe widgets.\n",
-        api={"paths": {}},
+        api=cast(ApiModel, {"paths": {}}),
         kind="api_change",
         language=language,
-        repository=dict(REPOSITORY),
-        checkout=dict(CHECKOUT),
+        repository=REPOSITORY.copy(),
+        checkout=CHECKOUT.copy(),
         onboarding=onboarding,
     )
     return DeliveryState(spec=spec, progress=progress, record_only=record_only, waiting=waiting)
@@ -198,8 +203,9 @@ def delivery_state(
 def architecture_only_state(session_id: str = "onb-1") -> DeliveryState:
     """An architecture-only onboarding's delivery, about to push."""
     spec = TaskSpec(
-        session_id=session_id, requirements=[], requirements_document="", api={"paths": {}},
-        kind=None, repository=dict(REPOSITORY), checkout=dict(CHECKOUT), onboarding=True,
+        session_id=session_id, requirements=[], requirements_document="",
+        api=cast(ApiModel, {"paths": {}}),
+        kind=None, repository=REPOSITORY.copy(), checkout=CHECKOUT.copy(), onboarding=True,
         architecture="# Architecture\n\nOne module.\n",
         architecture_structure={"components": [{"name": "core"}]},
         architecture_only=True,
@@ -207,14 +213,15 @@ def architecture_only_state(session_id: str = "onb-1") -> DeliveryState:
     return DeliveryState(spec=spec)
 
 
-def mention_for(comment_id: int, number: int = 7) -> dict[str, Any]:
-    return {
+def mention_for(comment_id: int, number: int = 7) -> PullRequestMention:
+    # As the webhook hands a mention over, with the routing fields it adds.
+    return cast(PullRequestMention, {
         "comment_id": comment_id, "comment_type": "conversation",
         "url": f"https://github.com/acme/widgets/pull/{number}#issuecomment-{comment_id}",
         "author": "alice", "body": "@flows-app please fix the typo in the README",
         "received_at": "2026-11-08T10:00:00Z", "classification": None, "status": "received",
         "repository": "acme/widgets", "pull_number": number, "reply_to": None,
-    }
+    })
 
 
 def requirements_state() -> RequirementsState:
@@ -228,14 +235,15 @@ def requirements_state() -> RequirementsState:
             "title": "Serve widgets", "description": "The service serves widgets.",
         }],
         kind="new_service", status="interviewing",
-        repository=dict(REPOSITORY), checkout=dict(CHECKOUT),
+        repository=REPOSITORY.copy(), checkout=CHECKOUT.copy(),
     )
 
 
-def api_design_state(source_session_id: str = "req-1", *, status: str = "completed") -> ApiDesignState:
+def api_design_state(source_session_id: str = "req-1", *,
+                     status: SessionStatus = "completed") -> ApiDesignState:
     return ApiDesignState(
         source_session_id=source_session_id,
-        requirements=[{"id": "R1", "title": "Serve widgets"}],
+        requirements=cast(list[Requirement], [{"id": "R1", "title": "Serve widgets"}]),
         requirements_document="# Requirements\n",
         kind="new_service",
         messages=[
@@ -243,24 +251,24 @@ def api_design_state(source_session_id: str = "req-1", *, status: str = "complet
             {"role": "user", "content": "Looks good."},
             {"role": "assistant", "content": "Finalized."},
         ],
-        api={"paths": {"/widgets": {}}},
+        api=cast(ApiModel, {"paths": {"/widgets": {}}}),
         language="python",
         status=status,
         document={"document_id": "openapi-doc-1"} if status == "completed" else None,
-        repository=dict(REPOSITORY), checkout=dict(CHECKOUT),
+        repository=REPOSITORY.copy(), checkout=CHECKOUT.copy(),
     )
 
 
 def architecture_state(source_session_id: str) -> ArchitectureState:
     return ArchitectureState(
         source_session_id=source_session_id, kind="new_service",
-        requirements=[{"id": "R1", "title": "Serve widgets"}],
+        requirements=cast(list[Requirement], [{"id": "R1", "title": "Serve widgets"}]),
         requirements_document="# Requirements\n",
         messages=[
             {"role": "user", "content": "Keep it to one module."},
             {"role": "assistant", "content": "Drafted the architecture."},
         ],
-        status="interviewing", repository=dict(REPOSITORY), checkout=dict(CHECKOUT),
+        status="interviewing", repository=REPOSITORY.copy(), checkout=CHECKOUT.copy(),
     )
 
 

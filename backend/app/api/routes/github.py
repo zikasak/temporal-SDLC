@@ -13,6 +13,7 @@ from app.config import GITHUB_ALLOWED_ORIGINS, GITHUB_WEBHOOK_URL
 from app.delivery import service as delivery_service
 from app.github import service, storage, webhooks
 from app.github.client import LOGIN_PATTERN
+from app.github.models import PullRequestMention
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/connectors/github")
@@ -158,7 +159,7 @@ events_router = APIRouter(prefix="/connectors/github")
 MAX_EVENT_BYTES = 5 * 1024 * 1024
 
 
-async def hand_over(session_id: str, mention: dict) -> bool:
+async def hand_over(session_id: str, mention: PullRequestMention) -> bool:
     try:
         return await delivery_service.receive_mention(session_id, mention)
     except delivery_service.MentionHandled as exc:
@@ -199,8 +200,8 @@ async def receive_event(
         secret = storage.decrypt_webhook_secret(connection)
     except Exception as exc:
         raise http_error(exc) from None
-    if secret is None or not webhooks.signature_matches(secret, bytes(payload),
-                                                         x_hub_signature_256):
+    if (connection is None or secret is None
+            or not webhooks.signature_matches(secret, bytes(payload), x_hub_signature_256)):
         raise HTTPException(401, "The webhook delivery is not signed with the connection's "
                                  "webhook secret.")
     delivery_id = (x_github_delivery or "").strip()[:200] or None

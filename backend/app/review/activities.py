@@ -10,7 +10,7 @@ import tempfile
 import uuid
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -33,8 +33,9 @@ from app.test_generation.activities import copy_test_suite
 from app.review import checks, settled
 from app.review.agent import FINDINGS
 from app.review.models import (
-    MAX_FINDINGS, PATH_CHARS, PREVIOUS_SUMMARY_CHARS, REASON_CHARS, REVIEW_TARGETS,
+    MAX_FINDINGS, PATH_CHARS, REASON_CHARS, REVIEW_TARGETS,
     BASELINE_KEY, SCOPE_KEY, SCOPE_TARGETS, SUMMARY_CHARS, REVIEW_INSTRUCTIONS_CHARS, ReviewFinding,
+    same_finding,
 )
 from app.verification.models import COMPONENT_TESTS_ARTIFACT
 from app.temporal.tracing import activity_metadata
@@ -412,10 +413,6 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
     return prepared.changes, prepared.count
 
 
-def _same(summary: str) -> str:
-    return ' '.join(summary.lower().split())
-
-
 def _repeated(item: dict[str, Any], finding: ReviewFinding,
               previous: list[dict[str, Any]]) -> int | None:
     """The number of the earlier finding this one reports again: the one the reviewer
@@ -425,10 +422,7 @@ def _repeated(item: dict[str, Any], finding: ReviewFinding,
     if isinstance(named, int) and not isinstance(named, bool) and named in numbers:
         return named
     for entry in previous:
-        if (entry.get('target') == finding['target']
-                and (entry.get('path') or '') == finding.get('path', '')
-                and _same(str(entry.get('summary') or ''))
-                == _same(finding['summary'][:PREVIOUS_SUMMARY_CHARS])):
+        if same_finding(entry, finding):
             return entry.get('number')
     return None
 
@@ -478,7 +472,7 @@ def read_findings(output: Path, changed: set[str],
 
 def _round_id() -> str:
     """The review round in progress: the child workflow running it, one per round."""
-    return activity.info().workflow_id if activity.in_activity() else ''
+    return (activity.info().workflow_id or '') if activity.in_activity() else ''
 
 
 async def _static_findings(language: Language, session_id: str, workspace: Path,
@@ -559,7 +553,7 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
                 language, session_dir, context, workspace, part)
             if prepared.decided is not None:
                 # A host check decided the round: no agent runs, and no other part.
-                findings = [{**item, **({'target': target} if target else {})}
+                findings = [cast(ReviewFinding, {**item, **({'target': target} if target else {})})
                             for item in prepared.decided]
                 for finding in findings:
                     repeats = _repeated({}, finding, previous)

@@ -2,6 +2,8 @@
 its repository than the service, such as its web client: one project per part, written by
 one author, built into one runner and run as one suite (plans/part-component-contracts.md,
 step 3)."""
+# Assertions read optional fields directly: a None there fails the test anyway.
+# pyright: reportOptionalMemberAccess=false
 import dataclasses
 import io
 import json
@@ -26,6 +28,7 @@ from app.routing.parts import (
 from app.test_generation import activities as contract_tests
 from app.test_generation import components
 from app.verification import activities as verification
+from app.verification.models import TrackedTest
 
 PYTHON = get_language('python')
 TYPESCRIPT = get_part_language('typescript')
@@ -501,7 +504,7 @@ async def test_the_run_reports_each_parts_tests_by_their_names(changed, tmp_path
     # The test the report has no entry of is missing, named after its part.
     assert result['missing_tests'] == ['frontend:tests/existing.test.ts#creates an app']
     # The run counts its tests by part, for the delivery page.
-    assert result['parts'] == {'frontend': {'tests': 1, 'passed': 0, 'failures': 1,
+    assert result.get('parts') == {'frontend': {'tests': 1, 'passed': 0, 'failures': 1,
                                             'errors': 0, 'skipped': 0}}
 
 
@@ -569,7 +572,7 @@ def test_the_composite_runner_names_the_web_clients_tests_after_it(composite_run
     view = composite_runner.parent / 'view'
     write(view, {'parts/frontend/tests/manifest.test.ts': MANIFEST_TEST})
     expected, = suite.test_cases(view)
-    tracked = {expected: {'tests': 0, 'failed': 0}}
+    tracked: dict[str, TrackedTest] = {expected: {'tests': 0, 'failed': 0}}
     summary = verification.summarize_reports(reports, language.test_reports, tracked,
                                              suite.case_id, {expected})
     assert expected == ('frontend:tests/manifest.test.ts#the GitHub App manifest > '

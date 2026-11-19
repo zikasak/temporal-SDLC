@@ -14,7 +14,8 @@ from app.github.models import PullRequestMention
 
 logger = logging.getLogger(__name__)
 
-COMMENT_EVENTS = {'issue_comment': 'conversation', 'pull_request_review_comment': 'review'}
+COMMENT_EVENTS: dict[str, Literal['conversation', 'review']] = {
+    'issue_comment': 'conversation', 'pull_request_review_comment': 'review'}
 # A mention's text as the delivery keeps it.
 BODY_CHARS = 65536
 HEX_DIGEST = re.compile(r'[0-9a-f]{64}', re.ASCII)

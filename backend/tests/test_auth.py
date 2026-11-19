@@ -97,7 +97,7 @@ def test_wrong_password_and_unknown_login_are_indistinguishable(http):
 def test_forged_unsigned_and_expired_tokens_are_rejected(http, monkeypatch):
     claims = {"sub": "7", "login": "alice@example.com", "exp": 4102444800}
     forged = jwt.encode(claims, "another-secret-of-sufficient-length!", algorithm="HS256")
-    unsigned = jwt.encode(claims, None, algorithm="none")
+    unsigned = jwt.encode(claims, "", algorithm="none")
     monkeypatch.setattr(tokens, "AUTH_TOKEN_TTL_HOURS", -1)
     expired = sign_in(http).json()["access_token"]
     http.cookies.clear()

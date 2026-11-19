@@ -2,6 +2,8 @@
 its requirements, and reviewing it with the user."""
 
 import json
+from collections.abc import Mapping
+from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
@@ -85,7 +87,7 @@ def opening_fallback() -> ConversationMessage:
     return {"role": "assistant", "content": OPENING_FALLBACK}
 
 
-def draft_fallback(structure: dict) -> str:
+def draft_fallback(structure: Mapping[str, Any]) -> str:
     return DRAFT_FALLBACK.format(components=len(structure["components"]),
                                  flows=len(structure["data_flows"]),
                                  choices=len(structure["technology_choices"]))

@@ -3,6 +3,7 @@
 import httpx
 import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -61,7 +62,9 @@ def test_repository_and_branch_pagination_never_follows_foreign_links(http, gith
     # Each operation mints its own installation token, as the app, and acts with it.
     minted = [request for request in requests if request.url.path == TOKEN_PATH]
     used = [request for request in requests if request.url.path != TOKEN_PATH]
-    public_key = load_pem_private_key(app_private_key.encode(), None).public_key()
+    private_key = load_pem_private_key(app_private_key.encode(), None)
+    assert isinstance(private_key, RSAPrivateKey)
+    public_key = private_key.public_key()
     assert len(minted) == len(used) == 3
     for request in minted:
         claims = jwt.decode(request.headers["authorization"].removeprefix("Bearer "), public_key,

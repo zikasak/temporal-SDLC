@@ -15,7 +15,7 @@ psycopg[binary]
 python-multipart
 pypdf
 pytest
-pytest-asyncio
+pytest-asyncio>=1.0
 pytest-xdist
 pyyaml
 openapi-spec-validator

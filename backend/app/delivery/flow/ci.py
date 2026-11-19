@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -11,7 +11,7 @@ with workflow.unsafe.imports_passed_through():
     from app.delivery.ci_activities import CHECKS_UNAVAILABLE, FAILED
     from app.delivery.models import (
         CI_CHECK_TIMEOUT, CI_REGISTRATION_GRACE, LEGACY_CI_FIX_ROUNDS, MAX_CI_FIX_ROUNDS,
-        CiChecks,
+        CiCheck, CiChecks, CiStatus,
     )
     from app.delivery.rounds import decide, outcome
     from app.verification.checks import failure_outcome, failure_signature
@@ -77,9 +77,11 @@ class CiWatch(FlowBase):
     async def _check_ci(self) -> None:
         """Read the checks of the watched commit, and act on them once they finished."""
         ci = self.progress.ci
+        repository = self.spec.repository
+        assert ci is not None and repository is not None  # only a pushed delivery watches CI
         try:
             result = await workflow.execute_activity(
-                'commit_checks', args=[self.spec.repository['full_name'], ci['commit']],
+                'commit_checks', args=[repository['full_name'], ci['commit']],
                 result_type=dict, start_to_close_timeout=timedelta(minutes=1),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
@@ -92,9 +94,11 @@ class CiWatch(FlowBase):
             workflow.logger.warning('CI checks not read: %s', cause or exc)
             result = None
         watched = workflow.now() - datetime.fromisoformat(ci['since'])
-        status = result.get('status') if isinstance(result, dict) else 'pending'
+        status = (cast(CiStatus, result.get('status')) if isinstance(result, dict)
+                  else 'pending')
         if isinstance(result, dict):
-            ci['checks'] = [{key: check.get(key) for key in ('name', 'status', 'conclusion', 'url')}
+            ci['checks'] = [CiCheck(name=check.get('name'), status=check.get('status'),
+                                    conclusion=check.get('conclusion'), url=check.get('url'))
                             for check in result.get('checks') or []]
         if status == 'none' and watched < CI_REGISTRATION_GRACE:
             # GitHub has not registered the commit's checks yet.
@@ -104,6 +108,7 @@ class CiWatch(FlowBase):
         ci['status'] = status
         if status == 'failed':
             workflow.logger.info('CI failed on %s', _short(ci['commit']))
+            assert result is not None  # a status was read
             await self._ci_failed(result['checks'])
         elif status == 'passed':
             workflow.logger.info('CI passed on %s', _short(ci['commit']))
@@ -145,13 +150,15 @@ class CiWatch(FlowBase):
 
     async def _ci_failed(self, checks: list[dict[str, Any]]) -> None:
         ci = self.progress.ci
+        repository = self.spec.repository
+        assert ci is not None and repository is not None  # only a pushed delivery watches CI
         commit = ci['commit']
         failed = [check for check in checks if check['conclusion'] in FAILED]
         names = ', '.join(f"[{check['name']}]({check['url']})" if check.get('url')
                           else check['name'] for check in failed[:10])
         try:
             report = await workflow.execute_activity(
-                'ci_failure_report', args=[self.spec.repository['full_name'], commit, checks],
+                'ci_failure_report', args=[repository['full_name'], commit, checks],
                 result_type=str, start_to_close_timeout=timedelta(minutes=5),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )

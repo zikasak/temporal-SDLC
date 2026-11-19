@@ -1,10 +1,13 @@
 """Routing a change's criteria to the suite that can prove them, and the test author's
 finding that a criterion has none."""
+# Assertions read optional fields directly: a None there fails the test anyway.
+# pyright: reportOptionalMemberAccess=false
 import dataclasses
 import json
 import re
 import tarfile
 from pathlib import Path
+from typing import cast
 
 import pytest
 from temporalio.exceptions import ApplicationError
@@ -14,7 +17,9 @@ from app import docker_agents
 from app.api_design.models import empty_api
 from app.languages import get_language
 from app.routing import activities
-from app.routing.models import ROUTING_ERROR, added_seams, judge_routes, read_seam
+from app.routing.models import (
+    ROUTING_ERROR, RequirementRoute, Seam, added_seams, judge_routes, read_seam,
+)
 from app.routing.parts import SERVICE_PART, ComponentPart
 from app.test_generation.activities import read_unobservable
 
@@ -136,25 +141,26 @@ async def test_a_routing_model_without_credentials_says_how_to_fix_it(session, m
 
 
 def test_unobservable_criteria_are_named_with_their_reasons():
-    routes = {f'FR-{number}': {'route': 'unobservable', 'reason': f'R{number}.',
-                               'source': 'routing'} for number in range(2, 9)}
+    routes: dict[str, RequirementRoute] = {
+        f'FR-{number}': {'route': 'unobservable', 'reason': f'R{number}.', 'source': 'routing'}
+        for number in range(2, 9)}
     routes['FR-1'] = {'route': 'contract', 'reason': 'GET /rooms.', 'source': 'routing'}
     status, error = judge_routes(routes)
     assert status == 'unobservable'
     assert error.startswith('The contract tests cannot observe 7 of the 8 acceptance criteria')
-    assert 'FR-2: R2.; FR-3: R3.' in error and 'FR-6: R6.; 2 more' in error
-    assert 'FR-7' not in error
+    assert 'FR-2: R2.; FR-3: R3.' in (error or '') and 'FR-6: R6.; 2 more' in (error or '')
+    assert 'FR-7' not in (error or '')
     assert judge_routes({'FR-1': routes['FR-1']}) == ('routed', None)
 
 
 def test_criteria_declined_at_a_seam_are_offered_a_new_routing():
-    seam = {'module': 'app.flows', 'symbols': ['Flow.run']}
+    seam: Seam = {'module': 'app.flows', 'symbols': ['Flow.run']}
     status, error = judge_routes({'FR-1': {'route': 'unobservable', 'reason': 'No stub.',
                                            'source': 'tests', 'seam': seam}})
     assert status == 'unobservable'
     assert error.startswith('The test author found that its suite cannot observe 1 of the 1')
-    assert 'Retry the tests to route them again' in error
-    assert "HTTP API or a seam of its code shows" in error
+    assert 'Retry the tests to route them again' in (error or '')
+    assert "HTTP API or a seam of its code shows" in (error or '')
 
 
 def test_the_test_author_may_name_criteria_of_the_brief_instead_of_writing_a_suite(tmp_path):
@@ -539,7 +545,7 @@ def test_the_seams_a_change_adds_are_collected_by_module():
     routes['FR-6'] = {'route': 'component', 'reason': 'R.', 'seam': {
         'part': 'frontend', 'module': 'src/Flows', 'symbols': ['Flow'],
         'added_elsewhere': {'src/api': ['fetchFlow']}}}
-    assert read_seam('FR-5', routes['FR-5']['seam'])['added_elsewhere'] == {
+    assert read_seam('FR-5', routes['FR-5']['seam']).get('added_elsewhere') == {
         'app.activities': ['state'], 'app.models': ['X']}
     assert added_seams(routes) == {'app.workflows': ['Flow.close', 'Flow.state'],
                                    'app.activities': ['state'], 'app.models': ['X'],
@@ -638,7 +644,7 @@ async def test_a_criterion_of_another_part_is_routed_to_its_seam(frontend_sessio
                                 'language': 'typescript'}]
     assert 'components' not in result
     assert json.loads((frontend_session / 'routing/routes.json').read_text()) == result
-    assert judge_routes({key: {**value, 'source': 'routing'}
+    assert judge_routes({key: cast(RequirementRoute, {**value, 'source': 'routing'})
                          for key, value in result['routes'].items()})[0] == 'routed'
 
 

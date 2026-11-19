@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from pydantic import BaseModel
 
 from app.api_design.models import empty_api
 from app.tools.api_design import ApiDesignContext, build, parse_type
@@ -72,7 +73,7 @@ def test_record_and_remove_schema():
     ])
     assert schema["name"] == "Room"
     assert [item["array"] for item in schema["properties"]] == [False, True, False]
-    assert schema["properties"][2]["enum"] == ["small", "large"]
+    assert schema["properties"][2].get("enum") == ["small", "large"]
     with pytest.raises(ValueError):
         ctx.record_schema("Room", "", [{"name": "id", "type": "string"},
                                        {"name": "id", "type": "integer"}])
@@ -194,7 +195,9 @@ async def test_existing_service_keeps_its_language():
 
 def test_tool_schemas_still_describe_lists():
     tools = {item.name: item for item in build(context())}
-    schema = tools["record_schema"].tool_call_schema.model_json_schema()
+    tool_schema = tools["record_schema"].tool_call_schema
+    assert isinstance(tool_schema, type) and issubclass(tool_schema, BaseModel)
+    schema = tool_schema.model_json_schema()
     options = [option.get("type") for option in schema["properties"]["properties"]["anyOf"]]
     assert "array" in options
     assert "string" not in options

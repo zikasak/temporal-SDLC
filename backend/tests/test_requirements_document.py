@@ -1,8 +1,13 @@
+# Assertions read optional fields directly: a None there fails the test anyway.
+# pyright: reportOptionalMemberAccess=false
+from typing import cast
+
 import pytest
 
 from app.requirements.document import (
     render_requirements_markdown, requirements_narrative, without_repeated_tables,
 )
+from app.requirements.models import Category, Requirement
 from app.tools.requirements import RequirementsContext, build
 
 
@@ -61,10 +66,12 @@ async def test_set_task_kind_records_only_known_kinds():
 
 @pytest.mark.parametrize("kind", ["bugfix", "api_change"])
 async def test_change_to_a_published_service_continues_its_requirement_ids(kind):
+    categories: list[tuple[str, Category]] = [
+        ("FR-1", "functional"), ("FR-2", "functional"), ("NFR-1", "non_functional"),
+        ("TR-5", "technical")]
     ctx = RequirementsContext(published=tuple(
-        {"id": item, "category": category, "title": "T", "description": "D", "priority": "must"}
-        for item, category in (("FR-1", "functional"), ("FR-2", "functional"),
-                               ("NFR-1", "non_functional"), ("TR-5", "technical"))))
+        Requirement(id=item, category=category, title="T", description="D", priority="must")
+        for item, category in categories))
     # Until the user says the task changes that service, it is numbered on its own.
     assert ctx.record("functional", "Sign in", "D", "must")["id"] == "FR-1"
     assert ctx.record("technical", "Postgres", "D", "must")["id"] == "TR-1"
@@ -82,7 +89,7 @@ async def test_change_to_a_published_service_continues_its_requirement_ids(kind)
 
 
 async def test_only_a_change_retires_requirements_and_only_the_services():
-    service = ({"id": "FR-1", "category": "functional", "title": "Book rooms",
+    service: tuple[Requirement, ...] = ({"id": "FR-1", "category": "functional", "title": "Book rooms",
                 "description": "Guests book rooms.", "priority": "must"},)
     ctx = RequirementsContext(published=service)
     tools = {item.name: item for item in build(ctx)}
@@ -105,15 +112,15 @@ async def test_only_a_change_retires_requirements_and_only_the_services():
 
 
 def test_document_names_retired_requirements_and_keeps_its_narrative_readable():
-    kept = [{"id": "FR-2", "category": "functional", "title": "Cancel",
+    kept: list[Requirement] = [{"id": "FR-2", "category": "functional", "title": "Cancel",
              "description": "Guests cancel.", "priority": "must"}]
-    retired = [{"id": "FR-1", "category": "functional", "title": "No refunds",
+    retired: list[Requirement] = [{"id": "FR-1", "category": "functional", "title": "No refunds",
                 "description": "A booking | is final.", "priority": "must"}]
     document = render_requirements_markdown(kept, "## Overview\n\nRefunds.", retired)
     assert "| FR-1 | No refunds | A booking \\| is final. |" in document
     # The coding agents still get the tables once: what is retired travels as narrative.
     narrative = requirements_narrative(document, kept)
-    assert narrative.startswith("## Overview") and "## Retired requirements" in narrative
+    assert narrative.startswith("## Overview") and "## Retired requirements" in (narrative or '')
 
 
 def test_render_contains_every_requirement_and_escapes_tables():
@@ -130,7 +137,7 @@ def test_render_contains_every_requirement_and_escapes_tables():
 
 @pytest.mark.parametrize("narrative", ["Bookings are never deleted.\n\n## Assumptions\nOne site.", None])
 def test_coding_context_carries_requirements_once(narrative):
-    requirements = [
+    requirements: list[Requirement] = [
         {"id": "FR-1", "category": "functional", "title": "Book | rooms",
          "description": "Users can\nbook a room.", "priority": "must", "rationale": "Core"},
         {"id": "NFR-1", "category": "non_functional", "title": "Fast",
@@ -146,8 +153,10 @@ def test_coding_context_carries_requirements_once(narrative):
 
 @pytest.mark.parametrize("change", ["edited", "stale", "foreign", "malformed"])
 def test_coding_context_keeps_documents_it_cannot_account_for(change):
-    requirements = [{"id": "FR-1", "category": "functional", "title": "Book rooms",
-                     "description": "Users can book a room.", "priority": "must"}]
+    requirements: list[Requirement] = [{"id": "FR-1", "category": "functional",
+                                        "title": "Book rooms",
+                                        "description": "Users can book a room.",
+                                        "priority": "must"}]
     document = render_requirements_markdown(requirements, "Overview")
     if change == "edited":
         document = document.replace("Users can book a room.", "Members can book a room.")
@@ -156,6 +165,7 @@ def test_coding_context_keeps_documents_it_cannot_account_for(change):
     elif change == "foreign":
         document = "Uploaded specification\n" + document
     else:
-        requirements = [{"id": "FR-1"}]
+        # Deliberately not a requirement.
+        requirements = cast(list[Requirement], [{"id": "FR-1"}])
     context = {"requirements": requirements, "requirements_document": document}
     assert without_repeated_tables(context) == context

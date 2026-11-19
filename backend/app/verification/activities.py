@@ -14,6 +14,7 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 from xml.etree import ElementTree
 
 from temporalio import activity
@@ -69,6 +70,7 @@ async def collect_reports(container: str, destination: Path, reports: TestReport
         try:
             async with asyncio.timeout(30):
                 archive = bytearray()
+                assert process.stdout is not None  # piped
                 while chunk := await process.stdout.read(65536):
                     archive.extend(chunk)
                     if len(archive) > MAX_ARCHIVE_BYTES:
@@ -83,7 +85,7 @@ async def collect_reports(container: str, destination: Path, reports: TestReport
     await run_sync(_extract_reports, archive, destination, reports)
 
 
-def _extract_reports(archive: bytes, destination: Path, reports: TestReports) -> None:
+def _extract_reports(archive: bytes | bytearray, destination: Path, reports: TestReports) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     # Docker emits an uncompressed tar. Do not auto-decompress untrusted input.
     with tarfile.open(fileobj=io.BytesIO(archive), mode='r:') as tar:
@@ -99,7 +101,9 @@ def _extract_reports(archive: bytes, destination: Path, reports: TestReports) ->
             names.add(name)
             if len(names) > MAX_REPORT_FILES or member.size > MAX_REPORT_BYTES:
                 raise RuntimeError('Test reports exceed size limits')
-            with tar.extractfile(member) as source:
+            source = tar.extractfile(member)
+            assert source is not None  # a regular file, checked above
+            with source:
                 (destination / name).write_bytes(source.read(MAX_REPORT_BYTES + 1))
         logger.info('Collected %d test reports', len(names))
 
@@ -153,18 +157,19 @@ def summarize_reports(directory: Path, reports: TestReports,
                 counts[key] += 1
             identity = case_id(case.get('classname', ''), case.get('name', '')) if case_id else ''
             reported.add(identity)
-            watched = tracked and tracked.get(identity)
+            watched = tracked.get(identity) if tracked else None
             if watched:
                 watched['tests'] += 1
                 watched['failed'] += key in ('failures', 'errors')
-            if key == 'skipped' and len(skips) < MAX_FAILURE_DETAILS:
+            if key == 'skipped' and outcome is not None and len(skips) < MAX_FAILURE_DETAILS:
                 skips.append({
                     'class_name': case.get('classname', '')[:256],
                     'name': case.get('name', '')[:256],
                     'message': (outcome.get('message') or outcome.text or '')[:2000],
                 })
-            if key in ('failures', 'errors'):
-                kind = outcome.tag
+            if key in ('failures', 'errors') and outcome is not None:
+                kind: Literal['failure', 'error'] = (
+                    'failure' if outcome.tag == 'failure' else 'error')
                 if len(failures) < MAX_FAILURE_DETAILS:
                     failures.append({
                         'class_name': case.get('classname', '')[:256],
@@ -444,6 +449,7 @@ async def _record_suites(registered: Language, session_id: str, checkout: Path,
         suites.append((registered.component_suite, COMPONENT_TESTS_DIR, 'component_tests',
                        snapshot / COMPONENT_SNAPSHOT, False))
     for part in (await run_sync(component_parts, registered, checkout))[1:]:
+        assert part.suite is not None  # every part language has component tests
         suites.append((part.suite, part.tests_dir().as_posix(),
                        f'component_tests_of_{part.name}',
                        snapshot / COMPONENT_SNAPSHOT / SUITE_PARTS_DIR / part.name, True))
@@ -611,7 +617,7 @@ async def run_component_suite(session_id: str, runner_image: str, language: str,
     artifact_dir = session_dir / COMPONENT_RUNS_DIR
     run_dir = artifact_dir / token
     await run_sync(run_dir.mkdir, parents=True)
-    result = {**_empty_result(session_id, run_dir), 'tracked': tracked}
+    result: VerificationResult = {**_empty_result(session_id, run_dir), 'tracked': tracked}
     started = time.monotonic()
     logger.info('Component tests starting (session=%s, runner=%s)', session_id, runner)
     created = False

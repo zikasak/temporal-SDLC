@@ -1,25 +1,28 @@
 """The conversation every session workflow holds with its user."""
+import asyncio
 import json
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 from temporalio import workflow
 from temporalio.exceptions import ApplicationError
 
 with workflow.unsafe.imports_passed_through():
-    from app.llm.questions import answer_problem, answers_text
+    from app.conversations.models import ConversationMessage
+    from app.llm.questions import Question, answer_problem, answers_text
 
 MAX_TRANSCRIPT_BYTES = 64 * 1024
 MAX_MESSAGE_CHARS = 10000
 
 
-def pending_questions(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def pending_questions(messages: Sequence[Mapping[str, Any]]) -> list[Question]:
     """The questions the last message asked with ask_user, which the next must answer."""
     if not messages or messages[-1]["role"] != "assistant":
         return []
     return messages[-1].get("questions") or []
 
 
-def check_message(messages: list[dict[str, Any]], text: str, too_long: str) -> None:
+def check_message(messages: Sequence[Mapping[str, Any]], text: str, too_long: str) -> None:
     """Raise ValueError unless `text` can be the session's next user message."""
     if not text or len(text) > MAX_MESSAGE_CHARS:
         raise ValueError(f"A message must contain 1 to {MAX_MESSAGE_CHARS} characters.")
@@ -31,7 +34,8 @@ def check_message(messages: list[dict[str, Any]], text: str, too_long: str) -> N
         raise ValueError(too_long)
 
 
-def check_answers(messages: list[dict[str, Any]], answers: list[str], too_long: str) -> None:
+def check_answers(messages: Sequence[Mapping[str, Any]], answers: list[str],
+                  too_long: str) -> None:
     """Raise ValueError unless `answers` answer the questions the session waits for."""
     questions = pending_questions(messages)
     if not questions:
@@ -42,20 +46,41 @@ def check_answers(messages: list[dict[str, Any]], answers: list[str], too_long: 
     check_message(messages, answers_text(questions, answers), too_long)
 
 
-def assistant_message(result: dict[str, Any]) -> dict[str, Any]:
+def assistant_message(result: dict[str, Any]) -> ConversationMessage:
     """The message a turn added: its reply and the questions it asked."""
-    message = {"role": "assistant", "content": result["reply"]}
+    message: ConversationMessage = {"role": "assistant", "content": result["reply"]}
     if result.get("questions"):
         message["questions"] = result["questions"]
     return message
 
 
-class Interview:
+class InterviewState(Protocol):
+    """What an interviewing session's state holds for Interview."""
+
+    messages: list[ConversationMessage]
+
+    @property
+    def status(self) -> str: ...
+
+
+StateT = TypeVar('StateT', bound=InterviewState)
+
+
+class Interview(Generic[StateT]):
     """The user's side of a session's conversation: a message, or answers to the questions
     of the last message, each an update that runs one LLM turn. The workflow holds
     `state` with its `status` and `messages`, counts its updates in `_updates`, queues
     turns on `_turn_lock`, and defines `_turn` and `_check_open`, which raises ValueError
     unless the session waits for the user."""
+
+    state: StateT
+    _updates: int
+    _turn_lock: asyncio.Lock
+
+    if TYPE_CHECKING:
+        async def _turn(self) -> bool: ...
+
+        def _check_open(self) -> None: ...
 
     # Who asks the questions, as the refusal of a message that skips them names it.
     INTERVIEWER = "interviewer"

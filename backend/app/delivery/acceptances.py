@@ -8,11 +8,13 @@ terminated at once, so that nothing runs for it. The delivery's progress is repo
 with it."""
 
 import logging
-from typing import Any
+from typing import cast
 
 from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.service import RPCError, RPCStatusCode
+
+from app.review.models import FindingsAcceptance
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +35,7 @@ def record_id(session_id: str, run_id: str) -> str:
 
 
 async def record(client: Client, session_id: str, run_id: str,
-                 acceptance: dict[str, Any]) -> None:
+                 acceptance: FindingsAcceptance) -> None:
     """Keep the acceptance of the open findings of the closed run `run_id`. A Temporal
     that cannot be reached raises its error: the acceptance is not reported as given
     when it would be lost."""
@@ -52,7 +54,8 @@ async def record(client: Client, session_id: str, run_id: str,
                            workflow_id, session_id, exc)
 
 
-async def find(client: Client, session_id: str, run_id: str) -> dict[str, Any] | None:
+async def find(client: Client, session_id: str,
+               run_id: str) -> FindingsAcceptance | None:
     """The acceptance of the open findings of the closed run `run_id`, if any."""
     try:
         description = await client.get_workflow_handle(
@@ -67,4 +70,4 @@ async def find(client: Client, session_id: str, run_id: str) -> dict[str, Any] |
         logger.warning('Unreadable acceptance of the findings of session %s', session_id,
                        exc_info=True)
         return None
-    return dict(acceptance) if isinstance(acceptance, dict) else None
+    return cast(FindingsAcceptance, dict(acceptance)) if isinstance(acceptance, dict) else None

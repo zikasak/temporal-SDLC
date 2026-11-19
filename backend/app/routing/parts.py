@@ -153,13 +153,16 @@ def component_suite(language: Language, parts: list[ComponentPart]) -> Component
     `parts`: the service's own suite when it is the only one, as before parts other than
     the service could be routed, and otherwise one project per part
     (app/languages/composite.py). Raises ValueError for a part without component tests."""
+    suites = []
     for part in parts:
         if part.suite is None:
             raise ValueError(f'{part.language.label} has no component tests')
+        suites.append(part.suite)
     if [part.name for part in parts] == [SERVICE_PART]:
-        return parts[0].suite
-    return composite_suite([SuiteMember(part.name, part.suite, service=part.is_service,
-                                        label=part.language.label) for part in parts])
+        return suites[0]
+    return composite_suite([SuiteMember(part.name, suite, service=part.is_service,
+                                        label=part.language.label)
+                            for part, suite in zip(parts, suites)])
 
 
 async def check_parts(parts: list[ComponentPart], session_dir: Path, code: Path, work: Path,
@@ -168,14 +171,16 @@ async def check_parts(parts: list[ComponentPart], session_dir: Path, code: Path,
     repository's sources: None when every one holds, or what the first that does not
     says, naming its part when it is not the service."""
     for part in parts:
+        contract = part.contract
+        assert contract is not None  # only a part with component tests is routed to
         components = part.routed_contract(session_dir)
-        modules = await run_sync(stub_modules, part.contract, components)
+        modules = await run_sync(stub_modules, contract, components)
         own = work / 'checks' / part.name
         await run_sync(own.mkdir, parents=True)
         logs = log_dir if part.is_service else log_dir / PARTS_DIR / part.name
         await run_sync(logs.mkdir, parents=True, exist_ok=True)
         try:
-            await check_conformance(part.contract, code, components, modules, own, logs)
+            await check_conformance(contract, code, components, modules, own, logs)
         except RuntimeError as exc:
             return str(exc) if part.is_service else f'Part {part.name}: {exc}'
     return None

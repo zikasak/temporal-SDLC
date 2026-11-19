@@ -131,6 +131,7 @@ def _tokens(source: str) -> list[_Token]:
         if match is None:
             raise ValueError(f"line {line}: unreadable character")
         kind, value = match.lastgroup, match.group()
+        assert kind is not None  # every alternative of TOKEN is a named group
         if kind == "op" and value in "\"'":
             raise ValueError(f"line {line}: unterminated literal")
         if kind == "op" and value == "/" and source.startswith("/*", position):
@@ -394,7 +395,8 @@ class _Stub:
                 ended = self.peek()
                 if ended in (";", ","):
                     self.take()
-                elif ended is not None and self.token().line == self.tokens[self.index - 1].line:
+                elif (ended is not None and (following := self.token()) is not None
+                      and following.line == self.tokens[self.index - 1].line):
                     raise ValueError(f"line {line}: the value of {name} is not a literal")
             else:
                 raise ValueError(f"line {line}: {name} has neither a type nor a literal value")

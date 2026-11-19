@@ -67,6 +67,9 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
     if context.get('keep'):
         # The repository's tests the changed service still passes, with their sources.
         contracts['keep'] = context['keep']
+    if context.get('released'):
+        # Those of them a code review finding found wrong, which the author may change.
+        contracts['released'] = context['released']
 
     # The author of a session with a repository continues that repository's contract
     # tests, as the delivery recorded them before any author ran; the rest of the

@@ -165,8 +165,9 @@ def _collect_class(modules: _Modules, module: str, node: ast.ClassDef, owner: st
     methods, classes = modules.members(module, node)
     for name, source in methods.items():
         cases[f"{owner}#{name}"] = f"{context} {source}"
-    for inner in classes.values() if depth < MAX_DEPTH else []:
-        _collect_class(modules, *inner, owner, context, cases, depth + 1)
+    if depth < MAX_DEPTH:
+        for inner_module, inner in classes.values():
+            _collect_class(modules, inner_module, inner, owner, context, cases, depth + 1)
 
 
 def _collect(modules: _Modules, module: str, tree: ast.Module, cases: dict[str, str]) -> None:

@@ -3,7 +3,7 @@
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.errors import GraphRecursionError
@@ -11,7 +11,8 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from app.architecture.models import (
-    architecture_problems, normalize_structure, render_architecture_markdown,
+    ArchitectureStructure, architecture_problems, normalize_structure,
+    render_architecture_markdown,
 )
 from app.asyncio_utils import run_sync
 from app.config import GENERATED_CODE_DIR
@@ -94,7 +95,9 @@ async def inspect_onboarding_contract(session_id: str) -> dict[str, Any]:
 async def onboarding_turn(state: OnboardingState) -> dict[str, Any]:
     """Draft the contract from the code (a state without messages), or answer the user's
     last message about the drafts. Returns the reply and the updated drafts."""
-    root = repository_checkout.checkout_path(GENERATED_CODE_DIR, activity.info().workflow_id)
+    workflow_id = activity.info().workflow_id
+    assert workflow_id is not None  # run by the onboarding's workflow
+    root = repository_checkout.checkout_path(GENERATED_CODE_DIR, workflow_id)
     repository = (await run_sync(repository_tools.build, root)
                   if await run_sync(root.is_dir) else [])
     if not repository:
@@ -105,7 +108,8 @@ async def onboarding_turn(state: OnboardingState) -> dict[str, Any]:
     api = api_design_tools.ApiDesignContext.from_model(state.api, None, state.language)
     # Endpoints link to the requirements as recorded so far in this same turn.
     api.requirement_ids = requirements.requirements.keys()  # type: ignore[assignment]
-    architecture = architecture_tools.ArchitectureContext(state.architecture_structure)
+    architecture = architecture_tools.ArchitectureContext(
+        cast(ArchitectureStructure | None, state.architecture_structure))
     asked = question_tools.QuestionsContext()
     tools = [*(item for item in requirements_tools.build(requirements)
                if item.name not in UNUSED_TOOLS),
@@ -220,7 +224,7 @@ async def _architecture_turn(state: OnboardingState, root: Path,
         raise ApplicationError(str(exc), non_retryable=True) from exc
     conflicts = list(state.conflicts)
     architecture = architecture_tools.ArchitectureContext(
-        state.architecture_structure, conflicts=conflicts)
+        cast(ArchitectureStructure | None, state.architecture_structure), conflicts=conflicts)
     asked = question_tools.QuestionsContext()
     tools = [*architecture_tools.build(architecture), *question_tools.build(asked),
              *repository]

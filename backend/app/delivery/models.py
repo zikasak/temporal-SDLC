@@ -1,11 +1,13 @@
 """What the delivery pipeline is asked to build and how far it has come."""
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Literal, TypedDict
 
 from app.api_design.models import ApiModel
 from app.config import PULL_REQUEST_CHECK_INTERVAL_SECONDS
+from app.delivery.rounds import RoundOutcome
 from app.diagnosis.models import RepairRound
 from app.github.models import (
     PublicationStatus, PullRequest, PullRequestMention, RepositoryCheckout,
@@ -541,6 +543,37 @@ def unproven_green(result: VerificationResult | None,
     return None
 
 
+def touched_tests(tests: Mapping[str, Any] | None, released: Iterable[str] = ()) -> list[str]:
+    """The repository's tests an API change's suite changed or removed that still have to
+    be proved no longer supported: all of them but those the code review `released`."""
+    if not tests:
+        return []
+    left = set(released)
+    return [case for case in (*tests.get('changed_tests', []), *tests.get('removed_tests', []))
+            if case not in left]
+
+
+def named_tests(finding: Mapping[str, Any], cases: Iterable[str]) -> list[str]:
+    """Those of `cases`, tests by identity (`module.Class#test`), that a code review finding
+    about the tests names: by the test's own name, and by its module or class, in the
+    finding's file or summary."""
+    if finding.get('target') not in ('tests', 'both'):
+        return []
+    summary = str(finding.get('summary') or '')
+    where = f'{finding.get("path") or ""} {summary}'
+    named = []
+    for case in cases:
+        owner, _, name = case.rpartition('#')
+        parts = [part for part in owner.replace('/', '.').split('.') if part]
+        if not name or not parts or not re.search(rf'\b{re.escape(name)}\b', summary):
+            continue
+        # Its class and module, not the root package, which names every test of the suite.
+        if any(re.search(rf'\b{re.escape(part)}\b', where)
+               for part in (parts[-2:] if len(parts) > 2 else parts[-1:])):
+            named.append(case)
+    return named
+
+
 def kept_tests(result: VerificationResult, touched: list[str]) -> list[str]:
     """The repository's tests in `touched`, changed or removed by an API change, that ran
     as they were against the changed service, in `result`, and passed there."""
@@ -551,16 +584,17 @@ def kept_tests(result: VerificationResult, touched: list[str]) -> list[str]:
             if tracked.get(case, {}).get('tests') and not tracked[case]['failed']]
 
 
-def restorable_tests(progress: 'DeliveryProgress') -> list[str]:
+def restorable_tests(progress: 'DeliveryProgress', released: Iterable[str] = ()) -> list[str]:
     """The repository's tests an API change changed or removed that its passed suite has to
     put back as the repository holds them: all of them ran, as they were, against the
     changed service, and these still passed there. Empty when verification did not pass,
-    or when some did not run or could not be run, which no restore settles."""
+    or when some did not run or could not be run, which no restore settles. Those the code
+    review `released` are not put back."""
     result, tests, verification = (progress.existing_tests, progress.tests,
                                    progress.verification)
     if not result or not tests or not verification or verification['status'] != 'passed':
         return []
-    touched = [*tests.get('changed_tests', []), *tests.get('removed_tests', [])]
+    touched = touched_tests(tests, released)
     tracked = result['tracked']
     if result['status'] == 'error' or tracked is None or any(
             not tracked.get(case, {}).get('tests') for case in touched):
@@ -634,6 +668,15 @@ class DeliveryState:
     # repository holds it, against the changed service and passed. Every later author of
     # the delivery, a repair included, has to leave them as the repository holds them.
     kept_tests: list[str] = field(default_factory=list)
+    # Those of them a code review finding found wrong against the contract, such as one
+    # that passed only because what it asserts never ran: the test author may change them
+    # as the finding says, and they are no longer proved unsupported.
+    released_tests: list[str] = field(default_factory=list)
+    # Review findings that failing repository tests no author of the delivery may change
+    # contradict, as an analysis of the failed checks found them: each with the finding's
+    # `summary`, `target` and `path`, the `tests` and the `reason`. Such a finding is not
+    # sent for another correction; it is left open, saying why.
+    finding_conflicts: list[dict[str, Any]] = field(default_factory=list)
     # Raised once the run has done its work and waits for the user's next decision; a
     # restart continues the delivery as a new run of the same workflow.
     waiting: bool = False
@@ -649,7 +692,7 @@ class DeliveryState:
     # What the CI left failing on each pushed commit of the automatic fix rounds in a
     # row, the failure before the first round included (app.delivery.rounds): whether
     # another round is worth it is decided from it.
-    ci_history: list[dict[str, Any]] = field(default_factory=list)
+    ci_history: list[RoundOutcome] = field(default_factory=list)
 
 
 def mention_key(item: Any) -> tuple[str | None, int]:
@@ -660,7 +703,7 @@ def mention_key(item: Any) -> tuple[str | None, int]:
     return None, int(item)
 
 
-def is_mention(entry: dict[str, Any], key: tuple[str | None, int]) -> bool:
+def is_mention(entry: Mapping[str, Any], key: tuple[str | None, int]) -> bool:
     comment_type, comment_id = key
     return entry['comment_id'] == comment_id and (
         comment_type is None or entry['comment_type'] == comment_type)
@@ -734,7 +777,8 @@ def interrupted(state: DeliveryState) -> DeliveryState:
         progress.routing_status = 'error'
         progress.baseline_status = 'skipped'
         progress.verification_status = 'skipped'
-    elif progress.verification_status in ('waiting', 'running', 'diagnosing', 'repairing'):
+    elif progress.verification_status in ('waiting', 'running', 'checking', 'diagnosing',
+                                          'repairing'):
         # Before the delivery was verified, the author whose retry starts it over failed.
         if state.spec.kind == 'docs':
             progress.documentation_error = STOPPED
@@ -747,6 +791,20 @@ def interrupted(state: DeliveryState) -> DeliveryState:
         else:
             progress.implementation_error = STOPPED
         progress.verification_status = 'error'
+    elif progress.publication_status == 'waiting' and progress.verification_status in (
+            'completed', 'not_applicable'):
+        # Stopped after the delivery was done and before its push started: retrying the
+        # push goes on from there.
+        progress.publication_error = STOPPED
+        progress.publication_status = 'error'
+        progress.pull_request_status = 'skipped'
+    # The steps after the stopped stage never run in this run. Left waiting, they would
+    # report the delivery as still working, and its retry would stay unavailable.
+    if progress.publication_status == 'waiting':
+        progress.publication_status = 'completed' if progress.publication else 'skipped'
+    if progress.pull_request_status == 'waiting':
+        progress.pull_request_status = ('completed' if progress.publication
+                                        and progress.pull_request else 'skipped')
     return state
 
 

@@ -10,7 +10,9 @@ from langchain_core.messages import AIMessage
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
-from app.delivery.contract import ContractError, read_contract, write_contract
+from app.delivery.contract import (
+    ContractError, RepositoryContract, read_contract, write_contract,
+)
 from app.github import checkout, storage
 from app.temporal import activities
 
@@ -18,7 +20,7 @@ TOKEN = "ghs_SECRET_SENTINEL"
 TOKEN_PATH = "/app/installations/99/access_tokens"
 SESSION = "api-design-session-" + "a" * 32
 BRANCH = "generated/" + "a" * 12
-CONTRACT = {
+CONTRACT: RepositoryContract = {
     "language": "java",
     "requirements": [{"id": "FR-1", "category": "functional", "title": "Place an order",
                       "description": "A customer places an order.", "priority": "must"}],
@@ -179,7 +181,7 @@ async def test_a_change_with_component_tests_pushes_them_with_its_component_cont
                        "routing/components/app/rooms.pyi": "new stub"}.items():
         (session / name).parent.mkdir(parents=True, exist_ok=True)
         (session / name).write_text(text)
-    contract = {**CONTRACT, "language": "python"}
+    contract: RepositoryContract = {**CONTRACT, "language": "python"}
 
     published = await environment.run(activities.publish_repository, SESSION,
                                       repository_selection, contract, "bugfix", None,
@@ -239,7 +241,7 @@ async def test_a_change_with_component_tests_of_its_web_client_pushes_them_in_th
             "routing/parts/frontend/components/src/github.d.ts": "stub"}.items():
         (session / name).parent.mkdir(parents=True, exist_ok=True)
         (session / name).write_text(text)
-    contract = {**CONTRACT, "language": "python"}
+    contract: RepositoryContract = {**CONTRACT, "language": "python"}
 
     published = await environment.run(activities.publish_repository, SESSION,
                                       repository_selection, contract, "bugfix", None,

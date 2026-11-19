@@ -7,6 +7,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
@@ -322,12 +323,12 @@ def github_http(monkeypatch):
     requests = []
     async_client = httpx.AsyncClient
 
-    def respond(request):
+    def respond(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         response = responses[request.url.path]
         if isinstance(response, Exception):
             raise response
-        return response(request) if callable(response) else response
+        return cast(httpx.Response, response(request) if callable(response) else response)
 
     def create_client(**kwargs):
         return async_client(transport=httpx.MockTransport(respond), **kwargs)

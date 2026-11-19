@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -436,7 +436,8 @@ def _pending(row: dict[str, Any] | None) -> PendingMention | None:
     if row is None or row["handed_over"] or row["session_id"] is None or row["mention"] is None:
         return None
     return PendingMention(row["comment_type"], row["comment_id"], row["session_id"],
-                          dict(row["mention"]), row.get("admission_seq"))
+                          cast(PullRequestMention, dict(row["mention"])),
+                          row.get("admission_seq"))
 
 
 async def pending_comment(comment_type: str, comment_id: int) -> PendingMention | None:

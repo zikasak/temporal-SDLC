@@ -170,8 +170,10 @@ def runner_context(suite: ComponentSuite, repository: Path, tests: Path, context
 
 def _runtime(part: ComponentPart, session_dir: Path, repository: Path) -> dict[str, Any]:
     text = (_contract(session_dir, part) / RUNTIME_FILE).read_text()
+    contract = part.contract
+    assert contract is not None  # only a part with component tests is routed to
     try:
-        return part.contract.read_runtime(json.loads(text), repository)
+        return contract.read_runtime(json.loads(text), repository)
     except ValueError as exc:
         raise RuntimeError(f'The component contract\'s {RUNTIME_FILE} is unusable: '
                            f'{exc}') from exc
@@ -230,9 +232,10 @@ def composite_files(language: Language, members: list[tuple[ComponentPart, Suite
                              f'> /dev/null || {{ echo "The runtime of part {part.name} does '
                              'not start on the service\'s component test runner" >&2; '
                              'exit 1; }')
-        command = member.suite.part_command(root, part.root,
-                                            f'{reports}/{part_report(language, index, part)}',
-                                            member.prefix)
+        part_command = member.suite.part_command
+        assert part_command is not None  # a suite of a part runs its tests by part
+        command = part_command(root, part.root,
+                               f'{reports}/{part_report(language, index, part)}', member.prefix)
         commands.append(f'# Part {part.name}\n({command}); record $?')
     lines.append('COPY run-tests.sh run-parts.sh /runner/')
     if not service:

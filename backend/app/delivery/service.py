@@ -8,6 +8,7 @@ import shutil
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import cast
 
 from temporalio.client import Client, WorkflowExecutionDescription, WorkflowExecutionStatus
 from temporalio.common import (
@@ -28,6 +29,7 @@ from app.github.errors import GitHubError
 from app.github.models import PullRequestMention
 from app.requirements.lookup import lookup_requirements
 from app.requirements.models import CHANGE_KINDS
+from app.review.models import ReviewRound
 from app.tasks.service import (
     fork_name_source, stage_ids, start_fix_flow, task_flow_state, wait_for_stage,
 )
@@ -161,8 +163,10 @@ async def with_mention_history(session_id: str,
     # Mentions the history does not have yet, as the workflow reports them.
     merged.extend({'body': '', **item} for item in current.values())
     # What the workflow still owes a mention is its own bookkeeping, not shown.
-    progress.mentions = [{name: value for name, value in item.items() if name != OUTCOME_OWED}
-                         for item in merged]
+    progress.mentions = [
+        cast(PullRequestMention,
+             {name: value for name, value in item.items() if name != OUTCOME_OWED})
+        for item in merged]
     progress.reviews = [
         _with_instructions(item, texts) for item in progress.reviews]
     return progress
@@ -220,17 +224,17 @@ async def _record_handover(client: Client, session_id: str, target: str,
     record['fix_flow_id'] = fix_flow
     record[HANDED_TO] = target
     try:
-        await mention_history.save(session_id, record)
+        await mention_history.save(session_id, cast(PullRequestMention, record))
     except Exception as exc:  # noqa: BLE001 - the handover itself already succeeded
         logger.warning('Mention %s handed to %s not recorded for session %s: %s',
                        mention.get('comment_id'), target, session_id, exc)
 
 
-def _with_instructions(round_: dict, texts: dict) -> dict:
+def _with_instructions(round_: ReviewRound, texts: dict) -> ReviewRound:
     reference = round_.get('mention')
     if not isinstance(reference, dict):
         return round_
-    result = {key: value for key, value in round_.items() if key != 'mention'}
+    result = cast(ReviewRound, {key: value for key, value in round_.items() if key != 'mention'})
     result['instructions'] = texts.get(
         (reference.get('comment_type'), reference.get('comment_id')), '')
     return result
@@ -407,7 +411,8 @@ async def _as_pull_request_stands(finished: _Finished, session_id: str,
     full_name, number = _pull_request_of(finished.state)
     current = await _pull_request_state(full_name, number)
     status = finished.description.status
-    if status == WorkflowExecutionStatus.RUNNING and current in ('merged', 'closed'):
+    if (status == WorkflowExecutionStatus.RUNNING and current in ('merged', 'closed')
+            and number is not None):
         await _report_closed(finished.client, session_id, number, current == 'merged')
         finished = await _finished(session_id, busy)
         status = finished.description.status
@@ -697,7 +702,7 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
     state.retry_stage = stage
     # A suite rejected for changing tests the changed service still passes would be
     # rejected again: the retry has its author put them back, before the run is cleared.
-    state.restore_tests = (restorable_tests(progress)
+    state.restore_tests = (restorable_tests(progress, state.released_tests)
                            if stage == 'tests' and state.spec.kind == 'api_change' else [])
     # A finished run waits for no agent.
     progress.agent_questions = []
@@ -881,7 +886,7 @@ async def receive_mention(session_id: str, mention: PullRequestMention) -> bool:
                 raise
             return False
         if (description.status == WorkflowExecutionStatus.RUNNING
-                and current in ('merged', 'closed')):
+                and current in ('merged', 'closed') and pull_number is not None):
             # Its pull request ended, which the delivery has not been told yet: it closes
             # first, so that the fix goes to a new branch rather than the ended one's.
             await _report_closed(client, session_id, pull_number, current == 'merged')

@@ -91,15 +91,15 @@ async def write_architecture_document(session_id: str, structure: dict[str, Any]
     """Save architecture.md and architecture.json as the session's documents; the
     Markdown document's record, with the JSON one's under `json`."""
     try:
-        structure = normalize_structure(structure)
+        normalized = normalize_structure(structure)
     except (TypeError, ValueError, KeyError) as exc:
         raise ApplicationError(f"The architecture is malformed: {exc}",
                                non_retryable=True) from exc
-    problems = architecture_problems(structure)  # type: ignore[arg-type]
+    problems = architecture_problems(normalized)
     if problems:
         raise ApplicationError(" ".join(problems), non_retryable=True)
     markdown = await _save_session_document(session_id, MARKDOWN_FILENAME,
-                                            render_architecture_markdown(structure))
+                                            render_architecture_markdown(normalized))
     machine = await _save_session_document(session_id, JSON_FILENAME,
-                                           render_architecture_json(structure))
+                                           render_architecture_json(normalized))
     return {**markdown, "json": machine}

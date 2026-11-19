@@ -28,7 +28,7 @@ NO_SKIP = ("A new service always goes through the architecture stage; only the s
 
 
 @workflow.defn
-class ArchitectureWorkflow(Interview, FlowFlags, PendingStage):
+class ArchitectureWorkflow(Interview[ArchitectureState], FlowFlags, PendingStage):
     """One architecture session of a task: the LLM drafts the top-level architecture from
     the requirements (an API change starting from the repository's existing one, or
     proposing to skip the stage instead), and the user reviews it in a conversation of
@@ -116,6 +116,7 @@ class ArchitectureWorkflow(Interview, FlowFlags, PendingStage):
 
     async def _start_design_alone(self, design: Any) -> None:
         session_id = self.state.api_design_session_id
+        assert session_id is not None  # only a session that hands on starts its design
         await workflow.start_child_workflow(
             "ApiDesignWorkflow", design, id=session_id,
             parent_close_policy=workflow.ParentClosePolicy.ABANDON,

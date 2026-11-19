@@ -193,6 +193,9 @@ and why it was sent to you) and, when present, the user's `instructions` about t
 take precedence over the findings. Correct each finding with targeted edits; do not start
 over or rewrite code that works, and keep everything the contract requires working. The
 requirements and OpenAPI design remain the authority. The test sources stay unavailable.
+A finding marked `reported_again` was sent to you before, and the review found it again
+after your correction: that correction did not settle it, or a later repair undid it. Read
+what it says the code still does, and settle it this time.
 """
 
 
