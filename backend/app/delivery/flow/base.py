@@ -15,6 +15,7 @@ class FlowBase:
     spec: TaskSpec
     progress: DeliveryProgress
     _child_ids: dict[str, int]
+    _correcting: list[dict[str, Any]]
 
     if TYPE_CHECKING:
         # The mixins are one workflow: a method of one that another calls is not known

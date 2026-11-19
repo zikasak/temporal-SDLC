@@ -565,7 +565,7 @@ async def retry(session_id: str, stage: RetryStage) -> DeliveryProgress:
     state.retry_stage = stage
     # A suite rejected for changing tests the changed service still passes would be
     # rejected again: the retry has its author put them back, before the run is cleared.
-    state.restore_tests = (restorable_tests(progress)
+    state.restore_tests = (restorable_tests(progress, state.released_tests)
                            if stage == 'tests' and state.spec.kind == 'api_change' else [])
     # A finished run waits for no agent.
     progress.agent_questions = []

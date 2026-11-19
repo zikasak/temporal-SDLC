@@ -151,6 +151,9 @@ class FakeStages:
         # and the cause it gives.
         self.analysis_limits = 0
         self.analysis_cause = 'code'
+        # The review findings each analysis was told, and the conflict it finds with them.
+        self.analysed_findings: list[list[dict[str, Any]] | None] = []
+        self.analysis_conflict: dict[str, Any] | None = None
         # How many contract tests the repository has.
         self.repository_tests = 3
         self.fail_snapshot = False
@@ -367,6 +370,9 @@ class FakeStages:
             # Tests put back as the repository holds them are no longer rewritten.
             restore = context['repair'].get('review', {}).get('restore', [])
             self.rewritten_tests = [case for case in self.rewritten_tests if case not in restore]
+            # A test a review finding released is rewritten as the finding says.
+            self.rewritten_tests += [case for case in context.get('released', [])
+                                     if case not in self.rewritten_tests]
         if 'brief' not in context:
             changed = {"added_tests": [], "changed_tests": self.rewritten_tests,
                        "removed_tests": []}
@@ -407,16 +413,20 @@ class FakeStages:
                 'error': 'did not finish' if status == 'error' else None}
 
     @activity.defn(name='analyze_checks_failure')
-    async def analyze_checks_failure(self, session_id: str, excerpt: str) -> dict[str, Any]:
+    async def analyze_checks_failure(self, session_id: str, excerpt: str,
+                                     findings: list[dict[str, Any]] | None = None
+                                     ) -> dict[str, Any]:
         if self.analysis_limits:
             self.analysis_limits -= 1
             raise ApplicationError('limits', {'retry_after': 0}, type='ProviderLimitReached',
                                    non_retryable=True)
         self.analysed.append(excerpt)
+        self.analysed_findings.append(findings)
+        conflict = self.analysis_conflict if findings else None
         return {'cause': self.analysis_cause,
                 'summary': 'A test patches a removed attribute.', 'files': ['tests/test_x.py'],
                 'instructions': 'Stop patching TASK_QUEUE in tests/test_x.py.',
-                'analysed': True}
+                'analysed': True, **({'conflict': conflict} if conflict else {})}
 
     @activity.defn(name='build_repository_tests')
     async def build_repository_tests(self, session_id: str, language: str) -> dict[str, Any]:

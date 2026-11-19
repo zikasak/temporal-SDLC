@@ -776,9 +776,9 @@ flowchart LR
    finding goes to the seam's author (`SCOPE_TARGETS`), who corrects it in a run of its
    own (`SEAM_REVIEW_PROMPT` in `app/implementation/agent.py`, starting from
    `<session-id>/seam/service`); the code is built and checked against the component
-   contract again, and reviewed again. The rounds work as the delivery's own review
-   rounds: each knows the findings already corrected, a finding reported again
-   (`repeats`) is not sent back, and findings about the stubs go to nobody. They stop when
+   contract again, and reviewed again. Each round knows the findings already
+   corrected, a finding reported again (`repeats`) is not sent back, and findings about
+   the stubs go to nobody. They stop when
    no new finding is left or after `MAX_STAGE_REVIEW_ROUNDS` rounds, whose last findings
    go on with the delivery: its own code review sees the seam again. The rounds are
    `DeliveryProgress.seam_reviews`, while `seam_status` stays `running`. A correction
@@ -1055,6 +1055,13 @@ Two checks stand in for it:
   `app/delivery/models.py`): `verification_error` names it and nothing is pushed. One that
   did not run there at all is refused too, since nothing shows it is unsupported. Retrying
   `tests` writes a new suite, which is judged the same way.
+- **A review finding may release a kept test.** A test that passes as the repository holds
+  it is not always supported: one whose assertions never ran, such as a loop over an empty
+  listing, passes whatever the service does. When a code review finding about the tests
+  names a kept test (by its name, and its module or class in the finding's file or
+  summary; `named_tests`), the delivery records it in `DeliveryState.released_tests`. The
+  test author no longer gets it in `keep` but in `released`, may change it as the finding
+  says, and it is left out of the tests proved unsupported (`touched_tests`).
 
 ## Changing documentation only
 
@@ -1359,6 +1366,31 @@ checks are the code's, so the implementation's author gets a `repair` with the a
 assertion the change rightly altered. Then the contract tests and the checks run again.
 Checks that still fail stop the delivery before its push, with the reason in
 `verification_error`, just as failing tests do.
+
+While the delivery is being corrected for code review findings, the analysis is also told
+those findings (the last review round's, numbered), as the authority on what the change
+rightly alters. The checks' author may change the code and the repository's own unit
+tests, but not the tests in `contract-tests/` and `component-tests/`. When failed tests
+there assert exactly what a finding requires to change, the analysis returns a `conflict`
+(the finding's number, the tests and why): its instructions keep the behaviour those tests
+assert, and the delivery records the conflict in `DeliveryState.finding_conflicts`. The
+finding is then not sent for another correction (see [Code review rounds](#code-review-rounds)).
+
+## Code review rounds
+
+Once verification passed, `ReviewWorkflow` reviews the delivery's changes, and its
+findings go to the authors they concern (`for_worker`); the corrected delivery is verified
+and reviewed again, at most `MAX_REVIEW_ROUNDS` times in a run. Each review gets the
+findings already corrected in the run, numbered, as `previous_findings`, and marks a finding
+it reports again with `repeats`. A finding reported again goes back to its author, marked
+`reported_again`, at most `MAX_FINDING_CORRECTIONS` (2) times in a run in all, unless
+failed checks [conflict](#the-repositorys-checks) with it. A round with nothing left to
+correct ends the run. The findings of the last round are open (`findings_open`): the
+delivery is pushed as unverified and the user decides about them. A finding no author
+could settle says why in `unresolved`, which the page, the commit message and the pull
+request show: the tests that contradict it, or how often it was corrected. These rules are
+behind the `review-finding-conflicts` workflow patch; runs recorded before it end at the
+first round that only repeats corrected findings.
 
 ## Further rounds of fixes
 

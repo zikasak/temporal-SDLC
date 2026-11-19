@@ -1,6 +1,9 @@
 """The reviewer's findings as the host accepts them."""
 import json
 
+import pytest
+
+from app.delivery.models import named_tests
 from app.review.activities import read_findings
 
 PREVIOUS = [{'number': 1, 'summary': 'GET /rooms  does not sort.', 'target': 'implementation',
@@ -252,3 +255,24 @@ def test_a_bugfix_review_asks_only_for_tests_that_can_fail_without_the_fix():
 
     prompt = agent.prompt({'brief': {'requirements': []}, 'regression': True}, 'Java')
     assert agent.BUGFIX_PROMPT in prompt
+
+
+ARCHITECTURE = 'tests.test_architecture#test_workflow_listing_accepts_the_architecture_type'
+LISTING = 'tests.test_onboarding#test_workflow_listing_accepts_the_onboarding_type'
+
+
+@pytest.mark.parametrize('finding, named', [
+    # The test by its name and its module, in the file the finding is about.
+    ({'target': 'tests', 'path': 'tests/tests/test_architecture.py',
+      'summary': 'test_workflow_listing_accepts_the_architecture_type still asserts the old '
+                 'parent.'}, [ARCHITECTURE]),
+    # The suite's root package names every test: it does not tell them apart.
+    ({'target': 'tests', 'path': 'tests/tests/test_other.py',
+      'summary': 'test_workflow_listing_accepts_the_architecture_type is fine; the other is not.'},
+     []),
+    # A finding for the implementation releases nothing.
+    ({'target': 'implementation', 'path': 'tests/tests/test_architecture.py',
+      'summary': 'test_workflow_listing_accepts_the_architecture_type fails.'}, []),
+])
+def test_a_finding_about_the_tests_names_the_kept_tests_it_concerns(finding, named):
+    assert named_tests({'reason': 'R', **finding}, [ARCHITECTURE, LISTING]) == named

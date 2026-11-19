@@ -80,7 +80,11 @@ export function taskKind(value: unknown): TaskKind | null {
   return taskKinds.includes(value as TaskKind) ? value as TaskKind : null;
 }
 // `repeats`: the finding was reported again after a correction did not settle it.
-type ReviewFinding = { summary: string; path?: string; target: "implementation" | "tests" | "both"; reason: string; repeats?: number };
+// `unresolved`: why no author of the delivery settled a finding left open.
+type ReviewFinding = {
+  summary: string; path?: string; target: "implementation" | "tests" | "both"; reason: string; repeats?: number;
+  unresolved?: string;
+};
 type ReviewRound = { round: number; findings: ReviewFinding[]; instructions?: string };
 // Questions a coding agent asked; its run is paused until they are answered, and only
 // that agent sees the answers.
@@ -931,6 +935,7 @@ function CodeReview({ progress, retrying, disabled, onRetry, onFindings }: {
       {last.findings.map((item, index) => <li key={index}>
         <strong>{item.path ?? "General"} ({findingTargets[item.target]}){item.repeats !== undefined && ", reported again after a correction"}</strong>
         <span>{item.summary}</span>
+        {typeof item.unresolved === "string" && <span>Left open: {item.unresolved}</span>}
       </li>)}
     </ul>}
     {progress.review_error && <div className="generation-failure">

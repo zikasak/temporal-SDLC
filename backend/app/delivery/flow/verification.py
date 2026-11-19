@@ -9,8 +9,8 @@ from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflow
 from app.agent_workflows.workflows import PROVIDER_WAIT_TOTAL, provider_wait
 
 from app.delivery.flow.stages import (
-    COMPONENT_REPAIRS_PATCH, MAX_TRACKED, RESTORE_KEPT_PATCH, VERIFICATION_ATTEMPTS,
-    restore_finding,
+    COMPONENT_REPAIRS_PATCH, FINDING_CONFLICTS_PATCH, MAX_TRACKED, RESTORE_KEPT_PATCH,
+    VERIFICATION_ATTEMPTS, restore_finding,
 )
 
 from app.delivery.flow.base import FlowBase
@@ -21,11 +21,15 @@ with workflow.unsafe.imports_passed_through():
     from app.llm.limits import PROVIDER_LIMIT_ERROR
     from app.verification.checks import fallback_analysis
     from app.config import DIAGNOSIS_TASK_QUEUE, VERIFICATION_TASK_QUEUE
-    from app.delivery.models import judge_kept, kept_tests, restorable_tests, unproven_green
+    from app.delivery.models import (
+        judge_kept, kept_tests, restorable_tests, touched_tests, unproven_green,
+    )
     from app.diagnosis.models import RepairRound, repair_request
     from app.github.checkout import SNAPSHOT_DIR
     from app.requirements.models import CHANGE_KINDS
-    from app.review.models import review_request
+    from app.review.models import (
+        MAX_FINDINGS, PREVIOUS_SUMMARY_CHARS, review_request, same_finding,
+    )
 
 # Each round is a diagnosis, a repair of one side and a new verification. Within the
 # ceiling each round has to be earned by progress (app.delivery.rounds); runs that began
@@ -371,18 +375,27 @@ class Verification(FlowBase):
         workflow.logger.info("The repository's checks: %s", checks['status'])
 
     async def _analyze_checks(self, excerpt: str) -> dict[str, Any]:
-        """The LLM's analysis of a failure of the repository's checks. While the
+        """The LLM's analysis of a failure of the repository's checks, told the code
+        review findings the delivery is being corrected for, if any: a conflict it finds
+        between one of them and failed tests no author may change is recorded. While the
         provider's limits are spent it waits, as the coding agents do; any other failure
         gives the analysis made without the LLM."""
+        findings = self._correcting if workflow.patched(FINDING_CONFLICTS_PATCH) else []
+        args: list[Any] = [self.spec.session_id, excerpt]
+        if findings:
+            args.append([{key: item[key] for key in ('summary', 'path') if key in item}
+                         for item in findings])
         waited, attempt = timedelta(), 0
         while True:
             try:
-                return await workflow.execute_activity(
-                    'analyze_checks_failure', args=[self.spec.session_id, excerpt],
+                analysis = await workflow.execute_activity(
+                    'analyze_checks_failure', args=args,
                     task_queue=VERIFICATION_TASK_QUEUE, result_type=dict,
                     start_to_close_timeout=timedelta(minutes=10),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
+                self._record_conflict(analysis.get('conflict'), findings)
+                return analysis
             except ActivityError as exc:
                 cause = exc.cause
                 if not (isinstance(cause, ApplicationError)
@@ -399,6 +412,26 @@ class Verification(FlowBase):
                 await workflow.sleep(wait)
                 waited += wait
 
+    def _record_conflict(self, conflict: dict[str, Any] | None,
+                         findings: list[dict[str, Any]]) -> None:
+        """Record that failed tests no author may change contradict one of the review
+        `findings`, as the analysis of the failed checks found: that finding is left open."""
+        if not conflict or not 1 <= conflict.get('finding', 0) <= len(findings):
+            return
+        workflow.logger.info('Failed checks contradict a review finding: %s',
+                             ', '.join(conflict['tests'][:NAMED_FAILURES]))
+        self._note_conflict(findings[conflict['finding'] - 1], conflict)
+
+    def _note_conflict(self, finding: dict[str, Any], conflict: dict[str, Any]) -> None:
+        """Record `conflict` as the one of `finding`, replacing an earlier record of it."""
+        recorded = {'summary': finding['summary'][:PREVIOUS_SUMMARY_CHARS],
+                    'target': finding['target'],
+                    **({'path': finding['path']} if finding.get('path') else {}),
+                    'tests': list(conflict['tests']), 'reason': conflict.get('reason') or ''}
+        self.state.finding_conflicts = [
+            *(item for item in self.state.finding_conflicts
+              if not same_finding(item, recorded)), recorded][-MAX_FINDINGS:]
+
     async def _repair_checks(self, attempt: int) -> bool:
         """Have the implementation's author fix what the repository's checks reported,
         from the analysis and the excerpt of their output."""
@@ -407,6 +440,11 @@ class Verification(FlowBase):
         files = analysis.get('files') or []
         instructions = analysis['instructions'] + (
             f'\nFiles to look at first: {", ".join(files)}.' if files else '')
+        if analysis.get('conflict'):
+            instructions += (
+                '\nThose failed tests are not yours to change and assert what a review '
+                'finding requires to change. Keep the behaviour they assert; the finding is '
+                'left open for the user to decide about.')
         workflow.logger.info('Repair round %d: the repository\'s checks', attempt)
         self.progress.repairs.append({
             'attempt': attempt, 'target': 'implementation', 'tests': [],
@@ -426,7 +464,8 @@ class Verification(FlowBase):
         tests, verification = self.progress.tests, self.progress.verification
         implementation = self.progress.implementation
         assert tests is not None and implementation is not None  # verification ran on them
-        touched = [*tests['changed_tests'], *tests['removed_tests']]
+        # Tests a review finding found wrong may change although the service passes them.
+        touched = touched_tests(tests, self.state.released_tests)
         if (not touched or self.progress.verification_error
                 or self.progress.verification_status != 'completed'
                 or verification is None or verification['status'] != 'passed'):
@@ -463,7 +502,7 @@ class Verification(FlowBase):
         the test author put them back as the repository holds them and verify again, at
         most MAX_RESTORE_ROUNDS times. A rejection left stays the verification's error."""
         for attempt in range(1, MAX_RESTORE_ROUNDS + 1):
-            restore = restorable_tests(self.progress)
+            restore = restorable_tests(self.progress, self.state.released_tests)
             if not restore or not self.progress.verification_error:
                 return
             workflow.logger.info('Restore round %d: %d repository tests', attempt, len(restore))

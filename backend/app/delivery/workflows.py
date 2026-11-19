@@ -76,6 +76,9 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
         self._ack_error: str | None = None
         # The comment whose fix round this run carries out, as review rounds refer to it.
         self._mention_ref: dict[str, Any] | None = None
+        # The code review findings the authors are correcting now, which the analysis of
+        # failed checks is told: empty while no correction runs.
+        self._correcting: list[dict[str, Any]] = []
         # Whether this run's own push succeeded, whether or not its commit changed: a
         # round whose correction was already present pushes the same SHA again.
         self._pushed = False

@@ -252,6 +252,48 @@ async def test_failing_checks_are_repaired_from_their_analysis_before_the_push(
     assert state.publication_status == 'completed' and worker.published
 
 
+CLOSED_FLOWS = 'component-tests/tests/test_closed_flows.py::test_a_mention_starts_a_new_flow'
+
+
+async def test_a_finding_failing_tests_no_author_may_change_contradict_is_left_open_saying_why(
+        env, worker, repository_selection):
+    question = {'summary': 'A question on a closed pull request starts a new fix flow.',
+                'target': 'implementation', 'reason': 'The contract answers it in place.',
+                'path': 'backend/app/delivery/service.py'}
+    # The review words the finding anew each time it reports it again.
+    reworded = {**question, 'summary': 'Questions on closed pull requests still start flows.',
+                'repeats': 1}
+    worker.review_findings = [[question], [reworded]]
+    # The corrected code fails the repository's component tests, which no author of the
+    # delivery may change and which assert what the finding requires to change.
+    worker.checks_results = ['passed', 'failed', 'passed']
+    worker.analysis_conflict = {'finding': 1, 'tests': [CLOSED_FLOWS],
+                                'reason': 'They expect every mention to start a new flow.'}
+    session_id = await deliver(env, repository_selection)
+    state = await delivered(env, session_id)
+    # The analysis of the failure was told the finding being corrected.
+    assert worker.analysed_findings == [[{'summary': question['summary'],
+                                          'path': question['path']}]]
+    # The checks repair keeps what those tests assert; the finding is not sent again.
+    assert [stage for stage, _ in worker.repairs] == ['implementation', 'implementation']
+    assert 'Keep the behaviour they assert' in worker.repairs[1][1]['instructions']
+    assert state.verification_status == 'findings_open' and state.open_findings
+    unresolved = (
+        'Tests of the repository that no author of this delivery may change fail when it is '
+        f'corrected: {CLOSED_FLOWS}. They expect every mention to start a new flow. Change '
+        'those tests, or accept the finding.')
+    assert state.reviews[-1]['findings'][0].get('unresolved') == unresolved
+    assert state.publication_status == 'completed' and worker.published
+
+    # The user's instructions go to the author with the finding; reported again after
+    # them, it is known as the same conflict, not sent for yet another correction.
+    await delivery_service.instruct_findings(session_id, 'Answer questions in place.')
+    state = await delivered(env, session_id)
+    # Only the instructed correction ran, by both authors as instructions go to both.
+    assert sorted(stage for stage, _ in worker.repairs[2:]) == ['implementation', 'tests']
+    assert state.reviews[-1]['findings'][0].get('unresolved') == unresolved
+
+
 async def test_checks_failed_by_the_sandbox_are_reported_not_repaired(
         env, worker, repository_selection):
     worker.checks_results = ['failed']
@@ -422,38 +464,49 @@ async def test_a_retried_correction_tells_the_test_author_which_test_skipped_and
     assert state.publication_status == 'completed'
 
 
-async def test_review_rounds_end_when_a_review_only_repeats_corrected_findings(env, worker, repository_selection):
+async def test_a_finding_reported_again_is_corrected_again_once_then_left_open_saying_why(
+        env, worker, repository_selection):
     unsorted = {'summary': 'Rooms are listed unsorted.', 'target': 'implementation',
                 'reason': 'The service orders them.', 'path': 'service/Rooms.java'}
     again = {**unsorted, 'summary': 'GET /rooms still does not sort.', 'repeats': 1}
     paged = {'summary': 'GET /rooms ignores the page size.', 'target': 'implementation',
              'reason': 'The service pages.'}
-    worker.review_findings = [[unsorted], [again], [paged], []]
+    worker.review_findings = [[unsorted], [again], [again], [paged], []]
     session_id = await deliver(env, repository_selection)
     state = await delivered(env, session_id)
-    # The repeated finding is not sent for another correction: it is left to the user.
-    assert [stage for stage, _ in worker.repairs] == ['implementation']
+    # Reported again after its correction, the finding goes back to its author once, told
+    # so; reported after that second correction too, it is left to the user.
+    assert [stage for stage, _ in worker.repairs] == ['implementation', 'implementation']
+    assert worker.repairs[1][1]['review']['findings'] == [
+        {'summary': again['summary'], 'reason': again['reason'], 'path': again['path'],
+         'reported_again': True}]
     assert state.verification_status == 'findings_open' and state.open_findings
-    assert [item['findings'] for item in state.reviews] == [[unsorted], [again]]
-    # The second review knew what the first had corrected.
+    assert [item['findings'] for item in state.reviews[:2]] == [[unsorted], [again]]
+    assert state.reviews[2]['findings'] == [
+        {**again, 'unresolved': 'Corrected 2 times in this run, and the review still finds it.'}]
+    assert worker.published_findings == state.reviews[2]['findings']
+    # Each review knew the finding as last corrected, under the same number.
     assert 'previous_findings' not in worker.reviewed[0]
     assert worker.reviewed[1]['previous_findings'] == [
         {'number': 1, 'summary': unsorted['summary'], 'target': 'implementation',
+         'path': 'service/Rooms.java'}]
+    assert worker.reviewed[2]['previous_findings'] == [
+        {'number': 1, 'summary': again['summary'], 'target': 'implementation',
          'path': 'service/Rooms.java'}]
 
     await delivery_service.instruct_findings(session_id, 'Sort by room number.')
     state = await delivered(env, session_id)
     # Every round of the instructed run reviews under the user's instructions, and knows
     # the findings corrected from them as well as those corrected since.
-    assert [context['instructions'] for context in worker.reviewed[2:]] == [
+    assert [context['instructions'] for context in worker.reviewed[3:]] == [
         'Sort by room number.'] * 2
-    assert [item['summary'] for item in worker.reviewed[3]['previous_findings']] == [
+    assert [item['summary'] for item in worker.reviewed[4]['previous_findings']] == [
         again['summary'], paged['summary']]
     # The author of the next correction never sees the bookkeeping.
     assert worker.repairs[-1][1]['review']['findings'] == [
         {key: value for key, value in paged.items() if key != 'target'}]
     assert state.verification_status == 'completed' and not state.open_findings
-    assert 'instructions' in state.reviews[2] and 'instructions' not in state.reviews[3]
+    assert 'instructions' in state.reviews[3] and 'instructions' not in state.reviews[4]
 
 
 async def test_only_a_failed_review_or_correction_is_retried(env, worker):
@@ -1574,6 +1627,25 @@ async def test_api_change_has_the_repository_tests_its_service_still_passes_put_
     # The restored suite goes on to the code review and is published.
     assert len(state.reviews) == 1 and state.verification_error is None
     assert state.verification_status == "completed" and state.publication_status == "completed"
+
+
+async def test_a_kept_test_a_review_finding_names_may_be_rewritten(env, worker, repository_selection):
+    worker.rewritten_tests, worker.still_passing = [LISTS, BOOKS], [LISTS]
+    # The test the changed service still passes was put back; the review then finds it
+    # asserting what the contract no longer says, which it passed only by never asserting.
+    wrong = {'summary': 'RoomsTest#lists still expects rooms in insertion order; when the '
+                        'listing is empty its assertions never run.',
+             'target': 'tests', 'reason': 'Only the test is wrong.',
+             'path': 'tests/src/test/java/com/example/RoomsTest.java'}
+    worker.review_findings = [[wrong], []]
+    state = await delivered(env, await deliver(env, repository_selection, kind="api_change"))
+    # Its author may now change it, told why, and it is not proved unsupported again.
+    corrected = worker.test_contexts[-1]
+    assert corrected['repair']['review']['findings'][0]['summary'] == wrong['summary']
+    assert corrected['released'] == [LISTS] and 'keep' not in corrected
+    assert worker.existing_runs[-1] == ("repository-tests", [BOOKS])
+    assert state.verification_error is None and state.verification_status == "completed"
+    assert state.publication_status == "completed"
 
 
 async def test_a_suite_still_keeping_tests_after_the_restore_rounds_is_retried_with_the_restore(env, worker, repository_selection, monkeypatch):

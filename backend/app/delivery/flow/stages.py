@@ -20,6 +20,11 @@ with workflow.unsafe.imports_passed_through():
 RESTORE_KEPT_PATCH = 'restore-kept-tests'
 COMPONENT_TESTS_PATCH = 'component-tests'
 COMPONENT_REPAIRS_PATCH = 'component-repairs'
+# Marks the workflow code that sends a review finding reported again after its correction
+# for another one, up to MAX_FINDING_CORRECTIONS; tells the analysis of failed checks the
+# findings being corrected, and leaves a finding it finds failing tests no author may
+# change contradict open; and releases the repository's kept tests a finding names.
+FINDING_CONFLICTS_PATCH = 'review-finding-conflicts'
 # Runs of one verification whose result is an infrastructure error, not a verdict.
 VERIFICATION_ATTEMPTS = 2
 # An API change may add more tests than one run reports on singly; the run still
@@ -241,9 +246,13 @@ class Stages(FlowBase):
         if routes:
             # The criteria the contract tests prove, when the component tests prove others.
             context['routes'] = routes
-        if self.state.kept_tests and self.spec.checkout:
+        keep = [case for case in self.state.kept_tests if case not in self.state.released_tests]
+        if keep and self.spec.checkout:
             # The repository's tests the changed service was seen to pass as they are.
-            context['keep'] = list(self.state.kept_tests)
+            context['keep'] = keep
+        if self.state.released_tests and self.spec.checkout:
+            # Those of them a review finding found wrong: the author may change them.
+            context['released'] = list(self.state.released_tests)
         try:
             tests = await self._child(
                 'TestGenerationWorkflow', TEST_GENERATION_TASK_QUEUE,

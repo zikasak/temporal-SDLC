@@ -42,6 +42,19 @@ def test_the_proofs_and_findings_always_fit_and_long_lists_are_counted():
     assert 'The docstring names a private helper.' in body
 
 
+def test_an_open_finding_no_author_could_settle_says_why():
+    publication = {**PUBLICATION, 'verified': False, 'findings_count': 1, 'findings': [
+        {'summary': 'A question on a closed pull request starts a fix flow.',
+         'target': 'implementation', 'reason': 'R',
+         'unresolved': 'Corrected 2 times in this run, and the review still finds it.'}]}
+    _, body = describe('Change the service', {'kind': 'api_change'}, publication)
+    lines = body.splitlines()
+    finding = lines.index('1. (implementation) A question on a closed pull request starts a '
+                          'fix flow.')
+    assert lines[finding + 1] == (
+        '   Left open: Corrected 2 times in this run, and the review still finds it.')
+
+
 def test_the_proofs_name_the_symbols_of_a_seam_the_change_added():
     seam = {'module': 'app.delivery.workflows',
             'symbols': ['DeliveryWorkflow.pull_request_closed', 'DeliveryWorkflow.get_state'],

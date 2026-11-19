@@ -33,8 +33,9 @@ from app.test_generation.activities import copy_test_suite
 from app.review import checks, settled
 from app.review.agent import FINDINGS
 from app.review.models import (
-    MAX_FINDINGS, PATH_CHARS, PREVIOUS_SUMMARY_CHARS, REASON_CHARS, REVIEW_TARGETS,
+    MAX_FINDINGS, PATH_CHARS, REASON_CHARS, REVIEW_TARGETS,
     BASELINE_KEY, SCOPE_KEY, SCOPE_TARGETS, SUMMARY_CHARS, REVIEW_INSTRUCTIONS_CHARS, ReviewFinding,
+    same_finding,
 )
 from app.verification.models import COMPONENT_TESTS_ARTIFACT
 from app.temporal.tracing import activity_metadata
@@ -412,10 +413,6 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
     return prepared.changes, prepared.count
 
 
-def _same(summary: str) -> str:
-    return ' '.join(summary.lower().split())
-
-
 def _repeated(item: dict[str, Any], finding: ReviewFinding,
               previous: list[dict[str, Any]]) -> int | None:
     """The number of the earlier finding this one reports again: the one the reviewer
@@ -425,10 +422,7 @@ def _repeated(item: dict[str, Any], finding: ReviewFinding,
     if isinstance(named, int) and not isinstance(named, bool) and named in numbers:
         return named
     for entry in previous:
-        if (entry.get('target') == finding['target']
-                and (entry.get('path') or '') == finding.get('path', '')
-                and _same(str(entry.get('summary') or ''))
-                == _same(finding['summary'][:PREVIOUS_SUMMARY_CHARS])):
+        if same_finding(entry, finding):
             return entry.get('number')
     return None
 

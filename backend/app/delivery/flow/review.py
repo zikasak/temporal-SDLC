@@ -4,7 +4,7 @@ from typing import Any, cast
 from temporalio import workflow
 from temporalio.exceptions import ChildWorkflowError
 
-from app.delivery.flow.stages import restore_finding
+from app.delivery.flow.stages import FINDING_CONFLICTS_PATCH, restore_finding
 
 from app.delivery.flow.base import FlowBase
 
@@ -12,12 +12,13 @@ with workflow.unsafe.imports_passed_through():
     from app.delivery.causes import with_cause
     from app.config import REVIEW_TASK_QUEUE
     from app.delivery.models import (
-        kept_tests, open_review_findings, reproduce_request, unproven_green,
+        kept_tests, named_tests, open_review_findings, reproduce_request, touched_tests,
+        unproven_green,
     )
     from app.requirements.models import CHANGE_KINDS
     from app.review.models import (
-        MAX_REVIEW_ROUNDS, ReviewFinding, ReviewRound, correctable, earlier_findings,
-        for_worker, review_request,
+        MAX_FINDING_CORRECTIONS, MAX_REVIEW_ROUNDS, UNRESOLVED_CHARS, ReviewFinding,
+        ReviewRound, correctable, earlier_findings, for_worker, review_request, same_finding,
     )
 
 # Marks the workflow code that also sends a bugfix's tests corrected for review findings
@@ -33,15 +34,19 @@ class ReviewRounds(FlowBase):
 
     async def _review_rounds(self, instructions: str | None = None,
                              corrected: list[ReviewFinding] | None = None) -> None:
-        """Review the verified delivery's changes; while new findings remain, send them to
-        the worker they concern, verify again and review again, at most MAX_REVIEW_ROUNDS
-        times. Each round knows the findings already `corrected` in this run, and a
-        finding reported again is not sent for another correction: a round with nothing
-        new ends the run. Findings left are open: the delivery is pushed as unverified
-        and the user decides about them."""
+        """Review the verified delivery's changes; while findings to correct remain, send
+        them to the worker they concern, verify again and review again, at most
+        MAX_REVIEW_ROUNDS times. Each round knows the findings already `corrected` in this
+        run. A finding reported again goes for another correction, each at most
+        MAX_FINDING_CORRECTIONS times in the run, unless failing tests no author may change
+        contradict it: a round with nothing to correct ends the run. Findings left are
+        open, each saying why when no author could settle it: the delivery is pushed as
+        unverified and the user decides about them."""
         earlier = [cast(ReviewFinding, {key: value for key, value in item.items()
-                                        if key != 'repeats'})
+                                        if key not in ('repeats', 'unresolved')})
                    for item in corrected or []]
+        # How often each finding of `earlier` was sent for correction in this run.
+        sent = [1] * len(earlier)
         for count in range(1, MAX_REVIEW_ROUNDS + 1):
             # The user's instructions hold for every round of the run they started.
             findings = await self._review(instructions, earlier, record=count == 1)
@@ -50,6 +55,26 @@ class ReviewRounds(FlowBase):
             if not findings:
                 self.progress.verification_status = 'completed'
                 return
+            if workflow.patched(FINDING_CONFLICTS_PATCH):
+                self._release_kept(findings)
+                again = self._correct_again(findings, earlier, sent)
+                new = [item for item in findings if 'repeats' not in item]
+                batch = [*new, *(item for _, item in again)]
+                if not any(correctable(item) for item in batch):
+                    workflow.logger.info('The review found nothing an author can correct')
+                    break
+                if count == MAX_REVIEW_ROUNDS:
+                    workflow.logger.info('Review findings remain after %d rounds',
+                                         MAX_REVIEW_ROUNDS)
+                    break
+                if not await self._correct(batch, self.progress.reviews[-1]['round']):
+                    return
+                for index, item in again:
+                    earlier[index] = self._as_earlier(item)
+                    sent[index] += 1
+                earlier += [self._as_earlier(item) for item in new]
+                sent += [1] * len(new)
+                continue
             new = [item for item in findings if 'repeats' not in item]
             if not new:
                 workflow.logger.info('The review only repeats findings already corrected')
@@ -65,7 +90,71 @@ class ReviewRounds(FlowBase):
             if not await self._correct(new, self.progress.reviews[-1]['round']):
                 return
             earlier += new
+            sent += [1] * len(new)
+        if workflow.patched(FINDING_CONFLICTS_PATCH):
+            self._explain_open(earlier, sent)
         self.progress.verification_status = 'findings_open'
+
+    @staticmethod
+    def _as_earlier(item: ReviewFinding) -> ReviewFinding:
+        return cast(ReviewFinding, {key: value for key, value in item.items()
+                                    if key not in ('repeats', 'unresolved')})
+
+    def _correct_again(self, findings: list[ReviewFinding], earlier: list[ReviewFinding],
+                       sent: list[int]) -> list[tuple[int, ReviewFinding]]:
+        """The findings of a round that report an earlier one again and go for another
+        correction, each with the index of the earlier one: those corrected fewer than
+        MAX_FINDING_CORRECTIONS times that no failing test an author may not change
+        contradicts."""
+        again: list[tuple[int, ReviewFinding]] = []
+        for item in findings:
+            index = item.get('repeats', 0) - 1
+            if (0 <= index < len(earlier) and sent[index] < MAX_FINDING_CORRECTIONS
+                    and self._conflict(earlier[index]) is None
+                    and all(index != taken for taken, _ in again)):
+                again.append((index, item))
+        return again
+
+    def _conflict(self, finding: ReviewFinding) -> dict[str, Any] | None:
+        """The conflict recorded between the finding and failing tests no author may
+        change, if any."""
+        return next((item for item in reversed(self.state.finding_conflicts)
+                     if same_finding(item, finding)), None)
+
+    def _explain_open(self, earlier: list[ReviewFinding], sent: list[int]) -> None:
+        """Say, on each finding left open that reports an earlier one again, why no author
+        settled it: failing tests no author may change contradict it, or its corrections
+        did not settle it."""
+        for item in open_review_findings(self.progress):
+            index = item.get('repeats', 0) - 1
+            if not 0 <= index < len(earlier):
+                continue
+            conflict = self._conflict(earlier[index]) or self._conflict(item)
+            if conflict:
+                # Known by its words as reported last too, for a later run to find it.
+                self._note_conflict(item, conflict)
+                tests = ', '.join(conflict['tests'][:5])
+                reason = conflict['reason'] or 'They assert what the finding requires to change.'
+                item['unresolved'] = (
+                    f'Tests of the repository that no author of this delivery may change '
+                    f'fail when it is corrected: {tests}. {reason} Change those tests, or '
+                    f'accept the finding.')[:UNRESOLVED_CHARS]
+            elif sent[index] >= MAX_FINDING_CORRECTIONS:
+                item['unresolved'] = (
+                    f'Corrected {sent[index]} times in this run, and the review still finds '
+                    f'it.')
+
+    def _release_kept(self, findings: list[ReviewFinding]) -> None:
+        """Release the repository's kept tests that findings about the tests name: a test
+        the changed service passes as the repository holds it, such as one whose
+        assertions never ran, may still be wrong against the contract, and the review is
+        the authority that says so."""
+        kept = [case for case in self.state.kept_tests
+                if case not in self.state.released_tests]
+        released = sorted({case for item in findings for case in named_tests(item, kept)})
+        if released:
+            workflow.logger.info('Review findings release kept tests: %s', ', '.join(released))
+            self.state.released_tests = sorted({*self.state.released_tests, *released})
 
     async def _review(self, instructions: str | None, earlier: list[ReviewFinding],
                       record: bool = True) -> list[ReviewFinding] | None:
@@ -116,13 +205,17 @@ class ReviewRounds(FlowBase):
         self.progress.verification_status = 'repairing'
         workers = [worker for worker in ('implementation', 'tests')
                    if instructions or for_worker(findings, worker)]
-        await asyncio.gather(*(
-            self._implement_service(review_request(findings, worker, number, instructions))
-            if worker == 'implementation' else self._generate_tests(
-                review_request(findings, worker, number, instructions, restore), suite)
-            for worker in workers))
-        if await self._verify_correction(workers, number):
-            return True
+        self._correcting = [dict(item) for item in findings]
+        try:
+            await asyncio.gather(*(
+                self._implement_service(review_request(findings, worker, number, instructions))
+                if worker == 'implementation' else self._generate_tests(
+                    review_request(findings, worker, number, instructions, restore), suite)
+                for worker in workers))
+            if await self._verify_correction(workers, number):
+                return True
+        finally:
+            self._correcting = []
         self.progress.correction_failed = not instructions
         return False
 
@@ -159,16 +252,26 @@ class ReviewRounds(FlowBase):
             self.progress.implementation_error = None
             self.progress.tests_error = None
             self.progress.component_tests_error = None
-            corrected = await self._correct(open_review_findings(self.progress), number)
+            corrected = await self._correct(self._open_to_correct(), number)
         elif rejected:
             finding, restore, suite = rejected
             corrected = await self._correct([finding], number, restore=restore, suite=suite)
         else:
             self.progress.verification_status = 'repairing'
-            corrected = await self._verify_correction([], number)
+            self._correcting = [dict(item) for item in self._open_to_correct()]
+            try:
+                corrected = await self._verify_correction([], number)
+            finally:
+                self._correcting = []
             self.progress.correction_failed = not corrected
         if corrected:
             await self._review_rounds(corrected=open_review_findings(self.progress))
+
+    def _open_to_correct(self) -> list[ReviewFinding]:
+        """The open findings of the last round but those that failing tests no author may
+        change contradict, which another correction would only undo again."""
+        return [item for item in open_review_findings(self.progress)
+                if self._conflict(item) is None]
 
     def _rejected_suite(self) -> tuple[ReviewFinding, list[str], str | None] | None:
         """Why the last verification, which ran and passed, still rejected the suite of a
@@ -199,8 +302,7 @@ class ReviewRounds(FlowBase):
         existing = self.progress.existing_tests
         if self.spec.kind != 'api_change' or not existing:
             return None
-        tests = self.progress.tests
-        touched = [*tests['changed_tests'], *tests['removed_tests']]
+        touched = touched_tests(self.progress.tests, self.state.released_tests)
         kept = kept_tests(existing, touched)
         if not kept:
             return None
@@ -286,12 +388,16 @@ class ReviewRounds(FlowBase):
         self._mention_ref = fix.get('mention')
         self.progress.verification_status = 'repairing'
         try:
+            self._correcting = list(fix['findings'])
             await (self._implement_service if worker == 'implementation'
                    else self._generate_tests)(
                 review_request(fix['findings'], worker, number, instructions))
-            if not await self._verify_correction([worker], number):
+            verified = await self._verify_correction([worker], number)
+            self._correcting = []
+            if not verified:
                 return
             self.state.code_fix = None
             await self._review_rounds(instructions, fix['findings'])
         finally:
             self._mention_ref = None
+            self._correcting = []

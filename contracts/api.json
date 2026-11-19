@@ -3331,6 +3331,13 @@
           "name": "reason",
           "required": true,
           "type": "string"
+        },
+        {
+          "array": false,
+          "description": "On a finding left open that no author of the delivery could settle, why: failing repository tests that no author may change assert otherwise, or the review still found it after its corrections.",
+          "name": "unresolved",
+          "required": false,
+          "type": "string"
         }
       ]
     },

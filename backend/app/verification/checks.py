@@ -32,7 +32,7 @@ from app import docker_agents
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.host import session_language
 from app.config import GENERATED_CODE_DIR
-from app.github.checkout import CHECKOUT_DIR, TESTS_DIR, replace_files
+from app.github.checkout import CHECKOUT_DIR, COMPONENT_TESTS_DIR, TESTS_DIR, replace_files
 from app.implementation.activities import published_files
 from app.llm.limits import PROVIDER_LIMIT_ERROR, is_limit_error, retry_after
 from app.temporal.tracing import trace_activity
@@ -447,8 +447,28 @@ a program the checks call is not installed (such as `git` not found), or the net
 package registry could not be reached, so that no change to the repository's code or tests
 would fix it. Anything the repository's code, tests, build files or checks script could fix
 is "code".
-
+{findings}
 {excerpt}"""
+
+# What the analysis is told when the delivery is being corrected for code review findings.
+FINDINGS_PROMPT = """
+The change is being corrected for these code review findings, numbered, each about what
+the contract requires of the change; they are the authority on what the change rightly
+alters. A failed test that asserts the very behaviour a finding requires to change is
+wrong, not the code:
+{findings}
+The agent that fixes the checks may change the code and the repository's own unit tests.
+It may not change the tests in {fixed_dirs}: other authors own them, or none in this
+delivery does. When failed tests there assert what a finding requires to change, add to
+the JSON object "conflict": {{"finding": <its number>, "tests": ["<each such failed test>",
+...], "reason": "<one sentence: what the tests assert and what the finding requires>"}},
+and say in the instructions to keep the behaviour those tests assert, leaving that finding
+unsettled for the user to decide about. Add no conflict when the agent may change the
+test, nor when the tests are right: then say how to change the test or the code.
+"""
+FINDING_CHARS = 1000
+MAX_ANALYSED_FINDINGS = 20
+CONFLICT_TESTS = 20
 
 
 def fallback_analysis(excerpt: str) -> dict[str, Any]:
@@ -462,7 +482,36 @@ def fallback_analysis(excerpt: str) -> dict[str, Any]:
             'analysed': False}
 
 
-def parse_analysis(text: str) -> dict[str, Any] | None:
+def findings_prompt(findings: list[dict[str, Any]] | None) -> str:
+    """The code review findings the delivery is being corrected for, as the analysis is
+    told them; nothing without any."""
+    if not findings:
+        return ''
+    listed = '\n'.join(
+        f'{number}. ' + (f'[{path}] ' if (path := item.get('path')) else '')
+        + ' '.join(str(item.get('summary') or '').split())[:FINDING_CHARS]
+        for number, item in enumerate(findings[:MAX_ANALYSED_FINDINGS], start=1))
+    return FINDINGS_PROMPT.format(findings=listed,
+                                  fixed_dirs=f'{TESTS_DIR}/ and {COMPONENT_TESTS_DIR}/')
+
+
+def parse_conflict(value: Any, findings: int) -> dict[str, Any] | None:
+    """The conflict an analysis found between failed tests and one of the `findings`
+    review findings it was told, numbered from 1; None when it named none, or none of them."""
+    if not isinstance(value, dict):
+        return None
+    number, tests = value.get('finding'), value.get('tests')
+    if (not isinstance(number, int) or isinstance(number, bool)
+            or not 1 <= number <= min(findings, MAX_ANALYSED_FINDINGS)):
+        return None
+    tests = [str(item)[:300] for item in tests[:CONFLICT_TESTS]] if isinstance(tests, list) else []
+    if not tests:
+        return None
+    return {'finding': number, 'tests': tests,
+            'reason': ' '.join(str(value.get('reason') or '').split())[:500]}
+
+
+def parse_analysis(text: str, findings: int = 0) -> dict[str, Any] | None:
     match = re.search(r'\{.*\}', text or '', re.DOTALL)
     if not match:
         return None
@@ -475,20 +524,27 @@ def parse_analysis(text: str) -> dict[str, Any] | None:
     files = data.get('files')
     if not isinstance(files, list):
         files = []
-    return {'cause': 'environment' if data.get('cause') == 'environment' else 'code',
+    cause = 'environment' if data.get('cause') == 'environment' else 'code'
+    conflict = parse_conflict(data.get('conflict'), findings) if cause == 'code' else None
+    return {'cause': cause,
             'summary': str(data.get('summary') or '')[:500],
             'files': [str(item)[:300] for item in files[:20]],
-            'instructions': data['instructions'][:ANALYSIS_CHARS], 'analysed': True}
+            'instructions': data['instructions'][:ANALYSIS_CHARS], 'analysed': True,
+            **({'conflict': conflict} if conflict else {})}
 
 
 @activity.defn
 @trace_activity('analyze-checks-failure', feature='verification', input_parameter='session_id')
-async def analyze_checks_failure(session_id: str, excerpt: str) -> dict[str, Any]:
+async def analyze_checks_failure(session_id: str, excerpt: str,
+                                 findings: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Activity 'analyze_checks_failure': the LLM's analysis of where a failure of the
     repository's checks is, from the excerpt of their output: its `cause` (`code`, or
     `environment` when the sandbox, not the repository, is at fault), `summary`, `files`
-    and `instructions`. A provider whose limits are spent raises a PROVIDER_LIMIT_ERROR, for
-    the workflow to wait and ask again; any other failure gives the fallback analysis."""
+    and `instructions`. Told the code review `findings` the delivery is being corrected
+    for, it may find failed tests no author may change that one of them contradicts: its
+    `conflict` names the finding, numbered from 1, the tests and why. A provider whose
+    limits are spent raises a PROVIDER_LIMIT_ERROR, for the workflow to wait and ask again;
+    any other failure gives the fallback analysis."""
     from langchain_core.messages import HumanMessage
     from app.llm.graph import native_session
     from app.llm.model import get_model
@@ -496,7 +552,7 @@ async def analyze_checks_failure(session_id: str, excerpt: str) -> dict[str, Any
         model = await get_model('diagnosis')
         async with native_session(model):
             reply = await model.ainvoke([HumanMessage(content=ANALYSIS_PROMPT.format(
-                excerpt=excerpt[:EXCERPT_CHARS]))])
+                findings=findings_prompt(findings), excerpt=excerpt[:EXCERPT_CHARS]))])
     except Exception as exc:
         if is_limit_error(exc):
             raise ApplicationError('The model provider\'s limits were reached.',
@@ -507,4 +563,4 @@ async def analyze_checks_failure(session_id: str, excerpt: str) -> dict[str, Any
                        type(exc).__name__)
         return fallback_analysis(excerpt)
     text = str(getattr(reply, 'text', None) or getattr(reply, 'content', '') or '')
-    return parse_analysis(text) or fallback_analysis(excerpt)
+    return parse_analysis(text, len(findings or [])) or fallback_analysis(excerpt)

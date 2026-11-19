@@ -1,4 +1,5 @@
 """Bounded code review payloads exchanged between the review and the authors."""
+from collections.abc import Mapping
 from typing import Any, Literal, NotRequired, TypedDict
 
 ReviewTarget = Literal['implementation', 'tests', 'both']
@@ -31,6 +32,10 @@ REVIEW_INSTRUCTIONS_CHARS = 65536
 PREVIOUS_SUMMARY_CHARS = 1000
 # The open findings a pushed commit's message lists.
 COMMIT_FINDINGS = 20
+# How often one run of review rounds sends the same finding for correction: a finding the
+# review reports again after that many corrections is left to the user.
+MAX_FINDING_CORRECTIONS = 2
+UNRESOLVED_CHARS = 1000
 
 
 class ReviewFinding(TypedDict):
@@ -44,8 +49,12 @@ class ReviewFinding(TypedDict):
     # Briefly, why it goes to that worker.
     reason: str
     # The number of the earlier finding of the same run of review rounds that this one
-    # reports again: a correction did not settle it, so it is not sent for another.
+    # reports again: a correction did not settle it.
     repeats: NotRequired[int]
+    # Why no author of the delivery settled the finding, when it was left open for that
+    # reason: the repository's tests no author may change assert otherwise, or it was
+    # reported again after MAX_FINDING_CORRECTIONS corrections.
+    unresolved: NotRequired[str]
 
 
 class ReviewRound(TypedDict):
@@ -96,6 +105,16 @@ def for_suite(findings: list[ReviewFinding], suite: str) -> list[ReviewFinding]:
     return [item for item in findings if not item.get('path', '').startswith(other)]
 
 
+def same_finding(one: Mapping[str, Any], other: Mapping[str, Any]) -> bool:
+    """Whether two findings are the same one: the same target, file and summary, as far
+    as an earlier finding's summary is kept."""
+    def summary(item: Mapping[str, Any]) -> str:
+        return ' '.join(str(item.get('summary') or '')[:PREVIOUS_SUMMARY_CHARS].lower().split())
+    return (one.get('target') == other.get('target')
+            and (one.get('path') or '') == (other.get('path') or '')
+            and summary(one) == summary(other))
+
+
 def earlier_findings(findings: list[ReviewFinding]) -> list[dict[str, Any]]:
     """The findings a run of review rounds already had corrected, numbered from 1, as the
     next review receives them to tell whether they are settled."""
@@ -114,8 +133,10 @@ def review_request(findings: list[ReviewFinding], worker: str, attempt: int,
     to put back as the repository holds them. `before_fix` marks a review of a change's
     regression tests before the fix, which they still have to fail without."""
     review: dict[str, Any] = {
-        'findings': [{key: value for key, value in item.items()
-                      if key not in ('target', 'repeats')}
+        'findings': [{**{key: value for key, value in item.items()
+                         if key not in ('target', 'repeats', 'unresolved')},
+                      # The review found it again after an earlier correction of it.
+                      **({'reported_again': True} if 'repeats' in item else {})}
                      for item in for_worker(findings, worker)]}
     if instructions:
         review['instructions'] = instructions
@@ -136,4 +157,6 @@ def commit_findings(findings: list[ReviewFinding]) -> str:
         where = f' [{path}]' if (path := item.get('path')) else ''
         summary = ' '.join(item['summary'].split())
         lines.append(f'{number}. ({item["target"]}){where} {summary}')
+        if unresolved := item.get('unresolved'):
+            lines.append(f'   Left open: {" ".join(unresolved.split())}')
     return '\n'.join(lines)
