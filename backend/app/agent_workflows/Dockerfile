@@ -16,7 +16,7 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 RUN pip install --no-cache-dir langchain==1.4.2 langchain-openai==1.6.6 langchain-google-genai==4.4.0 langfuse==4.16.0
 # The Claude Agent SDK bundles the Claude Code CLI that serves the Claude adapter; its
 # credentials arrive as environment variables at run time.
-RUN pip install --no-cache-dir claude-agent-sdk==0.2.164
+RUN pip install --no-cache-dir claude-agent-sdk==0.2.186
 # Static tools the host runs over a delivery before its review, without a network
 # (app/languages/static_checks.py): a secrets scanner and Python's linter.
 RUN arch="$(uname -m | sed 's/x86_64/x64/; s/aarch64/arm64/')" \
