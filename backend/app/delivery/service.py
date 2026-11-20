@@ -28,6 +28,7 @@ from app.github.checkout import CheckoutError, checkout_path
 from app.github.errors import GitHubError
 from app.github.models import PullRequestMention
 from app.requirements.lookup import lookup_requirements
+from app.requirements_review.models import review_view
 from app.requirements.models import CHANGE_KINDS
 from app.review.models import ReviewRound
 from app.tasks.service import (
@@ -127,6 +128,8 @@ async def follow_up_session(session_id: str) -> dict:
         'repository': spec.repository,
         'checkout': spec.checkout,
         'architecture_session_id': None,
+        # Its task's requirements were reviewed, if at all, before the original delivery.
+        'review': {**review_view(None), 'status': 'skipped'},
         'delivery': dataclasses.asdict(state.progress),
     }
 
@@ -465,7 +468,7 @@ async def _copy_workspace(source: str, target: str) -> None:
 async def _follow_up(finished: _Finished, session_id: str,
                      prepare=None) -> tuple[str, bool]:
     """The open flow that carries on the closed delivery of `session_id`, as its session
-    ID, started as a new top-level DeliveryWorkflow when there is none: the earliest of
+    ID, started as the delivery of a new task flow when there is none: the earliest of
     its follow-ups whose workflow does not exist yet or still runs. `prepare(state)`
     changes the state a new one starts from. Also true when this call started it."""
     client = finished.client
@@ -485,31 +488,15 @@ async def _follow_up(finished: _Finished, session_id: str,
         if prepare is not None:
             prepare(state)
         await _copy_workspace(session_id, follow_up)
-        if not state.spec.onboarding:
-            # A task's fix round runs as the delivery of a new task flow of its own, which
-            # links to the original task's stages.
-            started = await _start_fix_task_flow(finished, session_id, follow_up, state)
-            if not await wait_for_stage(workflow_id, client):
-                raise GitHubError(503, 'The fix round of this closed flow has not started yet.')
-            if not started:
-                return follow_up, False
-            await registry.register(workflow_id)
-            logger.info('Delivery of session %s closed; carried on in a new task flow by %s',
-                        session_id, workflow_id)
-            return follow_up, True
-        try:
-            await start_workflow(
-                client, 'DeliveryWorkflow', state, id=workflow_id,
-                task_queue=finished.description.task_queue,
-                id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
-                id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
-                **task_fields(state.spec),
-            )
-        except WorkflowAlreadyStartedError:
-            # Started concurrently, such as by another handover: that one is the flow.
+        # A fix round runs as the delivery of a new task flow of its own, which links to
+        # the original task's (or onboarding's) stages.
+        started = await _start_fix_task_flow(finished, session_id, follow_up, state)
+        if not await wait_for_stage(workflow_id, client):
+            raise GitHubError(503, 'The fix round of this closed flow has not started yet.')
+        if not started:
             return follow_up, False
         await registry.register(workflow_id)
-        logger.info('Delivery of session %s closed; carried on as the flow %s',
+        logger.info('Delivery of session %s closed; carried on in a new task flow by %s',
                     session_id, workflow_id)
         return follow_up, True
     raise SessionBusy('This closed flow has been carried on too often.')

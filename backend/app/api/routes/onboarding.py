@@ -41,10 +41,10 @@ async def create_session(body: CreateBody):
         repository = await resolve_repository_selection(
             body.repository.full_name, body.repository.branch,
         )
-        session_id = await service.start_onboarding(repository)
+        # A new top-level task flow, whose onboarding interview this onboarding is.
+        return await service.create_onboarding(repository)
     except Exception as exc:
         raise http_error(exc) from exc
-    return {"session_id": session_id}
 
 
 @router.get("/{session_id}")
@@ -111,10 +111,22 @@ async def decide_contract(session_id: str, body: ContractDecisionBody):
 
 
 @router.post("/{session_id}/finalize", status_code=202)
-async def finalize(session_id: str):
+async def finalize(session_id: str, force: bool = False):
+    """Finalize the onboarding; force=true continues despite its requirements review."""
     _check_session_id(session_id)
     try:
-        await service.finalize(session_id)
+        await service.finalize(session_id, force)
+    except Exception as exc:
+        raise http_error(exc) from exc
+    return {"session_id": session_id, "status": "finalizing"}
+
+
+@router.post("/{session_id}/review/retry", status_code=202)
+async def retry_review(session_id: str):
+    """Run the failed requirements review round again with its original input."""
+    _check_session_id(session_id)
+    try:
+        await service.retry_review(session_id)
     except Exception as exc:
         raise http_error(exc) from exc
     return {"session_id": session_id, "status": "finalizing"}
@@ -124,10 +136,10 @@ async def finalize(session_id: str):
 async def fork(session_id: str, body: ForkBody):
     _check_session_id(session_id)
     try:
-        fork_id = await service.fork_onboarding(session_id, body.message_index)
+        # The fork starts a new top-level task flow of its own.
+        return await service.fork(session_id, body.message_index)
     except Exception as exc:
         raise http_error(exc) from exc
-    return {"session_id": fork_id}
 
 
 @router.post("/{session_id}/delivery/answers", status_code=202)

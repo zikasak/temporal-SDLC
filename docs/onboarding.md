@@ -1,7 +1,9 @@
 # Onboarding an existing repository
 
-`POST /onboarding/sessions` starts an `OnboardingWorkflow` (`backend/app/onboarding/`) on a
-repository branch. It runs outside requirements sessions and the intake. Only one unfinished
+`POST /onboarding/sessions` starts a task flow (`TaskWorkflow` with origin `onboarding`, see
+[task flows](task-flows.md)) whose children are the onboarding interview
+(`OnboardingWorkflow`, `backend/app/onboarding/`), its requirements review and its delivery.
+It runs outside requirements sessions and the intake. Only one unfinished
 onboarding per repository and branch is allowed (`app.onboarding_sessions` plus an advisory
 lock).
 
@@ -19,9 +21,12 @@ lock).
    the existing `api.json` or `requirements.json`; open conflicts are listed in `problems`.
 4. **interviewing / turn_running**: the user reviews and corrects the drafts. Failed turns
    and failed drafting can be retried, and `POST …/checkout` checks the branch out again.
-   Forking ends the original as **superseded**.
-5. **finalize** turns the drafts into the contract and starts a `DeliveryWorkflow` with
-   `TaskSpec.onboarding`. No code is generated. The implementation agent writes only the
+   Forking ends the original as **superseded** and starts a new task flow for the fork,
+   with the review state copied; the original's task flow closes as cancelled.
+5. **finalize** first has the requirements review check the drafted requirements (unless
+   `force=true`, or for an architecture-only onboarding); contradictions are asked in the
+   interview, as for a requirements session. Then the drafts become the contract and the
+   task flow starts its pending `DeliveryWorkflow` with `TaskSpec.onboarding`. No code is generated. The implementation agent writes only the
    root `Dockerfile` and `.dockerignore` and the repository's checks script
    `.sdlc/checks.sh` (see [the repository's checks](service-implementation.md#the-repositorys-checks)),
    and the host keeps the existing code as it was.
@@ -51,12 +56,13 @@ updates, finalizing, forking, retries, agent questions (including the confirmati
 in the existing code), open review findings and stage retries. The repository picker of the
 **Requirements** tab can start an onboarding of the selected branch and open it there.
 
-`GET /workflows` returns `repository`, `branch` and `onboarding_id` for every execution
-(null when they do not apply) and filters on them with the same query parameters. They are
-recorded when an execution starts (`app/temporal/execution_fields.py`): the repository
-selection in the memo and the custom keyword search attributes `Repository` (lower-cased
-`owner/name`), `Branch` and `OnboardingId`. The `temporal-namespace` compose job and the main
-worker register the attributes; the main worker also deletes, once per instance, the
-executions started before they recorded these fields. The **Workflows** page has an
-Onboarding filter, shows each execution's repository and branch, and links an onboarding and
-the delivery and code generation it started to the onboarding's page.
+`GET /workflows` returns `repository` and `branch` for every execution (null when they do
+not apply) and filters on them with the same query parameters; task flows also carry
+`origin`, and `origin=onboarding` lists the onboardings' task flows. They are recorded when
+an execution starts (`app/temporal/execution_fields.py`): the repository selection in the
+memo and the custom keyword search attributes `Repository` (lower-cased `owner/name`),
+`Branch` and `TaskOrigin`. The `temporal-namespace` compose job and the main worker register
+the attributes; the main worker also deletes, once per instance, the executions started
+before they recorded these fields. The **Flows** page's Onboarding filter lists the
+onboardings' task flows, whose children are the onboarding interview, its requirements
+review and its delivery.

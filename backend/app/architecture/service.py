@@ -12,6 +12,7 @@ from app.architecture.models import (
     render_architecture_markdown,
 )
 from app.requirements.lookup import source_session_lookup
+from app.requirements_review.models import review_id
 from app.config import TASK_QUEUE
 from app.tasks.models import FORK_SUFFIX, TaskFlowState
 from app.tasks.service import (
@@ -62,7 +63,9 @@ async def _start(state: ArchitectureState, original_task_flow_id: str | None,
         architecture_session_id=session_id,
         api_design_session_id=ids["api_design_session_id"],
         architecture=state,
-        linked=[state.source_session_id] if state.source_session_id else [],
+        # The original task's requirements session and its requirements review.
+        linked=([state.source_session_id, review_id(state.source_session_id)]
+                if state.source_session_id else []),
     ), client, task_queue or TASK_QUEUE, session_id)
     await register(session_id)
     logger.info("Started architecture session %s from %s in task flow %s", session_id,

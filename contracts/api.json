@@ -122,7 +122,6 @@
       "request_schema": null,
       "requirement_ids": [
         "FR-30",
-        "FR-142",
         "FR-143"
       ],
       "response_array": false,
@@ -155,8 +154,7 @@
       "request_schema": "FindingsInstructionsInput",
       "requirement_ids": [
         "FR-30",
-        "FR-113",
-        "FR-142"
+        "FR-113"
       ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
@@ -867,7 +865,7 @@
       "tag": "github"
     },
     {
-      "description": "No sign-in required; called by GitHub. Accepted only when X-Hub-Signature-256 matches the connection's webhook secret, computed over the raw body. A comment mentions the app when it contains @<app slug> or @<app slug>[bot], case-insensitive, as a whole word. Answers 202 with no body when the delivery was accepted and is acted on: a newly created comment (action created) mentioning the app in an issue_comment or pull_request_review_comment event on a pull request the app opened for a delivery or an onboarding, open, merged or closed, by an author with write access, which is then classified and handled; mentions on an onboarding's pull request are handled exactly like those on a delivery's and shown in the onboarding's delivery progress. A clarification or an unclear mention is answered in the pull request right away from the code as last pushed, the same on a merged or closed pull request as on an open one, even while a fix round of the delivery is running or queued. A fix request on a merged or closed pull request (whose delivery or onboarding has completed or been cancelled) still runs a fix round, followed by verification and code review: for a task's delivery as the delivery child of a new top-level task flow named after the original with a \" (fix)\" suffix, linking to the original task's stages; for an onboarding as a new top-level flow of its own. Its ID is appended to the original delivery progress's fix_flow_ids and recorded as the mention's fix_flow_id, its result is pushed to a new branch with a new pull request, and the app replies on the old pull request with a link to the new one. Answers 204 with no body when a correctly signed delivery is ignored: other events, edited or deleted comments, and mentions that are not authorised or not on the app's pull requests. Ignored mentions are only logged on the server and not shown in any delivery. Fix requests already queued when the pull request is closed or merged still run. Answers 401 without acting on it when the delivery is unsigned or wrongly signed, or while the connection has no webhook secret. Answers 409 when the delivery (the same X-GitHub-Delivery) or its comment was already handled, such as a GitHub redelivery.",
+      "description": "No sign-in required; called by GitHub. Accepted only when X-Hub-Signature-256 matches the connection's webhook secret, computed over the raw body. A comment mentions the app when it contains @<app slug> or @<app slug>[bot], case-insensitive, as a whole word. Answers 202 with no body when the delivery was accepted and is acted on: a newly created comment (action created) mentioning the app in an issue_comment or pull_request_review_comment event on a pull request the app opened for a delivery or an onboarding, open, merged or closed, by an author with write access, which is then classified and handled; mentions on an onboarding's pull request are handled exactly like those on a delivery's and shown in the onboarding's delivery progress. A clarification or an unclear mention is answered in the pull request right away from the code as last pushed, the same on a merged or closed pull request as on an open one, even while a fix round of the delivery is running or queued. A fix request on a merged or closed pull request (whose delivery has completed or been cancelled) still runs a fix round, followed by verification and code review, as the delivery child of a new top-level task flow named after the original with a \" (fix)\" suffix and the original's origin, linking to the original task's stages, for a task and for an onboarding alike. Its ID is appended to the original delivery progress's fix_flow_ids and recorded as the mention's fix_flow_id, its result is pushed to a new branch with a new pull request, and the app replies on the old pull request with a link to the new one. Answers 204 with no body when a correctly signed delivery is ignored: other events, edited or deleted comments, and mentions that are not authorised or not on the app's pull requests. Ignored mentions are only logged on the server and not shown in any delivery. Fix requests already queued when the pull request is closed or merged still run. Answers 401 without acting on it when the delivery is unsigned or wrongly signed, or while the connection has no webhook secret. Answers 409 when the delivery (the same X-GitHub-Delivery) or its comment was already handled, such as a GitHub redelivery.",
       "error_statuses": [
         401,
         409,
@@ -912,7 +910,7 @@
         "FR-48",
         "FR-49",
         "FR-64",
-        "FR-141"
+        "FR-160"
       ],
       "response_array": false,
       "response_schema": null,
@@ -1141,7 +1139,7 @@
       "tag": "chat"
     },
     {
-      "description": "Starts onboarding on the repository and branch, outside requirements sessions and the intake. Any signed-in user can start one, and every signed-in user can list (GET /workflows?type=OnboardingWorkflow) and reopen all onboardings. When the branch already has a contract in contracts/, contract tests in contract-tests/ or a root Dockerfile, the onboarding waits as awaiting_confirmation, with existing_artifacts saying which were found and architecture_missing whether the contract lacks contracts/architecture.md or contracts/architecture.json, until the user decides through POST /onboarding/sessions/{session_id}/contract-decision; otherwise the LLM drafts the requirements, the architecture, the API and the language from the existing code, all reviewed in the same interview. 409 while another onboarding of the same repository and branch is unfinished.",
+      "description": "Starts a new top-level task flow (TaskWorkflow with origin onboarding, its ID returned as task_flow_id) on the repository and branch, outside requirements sessions and the intake, which starts the onboarding interview as its child and creates its requirements review and delivery children up front as pending. Any signed-in user can start one, and every signed-in user can list (GET /workflows?origin=onboarding) and reopen all onboardings. When the branch already has a contract in contracts/, contract tests in contract-tests/ or a root Dockerfile, the onboarding waits as awaiting_confirmation, with existing_artifacts saying which were found and architecture_missing whether the contract lacks contracts/architecture.md or contracts/architecture.json, until the user decides through POST /onboarding/sessions/{session_id}/contract-decision; otherwise the LLM drafts the requirements, the architecture, the API and the language from the existing code, all reviewed in the same interview. 409 while another onboarding of the same repository and branch is unfinished.",
       "error_statuses": [
         401,
         404,
@@ -1159,7 +1157,10 @@
         "FR-66",
         "FR-93",
         "FR-95",
-        "FR-96"
+        "FR-96",
+        "FR-155",
+        "FR-159",
+        "FR-166"
       ],
       "response_array": false,
       "response_schema": "SessionCreated",
@@ -1201,7 +1202,7 @@
       "tag": "onboarding"
     },
     {
-      "description": "Answers the questions of the last assistant message and starts a turn.",
+      "description": "Answers the questions of the last assistant message and starts a turn. When the requirements review of the drafted requirements reports contradictions (review.status contradictions_found), its questions arrive as one assistant message with one question per contradiction, in the order of review.contradictions. Answering them through this endpoint, one answer per question in that order, records the answers, and the review then runs its next round with the diff of the requirements since its previous round and the questions with their answers (review.status running, onboarding status finalizing). Once a free message has dropped the contradiction questions, they can no longer be answered here. 409 while a review round is running.",
       "error_statuses": [
         401,
         404,
@@ -1221,7 +1222,10 @@
       ],
       "path": "/onboarding/sessions/{session_id}/answers",
       "request_schema": "AnswersInput",
-      "requirement_ids": [],
+      "requirement_ids": [
+        "FR-153",
+        "FR-157"
+      ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
       "response_status": 202,
@@ -1342,9 +1346,7 @@
       ],
       "path": "/onboarding/sessions/{session_id}/delivery/findings/accept",
       "request_schema": null,
-      "requirement_ids": [
-        "FR-142"
-      ],
+      "requirement_ids": [],
       "response_array": false,
       "response_schema": "SessionStatusChange",
       "response_status": 200,
@@ -1352,7 +1354,7 @@
       "tag": "onboarding"
     },
     {
-      "description": "As for a delivery: starts a fix round from the instructions, then verification and code review, pushing to the same branch while the pull request is open. Once the pull request was merged or closed, the fix round runs as a new top-level flow of its own (no task flow), whose ID is appended to the delivery progress's fix_flow_ids, and its result is pushed to a new branch with a new pull request. 409 while no flag is raised.",
+      "description": "As for a delivery: starts a fix round from the instructions, then verification and code review, pushing to the same branch while the pull request is open. Once the pull request was merged or closed, the fix round runs as the delivery child of a new top-level task flow (origin onboarding) named after the original with a \" (fix)\" suffix, which links to the original onboarding task's stages; its ID is appended to the delivery progress's fix_flow_ids, and its result is pushed to a new branch with a new pull request. 409 while no flag is raised.",
       "error_statuses": [
         401,
         404,
@@ -1374,7 +1376,7 @@
       "path": "/onboarding/sessions/{session_id}/delivery/findings/instructions",
       "request_schema": "FindingsInstructionsInput",
       "requirement_ids": [
-        "FR-142"
+        "FR-161"
       ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
@@ -1383,11 +1385,12 @@
       "tag": "onboarding"
     },
     {
-      "description": "Fixes the reviewed drafts as the contract, including contracts/architecture.md, and starts the delivery: contract tests and a root Dockerfile are written and verified against the existing code, then code review, push to a new branch named onboarding/<source branch>-<short id> (the short id taken from the onboarding's session ID) and a pull request to the default branch, as for a delivery. For an architecture-only onboarding, only contracts/architecture.md (and contracts/architecture.json) is pushed to that branch with a pull request to the default branch, without contract tests, verification or code review; the rest of the existing contract is left unchanged, and disagreements between the drafted architecture and the existing api.json or requirements.json are among the problems that block finalizing. 409 while problems remain or a turn is running.",
+      "description": "For an onboarding that produces the full contract, first starts the task flow's pending requirements review child (review.status running), which checks the drafted requirements against each other and, when the onboarding replaces an existing contract, against that contract's requirements; each contradiction found is asked in the interview as a question, and after the answers the review runs again knowing what changed, without a limit on rounds. After a free message dropped the open contradiction questions (review.status contradictions_found with questions_open false), calling it again starts the next round, given the diff of the drafted requirements since the previous round and the dropped questions marked unanswered. After a failed round (review.status failed), calling it starts a new round on the current drafts, including any changes made by messages since the failure, given the diff since the last finished round; POST .../review/retry instead reruns the failed round with its original input. Only once a round finds no contradictions, or with force=true, are the reviewed drafts fixed as the contract, including contracts/architecture.md, and handed to the task flow, which starts its pending delivery child: contract tests and a root Dockerfile are written and verified against the existing code, then code review, push to a new branch named onboarding/<source branch>-<short id> (the short id taken from the onboarding's session ID) and a pull request to the default branch, as for a delivery. Without force=true, calling it while a round is running or while the contradiction questions are open (questions_open true) answers 409. For an architecture-only onboarding no review runs (its review child closes as skipped), and only contracts/architecture.md (and contracts/architecture.json) is pushed to that branch with a pull request to the default branch, without contract tests, verification or code review; the rest of the existing contract is left unchanged, and disagreements between the drafted architecture and the existing api.json or requirements.json are among the problems that block finalizing. 409 while problems remain or a turn is running.",
       "error_statuses": [
         401,
         404,
         409,
+        422,
         503
       ],
       "method": "POST",
@@ -1398,6 +1401,13 @@
           "name": "session_id",
           "required": true,
           "type": "string"
+        },
+        {
+          "description": "true to continue despite the requirements review: proceeds at once whatever the review's state (a running round is cancelled, a review not run yet closes as continued anyway with no contradictions) and lists the last finished round's remaining contradictions in the requirements document. false by default.",
+          "location": "query",
+          "name": "force",
+          "required": false,
+          "type": "boolean"
         }
       ],
       "path": "/onboarding/sessions/{session_id}/finalize",
@@ -1407,7 +1417,11 @@
         "FR-93",
         "FR-98",
         "FR-99",
-        "FR-100"
+        "FR-100",
+        "FR-153",
+        "FR-159",
+        "FR-165",
+        "FR-168"
       ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
@@ -1416,7 +1430,7 @@
       "tag": "onboarding"
     },
     {
-      "description": "Starts a new onboarding of the same repository and branch with the conversation, drafts and contract decision up to the given message. Only an unfinished onboarding can be forked: 409 when it is completed, failed, declined or superseded. Forking ends the original as superseded, so that only the fork stays unfinished and the one-at-a-time rule of POST /onboarding/sessions holds.",
+      "description": "Starts a new onboarding of the same repository and branch with the conversation, drafts, contract decision and requirements review state (status, round and contradictions) up to the given message, in a new top-level task flow of its own (TaskWorkflow with origin onboarding, returned as task_flow_id) named after the original with a \" (fork)\" suffix, which holds the forked interview and pending requirements review and delivery children; the review continues from the copied round. Only an unfinished onboarding can be forked: 409 when it is completed, failed, declined or superseded. Forking ends the original as superseded and cancels its task flow with its pending children, so that only the fork stays unfinished and the one-at-a-time rule of POST /onboarding/sessions holds.",
       "error_statuses": [
         401,
         404,
@@ -1437,7 +1451,10 @@
       "path": "/onboarding/sessions/{session_id}/fork",
       "request_schema": "ForkInput",
       "requirement_ids": [
-        "FR-66"
+        "FR-66",
+        "FR-159",
+        "FR-169",
+        "FR-170"
       ],
       "response_array": false,
       "response_schema": "SessionCreated",
@@ -1476,7 +1493,7 @@
       "tag": "onboarding"
     },
     {
-      "description": "Starts the interviewer's turn on the user's correction or remark about the drafts.",
+      "description": "Starts the interviewer's turn on the user's correction or remark about the drafts. Also allowed while the review's contradiction questions are open (review.status contradictions_found) or after a failed review round (review.status failed). A message sent while contradiction questions are open drops them: review.questions_open becomes false, review.status stays contradictions_found with the last round's contradictions still listed, the questions are no longer answerable through POST .../answers, and the message may change the drafted requirements. Finalizing again starts the next round, given those changes in the diff and the dropped questions marked unanswered. A message sent after a failed round may change the drafted requirements too; review.status stays failed with its error, finalizing again starts a new round on the updated drafts, and POST .../review/retry still reruns the failed round with its original input. The web client warns the user before sending such a message. 409 while a review round is running (review.status running); finalize with force=true stays possible.",
       "error_statuses": [
         401,
         404,
@@ -1497,7 +1514,10 @@
       ],
       "path": "/onboarding/sessions/{session_id}/messages",
       "request_schema": "MessageInput",
-      "requirement_ids": [],
+      "requirement_ids": [
+        "FR-153",
+        "FR-157"
+      ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
       "response_status": 202,
@@ -1532,6 +1552,36 @@
       "tag": "onboarding"
     },
     {
+      "description": "Runs the failed review round of the onboarding's drafted requirements again with the same input (review.status failed); 409 when the last round did not fail.",
+      "error_statuses": [
+        401,
+        404,
+        409,
+        503
+      ],
+      "method": "POST",
+      "parameters": [
+        {
+          "description": "onboarding-session- followed by 32 hex digits.",
+          "location": "path",
+          "name": "session_id",
+          "required": true,
+          "type": "string"
+        }
+      ],
+      "path": "/onboarding/sessions/{session_id}/review/retry",
+      "request_schema": null,
+      "requirement_ids": [
+        "FR-153",
+        "FR-169"
+      ],
+      "response_array": false,
+      "response_schema": "SessionStatusChange",
+      "response_status": 202,
+      "summary": "Retry a failed onboarding requirements review round",
+      "tag": "onboarding"
+    },
+    {
       "description": "The questions a requirements session starts with.",
       "error_statuses": [
         401,
@@ -1551,7 +1601,7 @@
       "tag": "requirements"
     },
     {
-      "description": "Starts a new top-level task flow (TaskWorkflow, its ID returned as task_flow_id), named by an LLM from the intake's task, which starts the interview in the repository from the intake's answers as its requirements child. It creates its other children up front as pending: architecture, API design and delivery for a new service or an API change, delivery for a bugfix or a documentation change.",
+      "description": "Starts a new top-level task flow (TaskWorkflow with origin requirements, its ID returned as task_flow_id), named by an LLM from the intake's task, which starts the interview in the repository from the intake's answers as its requirements child. It creates its other children up front as pending: requirements review, architecture, API design and delivery for a new service or an API change; requirements review and delivery for a bugfix; delivery for a documentation change.",
       "error_statuses": [
         401,
         404,
@@ -1569,7 +1619,9 @@
         "FR-126",
         "FR-128",
         "FR-129",
-        "FR-130"
+        "FR-149",
+        "FR-155",
+        "FR-166"
       ],
       "response_array": false,
       "response_schema": "SessionCreated",
@@ -1618,13 +1670,13 @@
       "tag": "requirements"
     },
     {
-      "description": "Answers the questions of the last assistant message and starts a turn.",
+      "description": "Answers the questions of the last assistant message and starts a turn. When the requirements review reports contradictions (review.status contradictions_found), its questions arrive as one assistant message with one question per contradiction, in the order of review.contradictions. Answering them through this endpoint, one answer per question in that order, records the answers, and the review then runs its next round with the diff of the requirements since its previous round and the questions with their answers (review.status running, session status finalizing). Once a free message has dropped the contradiction questions, they can no longer be answered here. 409 while a review round is running.",
       "error_statuses": [
         401,
-        503,
         404,
         409,
-        422
+        422,
+        503
       ],
       "method": "POST",
       "parameters": [
@@ -1638,7 +1690,11 @@
       ],
       "path": "/requirements/sessions/{session_id}/answers",
       "request_schema": "AnswersInput",
-      "requirement_ids": [],
+      "requirement_ids": [
+        "FR-146",
+        "FR-147",
+        "FR-157"
+      ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
       "response_status": 202,
@@ -1726,7 +1782,6 @@
       "request_schema": null,
       "requirement_ids": [
         "FR-30",
-        "FR-142",
         "FR-143"
       ],
       "response_array": false,
@@ -1759,8 +1814,7 @@
       "request_schema": "FindingsInstructionsInput",
       "requirement_ids": [
         "FR-30",
-        "FR-113",
-        "FR-142"
+        "FR-113"
       ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
@@ -1795,11 +1849,12 @@
       "tag": "requirements"
     },
     {
-      "description": "Writes the requirements document; the session is completed once it is ready, and the task flow's name is rewritten by the LLM from the finalized requirements. For a new service or an API change on a repository, the task flow then starts its pending architecture child (architecture_session_id), which drafts the architecture at once. An API change, bugfix or documentation task is specified against the repository's contract in contracts/, which must include contracts/architecture.md and contracts/architecture.json; 409 when the contract is missing or unreadable, including when either architecture file is missing. The coding agents of a bugfix or documentation delivery receive the repository's existing contracts/architecture.md and contracts/architecture.json read-only, as context, and never change them. When the document is written because the session was idle for a day, no stage is started and the task flow's pending children close as skipped.",
+      "description": "For a new service, API change or bugfix, starts the task flow's pending requirements review child (review.status running) instead of writing the document; each contradiction found is asked in the interview as a question, and once all are answered the review runs again with the diff of the requirements and the answers, without a limit on rounds. After a free message dropped the open contradiction questions (review.status contradictions_found with questions_open false), calling it again starts the next round, given the diff of the requirements since the previous round and the dropped questions marked unanswered. After a failed round (review.status failed), calling it starts a new round on the current requirements, including any changes made by messages since the failure, given the diff since the last finished round; POST .../review/retry instead reruns the failed round with its original input. The document is written, and the session completed, only once a round finds no contradictions or the user finalizes with force=true. Without force=true, calling it while a round is running or while the contradiction questions are open (questions_open true) answers 409. A documentation task writes the document at once, as before, and its review is not created. Once the document is written the task flow's name is rewritten by the LLM from the finalized requirements, and the task flow starts its next pending child: the architecture (architecture_session_id) of a new service or an API change on a repository, or the delivery of a bugfix or documentation task. An API change, bugfix or documentation task is specified against the repository's contract in contracts/, which must include contracts/architecture.md and contracts/architecture.json; 409 when the contract is missing or unreadable, including when either architecture file is missing. The coding agents of a bugfix or documentation delivery receive the repository's existing contracts/architecture.md and contracts/architecture.json read-only, as context, and never change them. When the document is written because the session was idle for a day, no review runs and the task flow's pending children, review included, close as skipped.",
       "error_statuses": [
         401,
         404,
         409,
+        422,
         503
       ],
       "method": "POST",
@@ -1810,6 +1865,13 @@
           "name": "session_id",
           "required": true,
           "type": "string"
+        },
+        {
+          "description": "true to continue despite the review: writes the document at once whatever the review's state (a running round is cancelled, a review not run yet closes as continued anyway with no contradictions) and lists the last finished round's remaining contradictions in it. false by default.",
+          "location": "query",
+          "name": "force",
+          "required": false,
+          "type": "boolean"
         }
       ],
       "path": "/requirements/sessions/{session_id}/finalize",
@@ -1817,10 +1879,19 @@
       "requirement_ids": [
         "FR-78",
         "FR-85",
-        "FR-92",
         "FR-126",
         "FR-128",
-        "FR-133"
+        "FR-144",
+        "FR-146",
+        "FR-147",
+        "FR-151",
+        "FR-152",
+        "FR-154",
+        "FR-156",
+        "FR-157",
+        "FR-158",
+        "FR-162",
+        "FR-168"
       ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
@@ -1897,14 +1968,14 @@
       "tag": "requirements"
     },
     {
-      "description": "Starts the interviewer's turn on the message.",
+      "description": "Starts the interviewer's turn on the message. Also allowed while the review's contradiction questions are open (review.status contradictions_found) or after a failed review round (review.status failed). A message sent while contradiction questions are open drops them: review.questions_open becomes false, review.status stays contradictions_found with the last round's contradictions still listed, the questions are no longer answerable through POST .../answers, and the message may change the requirements. Finalizing again starts the next round, given those changes in the diff and the dropped questions marked unanswered. A message sent after a failed round may change the requirements too; review.status stays failed with its error, finalizing again starts a new round on the updated requirements, and POST .../review/retry still reruns the failed round with its original input. The web client warns the user before sending such a message. 409 while a review round is running (review.status running); finalize with force=true stays possible.",
       "error_statuses": [
         401,
-        503,
         404,
         409,
         413,
-        422
+        422,
+        503
       ],
       "method": "POST",
       "parameters": [
@@ -1918,7 +1989,11 @@
       ],
       "path": "/requirements/sessions/{session_id}/messages",
       "request_schema": "MessageInput",
-      "requirement_ids": [],
+      "requirement_ids": [
+        "FR-146",
+        "FR-147",
+        "FR-157"
+      ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
       "response_status": 202,
@@ -1953,7 +2028,77 @@
       "tag": "requirements"
     },
     {
-      "description": "Newest first, 50 per page. type TaskWorkflow lists only task flows (the top-level flow of each task, not RequirementsWorkflow executions); type OnboardingWorkflow lists onboardings, whose workflow_id is the onboarding's session_id, as RequirementsWorkflow lists requirements sessions and ArchitectureWorkflow lists architecture sessions. Every execution also carries repository, branch, onboarding_id, name, linked, waiting_for_user and unresolved_findings, each null when it does not apply; the existing fields keep their names and meaning, and status additionally takes the values pending and skipped for stages of a task flow. The optional repository, branch and onboarding_id filters combine with type and with each other (all must match); executions whose field is null never match a filter on it. The repository filter is compared case-insensitively, as on GitHub; the branch and onboarding_id filters must match exactly. A malformed filter value (a repository that is not owner/name, an empty branch, or an onboarding_id not of the form onboarding-session- followed by 32 hex digits) answers 422 with a detail, like an invalid type or page_token. Pass the same filters with page_token when continuing. top_level=true lists only executions without a parent: task flows, onboardings, chats and the requirements flows started before task flows existed; no stage of a task (requirements, architecture, API design or delivery, including a delivery started again on its own) is ever top-level. parent=<workflow_id> lists only the direct children of that execution: for a task flow, its requirements, architecture, API design and delivery children (including a delivery started again on its own) and, for a forked or fix-round task flow, the original task's earlier stages it links to, with linked true; parent=<a stage's workflow_id> never lists another stage of the task (a requirements or API design session lists none, a delivery its code generation and stage workflows). For a requirements flow started before task flows existed, parent lists its children and its session's delivery runs as before. parent and top_level cannot be combined; an empty or malformed parent, or parent with top_level, answers 422.",
+      "description": "Runs the failed review round again with the same input (review.status failed); 409 when the last round did not fail.",
+      "error_statuses": [
+        401,
+        404,
+        409,
+        503
+      ],
+      "method": "POST",
+      "parameters": [
+        {
+          "description": "requirements-session- followed by 32 hex digits.",
+          "location": "path",
+          "name": "session_id",
+          "required": true,
+          "type": "string"
+        }
+      ],
+      "path": "/requirements/sessions/{session_id}/review/retry",
+      "request_schema": null,
+      "requirement_ids": [
+        "FR-144",
+        "FR-145",
+        "FR-169"
+      ],
+      "response_array": false,
+      "response_schema": "SessionStatusChange",
+      "response_status": 202,
+      "summary": "Retry a failed requirements review round",
+      "tag": "requirements"
+    },
+    {
+      "description": "The adapter, model and thinking level of every LLM workflow type, including the new requirements_review entry used by the requirements reviewer of tasks and onboardings, with labels and the selectable models of each provider.",
+      "error_statuses": [
+        401,
+        503
+      ],
+      "method": "GET",
+      "parameters": [],
+      "path": "/settings",
+      "request_schema": null,
+      "requirement_ids": [
+        "FR-148"
+      ],
+      "response_array": false,
+      "response_schema": "SettingsView",
+      "response_status": 200,
+      "summary": "Get the model settings",
+      "tag": "settings"
+    },
+    {
+      "description": "Replaces the settings of every LLM workflow type; the body must now include requirements_review too (422 otherwise, a breaking change for clients sending the former set). 422 when a selected model or thinking level is no longer offered; 503 when a provider's models cannot be listed.",
+      "error_statuses": [
+        401,
+        422,
+        503
+      ],
+      "method": "PUT",
+      "parameters": [],
+      "path": "/settings",
+      "request_schema": "WorkflowSettings",
+      "requirement_ids": [
+        "FR-148"
+      ],
+      "response_array": false,
+      "response_schema": "WorkflowSettings",
+      "response_status": 200,
+      "summary": "Save the model settings",
+      "tag": "settings"
+    },
+    {
+      "description": "Newest first, 50 per page. type TaskWorkflow lists only task flows (the top-level flow of each task or onboarding), not RequirementsWorkflow or OnboardingWorkflow executions, which are reached by opening their task flow; type RequirementsWorkflow lists requirements sessions, OnboardingWorkflow onboarding interviews (workflow_id is the onboarding's session_id), RequirementsReviewWorkflow requirements reviews and ArchitectureWorkflow architecture sessions. Every execution also carries repository, branch, name, origin, linked, waiting_for_user and unresolved_findings, each null when it does not apply; the onboarding_id field and filter are removed. The existing fields keep their names and meaning, and status additionally takes the values pending and skipped for stages of a task flow. The optional repository, branch and origin filters combine with type and with each other (all must match); executions whose field is null never match a filter on it, so origin lists only task flows. The repository filter is compared case-insensitively, as on GitHub; the branch filter must match exactly. A malformed filter value (a repository that is not owner/name, an empty branch, or an origin other than requirements or onboarding) answers 422 with a detail, like an invalid type or page_token. Pass the same filters with page_token when continuing. top_level=true lists only executions without a parent: task flows, chats, and the requirements and onboarding flows started before onboardings ran under task flows; no stage of a task (requirements or onboarding interview, requirements review, architecture, API design or delivery, including a delivery started again on its own) is ever top-level. parent=<workflow_id> lists only the direct children of that execution: for a task flow, its requirements (or, for an onboarding's task flow, its onboarding interview), requirements review, architecture, API design and delivery children (including a delivery started again on its own) and, for a forked or fix-round task flow, the original task's earlier stages it links to, with linked true; parent=<a stage's workflow_id> never lists another stage of the task (a requirements, onboarding interview, review or API design session lists none, a delivery its code generation and stage workflows). For a requirements or onboarding flow started before this change, parent lists its children as before. parent and top_level cannot be combined; an empty or malformed parent, or parent with top_level, answers 422.",
       "error_statuses": [
         401,
         422,
@@ -1962,7 +2107,7 @@
       "method": "GET",
       "parameters": [
         {
-          "description": "A workflow type to list only, such as TaskWorkflow.",
+          "description": "A workflow type to list only, such as TaskWorkflow or RequirementsReviewWorkflow.",
           "location": "query",
           "name": "type",
           "required": false,
@@ -1990,9 +2135,9 @@
           "type": "string"
         },
         {
-          "description": "Only executions started for this onboarding (onboarding-session- followed by 32 hex digits), compared exactly; 422 otherwise.",
+          "description": "Only task flows of this origin: requirements (started by a requirements interview) or onboarding (started by an onboarding); 422 for any other value.",
           "location": "query",
-          "name": "onboarding_id",
+          "name": "origin",
           "required": false,
           "type": "string"
         },
@@ -2004,7 +2149,7 @@
           "type": "string"
         },
         {
-          "description": "true lists only executions without a parent workflow: task flows, onboardings, chats and requirements flows started before task flows existed; a stage of a task is never listed.",
+          "description": "true lists only executions without a parent workflow: task flows, chats, and the requirements and onboarding flows started before onboardings ran under task flows; a stage of a task is never listed.",
           "location": "query",
           "name": "top_level",
           "required": false,
@@ -2016,10 +2161,6 @@
       "requirement_ids": [
         "FR-17",
         "FR-66",
-        "FR-69",
-        "FR-72",
-        "FR-73",
-        "FR-74",
         "NFR-7",
         "FR-89",
         "FR-90",
@@ -2027,13 +2168,18 @@
         "FR-127",
         "FR-128",
         "FR-129",
-        "FR-131",
         "FR-132",
         "FR-135",
         "FR-136",
-        "FR-139",
         "FR-140",
-        "FR-143"
+        "FR-143",
+        "FR-149",
+        "FR-159",
+        "FR-162",
+        "FR-163",
+        "FR-164",
+        "FR-166",
+        "FR-167"
       ],
       "response_array": false,
       "response_schema": "WorkflowPage",
@@ -2601,7 +2747,7 @@
         },
         {
           "array": false,
-          "description": "The workflow_id of the top-level task flow that holds the session: the new task flow started by POST /requirements/sessions or by a fork of a requirements, architecture or API design session. Absent for other responses.",
+          "description": "The workflow_id of the top-level task flow that holds the session: the new task flow started by POST /requirements/sessions, POST /onboarding/sessions or a fork of a requirements, architecture, API design or onboarding interview session. Absent for other responses.",
           "name": "task_flow_id",
           "required": false,
           "type": "string"
@@ -2789,6 +2935,7 @@
         },
         {
           "array": false,
+          "description": "finalizing also while the requirements review runs; interviewing again while the user answers the contradiction questions or after a failed review round; completed once the document is written.",
           "enum": [
             "preparing",
             "interviewing",
@@ -2841,7 +2988,14 @@
         },
         {
           "array": false,
-          "description": "The requirements document, once written.",
+          "description": "The requirements review's status, round, contradictions and any reviewer error. not_started until finalize; skipped for a documentation task or an idle-written session. A fork copies the review state of the session it was forked from at the fork point.",
+          "name": "review",
+          "required": true,
+          "type": "RequirementsReview"
+        },
+        {
+          "array": false,
+          "description": "The requirements document, once written; when the user continued despite contradictions, it lists those that remained.",
           "name": "document",
           "required": false,
           "type": "object"
@@ -2878,21 +3032,21 @@
         },
         {
           "array": false,
-          "description": "The workflow_id of the top-level task flow (TaskWorkflow) the session is a child of. Null only for sessions started before task flows existed. The delivery of a bugfix or documentation task, which the task flow starts once the requirements are finalized, is found with GET /workflows?parent=<task_flow_id>; no separate delivery ID is returned.",
+          "description": "The workflow_id of the top-level task flow (TaskWorkflow) the session is a child of. Null only for sessions started before task flows existed. The requirements review and the delivery of a bugfix or documentation task are found with GET /workflows?parent=<task_flow_id>; no separate review or delivery ID is returned.",
           "name": "task_flow_id",
           "required": false,
           "type": "string"
         },
         {
           "array": false,
-          "description": "The architecture session the task flow started from its pending architecture child once the user generated the document of a new service or an API change; it drafts the architecture at once, as a child of the task flow (task_flow_id). Null until then, for any other kind of task, for a session without a repository, and for one whose document was written because it was idle for a day (its later stages are then skipped). The API design is found through the architecture session.",
+          "description": "The architecture session the task flow started from its pending architecture child once the requirements review of a new service or an API change passed or the user continued despite it; it drafts the architecture at once, as a child of the task flow (task_flow_id). Null until then, for any other kind of task, for a session without a repository, and for one whose document was written because it was idle for a day (its later stages are then skipped). The API design is found through the architecture session.",
           "name": "architecture_session_id",
           "required": false,
           "type": "string"
         },
         {
           "array": false,
-          "description": "Progress of the delivery of a bugfix or documentation task, which runs as the delivery child of the task flow. A bugfix's progress also holds reviews (ReviewRound list), review_error, the open_findings flag, findings_acceptance (FindingsAcceptance), the reviewing and findings_open verification_status values and the publication (RepositoryPublication) with its verified flag, the first 20 open findings its commit message lists and findings_count, as in ApiDesignSession. Every delivery's progress also holds pull_request_status and, once a pushed delivery's pull request is open, pull_request (PullRequest), pull_request_error, pull_request_text_error, mentions (PullRequestMention list) of the app on that pull request and fix_flow_ids (the new task flows started by fix rounds after the flow closed), as in ApiDesignSession.",
+          "description": "Progress of the delivery of a bugfix or documentation task, which runs as the delivery child of the task flow, started for a bugfix once its requirements review passed or the user continued despite it. A bugfix's progress also holds reviews (ReviewRound list), review_error, the open_findings flag, findings_acceptance (FindingsAcceptance), the reviewing and findings_open verification_status values and the publication (RepositoryPublication) with its verified flag, the first 20 open findings its commit message lists and findings_count, as in ApiDesignSession. Every delivery's progress also holds pull_request_status and, once a pushed delivery's pull request is open, pull_request (PullRequest), pull_request_error, pull_request_text_error, mentions (PullRequestMention list) of the app on that pull request and fix_flow_ids (the new task flows started by fix rounds after the flow closed), as in ApiDesignSession.",
           "name": "delivery",
           "required": false,
           "type": "object"
@@ -3159,7 +3313,7 @@
         },
         {
           "array": true,
-          "description": "The workflow_ids of the new top-level flows started by fix rounds after this delivery's flow completed or was cancelled, oldest first: one per instructions given about its open review findings and per fix request mentioned on its closed or merged pull request. For a task's delivery each is a new TaskWorkflow (named after the original with a \" (fix)\" suffix) that holds the fix delivery as its child and links to the original task's stages; for an onboarding, the fix round's own top-level flow. Empty or absent while none was started.",
+          "description": "The workflow_ids of the new top-level task flows started by fix rounds after this delivery's flow completed or was cancelled, oldest first: one per instructions given about its open review findings and per fix request mentioned on its closed or merged pull request. Each is a new TaskWorkflow, with the original's origin and named after the original with a \" (fix)\" suffix, that holds the fix delivery as its child and links to the original task's stages, for a task's delivery and an onboarding's alike. Empty or absent while none was started.",
           "name": "fix_flow_ids",
           "required": false,
           "type": "string"
@@ -3289,14 +3443,14 @@
         },
         {
           "array": false,
-          "description": "Includes TaskWorkflow, the top-level flow of a task started by a new requirements interview, a fork of a requirements, architecture or API design session, or a fix round on a closed task's delivery.",
+          "description": "Includes TaskWorkflow, the top-level flow of a task or onboarding started by a new requirements interview, a new onboarding, a fork of a requirements, architecture, API design or onboarding interview session, or a fix round on a closed delivery; and RequirementsReviewWorkflow, the requirements review child of a task flow.",
           "name": "workflow_type",
           "required": true,
           "type": "string"
         },
         {
           "array": false,
-          "description": "The Temporal status in lower case (running, completed, cancelled, ...), except that a stage child of a task flow that was created but still waits for the stages it depends on is listed as pending, and one that will never run (such as a confirmed architecture skip, or the stages after a requirements session whose document was written because it was idle for a day) as skipped. An open task flow is running; it closes with its delivery child's status (cancelled when the delivery was skipped) once every child, linked earlier stages included, has closed.",
+          "description": "The Temporal status in lower case (running, completed, cancelled, ...), except that a stage child of a task flow that was created but still waits for the stages it depends on is listed as pending, and one that will never run (such as a confirmed architecture skip, the review of a documentation task or an architecture-only onboarding, or the stages after a session whose document was written because it was idle for a day) as skipped. An open task flow is running; it closes with its delivery child's status (cancelled when the delivery was skipped) once every child, linked earlier stages included, has closed.",
           "name": "status",
           "required": true,
           "type": "string"
@@ -3309,7 +3463,7 @@
         },
         {
           "array": false,
-          "description": "For a stage of a task, the task flow's workflow_id. For a linked earlier stage listed under a forked or fix-round task flow, still its own task flow.",
+          "description": "For a stage of a task or onboarding, the task flow's workflow_id. For a linked earlier stage listed under a forked or fix-round task flow, still its own task flow.",
           "name": "parent_workflow_id",
           "required": false,
           "type": "string"
@@ -3330,22 +3484,15 @@
         },
         {
           "array": false,
-          "description": "Always present. The repository the execution works in, as in the session's repository (provider, repository_id, full_name, html_url, private and the source branch), for TaskWorkflow, OnboardingWorkflow, RequirementsWorkflow, ArchitectureWorkflow, ApiDesignWorkflow and DeliveryWorkflow executions, and for CodegenWorkflow executions the repository of the delivery that started them; null for any other execution.",
+          "description": "Always present. The repository the execution works in, as in the session's repository (provider, repository_id, full_name, html_url, private and the source branch), for TaskWorkflow, OnboardingWorkflow, RequirementsWorkflow, RequirementsReviewWorkflow, ArchitectureWorkflow, ApiDesignWorkflow and DeliveryWorkflow executions, and for CodegenWorkflow executions the repository of the delivery that started them; null for any other execution, such as a chat.",
           "name": "repository",
           "required": false,
           "type": "RepositorySelection"
         },
         {
           "array": false,
-          "description": "Always present. The branch the execution works in (the source branch the session checked out, not a branch the delivery pushes; the same as repository.branch), for TaskWorkflow, OnboardingWorkflow, RequirementsWorkflow, ArchitectureWorkflow, ApiDesignWorkflow and DeliveryWorkflow executions, and for CodegenWorkflow executions the branch of the delivery that started them; null for any other execution.",
+          "description": "Always present. The branch the execution works in (the source branch the session checked out, not a branch the delivery pushes; the same as repository.branch), for the same executions as repository; null for any other execution, such as a chat.",
           "name": "branch",
-          "required": false,
-          "type": "string"
-        },
-        {
-          "array": false,
-          "description": "Always present. The session_id of the onboarding the execution was started for: the OnboardingWorkflow's own workflow_id, or the onboarding that started a DeliveryWorkflow or CodegenWorkflow execution; null for an execution not started for an onboarding.",
-          "name": "onboarding_id",
           "required": false,
           "type": "string"
         },
@@ -3358,6 +3505,17 @@
         },
         {
           "array": false,
+          "description": "Always present. For a TaskWorkflow, requirements when it was started by a requirements interview (or a fork or fix round of one) and onboarding when it was started by an onboarding (or a fork or fix round of one). Null for any other execution.",
+          "enum": [
+            "requirements",
+            "onboarding"
+          ],
+          "name": "origin",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "array": false,
           "description": "Always present. True when the execution is listed under parent=<task flow> as an earlier stage of another task that this forked or fix-round task flow links to, not as its own child; false otherwise.",
           "name": "linked",
           "required": false,
@@ -3365,7 +3523,7 @@
         },
         {
           "array": false,
-          "description": "Always present. Whether the flow waits for the user (unanswered interviewer questions, a coding agent's questions, open review findings, a skip proposal or a contract decision); for a task flow, whether any of its children does. Always false for a closed flow. Null for executions started before this change and for executions that cannot wait for the user.",
+          "description": "Always present. Whether the flow waits for the user (unanswered interviewer or contradiction questions, a failed requirements review round, a coding agent's questions, open review findings, a skip proposal or a contract decision); for a task flow, whether any of its children does. Always false for a closed flow. Null for executions started before this change and for executions that cannot wait for the user.",
           "name": "waiting_for_user",
           "required": false,
           "type": "boolean"
@@ -3692,7 +3850,7 @@
         },
         {
           "array": false,
-          "description": "The workflow_id of the new top-level flow the mention's fix request started because the delivery's flow had completed or been cancelled (merged or closed pull request): a new TaskWorkflow holding the fix delivery as its child for a task's delivery, or the fix round's own top-level flow for an onboarding. Also listed in fix_flow_ids. Absent for any other mention.",
+          "description": "The workflow_id of the new top-level task flow the mention's fix request started because the delivery's flow had completed or been cancelled (merged or closed pull request); it holds the fix delivery as its child, for a task's delivery and an onboarding's alike. Also listed in fix_flow_ids. Absent for any other mention.",
           "name": "fix_flow_id",
           "required": false,
           "type": "string"
@@ -3790,7 +3948,7 @@
         },
         {
           "array": false,
-          "description": "awaiting_confirmation while the branch has a contract in contracts/, contract tests or a root Dockerfile and the user has not yet decided, at the start or again after a checkout update found ones not there before; declined once the user chose decline, which ends the onboarding without changing anything; drafting while the LLM drafts the requirements, the architecture, the API and the language from the existing code (only the architecture for an architecture-only onboarding); preparing also while the checkout is updated; superseded once the onboarding was forked, which ends it so that only the fork stays unfinished.",
+          "description": "awaiting_confirmation while the branch has a contract in contracts/, contract tests or a root Dockerfile and the user has not yet decided, at the start or again after a checkout update found ones not there before; declined once the user chose decline, which ends the onboarding without changing anything; drafting while the LLM drafts the requirements, the architecture, the API and the language from the existing code (only the architecture for an architecture-only onboarding); preparing also while the checkout is updated; finalizing also while the requirements review runs, interviewing again while the user answers its contradiction questions or after a failed review round; superseded once the onboarding was forked, which ends it so that only the fork stays unfinished.",
           "enum": [
             "preparing",
             "awaiting_confirmation",
@@ -3812,6 +3970,13 @@
           "name": "repository",
           "required": true,
           "type": "RepositorySelection"
+        },
+        {
+          "array": false,
+          "description": "The workflow_id of the top-level task flow (TaskWorkflow with origin onboarding) the onboarding interview is a child of, together with its requirements review and delivery. Null for onboardings started before onboardings ran under task flows.",
+          "name": "task_flow_id",
+          "required": false,
+          "type": "string"
         },
         {
           "array": false,
@@ -3862,7 +4027,7 @@
         },
         {
           "array": false,
-          "description": "Whether the user chose to add only contracts/architecture.md (decision architecture_only): only the architecture is drafted and reviewed, requirements, api and language stay empty, and the result is pushed with a pull request without contract tests, verification or code review.",
+          "description": "Whether the user chose to add only contracts/architecture.md (decision architecture_only): only the architecture is drafted and reviewed, requirements, api and language stay empty, and the result is pushed with a pull request without requirements review, contract tests, verification or code review.",
           "name": "architecture_only",
           "required": true,
           "type": "boolean"
@@ -3886,6 +4051,13 @@
           "name": "lookup_requirements",
           "required": true,
           "type": "LookupRequirement"
+        },
+        {
+          "array": false,
+          "description": "The requirements review of the drafted requirements: status, round, contradictions and any reviewer error. not_started until finalize; skipped for an architecture-only onboarding. A fork copies the review state of the onboarding it was forked from at the fork point.",
+          "name": "review",
+          "required": true,
+          "type": "RequirementsReview"
         },
         {
           "array": false,
@@ -3930,7 +4102,7 @@
         },
         {
           "array": false,
-          "description": "Progress of verifying and publishing the contract, contract tests and Dockerfile, with the same fields as an ApiDesignSession's delivery progress: verification_status, publication_status, verification, publication (its branch named onboarding/<source branch>-<short id>), agent_questions (including a coding agent's question whether a failing test reveals a bug in the existing code, which waits for an answer without a timeout), reviews, review_error, open_findings, findings_acceptance, pull_request_status, pull_request, pull_request_error, pull_request_text_error, mentions and fix_flow_ids (the fix rounds' own top-level flows started after the onboarding closed). When the existing code was changed after the user confirmed a bug, the result is still verified as usual once the tests pass, and the pushed commit's message and the pull request's description say that the existing code was changed. For an architecture-only onboarding, verification_status is not_applicable, reviews stay empty and open_findings is never raised; only the publication of contracts/architecture.md and contracts/architecture.json and its pull request are reported.",
+          "description": "Progress of the delivery child of the onboarding's task flow, which verifies and publishes the contract, contract tests and Dockerfile, with the same fields as an ApiDesignSession's delivery progress: verification_status, publication_status, verification, publication (its branch named onboarding/<source branch>-<short id>), agent_questions (including a coding agent's question whether a failing test reveals a bug in the existing code, which waits for an answer without a timeout), reviews, review_error, open_findings, findings_acceptance, pull_request_status, pull_request, pull_request_error, pull_request_text_error, mentions and fix_flow_ids (the new onboarding task flows started by fix rounds after the onboarding closed). When the existing code was changed after the user confirmed a bug, the result is still verified as usual once the tests pass, and the pushed commit's message and the pull request's description say that the existing code was changed. For an architecture-only onboarding, verification_status is not_applicable, reviews stay empty and open_findings is never raised; only the publication of contracts/architecture.md and contracts/architecture.json and its pull request are reported.",
           "name": "delivery",
           "required": false,
           "type": "object"
@@ -4267,6 +4439,161 @@
           "name": "retired",
           "required": true,
           "type": "boolean"
+        }
+      ]
+    },
+    {
+      "description": "A contradiction the requirements review found between requirements.",
+      "name": "Contradiction",
+      "properties": [
+        {
+          "array": false,
+          "description": "Stable ID of the contradiction, C- followed by a number (C-1, C-2, ...), unique across all rounds of the task's review. A contradiction the reviewer reports again in a later round keeps its ID; a new one gets the next number. The requirements document refers to remaining contradictions by it.",
+          "name": "id",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "What contradicts what, and why.",
+          "name": "summary",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": true,
+          "description": "The conflicting requirements, in canonical form (such as FR-12): recorded or drafted in the session, or of the existing service (or, for an onboarding replacing a contract, of that contract) and not retired by the task.",
+          "name": "requirement_ids",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "The question asked of the user on how to resolve it; all of a round's questions are asked in one assistant message, in the order of the contradictions, and answered through POST .../answers.",
+          "name": "question",
+          "required": true,
+          "type": "Question"
+        }
+      ]
+    },
+    {
+      "description": "The state of the task's requirements review (RequirementsReviewWorkflow, a child of the task flow). The Flows page shows a review flow by opening its requirements or onboarding session in the panel and reading this field, including the contradictions that remained when the user continued anyway.",
+      "name": "RequirementsReview",
+      "properties": [
+        {
+          "array": false,
+          "description": "not_started until the session is finalized; running while a round runs; passed when a round found no contradictions; contradictions_found after a round reported contradictions, both while the user answers their questions and after a free message dropped them (see questions_open); failed when the round's LLM call failed for good (see error), handled like contradictions_found with none listed, and kept after free messages until a round runs again (POST .../review/retry reruns the failed round with its original input; POST .../finalize starts a new round on the current requirements, whether or not messages changed them since the failure); continued_anyway once finalized with force=true; skipped for documentation, a requirements session or onboarding whose document was written because it was idle for a day, or an architecture-only onboarding.",
+          "enum": [
+            "not_started",
+            "running",
+            "passed",
+            "contradictions_found",
+            "failed",
+            "continued_anyway",
+            "skipped"
+          ],
+          "name": "status",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "The current or last round, numbered from 1; 0 before the first round. Rounds are unlimited. A failed round keeps its number: POST .../review/retry reruns it under the same number, while a new round started by POST .../finalize after the failure gets the next number.",
+          "name": "round",
+          "required": true,
+          "type": "integer"
+        },
+        {
+          "array": true,
+          "description": "The contradictions the last finished round reported, in the order their questions are asked; still listed after a free message dropped their questions; when continued_anyway, those that remained and are listed in the requirements document. Empty when none.",
+          "name": "contradictions",
+          "required": true,
+          "type": "Contradiction"
+        },
+        {
+          "array": false,
+          "description": "True while the last round's contradiction questions can be answered through POST .../answers, which then starts the next round. Turns false when a free message drops them; status stays contradictions_found and finalizing again (POST .../finalize) starts the next round, given the diff of the requirements and the dropped questions marked unanswered. False in every other status.",
+          "name": "questions_open",
+          "required": true,
+          "type": "boolean"
+        },
+        {
+          "array": false,
+          "description": "Why the last round failed; the round can be retried with its original input under the same number, a new round with the next number started on the current requirements by finalizing again, or the review forced past. Null otherwise.",
+          "name": "error",
+          "required": false,
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "description": "The adapter, model and thinking level of one LLM workflow type.",
+      "name": "ModelSettings",
+      "properties": [
+        {
+          "array": false,
+          "enum": [
+            "pi",
+            "openai",
+            "claude"
+          ],
+          "name": "adapter",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "1 to 300 characters, without control characters.",
+          "name": "model",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "1 to 100 characters; one the model offers.",
+          "name": "thinking_level",
+          "required": true,
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "description": "The model settings of every LLM workflow type.",
+      "name": "WorkflowSettings",
+      "properties": [
+        {
+          "array": false,
+          "description": "ModelSettings by workflow type; must hold exactly every type: chat, requirements, requirements_review (the requirements reviewer of tasks and onboardings, separate from review, the code review), api_design, implementation, test_generation, diagnosis, documentation, review and routing; 422 otherwise.",
+          "name": "workflows",
+          "required": true,
+          "type": "object"
+        }
+      ]
+    },
+    {
+      "description": "The stored settings with the labels and the selectable models.",
+      "name": "SettingsView",
+      "properties": [
+        {
+          "array": false,
+          "description": "ModelSettings by workflow type, including requirements_review.",
+          "name": "workflows",
+          "required": true,
+          "type": "object"
+        },
+        {
+          "array": false,
+          "description": "Display label by workflow type, such as requirements_review: Requirements review.",
+          "name": "workflow_labels",
+          "required": true,
+          "type": "object"
+        },
+        {
+          "array": false,
+          "description": "By adapter: label, models (id, label, thinking_levels), error and hint.",
+          "name": "providers",
+          "required": true,
+          "type": "object"
         }
       ]
     }

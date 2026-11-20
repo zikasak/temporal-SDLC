@@ -96,6 +96,12 @@ class Interview(Generic[StateT]):
     def _user_replies(self) -> None:
         """Called before the user's message or answers are added to the conversation."""
 
+    def _answers_given(self, answers: list[str]) -> None:
+        """Called with the user's answers before `_user_replies`."""
+
+    async def _after_turn(self, ok: Any) -> None:
+        """Called after the turn the user's message or answers started."""
+
     @workflow.update
     async def send_message(self, message: str) -> None:
         self._updates += 1
@@ -105,7 +111,7 @@ class Interview(Generic[StateT]):
             workflow.logger.info("Message received (%d characters)", len(message))
             self._user_replies()
             self.state.messages.append({"role": "user", "content": message.strip()})
-            await self._turn()
+            await self._after_turn(await self._turn())
 
     @send_message.validator
     def validate_send_message(self, message: str) -> None:
@@ -123,10 +129,11 @@ class Interview(Generic[StateT]):
                 raise ApplicationError(self.CLOSED)
             questions = pending_questions(self.state.messages)
             workflow.logger.info("Answers received (%d questions)", len(questions))
+            self._answers_given(answers)
             self._user_replies()
             self.state.messages.append(
                 {"role": "user", "content": answers_text(questions, answers)})
-            await self._turn()
+            await self._after_turn(await self._turn())
 
     @answer_questions.validator
     def validate_answer_questions(self, answers: list[str]) -> None:

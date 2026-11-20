@@ -5,11 +5,13 @@
       "responsibilities": [
         "React and TypeScript single-page app in frontend/, built with Vite and served by nginx in deployment",
         "Sign-in, registration of the first account and user administration",
-        "Flows page: lists top-level task flows (by their current name), onboardings and chats, and a task flow's requirements, architecture, API design and delivery children with pending, skipped and linked-from-another-task marks; opens chats and sessions in a panel; the Requirements filter lists task flows only, and old-shape requirements flows from before this change are shown only in the All view",
+        "Flows page: lists top-level task flows (by their current name) and chats, and a task flow's requirements or onboarding interview, requirements review, architecture, API design and delivery children with pending, skipped and linked-from-another-task marks; opens chats, sessions and onboardings in a panel; the Requirements and Onboarding filters list task flows of that origin through the origin filter, and old-shape requirements and onboarding flows from before this change are shown only in the All view",
+        "Shows the requirements review flow with its rounds and, when the user continued anyway, the contradictions that remained; shows the review's status, contradiction questions and any reviewer error in the requirements and onboarding sessions, with a retry button for a failed review round",
+        "Asks for confirmation in a warning modal window before finalizing with force while the review reports contradictions or has failed",
         "Shows an open task flow as running and highlights it, and each of its children, as waiting for the user and with the unresolved findings marker as GET /workflows reports them, instead of deriving them from the children's sessions; opens the waiting child's questions from the highlight",
-        "Old-shape requirements flows from before this change and their stages are only listed and opened, with no waiting-for-user highlight and no unresolved findings marker",
+        "Old-shape requirements and onboarding flows from before this change and their stages are only listed and opened, with no waiting-for-user highlight and no unresolved findings marker",
         "Opens the next stage from a session's returned IDs: the architecture session, the API design session, or the delivery of a bugfix or documentation change",
-        "Repository and branch picker and GitHub connection settings",
+        "Repository and branch picker, GitHub connection settings and the Settings page, which includes the requirements reviewer's model",
         "Shows delivery progress, agent questions, review findings and pull request links, and sends the user's answers and decisions"
       ]
     },
@@ -20,7 +22,8 @@
         "Requires a signed-in user on every router except auth and the GitHub webhook endpoint",
         "Validates input, bounds request sizes and maps Temporal and storage failures to 503 and session errors to 404/409/422",
         "Starts, queries, signals and updates Temporal workflows for each session through the session services",
-        "Creates the database schemas at startup (including the model settings table) and runs background loops: expired-document cleanup, Pi OAuth credential refresh and recovery of interrupted webhook mentions"
+        "Creates the database schemas at startup (including the model settings table) and runs background loops: expired-document cleanup, Pi OAuth credential refresh and recovery of interrupted webhook mentions",
+        "At startup, cancels every still-running old-shape OnboardingWorkflow (top-level, without a parent task flow) started before this change; the step is idempotent, so later startups find none"
       ]
     },
     {
@@ -36,31 +39,41 @@
       "name": "Session services",
       "responsibilities": [
         "Per-flow services (app.requirements, app.architecture, app.api_design, app.onboarding, app.conversations, app.delivery service modules) that turn API calls into Temporal workflow starts, queries, signals and updates",
-        "Start a TaskWorkflow for every new requirements interview, for every fork of a requirements, architecture or API design session (linked to the original task's earlier stages) and for every fix round on a closed task's delivery; onboardings keep their own top-level OnboardingWorkflow",
-        "Read session state, conversation, drafts, delivery progress and the task flow's ID and next stage's ID (architecture session, API design session, or the delivery of a bugfix or documentation change) from workflow queries for the API responses",
-        "Hand authorised pull request mentions to the delivery or onboarding workflow they belong to",
-        "List workflow executions with their repository, branch, onboarding, task name, pending/skipped state, linked-task, waiting-for-user and unresolved-findings search attributes and the workflow registry (app.temporal.executions, app.temporal.registry): top_level lists task flows, onboardings, chats and the old-shape requirements flows started before this change; parent lists a flow's direct children plus stages linked to it, and an old-shape requirements flow's children as before",
-        "For closed deliveries, onboardings and task flows, clear the listed unresolved findings marker when a findings acceptance record (app.delivery.acceptances) exists for the closed delivery run, since a closed workflow can no longer update its own search attributes",
-        "The workflow_type filter for task flows lists only TaskWorkflow executions, so old-shape RequirementsWorkflow executions appear only in the unfiltered (All) listing"
+        "Start a TaskWorkflow, with origin requirements or onboarding, for every new requirements interview and onboarding, for every fork of a requirements, architecture, API design or onboarding interview session (linked to the original task's earlier stages, carrying over the forked interview's review state) and for every fix round on a closed delivery of a task or onboarding",
+        "Pass finalize, with or without the force flag, to the requirements or onboarding interview; force is accepted at any point of the review (before it has run, during a running round, or after contradictions or a reviewer error) and writes the document at once",
+        "Pass the retry of a failed review round from the requirements or onboarding session to its requirements review; retrying when the last round did not fail answers 409",
+        "Read session state, conversation, drafts, the requirements review's status, round, contradictions and any reviewer error, delivery progress and the task flow's ID and next stage's ID (architecture session, API design session, or the delivery of a bugfix or documentation change) from workflow queries for the API responses",
+        "Hand authorised pull request mentions to the delivery workflow they belong to, for tasks and onboardings alike",
+        "List workflow executions with their repository, branch, task name, task origin, pending/skipped state, linked-task, waiting-for-user and unresolved-findings search attributes and the workflow registry (app.temporal.executions, app.temporal.registry). top_level lists task flows, chats, the old-shape requirements flows and the cancelled old-shape onboarding flows started before this change. parent lists a flow's direct children plus stages linked to it, and an old-shape flow's children as before. The origin filter lists only task flows of that origin. No onboarding ID is returned or accepted as a filter any more",
+        "For closed deliveries and task flows, clear the listed unresolved findings marker when a findings acceptance record (app.delivery.acceptances) exists for the closed delivery run, since a closed workflow can no longer update its own search attributes",
+        "The workflow_type filter for task flows lists only TaskWorkflow executions, so old-shape RequirementsWorkflow and OnboardingWorkflow executions appear only in the unfiltered (All) listing",
+        "Onboarding sessions of old-shape onboardings cancelled on deploy remain readable but accept no further actions (409)"
       ]
     },
     {
       "name": "Orchestration worker",
       "responsibilities": [
         "Temporal worker on the main task queue (app.temporal.worker)",
-        "Runs LLMRequestWorkflow, TaskWorkflow, RequirementsWorkflow, ArchitectureWorkflow, ApiDesignWorkflow, OnboardingWorkflow and DeliveryWorkflow",
-        "TaskWorkflow (new, top-level per task): creates its stage children up front per task kind (requirements, architecture, API design and delivery for a new service or API change; requirements and delivery for a bugfix or documentation), holds each one pending until the stages it depends on have finished, then starts it, and closes skipped stages; it stays running (its Temporal status) for as long as any child is pending or running",
-        "TaskWorkflow starts the pending delivery of a bugfix or documentation change as soon as its requirements are finalized, the architecture of a new service or API change when its requirements are finalized, and the API design when the architecture is finalized or skipped",
+        "Runs LLMRequestWorkflow, TaskWorkflow, RequirementsWorkflow, RequirementsReviewWorkflow, ArchitectureWorkflow, ApiDesignWorkflow, OnboardingWorkflow and DeliveryWorkflow",
+        "TaskWorkflow (top-level per task, with an origin of requirements or onboarding): creates its stage children up front: requirements, requirements review, architecture, API design and delivery for a new service or API change; requirements, requirements review and delivery for a bugfix; requirements and delivery for documentation; onboarding interview, requirements review and delivery for an onboarding. It holds each one pending until the stages it depends on have finished, then starts it, and closes skipped stages. It stays running (its Temporal status) for as long as any child is pending or running",
+        "TaskWorkflow starts the pending requirements review when the requirements or onboarding interview is finalized (except for documentation, an idle-written session or onboarding, or an architecture-only onboarding, whose review closes as skipped). It starts the next stage only once the review passes or the user continues despite contradictions: the delivery of a bugfix or onboarding, or the architecture of a new service or API change. It starts the API design when the architecture is finalized or skipped, and for documentation it starts the delivery as soon as the requirements are finalized",
+        "RequirementsReviewWorkflow (new, one child per task across all its rounds): in each round an LLM checks the session's requirements against each other and against the existing service's requirements the task has not retired; for an onboarding that replaces an existing contract, the drafted requirements are also checked against that contract's requirements. From the second round on, the reviewer is given both the diff of the requirement records since its previous round (added, changed and removed, with their texts) and the contradiction questions with the user's answers. It returns the contradictions to the requirements or onboarding interview, which asks the user one question per contradiction. Once all are answered, the interview hands the updated requirements back for the next round. Rounds are unlimited. It closes as passed when no contradictions remain, or as continued anyway with the remaining contradictions when the user finalizes with force",
+        "When a review round's LLM activity still fails after its Temporal retries (provider unavailable or invalid output), the round is marked failed with the reviewer's error and treated like a round with contradictions found (none listed): the session shows the error and the user can either retry the round through a retry action, like retrying a failed turn, which runs the same round again with the same input, or continue with force; nothing later starts on its own",
+        "Finalize with force writes the requirements document at once whatever the review's state: a running review round is cancelled, and a review that has not run yet is closed as continued anyway with no contradictions; the remaining contradictions of the last finished round are listed in the document",
+        "Requirements and onboarding reviews use the same requirements_review model settings entry",
+        "Requirements and onboarding interviews keep the review's status, round and contradictions for their session responses, write the requirements document only after the review passes or is forced, and list the remaining contradictions in it when it was forced. A forked requirements or onboarding interview copies the review state (status, round and contradictions) of the session it was forked from at the fork point, and its new task flow's review continues from that round",
+        "An onboarding interview idle for a day is closed like an idle requirements session: its requirements document is written without a review, and its review and delivery children close as skipped, so its task flow closes as cancelled",
+        "OnboardingWorkflow is the onboarding interview stage of an onboarding TaskWorkflow: it no longer starts its own delivery but hands its finalized contract to the task flow, whose delivery child verifies, reviews and pushes it (code generation runs under that delivery). Fix rounds on a closed onboarding's pull request and forks of an onboarding interview start a new onboarding TaskWorkflow, as they do for tasks",
         "TaskWorkflow keeps the task's short name: written by an LLM from the intake at start and rewritten from the finalized requirements; a task flow started by a fork or a fix round on a closed delivery copies the original task's name with a '(fork)' or '(fix)' suffix, and a fork's name is still rewritten when its requirements are finalized",
         "TaskWorkflow closes with its delivery child's status (cancelled when the delivery was skipped) once every child, including the earlier stages it links to from a fork or fix round, has closed",
-        "Stage and onboarding workflows keep their own waiting-for-user state (unanswered interviewer questions, coding agent questions, open review findings, a skip proposal or a contract decision) and unresolved-findings state as search attributes, cleared when the flow closes so a closed flow is never waiting (FR-110)",
+        "Stage workflows keep their own waiting-for-user state (unanswered interviewer or contradiction questions, a failed review round, coding agent questions, open review findings, a skip proposal or a contract decision) and unresolved-findings state as search attributes, cleared when the flow closes so a closed flow is never waiting (FR-110)",
         "Stages report every change of their waiting-for-user and unresolved-findings state to their TaskWorkflow, which aggregates its children's states into its own WaitingForUser and UnresolvedFindings search attributes",
-        "Stage workflows report their hand-off (requirements finalized or idle-written, architecture finalized or skip confirmed, API design finalized, pull request merged or closed) to their TaskWorkflow instead of starting the next stage themselves, and on closing signal every task flow they are linked into",
-        "Activities for LLM interviewer turns and drafting, writing the requirements, architecture and OpenAPI documents, and naming task flows",
+        "Stage workflows report their hand-off (requirements or onboarding interview finalized or idle-written, review passed or forced, architecture finalized or skip confirmed, API design finalized, pull request merged or closed) to their TaskWorkflow instead of starting the next stage themselves, and on closing signal every task flow they are linked into",
+        "Activities for LLM interviewer turns and drafting, requirements review rounds, writing the requirements, architecture and OpenAPI documents, and naming task flows",
         "Activities for repository checkout and contract reading, pushing deliveries, documentation and onboardings, and opening or updating pull requests with LLM-written text",
         "Classifies mentions of the GitHub App, replies to them and answers clarifications",
         "DeliveryWorkflow runs code generation, implementation, test generation, verification with diagnosis and repair rounds, code review rounds and the push as child workflows on the other task queues",
-        "Executions started before this change keep running in their old shape (stages under a RequirementsWorkflow) and are not migrated"
+        "Requirements executions started before this change keep running in their old shape (stages under a RequirementsWorkflow) and are not migrated; old-shape top-level OnboardingWorkflows are cancelled on deploy, together with their delivery and code generation children, and have to be started again"
       ]
     },
     {
@@ -120,7 +133,7 @@
     {
       "name": "Model settings",
       "responsibilities": [
-        "Internal storage of the adapter, model and thinking level chosen for each LLM workflow type (app.settings)",
+        "Internal storage of the adapter, model and thinking level chosen for each LLM workflow type (app.settings), now including a requirements_review entry for the requirements reviewer of tasks and onboardings alike, separate from the code review entry",
         "Knows the models and thinking levels each provider offers",
         "Provides the settings the workers and agent containers use for their LLM calls"
       ]
@@ -136,9 +149,10 @@
       "name": "Temporal server",
       "responsibilities": [
         "Persists workflow state and dispatches workflow and activity tasks to the workers by task queue",
-        "Keeps the Repository, Branch and OnboardingId search attributes used to list executions",
-        "Keeps the new FlowState (pending or skipped, overriding the Temporal status in listings), TaskName and LinkedTaskFlows (keyword list of task flows a stage is linked into by a fork or fix round) search attributes, upserted by the workflows",
-        "Keeps the new WaitingForUser and UnresolvedFindings boolean search attributes, upserted by stages, onboardings and task flows, so listings carry the backend-computed highlight and marker"
+        "Keeps the Repository and Branch search attributes used to list executions; OnboardingId is no longer set on new executions or returned",
+        "Keeps the FlowState (pending or skipped, overriding the Temporal status in listings), TaskName and LinkedTaskFlows (keyword list of task flows a stage is linked into by a fork or fix round) search attributes, upserted by the workflows",
+        "Keeps the new TaskOrigin keyword search attribute (requirements or onboarding), set when a TaskWorkflow starts, which the origin filter queries",
+        "Keeps the WaitingForUser and UnresolvedFindings boolean search attributes, upserted by stages and task flows, so listings carry the backend-computed highlight and marker"
       ]
     },
     {
@@ -153,7 +167,7 @@
       "name": "LLM provider",
       "responsibilities": [
         "External service: the model endpoints chosen in the model settings (OpenAI-compatible endpoints, Google Gemini, the providers behind the Pi CLI, or Anthropic's Claude)",
-        "Answers the chat, interviewer, drafting, review, pull request text, mention classification and coding agent model calls"
+        "Answers the chat, interviewer, drafting, requirements review, code review, pull request text, mention classification and coding agent model calls"
       ]
     },
     {
@@ -188,7 +202,7 @@
     {
       "source": "Session services",
       "target": "Temporal server",
-      "description": "Temporal client gRPC calls: start TaskWorkflows (and chats and onboardings) with search attributes, send signals and updates to the task flow and its stages, run queries for session state and list executions by visibility queries over ParentWorkflowId, LinkedTaskFlows, FlowState and the other search attributes."
+      "description": "Temporal client gRPC calls: start TaskWorkflows (with TaskOrigin) and chats with search attributes, send signals and updates to the task flow and its stages (including finalize with force and the retry of a failed review round), run queries for session and review state, and list executions by visibility queries over ParentWorkflowId, LinkedTaskFlows, FlowState, TaskOrigin and the other search attributes."
     },
     {
       "source": "Session services",
@@ -223,7 +237,7 @@
     {
       "source": "Temporal server",
       "target": "Orchestration worker",
-      "description": "Workflow and activity tasks of the main task queue over gRPC; the worker returns results, starts TaskWorkflow stage children (pending ones wait for a start signal from their task flow) and starts child workflows on the codegen and sandboxed stage queues; stage workflows signal their task flow at each hand-off and on every change of their waiting-for-user and unresolved-findings state, and, when they close, every task flow in their LinkedTaskFlows; the task flow signals pending stages to start or close as skipped; workflows upsert their search attributes."
+      "description": "Workflow and activity tasks of the main task queue over gRPC. The worker returns results, starts TaskWorkflow stage children (pending ones wait for a start signal from their task flow) and starts child workflows on the codegen and sandboxed stage queues. Stage workflows signal their task flow at each hand-off and on every change of their waiting-for-user and unresolved-findings state, and, when they close, every task flow in their LinkedTaskFlows. In each review round the requirements or onboarding interview signals the review with the current requirements, the diff since the previous round and the contradiction questions with the user's answers, and the review signals back the contradictions found. The task flow signals pending stages to start or close as skipped, and workflows upsert their search attributes."
     },
     {
       "source": "Temporal server",
@@ -273,7 +287,7 @@
     {
       "source": "Session services",
       "target": "Orchestration worker",
-      "description": "Admitted pull request mentions handed to the delivery or onboarding workflow as Temporal signals or updates, delivered through the Temporal server."
+      "description": "Admitted pull request mentions handed to the delivery workflow they belong to (of a task or an onboarding) as Temporal signals or updates, delivered through the Temporal server."
     },
     {
       "source": "Codegen worker",
@@ -374,13 +388,23 @@
     },
     {
       "topic": "Task flow hierarchy",
-      "choice": "A TaskWorkflow per task on the main queue starts every stage as its Temporal child at once; a stage not yet allowed to work waits for a start signal and carries FlowState=pending, a stage that will never run closes with FlowState=skipped; links of forked or fix-round task flows to earlier stages are the LinkedTaskFlows keyword-list search attribute on those stages",
-      "rationale": "FR-125 to FR-140: Temporal has no not-yet-started executions or second parents, so pending, skipped and linked are expressed with search attributes GET /workflows can filter on, keeping NFR-7's existing fields and Temporal statuses underneath."
+      "choice": "A TaskWorkflow per task or onboarding on the main queue starts every stage as its Temporal child at once and carries a TaskOrigin search attribute. A stage not yet allowed to work waits for a start signal and carries FlowState=pending, and a stage that will never run closes with FlowState=skipped. Links of forked or fix-round task flows to earlier stages are the LinkedTaskFlows keyword-list search attribute on those stages. The OnboardingId attribute is dropped.",
+      "rationale": "FR-125 to FR-140, FR-159, FR-164 and FR-166: Temporal has no not-yet-started executions or second parents, so pending, skipped, linked and origin are expressed with search attributes GET /workflows can filter on, keeping NFR-7's existing fields and Temporal statuses underneath."
     },
     {
       "topic": "Waiting highlight and findings marker",
       "choice": "Computed in the backend: each stage and onboarding upserts WaitingForUser and UnresolvedFindings search attributes as its state changes and clears WaitingForUser when it closes; the TaskWorkflow aggregates its children's states, signalled by them, into its own attributes; for closed flows the listing clears UnresolvedFindings when the existing findings acceptance record exists for the delivery run; GET /workflows returns both as new fields. Executions started before this change carry neither attribute and are listed without highlight or marker (the fields are null for them)",
       "rationale": "User's choice to compute the highlight in the backend; search attributes let the listing show it without querying every child, the acceptance record already holds acceptances given after a flow closed (FR-142, FR-143), closed flows are never waiting (FR-110), and the listing only gains fields (NFR-7). User chose not to backfill old-shape flows: they are only listed."
+    },
+    {
+      "topic": "Requirements review",
+      "choice": "A RequirementsReviewWorkflow per task or onboarding on the main queue, created pending by the TaskWorkflow and started on finalize. It runs every round of the review in one execution, calling the LLM through the existing adapters with the requirements_review model settings entry (shared by tasks and onboardings). From the second round on it is given the requirements diff plus the contradiction questions and answers. It talks to the interview stage by Temporal signals and closes as passed, continued anyway or skipped. A round whose LLM activity fails after Temporal's retries is marked failed with the error; the user retries it through a retry action like a failed turn, or forces past it; force cancels a running round.",
+      "rationale": "FR-144 to FR-158 and FR-153: a child flow of its own shown on the Flows page, with unlimited rounds that wait on the user's answers. The diff tells the reviewer what changed and the answers tell it how the user meant to resolve each contradiction (FR-147). One settings entry keeps Settings simple (FR-148). The user chose that a failed review round can be retried like a failed turn or forced past, and that force writes the document at once even while a round runs."
+    },
+    {
+      "topic": "Migration of old-shape onboardings",
+      "choice": "Cancelled on deploy: an idempotent startup step of the API cancels every running top-level OnboardingWorkflow (no parent task flow) with its children; they stay listed as cancelled in the All view and must be started again.",
+      "rationale": "User's choice; avoids keeping the onboarding ID field and the old onboarding flow shape alive alongside the task flow shape (FR-159, FR-164)."
     }
   ]
 }

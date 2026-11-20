@@ -8,6 +8,7 @@ from app.architecture.models import architecture_problems
 from app.conversations.models import ConversationMessage, ForkOrigin
 from app.github.models import RepositoryCheckout, RepositorySelection
 from app.requirements.models import Requirement
+from app.requirements_review.models import RequirementsReview
 
 # `preparing` while the branch is checked out (again); `awaiting_confirmation` while the
 # user decides about the contract, contract tests or Dockerfile the branch already has;
@@ -78,6 +79,13 @@ class OnboardingState:
     # What an architecture-only draft disagrees with in the existing api.json or
     # requirements.json, as the LLM recorded it; each blocks finalizing.
     conflicts: list[str] = field(default_factory=list)
+    # The top-level task flow (TaskWorkflow with origin onboarding) the onboarding interview
+    # is a stage of, which starts its delivery; None for onboardings started before, which
+    # deliver themselves.
+    task_flow_id: str | None = None
+    # The task flow's requirements review of the drafted requirements, and its state.
+    review_id: str | None = None
+    review: RequirementsReview = field(default_factory=RequirementsReview)
 
 
 def drafted_architecture_only(state: OnboardingState) -> bool:
