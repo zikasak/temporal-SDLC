@@ -2357,3 +2357,113 @@ body.flow-panel-open {
   font-size: 0.75rem;
   text-transform: uppercase;
 }
+
+/* The requirements review of a requirements session or onboarding, and of its flow. */
+.requirements-review {
+  margin: 0 28px 20px;
+  padding: 16px 20px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--green);
+  border-radius: 4px;
+  background: #fff;
+}
+
+.requirements-review.review-contradictions_found,
+.requirements-review.review-failed,
+.requirements-review.review-continued_anyway {
+  border-left-color: var(--red);
+}
+
+.review-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.review-heading h3 {
+  margin: 0;
+  font-size: 0.86rem;
+}
+
+.review-round {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.requirements-review p {
+  margin: 6px 0;
+  font-size: 0.86rem;
+}
+
+.review-contradictions {
+  display: grid;
+  gap: 10px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-contradictions li {
+  padding: 9px 11px;
+  border: 1px solid #ecd3ce;
+  border-radius: 4px;
+  background: var(--red-pale);
+}
+
+.review-contradictions small {
+  color: var(--muted);
+}
+
+.requirements-review .error-state {
+  margin: 10px 0 0;
+}
+
+.review-force {
+  margin-top: 10px;
+}
+
+.flow-review .requirements-review {
+  margin: 0;
+}
+
+.message-instead {
+  display: grid;
+  gap: 8px;
+}
+
+.force-dialog {
+  max-width: 560px;
+  padding: 22px 24px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+.force-dialog::backdrop {
+  background: rgba(32, 42, 37, 0.45);
+}
+
+.force-dialog h2 {
+  margin: 0 0 10px;
+  font-size: 1.05rem;
+}
+
+.force-dialog p {
+  font-size: 0.9rem;
+}
+
+.force-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.danger-button {
+  border-color: var(--red);
+  color: #fff;
+  background: var(--red);
+}

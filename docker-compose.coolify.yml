@@ -243,8 +243,9 @@ services:
       - |
         temporal operator namespace describe --address temporal:7233 --namespace default >/dev/null 2>&1 ||
         temporal operator namespace create --address temporal:7233 --namespace default --retention 1d
-        # Executions record the repository, branch and onboarding they work for (GET /workflows).
-        for name in Repository Branch OnboardingId; do
+        # Executions record the repository and branch they work for, and task flows their origin
+        # (GET /workflows); the main worker registers the other attributes it uses.
+        for name in Repository Branch OnboardingId TaskOrigin; do
           temporal operator search-attribute list --address temporal:7233 --namespace default | grep -qw "$$name" ||
           temporal operator search-attribute create --address temporal:7233 --namespace default --name "$$name" --type Keyword
         done

@@ -492,43 +492,11 @@
   },
   {
     "category": "functional",
-    "description": "The Workflows page offers an Onboarding filter for OnboardingWorkflow executions, and each onboarding execution in the list links to its page in the Onboarding tab, where its state and progress are shown.",
-    "id": "FR-69",
-    "priority": "must",
-    "rationale": "User chose to reuse the Workflows list filtered to onboarding workflows to satisfy FR-66.",
-    "title": "Reopen onboardings from the Workflows list"
-  },
-  {
-    "category": "functional",
     "description": "The Onboarding page lets the user do everything the /onboarding/sessions endpoints offer: send messages and answer the interviewer's questions, decide whether to replace an existing contract, update the checkout, finalize, fork after a message, retry a failed turn, follow the delivery progress, answer agent questions (including the confirmation of a bug in the existing code), accept open review findings or give instructions about them, and retry a failed stage.",
     "id": "FR-70",
     "priority": "must",
     "rationale": "User chose: everything the backend offers.",
     "title": "Onboarding UI covers every backend action"
-  },
-  {
-    "category": "functional",
-    "description": "In the Workflows list, every DeliveryWorkflow and CodegenWorkflow execution started for an onboarding links to that onboarding's page in the Onboarding tab.",
-    "id": "FR-72",
-    "priority": "must",
-    "rationale": "User chose to link an onboarding's delivery and code generation workflows to the onboarding's page.",
-    "title": "Onboarding's child workflows link to its page"
-  },
-  {
-    "category": "functional",
-    "description": "Every execution returned by GET /workflows that was started for an onboarding (the OnboardingWorkflow itself and its DeliveryWorkflow and CodegenWorkflow executions) includes the ID of that onboarding, which the Workflows page uses to link to the onboarding's page.",
-    "id": "FR-73",
-    "priority": "must",
-    "rationale": "User chose to have the API return an onboarding ID rather than have the page follow parent_workflow_id.",
-    "title": "Onboarding ID in GET /workflows"
-  },
-  {
-    "category": "functional",
-    "description": "Every execution returned by GET /workflows includes the new repository, branch and onboarding ID fields, and each one is null when it does not apply to that execution (for example, repository and branch of a chat, or the onboarding ID of a run not started for an onboarding).",
-    "id": "FR-74",
-    "priority": "must",
-    "rationale": "User chose to always return the fields, with null when they do not apply.",
-    "title": "Inapplicable new fields are null"
   },
   {
     "category": "non_functional",
@@ -617,14 +585,6 @@
     "priority": "must",
     "rationale": "User chose to offer the architecture workflow as a filter.",
     "title": "Architecture filter on the Flows page"
-  },
-  {
-    "category": "functional",
-    "description": "Finalizing a session writes its requirements document, available for download once ready. A task on an existing service (API change, bugfix or documentation) is specified against the contract the repository holds in contracts/, which includes contracts/architecture.md; a repository without a readable contract, including one without contracts/architecture.md, cannot be finalized for one.",
-    "id": "FR-92",
-    "priority": "must",
-    "rationale": "Replaces FR-12: user chose that contracts/architecture.md is a required part of the contract.",
-    "title": "Finalize requirements"
   },
   {
     "category": "functional",
@@ -916,35 +876,11 @@
   },
   {
     "category": "functional",
-    "description": "When the task flow starts, it creates the requirements, architecture, API design and delivery child flows for a new service or an API change, and the requirements and delivery child flows for a bugfix or a documentation change.",
-    "id": "FR-130",
-    "priority": "must",
-    "rationale": "User chose which children are created up front for each kind.",
-    "title": "Children created up front per task kind"
-  },
-  {
-    "category": "functional",
-    "description": "GET /workflows takes top_level=true to list only executions without a parent, and parent=<workflow_id> to list only the direct children of that execution; for a task flow these are its requirements, architecture, API design and delivery flows (including a delivery started again on its own), and parent=<a stage's workflow_id> never lists another stage of the task. They combine with the other filters; parent with top_level, or an empty or malformed parent, answers 422.",
-    "id": "FR-131",
-    "priority": "must",
-    "rationale": "Replaces FR-76: user chose that all stages are listed only under the task flow.",
-    "title": "List top-level flows and a flow's direct children"
-  },
-  {
-    "category": "functional",
     "description": "On the Flows page the architecture and API design sessions appear as child flows of the task flow, next to its requirements and delivery flows, open in the panel, and the architecture session is highlighted as waiting for the user while it has unanswered questions or a skip proposal to confirm.",
     "id": "FR-132",
     "priority": "must",
     "rationale": "Replaces FR-87 and FR-91: stages are children of the task flow, not of the requirements session.",
     "title": "Architecture and API design on the Flows page"
-  },
-  {
-    "category": "functional",
-    "description": "When the user generates the requirements document of a new service or an API change on a repository, the task flow starts its pending architecture child, which drafts the architecture at once; GET /requirements/sessions/{session_id} returns its ID as architecture_session_id together with the task flow's ID, and the web client opens the architecture session from there. When the document was written because the session was idle for a day, no stage is started.",
-    "id": "FR-133",
-    "priority": "must",
-    "rationale": "Replaces FR-81: user chose that the task flow starts each pending child, while sessions keep returning the next session's ID as well as the task flow's ID.",
-    "title": "Task flow starts the architecture stage"
   },
   {
     "category": "functional",
@@ -980,22 +916,6 @@
   },
   {
     "category": "functional",
-    "description": "Onboardings keep their current flow structure: an OnboardingWorkflow stays a top-level flow with its own delivery and code generation children and gets no task flow.",
-    "id": "FR-138",
-    "priority": "must",
-    "rationale": "User chose: onboarding stays as it is.",
-    "title": "Onboarding flows unchanged"
-  },
-  {
-    "category": "functional",
-    "description": "The task flow is a new workflow type whose executions in GET /workflows include its name, repository and branch; the Flows page has no separate filter for it, and its Requirements filter lists only task flows, not RequirementsWorkflow executions, which are reached by opening their task flow.",
-    "id": "FR-139",
-    "priority": "must",
-    "rationale": "User chose a new workflow type listed by the Requirements filter, which lists only task flows.",
-    "title": "Task flow in GET /workflows and the Flows page"
-  },
-  {
-    "category": "functional",
     "description": "GET /workflows?parent=<forked task flow> lists the original task's earlier stages that the fork links to as children of the forked task flow too, each marked as linked from another task flow; the Flows page shows them with that mark.",
     "id": "FR-140",
     "priority": "must",
@@ -1004,26 +924,226 @@
   },
   {
     "category": "functional",
-    "description": "When an authorised mention asking for a fix arrives on a pull request whose delivery or onboarding has already completed or been cancelled (the pull request was merged or closed), a new fix round still runs, followed by verification and code review; its result is pushed to a new branch, a new pull request is opened from that branch, and the app replies on the old pull request with a link to the new one. For a task's delivery, the fix round runs as the delivery child of a new top-level task flow of its own that links to the original task's stages; for an onboarding, it runs as a new top-level flow of its own.",
-    "id": "FR-141",
-    "priority": "must",
-    "rationale": "Replaces FR-108: user chose that a fix round on a closed task's delivery gets a new task flow with the fix delivery as its child and links to the original's stages.",
-    "title": "Fix request on a closed flow's pull request uses a new branch"
-  },
-  {
-    "category": "functional",
-    "description": "On a delivery or onboarding whose pull request was merged or closed with its open-review-findings flag still raised, the user can still accept the findings, which clears the flag and the unresolved findings marker, or give instructions about them. The instructions start a new fix round, followed by verification and code review, whose result is pushed to a new branch with a new pull request opened from it. For a task's delivery, the fix round runs as the delivery child of a new top-level task flow of its own that links to the original task's stages; for an onboarding, it runs as a new top-level flow of its own.",
-    "id": "FR-142",
-    "priority": "must",
-    "rationale": "Replaces FR-111: user chose that a fix round on a closed task's delivery gets a new task flow with links to the original's stages.",
-    "title": "Act on open review findings of a closed flow"
-  },
-  {
-    "category": "functional",
     "description": "When a task flow's delivery child has unresolved review findings (FR-110), the task flow also shows the \"unresolved findings\" marker on the Flows page, and the marker disappears from both when the findings are accepted.",
     "id": "FR-143",
     "priority": "must",
     "rationale": "User chose that the task flow carries the marker when its delivery has unresolved findings.",
     "title": "Unresolved findings marker on the task flow"
+  },
+  {
+    "category": "functional",
+    "description": "For a task that goes through the review, pressing \"Generate document\" (finalize) in a requirements session starts the requirements review, and the requirements document is written only after the review finds no contradictions; no later stage of the task starts before then.",
+    "id": "FR-144",
+    "priority": "must",
+    "rationale": "User: review after requirements are gathered and confirmed; chose finalize as the confirmation, with the document written only after the review passes.",
+    "title": "Requirements review stage"
+  },
+  {
+    "category": "functional",
+    "description": "In the requirements review stage an LLM reviews the task's requirements and reports every contradiction it finds between them.",
+    "id": "FR-145",
+    "priority": "must",
+    "rationale": "User: LLM should review them for contradictions.",
+    "title": "LLM reviews requirements for contradictions"
+  },
+  {
+    "category": "functional",
+    "description": "When the review finds one or more contradictions, the flow returns to the requirements stage, where the user is asked one question per contradiction on how to resolve it; several questions can be asked at once.",
+    "id": "FR-146",
+    "priority": "must",
+    "rationale": "User: return to requirements with a question on how to solve the conflict; there could be multiple questions.",
+    "title": "Contradictions return the flow to the requirements stage"
+  },
+  {
+    "category": "functional",
+    "description": "After the user has answered the contradiction questions, the review runs again, and the reviewer is given what changed in the requirements since its previous review.",
+    "id": "FR-147",
+    "priority": "must",
+    "rationale": "User: after answers, review happens again; reviewer should know what has changed.",
+    "title": "Review again after answers, knowing what changed"
+  },
+  {
+    "category": "functional",
+    "description": "The requirements reviewer's adapter, model and thinking level are a separate entry in GET/PUT /settings and can be changed on the Settings page of the web client, like the other LLM workflow types.",
+    "id": "FR-148",
+    "priority": "must",
+    "rationale": "User: model for reviewer should be changeable through settings in the UI. Code: settings are stored per workflow type (app/settings/models.py).",
+    "title": "Reviewer model configurable in Settings"
+  },
+  {
+    "category": "functional",
+    "description": "The requirements review runs as its own child flow of the top-level task flow, between the requirements flow and the next stage, is listed by GET /workflows?parent=<task flow> and is shown on the Flows page.",
+    "id": "FR-149",
+    "priority": "must",
+    "rationale": "User chose a new child flow of the task flow between requirements and architecture, shown on the Flows page.",
+    "title": "Review stage is a child flow of the task flow"
+  },
+  {
+    "category": "functional",
+    "description": "The reviewer checks the requirements recorded in the session against each other and against the existing service's requirements that the task has not retired.",
+    "id": "FR-150",
+    "priority": "must",
+    "rationale": "User chose: new requirements against each other and against the existing service's requirements.",
+    "title": "Scope of the contradiction check"
+  },
+  {
+    "category": "functional",
+    "description": "The requirements review runs for new service, API change and bugfix tasks. For a documentation change it does not run, and pressing \"Generate document\" writes the requirements document at once, as today.",
+    "id": "FR-151",
+    "priority": "must",
+    "rationale": "User chose: all kinds except documentation.",
+    "title": "Task kinds that go through the review"
+  },
+  {
+    "category": "functional",
+    "description": "When a requirements session's document is written because the session was idle for a day, no requirements review runs: the document is written, and the review and the later stages close as skipped.",
+    "id": "FR-152",
+    "priority": "must",
+    "rationale": "User chose: no review; the document is written and later stages are skipped, as today.",
+    "title": "No review for a session written because it was idle"
+  },
+  {
+    "category": "functional",
+    "description": "When an onboarding is finalized, an LLM reviews its drafted requirements for contradictions before the onboarding proceeds; each contradiction found is asked to the user as a question in the onboarding interview, and after the answers the review runs again, knowing what changed.",
+    "id": "FR-153",
+    "priority": "must",
+    "rationale": "User chose: yes, in the onboarding interview before finalizing.",
+    "title": "Onboarding requirements are reviewed for contradictions"
+  },
+  {
+    "category": "functional",
+    "description": "Finalizing a session writes its requirements document, available for download once ready; for a new service, API change or bugfix it is written only after the requirements review finds no contradictions or the user continues despite them. A task on an existing service (API change, bugfix or documentation) is specified against the contract the repository holds in contracts/, which includes contracts/architecture.md; a repository without a readable contract, including one without contracts/architecture.md, cannot be finalized for one.",
+    "id": "FR-154",
+    "priority": "must",
+    "rationale": "Replaces FR-92: the user confirmed the document is written only after the review passes.",
+    "title": "Finalize requirements"
+  },
+  {
+    "category": "functional",
+    "description": "When the task flow starts, it creates the requirements, requirements review, architecture, API design and delivery child flows for a new service or an API change, the requirements, requirements review and delivery child flows for a bugfix, and the requirements and delivery child flows for a documentation change.",
+    "id": "FR-155",
+    "priority": "must",
+    "rationale": "Replaces FR-130: the user confirmed a review child is created up front for new service, API change and bugfix.",
+    "title": "Children created up front per task kind"
+  },
+  {
+    "category": "functional",
+    "description": "When the requirements review of a new service or an API change on a repository passes (no contradictions remain, or the user continues despite them), the task flow starts its pending architecture child, which drafts the architecture at once; GET /requirements/sessions/{session_id} returns its ID as architecture_session_id together with the task flow's ID, and the web client opens the architecture session from there. When the document was written because the session was idle for a day, no stage is started.",
+    "id": "FR-156",
+    "priority": "must",
+    "rationale": "Replaces FR-133: the user confirmed the architecture starts only after the review passes.",
+    "title": "Task flow starts the architecture stage after the review"
+  },
+  {
+    "category": "functional",
+    "description": "The requirements review and answer rounds are not limited in number; the review repeats after each set of answers until it finds no contradictions.",
+    "id": "FR-157",
+    "priority": "must",
+    "rationale": "User: no limit.",
+    "title": "No limit on review rounds"
+  },
+  {
+    "category": "functional",
+    "description": "While the review reports contradictions, the user can continue anyway; the web client first shows a warning modal window, and only after the user confirms it is the requirements document written and the next stage started.",
+    "id": "FR-158",
+    "priority": "must",
+    "rationale": "User: the user should be able to continue forcefully with an additional warning modal window.",
+    "title": "Continue despite contradictions after a warning"
+  },
+  {
+    "category": "functional",
+    "description": "Starting an onboarding starts a top-level task flow whose direct children are the onboarding interview, the requirements review and the delivery flows, in the same way as a task's requirements, review and delivery children; none of them is a child of another of these flows.",
+    "id": "FR-159",
+    "priority": "must",
+    "rationale": "Replaces FR-138: user chose to put onboarding under a task flow with interview, review and delivery children, like a task.",
+    "title": "Onboarding runs under a task flow"
+  },
+  {
+    "category": "functional",
+    "description": "When an authorised mention asking for a fix arrives on a pull request whose delivery has already completed or been cancelled (the pull request was merged or closed), a new fix round still runs, followed by verification and code review; its result is pushed to a new branch, a new pull request is opened from that branch, and the app replies on the old pull request with a link to the new one. The fix round runs as the delivery child of a new top-level task flow of its own that links to the original task's stages, for a task and for an onboarding alike.",
+    "id": "FR-160",
+    "priority": "must",
+    "rationale": "Replaces FR-141: user chose that onboarding fix rounds also get a new task flow, like a task's delivery.",
+    "title": "Fix request on a closed flow's pull request uses a new branch"
+  },
+  {
+    "category": "functional",
+    "description": "On a delivery whose pull request was merged or closed with its open-review-findings flag still raised, the user can still accept the findings, which clears the flag and the unresolved findings marker, or give instructions about them. The instructions start a new fix round, followed by verification and code review, whose result is pushed to a new branch with a new pull request opened from it. The fix round runs as the delivery child of a new top-level task flow of its own that links to the original task's stages, for a task and for an onboarding alike.",
+    "id": "FR-161",
+    "priority": "must",
+    "rationale": "Replaces FR-142: user chose that onboarding fix rounds also get a new task flow, like a task's delivery.",
+    "title": "Act on open review findings of a closed flow"
+  },
+  {
+    "category": "functional",
+    "description": "When the user continues despite contradictions, the contradictions still reported by the last review are listed in the requirements document and shown on the requirements review flow on the Flows page.",
+    "id": "FR-162",
+    "priority": "must",
+    "rationale": "User chose to list them in the document and on the review flow.",
+    "title": "Record contradictions the user continued despite"
+  },
+  {
+    "category": "functional",
+    "description": "The task flow is a new workflow type whose executions in GET /workflows include its name, repository and branch. The Flows page has no separate filter for it: its Requirements filter lists only task flows started by a requirements interview, and its Onboarding filter lists only task flows started by an onboarding; RequirementsWorkflow and OnboardingWorkflow executions are reached by opening their task flow.",
+    "id": "FR-163",
+    "priority": "must",
+    "rationale": "Replaces FR-139 and FR-69: user chose that the Onboarding filter lists task flows started by an onboarding and the Requirements filter only those started by a requirements interview.",
+    "title": "Task flow in GET /workflows and the Flows page"
+  },
+  {
+    "category": "functional",
+    "description": "Executions returned by GET /workflows no longer include an onboarding ID field; an onboarding's delivery and code generation runs are reached through its task flow on the Flows page. The repository and branch fields are returned for every execution and are null when they do not apply to it (for example, for a chat).",
+    "id": "FR-164",
+    "priority": "must",
+    "rationale": "Replaces FR-72, FR-73 and FR-74: user chose to drop the onboarding ID field and reach onboarding runs through the task flow.",
+    "title": "Onboarding ID removed from GET /workflows"
+  },
+  {
+    "category": "functional",
+    "description": "An onboarding that adds only contracts/architecture.md does not go through the requirements review; its requirements review child closes as skipped.",
+    "id": "FR-165",
+    "priority": "must",
+    "rationale": "User: it has no requirements to review; its review child closes as skipped.",
+    "title": "No review for architecture-only onboarding"
+  },
+  {
+    "category": "functional",
+    "description": "Every task flow execution returned by GET /workflows includes an origin field whose value is \"requirements\" for a task flow started by a requirements interview and \"onboarding\" for one started by an onboarding, and GET /workflows accepts an origin query filter that lists only task flows of that origin; the Flows page's Requirements and Onboarding filters use it.",
+    "id": "FR-166",
+    "priority": "must",
+    "rationale": "User chose a new origin field on task flow executions plus a query filter on it.",
+    "title": "Task flow origin field and filter"
+  },
+  {
+    "category": "functional",
+    "description": "GET /workflows takes top_level=true to list only executions without a parent, and parent=<workflow_id> to list only the direct children of that execution; for a task flow these are its requirements (or, for an onboarding's task flow, its onboarding interview), requirements review, architecture, API design and delivery flows (including a delivery started again on its own), and parent=<a stage's workflow_id> never lists another stage of the task. They combine with the other filters; parent with top_level, or an empty or malformed parent, answers 422.",
+    "id": "FR-167",
+    "priority": "must",
+    "rationale": "Replaces FR-131: the user confirmed the task flow's children include the requirements review and, for onboarding, the onboarding interview.",
+    "title": "List top-level flows and a flow's direct children"
+  },
+  {
+    "category": "functional",
+    "description": "The finalize endpoint of requirements and onboarding sessions accepts a force flag (force=true); when the last review reported contradictions, finalizing with force=true writes the requirements document and starts the next stage despite them, and the web client sends it only after the user confirms the warning modal window.",
+    "id": "FR-168",
+    "priority": "must",
+    "rationale": "User chose a flag on the existing finalize endpoint.",
+    "title": "Continue despite contradictions through the finalize endpoint"
+  },
+  {
+    "category": "functional",
+    "description": "GET for a requirements or onboarding session returns the requirements review's status (running, passed, contradictions found or continued anyway), its round number and the contradictions it reported.",
+    "id": "FR-169",
+    "priority": "must",
+    "rationale": "User chose status, round number and the reported contradictions.",
+    "title": "Review state in session responses"
+  },
+  {
+    "category": "functional",
+    "description": "Forking an onboarding interview after a message starts a new top-level onboarding task flow of its own that holds the forked interview, in the same way as a forked requirements session; the original task flow and its children are left unchanged.",
+    "id": "FR-170",
+    "priority": "must",
+    "rationale": "User chose: like a forked requirements session.",
+    "title": "A forked onboarding starts a new task flow"
   }
 ]

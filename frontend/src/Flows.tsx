@@ -2,13 +2,17 @@ import { useEffect, useState } from "react";
 import { errorMessage, failure, isObject, readBody } from "./api";
 import { repositorySelection, type RepositorySelection } from "./github";
 import { onboardingLink } from "./Onboarding";
+import { ReviewPanel, requirementsReview, type RequirementsReview } from "./RequirementsReview";
 
 type FlowType =
   | "LLMRequestWorkflow"
   | "TaskWorkflow"
   | "ArchitectureWorkflow"
-  | "ApiDesignWorkflow"
-  | "OnboardingWorkflow";
+  | "ApiDesignWorkflow";
+
+// What started a task flow: a requirements interview or an onboarding.
+type Origin = "requirements" | "onboarding";
+const origins: Origin[] = ["requirements", "onboarding"];
 
 type Flow = {
   workflow_id: string;
@@ -18,13 +22,12 @@ type Flow = {
   parent_workflow_id: string | null;
   start_time: string;
   close_time: string | null;
-  // The repository and source branch it works in, and the onboarding it was started for;
-  // null when they do not apply.
+  // The repository and source branch it works in; null when they do not apply.
   repository: RepositorySelection | null;
   branch: string | null;
-  onboarding_id: string | null;
-  // A task flow's current short name; null for any other flow.
+  // A task flow's current short name, and what started it; null for any other flow.
   name: string | null;
+  origin: Origin | null;
   // Listed under a forked or fix-round task flow as an earlier stage of another task.
   linked: boolean;
   // As the backend reports them; null for flows from before it did, and for flows that
@@ -35,36 +38,40 @@ type Flow = {
 
 type Page = { workflows: Flow[]; next_page_token: string | null };
 
-// Filters on the type, repository (owner/name), source branch, onboarding and the flow whose
-// children are listed; empty for none.
+// Filters on the type, the origin of task flows, repository (owner/name), source branch and
+// the flow whose children are listed; empty for none.
 type Filters = {
   type: FlowType | "";
+  origin: Origin | "";
   repository: string;
   branch: string;
-  onboarding_id: string;
   parent: string;
 };
-const filterNames = ["repository", "branch", "onboarding_id", "parent"] as const;
+const filterNames = ["repository", "branch", "parent"] as const;
 const filterLabels: Record<(typeof filterNames)[number], string> = {
   repository: "Repository",
   branch: "Branch",
-  onboarding_id: "Onboarding",
   parent: "Steps of",
 };
 
-// The flows the type filter offers: those a user starts (a requirements interview starts a
-// task flow), and the architecture sessions and API designs of tasks.
-const flowTypes: [FlowType, string][] = [
-  ["LLMRequestWorkflow", "Chat"],
-  ["TaskWorkflow", "Requirements"],
-  ["ArchitectureWorkflow", "Architecture"],
-  ["ApiDesignWorkflow", "API design"],
-  ["OnboardingWorkflow", "Onboarding"],
+// The kinds of flow the filter offers: those a user starts (a requirements interview and an
+// onboarding each start a task flow, told apart by its origin), and the architecture
+// sessions and API designs of tasks.
+const flowKinds: { type: FlowType; origin: Origin | ""; label: string }[] = [
+  { type: "LLMRequestWorkflow", origin: "", label: "Chat" },
+  { type: "TaskWorkflow", origin: "requirements", label: "Requirements" },
+  { type: "ArchitectureWorkflow", origin: "", label: "Architecture" },
+  { type: "ApiDesignWorkflow", origin: "", label: "API design" },
+  { type: "TaskWorkflow", origin: "onboarding", label: "Onboarding" },
 ];
 
 const typeLabels: Record<string, string> = {
-  ...Object.fromEntries(flowTypes),
+  LLMRequestWorkflow: "Chat",
+  ArchitectureWorkflow: "Architecture",
+  ApiDesignWorkflow: "API design",
   TaskWorkflow: "Task",
+  OnboardingWorkflow: "Onboarding",
+  RequirementsReviewWorkflow: "Requirements review",
   RequirementsWorkflow: "Requirements",
   DeliveryWorkflow: "Delivery",
   CodegenWorkflow: "Code generation",
@@ -107,19 +114,35 @@ function typeLabel(type: string) {
   return typeLabels[type] ?? type.replace(/Workflow$/, "");
 }
 
-/** The label of a type filter, as its button names it. */
-function filterLabel(type: string) {
-  return flowTypes.find(([item]) => item === type)?.[1] ?? typeLabel(type);
+/** The label a flow is listed with: a task flow started by an onboarding is one. */
+function flowLabel(flow: Flow) {
+  if (flow.workflow_type === "TaskWorkflow" && flow.origin === "onboarding") return "Onboarding";
+  if (flow.workflow_type === "OnboardingWorkflow" && flow.parent_workflow_id) return "Onboarding interview";
+  return typeLabel(flow.workflow_type);
+}
+
+/** The label of a kind filter, as its button names it. */
+function filterLabel(filters: Filters) {
+  return flowKinds.find((kind) => kind.type === filters.type && kind.origin === filters.origin)?.label ??
+    typeLabel(filters.type);
 }
 
 export function filtersFromSearch(search: string): Filters {
   const params = new URLSearchParams(search);
-  const type = params.get("type");
+  let type = params.get("type");
+  let origin = params.get("origin") ?? "";
+  // Links from before onboardings ran under task flows.
+  if (type === "OnboardingWorkflow") {
+    type = "TaskWorkflow";
+    origin = "onboarding";
+  }
+  const kind = flowKinds.find((item) => item.type === type &&
+    (item.type !== "TaskWorkflow" || item.origin === (origin || "requirements")));
   return {
-    type: flowTypes.find(([item]) => item === type)?.[0] ?? "",
+    type: kind?.type ?? "",
+    origin: kind?.origin ?? "",
     repository: params.get("repository") ?? "",
     branch: params.get("branch") ?? "",
-    onboarding_id: params.get("onboarding_id") ?? "",
     parent: params.get("parent") ?? "",
   };
 }
@@ -131,6 +154,7 @@ function flag(value: unknown) {
 function filterSearch(filters: Filters) {
   const params = new URLSearchParams();
   if (filters.type) params.set("type", filters.type);
+  if (filters.type && filters.origin) params.set("origin", filters.origin);
   for (const name of filterNames) if (filters[name]) params.set(name, filters[name]);
   const query = params.toString();
   return query ? `?${query}` : "?";
@@ -166,8 +190,8 @@ function pageRecord(value: unknown): Page {
         close_time: text(item.close_time),
         repository,
         branch: text(item.branch) ?? repository?.branch ?? null,
-        onboarding_id: text(item.onboarding_id),
         name: text(item.name),
+        origin: (origins as unknown[]).includes(item.origin) ? item.origin as Origin : null,
         linked: item.linked === true,
         waiting_for_user: flag(item.waiting_for_user),
         unresolved_findings: flag(item.unresolved_findings),
@@ -195,6 +219,8 @@ function listParams(filters: Filters, pageToken: string | null) {
   const params = new URLSearchParams(
     childTypes.includes(filters.type) || filters.parent ? {} : { top_level: "true" });
   if (filters.type) params.set("type", filters.type);
+  // The Requirements and Onboarding kinds list the task flows of that origin.
+  if (filters.type && filters.origin) params.set("origin", filters.origin);
   for (const name of filterNames) if (filters[name]) params.set(name, filters[name]);
   if (pageToken) params.set("page_token", pageToken);
   return params;
@@ -232,12 +258,28 @@ function deliveryLink(workflowId: string): string | null {
   return `?mode=${mode}&session_id=${encodeURIComponent(sessionId)}`;
 }
 
+/** A requirements review is shown in the requirements session or onboarding it checks. */
+function reviewLink(workflowId: string): string {
+  if (workflowId.startsWith("onboarding-review-")) {
+    return onboardingLink(workflowId.replace(/^onboarding-review-/, "onboarding-session-"));
+  }
+  const sessionId = workflowId.replace(/^requirements-review-/, "requirements-session-");
+  return `?mode=requirements&session_id=${encodeURIComponent(sessionId)}`;
+}
+
+/** The session endpoint of the requirements session or onboarding a review checks. */
+function reviewedSessionEndpoint(workflowId: string): string {
+  if (workflowId.startsWith("onboarding-review-")) {
+    const sessionId = workflowId.replace(/^onboarding-review-/, "onboarding-session-");
+    return `/api/onboarding/sessions/${encodeURIComponent(sessionId)}`;
+  }
+  const sessionId = workflowId.replace(/^requirements-review-/, "requirements-session-");
+  return `/api/requirements/sessions/${encodeURIComponent(sessionId)}`;
+}
+
 /** The view that shows this flow, if it has one of its own. */
 function flowLink(item: Flow) {
   const id = encodeURIComponent(item.workflow_id);
-  if (item.onboarding_id && !item.onboarding_id.startsWith(followUpPrefix)) {
-    return onboardingLink(item.onboarding_id);
-  }
   switch (item.workflow_type) {
     case "LLMRequestWorkflow":
       return `?mode=chat&request_id=${id}`;
@@ -249,6 +291,8 @@ function flowLink(item: Flow) {
       return `?mode=api-design&session_id=${id}`;
     case "OnboardingWorkflow":
       return onboardingLink(item.workflow_id);
+    case "RequirementsReviewWorkflow":
+      return reviewLink(item.workflow_id);
     case "DeliveryWorkflow":
       return deliveryLink(item.workflow_id);
     default:
@@ -490,6 +534,37 @@ function FlowChildren({ parent, link, tick, onOpen }: {
   );
 }
 
+/** A requirements review flow's state as the session it checks reports it: its round, the
+ * contradictions it found and, when the user continued anyway, those that remained. */
+function ReviewDetails({ flow, tick }: { flow: Flow; tick: number }) {
+  const [review, setReview] = useState<RequirementsReview | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(reviewedSessionEndpoint(flow.workflow_id), { signal: controller.signal })
+      .then(async (response) => {
+        const body = await readBody(response);
+        if (!response.ok) throw new Error(errorMessage(body, response.status));
+        if (controller.signal.aborted) return;
+        setReview(requirementsReview(isObject(body) ? body.review : null));
+        setError("");
+      })
+      .catch((caught) => {
+        if (!controller.signal.aborted) setError(failure(caught, "Could not read the review."));
+      });
+    return () => controller.abort();
+    // A running review is read again on every tick.
+  }, [flow.workflow_id, flow.run_id, flow.status === "running" ? tick : 0]);
+
+  if (error) return <p className="flow-children-note connector-error" role="alert">{error}</p>;
+  if (review === null) return <p className="flow-children-note" role="status">Loading the review…</p>;
+  if (review.status === "not_started" && review.round === 0) {
+    return <p className="flow-children-note">No review round has run yet.</p>;
+  }
+  return <div className="flow-review"><ReviewPanel review={review} disabled /></div>;
+}
+
 /** A flow and, once opened, its steps. Whether it waits for the user and whether it closed
  * with unresolved review findings are as the backend reports them, or for flows from before
  * it did, as their sessions show them. */
@@ -510,8 +585,11 @@ function FlowRow({ flow: listed, inheritedLink, tick, onOpen, onFilter, topLevel
   // A closed flow never waits; with open review findings left it is only marked.
   const asking = flow.waiting_for_user === true && !closed && flow.status !== "pending";
   const unresolved = flow.unresolved_findings === true && closed;
-  // A linked stage belongs to another task: its own steps are listed under that task.
-  const expandable = (topLevel || parentTypes.includes(flow.workflow_type)) && !flow.linked;
+  // A linked stage belongs to another task: its own steps are listed under that task. A
+  // requirements review opens into its rounds and contradictions instead of steps.
+  const review = flow.workflow_type === "RequirementsReviewWorkflow";
+  const expandable = (topLevel || parentTypes.includes(flow.workflow_type) ||
+    (review && flow.status !== "pending" && flow.status !== "skipped")) && !flow.linked;
   const took = duration(flow.start_time, flow.close_time);
   const childrenId = `flow-children-${flow.workflow_id}`;
 
@@ -523,11 +601,11 @@ function FlowRow({ flow: listed, inheritedLink, tick, onOpen, onFilter, topLevel
           <button type="button" className="flow-toggle" aria-expanded={expanded}
             aria-controls={childrenId} onClick={() => setExpanded(!expanded)}>
             <span className="flow-chevron" aria-hidden="true" />
-            <span className="flow-type">{typeLabel(flow.workflow_type)}</span>
+            <span className="flow-type">{flowLabel(flow)}</span>
           </button>
         ) : (
           <span className="flow-toggle flow-leaf">
-            <span className="flow-type">{typeLabel(flow.workflow_type)}</span>
+            <span className="flow-type">{flowLabel(flow)}</span>
           </span>
         )}
         {flow.name ? (
@@ -574,7 +652,8 @@ function FlowRow({ flow: listed, inheritedLink, tick, onOpen, onFilter, topLevel
       </div>
       {expanded && (
         <div id={childrenId} className="flow-body">
-          <FlowChildren parent={flow} link={link} tick={tick} onOpen={onOpen} />
+          {review ? <ReviewDetails flow={flow} tick={tick} />
+            : <FlowChildren parent={flow} link={link} tick={tick} onOpen={onOpen} />}
         </div>
       )}
     </li>
@@ -684,7 +763,7 @@ export default function Flows({ search, refreshKey, onNavigate }: {
       <section className="workflows-panel" aria-labelledby="flows-title">
         <div className="workflows-toolbar">
           <div className="section-heading">
-            <h2 id="flows-title">{filters.type ? filterLabel(filters.type) : "All flows"}</h2>
+            <h2 id="flows-title">{filters.type ? filterLabel(filters) : "All flows"}</h2>
           </div>
           <div className="flow-start" role="group" aria-label="Start a flow">
             <span>Start</span>
@@ -699,13 +778,14 @@ export default function Flows({ search, refreshKey, onNavigate }: {
         </div>
 
         <div className="type-filter" role="group" aria-label="Filter by kind of flow">
-          <button type="button" aria-pressed={filters.type === ""} onClick={() => filter({ type: "" })}>
+          <button type="button" aria-pressed={filters.type === ""} onClick={() => filter({ type: "", origin: "" })}>
             All
           </button>
-          {flowTypes.map(([item, label]) => (
-            <button key={item} type="button" aria-pressed={filters.type === item}
-              onClick={() => filter({ type: item })}>
-              {label}
+          {flowKinds.map((kind) => (
+            <button key={kind.label} type="button"
+              aria-pressed={filters.type === kind.type && filters.origin === kind.origin}
+              onClick={() => filter({ type: kind.type, origin: kind.origin })}>
+              {kind.label}
             </button>
           ))}
         </div>
@@ -718,7 +798,7 @@ export default function Flows({ search, refreshKey, onNavigate }: {
                 {filterLabels[name]}: {filters[name]} ×
               </button>
             ))}
-            <button type="button" onClick={() => filter({ repository: "", branch: "", onboarding_id: "", parent: "" })}>
+            <button type="button" onClick={() => filter({ repository: "", branch: "", parent: "" })}>
               Clear filters
             </button>
           </div>
@@ -744,7 +824,7 @@ export default function Flows({ search, refreshKey, onNavigate }: {
               {filtered
                 ? "No flows match these filters."
                 : filters.type
-                  ? `No ${filterLabel(filters.type)} flows have been started.`
+                  ? `No ${filterLabel(filters)} flows have been started.`
                   : "Start a chat, a requirements interview or an onboarding to see it here."}
             </span>
           </div>

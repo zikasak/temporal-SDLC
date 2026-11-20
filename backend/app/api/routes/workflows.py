@@ -11,18 +11,18 @@ router = APIRouter(prefix="/workflows")
 @router.get("")
 async def list_workflows(type: str | None = None, page_token: str | None = None,
                          repository: str | None = None, branch: str | None = None,
-                         onboarding_id: str | None = None, parent: str | None = None,
+                         origin: str | None = None, parent: str | None = None,
                          top_level: bool = False):
     if type and type not in WORKFLOW_TYPES:
         raise HTTPException(status_code=422, detail=f"Unknown workflow type: {type}")
     try:
         # Malformed filters answer 422 before Temporal is asked.
-        check_filters(repository, branch, onboarding_id, parent, top_level)
+        check_filters(repository, branch, origin, parent, top_level)
     except InvalidFilter as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
         return await list_executions(type or None, page_token or None, repository=repository,
-                                     branch=branch, onboarding_id=onboarding_id,
+                                     branch=branch, origin=origin,
                                      parent=parent, top_level=top_level)
     except (InvalidPageToken, InvalidFilter) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

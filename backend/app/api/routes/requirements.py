@@ -25,6 +25,7 @@ from app.requirements.service import (
     get_session,
     retry_generation,
     retry_message,
+    retry_review,
     send_message,
     update_checkout,
 )
@@ -249,10 +250,22 @@ async def instruct_open_findings(session_id: str, body: FindingsInstructionsBody
 
 
 @router.post("/sessions/{session_id}/finalize", status_code=202)
-async def finalize(session_id: str):
+async def finalize(session_id: str, force: bool = False):
+    """Finalize the session; force=true continues despite its requirements review."""
     _check_session_id(session_id)
     try:
-        await finalize_session(session_id)
+        await finalize_session(session_id, force)
+    except Exception as exc:
+        raise http_error(exc) from exc
+    return {"session_id": session_id, "status": "finalizing"}
+
+
+@router.post("/sessions/{session_id}/review/retry", status_code=202)
+async def retry_failed_review(session_id: str):
+    """Run the failed requirements review round again with its original input."""
+    _check_session_id(session_id)
+    try:
+        await retry_review(session_id)
     except Exception as exc:
         raise http_error(exc) from exc
     return {"session_id": session_id, "status": "finalizing"}

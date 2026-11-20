@@ -18,14 +18,18 @@ def _cell(text: str) -> str:
 
 
 RETIRED_HEADING = "## Retired requirements"
+CONTRADICTIONS_HEADING = "## Unresolved contradictions"
 
 
 def render_requirements_markdown(
     requirements: list[Requirement], narrative: str | None = None,
     retired: list[Requirement] | None = None,
+    contradictions: list[dict[str, Any]] | None = None,
 ) -> str:
     """The requirement sections come straight from the list, so none are lost. `retired`
-    are the requirements of the existing service that a change to it ends."""
+    are the requirements of the existing service that a change to it ends;
+    `contradictions` those the requirements review still reported when the user
+    continued despite them."""
     parts = [TITLE]
     if narrative and narrative.strip():
         parts.append(narrative.strip())
@@ -37,6 +41,16 @@ def render_requirements_markdown(
         parts.append("\n".join(["| ID | Requirement | Description |", "| --- | --- | --- |"] + [
             f"| {item['id']} | {_cell(item['title'])} | {_cell(item['description'])} |"
             for item in retired]))
+    if contradictions:
+        # Also ahead of the tables.
+        parts.append(CONTRADICTIONS_HEADING)
+        parts.append("The requirements review still reported these contradictions when the "
+                     "user chose to continue despite them.")
+        parts.append("\n".join(["| ID | Requirements | Contradiction |", "| --- | --- | --- |"] + [
+            f"| {_cell(str(item.get('id', '')))} "
+            f"| {_cell(', '.join(str(ref) for ref in item.get('requirement_ids') or []))} "
+            f"| {_cell(str(item.get('summary', '')))} |"
+            for item in contradictions]))
     for category, heading in SECTIONS:
         items = [item for item in requirements if item["category"] == category]
         parts.append(f"## {heading}")

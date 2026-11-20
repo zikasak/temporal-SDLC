@@ -34,6 +34,7 @@ STAGE_START_POLL_SECONDS = 0.25
 
 # The workflow type of each stage of a task flow, earlier ones first.
 STAGE_TYPES = {
+    "onboarding": "OnboardingWorkflow",
     "requirements": "RequirementsWorkflow",
     "architecture": "ArchitectureWorkflow",
     "api_design": "ApiDesignWorkflow",
@@ -86,7 +87,8 @@ async def start_task_flow(task_flow_id: str, state: TaskFlowState,
         id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
         id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
         **execution_fields(state.repository,
-                           task_name=bounded_name(state.name) if state.name else None),
+                           task_name=bounded_name(state.name) if state.name else None,
+                           task_origin=state.source),
     )
     await register(task_flow_id)
     logger.info("Started task flow %s (%s)", task_flow_id, state.origin)
@@ -155,6 +157,9 @@ async def _start_stage_alone(task_flow_id: str, state: TaskFlowState, stage_id: 
     else:
         if hasattr(stage_state, "task_flow_id"):
             stage_state.task_flow_id = None
+        if hasattr(stage_state, "review_id"):
+            # Without its task flow, the stage has no requirements review either.
+            stage_state.review_id = None
         design = getattr(stage_state, "design", None)
         if design is not None and hasattr(design, "task_flow_id"):
             stage_state.design = dataclasses.replace(design, task_flow_id=None)
@@ -255,6 +260,7 @@ async def start_fix_flow(client: Client, follow_up_session_id: str, delivery: An
     spec = delivery.spec
     state = TaskFlowState(
         kind=spec.kind, repository=spec.repository, origin="fix",
+        source="onboarding" if getattr(spec, "onboarding", False) else "requirements",
         name=await derived_name(original_task_flow_id, fallback, FIX_SUFFIX, client),
         delivery_session_id=follow_up_session_id, delivery=delivery,
         linked=[item for item in linked if item])
@@ -271,5 +277,6 @@ def stage_ids(state: TaskFlowState | None) -> list[str]:
     """The task flow's stages, earlier ones first, as a fork or fix round links them."""
     if state is None:
         return []
-    order = ("requirements", "architecture", "api_design", "delivery")
+    order = ("onboarding", "requirements", "review", "architecture", "api_design",
+             "delivery")
     return [state.created[stage] for stage in order if state.created.get(stage)]

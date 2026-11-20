@@ -1,7 +1,7 @@
-"""The repository, branch and onboarding an execution works for, as GET /workflows lists them.
+"""The repository and branch an execution works for, as GET /workflows lists them.
 
-Every OnboardingWorkflow, RequirementsWorkflow, ArchitectureWorkflow, ApiDesignWorkflow and
-DeliveryWorkflow, and
+Every TaskWorkflow, OnboardingWorkflow, RequirementsWorkflow, RequirementsReviewWorkflow,
+ArchitectureWorkflow, ApiDesignWorkflow and DeliveryWorkflow, and
 every CodegenWorkflow a delivery starts, is started with them: as custom search attributes to
 filter on (the repository lower-cased, as GitHub compares names case-insensitively) and the
 whole repository selection in the memo. Continued runs keep both. Safe to import from
@@ -13,7 +13,12 @@ from temporalio.common import SearchAttributeKey, SearchAttributePair, TypedSear
 
 REPOSITORY_ATTRIBUTE = SearchAttributeKey.for_keyword("Repository")
 BRANCH_ATTRIBUTE = SearchAttributeKey.for_keyword("Branch")
+# The onboarding an execution worked for; set only by executions started before
+# onboardings ran under task flows, and no longer listed.
 ONBOARDING_ATTRIBUTE = SearchAttributeKey.for_keyword("OnboardingId")
+# What started a task flow: a requirements interview or an onboarding (or a fork or fix
+# round of one); the origin filter of GET /workflows queries it.
+TASK_ORIGIN_ATTRIBUTE = SearchAttributeKey.for_keyword("TaskOrigin")
 # A stage of a task flow that waits for the stages it depends on ('pending'), or that will
 # never run ('skipped'); unset while it works or once it closed otherwise. Listings show
 # it instead of the Temporal status.
@@ -29,7 +34,7 @@ WAITING_ATTRIBUTE = SearchAttributeKey.for_bool("WaitingForUser")
 UNRESOLVED_ATTRIBUTE = SearchAttributeKey.for_bool("UnresolvedFindings")
 SEARCH_ATTRIBUTES = (REPOSITORY_ATTRIBUTE, BRANCH_ATTRIBUTE, ONBOARDING_ATTRIBUTE,
                      FLOW_STATE_ATTRIBUTE, TASK_NAME_ATTRIBUTE, LINKED_ATTRIBUTE,
-                     WAITING_ATTRIBUTE, UNRESOLVED_ATTRIBUTE)
+                     WAITING_ATTRIBUTE, UNRESOLVED_ATTRIBUTE, TASK_ORIGIN_ATTRIBUTE)
 REPOSITORY_MEMO = "repository"
 # The memo of a task flow: the earlier stages of another task it links to, and the session
 # its delivery is named after.
@@ -41,17 +46,21 @@ SKIPPED = "skipped"
 
 def execution_fields(repository: Any = None, onboarding_id: str | None = None, *,
                      pending: bool = False, task_name: str | None = None,
+                     task_origin: str | None = None,
                      linked: list[str] | None = None,
                      memo: dict[str, Any] | None = None) -> dict[str, Any]:
     """Keyword arguments of start_workflow and of starting a child workflow: `pending`
-    for a stage that waits for its task flow's start signal, `task_name` for a task flow,
-    `linked` for the task flows the execution is listed under besides its parent."""
+    for a stage that waits for its task flow's start signal, `task_name` and `task_origin`
+    for a task flow, `linked` for the task flows the execution is listed under besides its
+    parent. `onboarding_id` is kept for executions recorded with it."""
     pairs: list[SearchAttributePair] = []
     memo = dict(memo or {})
     if pending:
         pairs.append(SearchAttributePair(FLOW_STATE_ATTRIBUTE, PENDING))
     if task_name:
         pairs.append(SearchAttributePair(TASK_NAME_ATTRIBUTE, task_name))
+    if task_origin:
+        pairs.append(SearchAttributePair(TASK_ORIGIN_ATTRIBUTE, task_origin))
     if linked:
         pairs.append(SearchAttributePair(LINKED_ATTRIBUTE, list(linked)))
     if repository:
@@ -73,7 +82,6 @@ def execution_fields(repository: Any = None, onboarding_id: str | None = None, *
 
 
 def task_fields(spec: Any) -> dict[str, Any]:
-    """The fields of a delivery, and of the code generation it starts, from its TaskSpec:
-    an onboarding's delivery is named by the onboarding's session ID."""
-    onboarding_id = spec.session_id if getattr(spec, "onboarding", False) else None
-    return execution_fields(getattr(spec, "repository", None), onboarding_id)
+    """The fields of a delivery, and of the code generation it starts, from its TaskSpec.
+    An onboarding's delivery is reached through its task flow, not an onboarding ID."""
+    return execution_fields(getattr(spec, "repository", None))

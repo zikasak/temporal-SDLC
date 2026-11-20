@@ -19,6 +19,11 @@ with workflow.unsafe.imports_passed_through():
         draft_kind_changed, onboarding_problems,
     )
     from app.requirements.document import render_requirements_markdown
+    from app.requirements_review.interview import ReviewedInterview
+    from app.requirements_review.models import (
+        CLEARED, ROUND_RUNNING, ReviewRoundResult,
+    )
+    from app.tasks.models import OnboardingResult
     from app.temporal.activities import checkout_repository, update_repository_checkout
     from app.temporal.closing import end_cancelled
     from app.temporal.flags import FlowFlags
@@ -44,14 +49,20 @@ CONTRACT_UNKNOWN = ("The existing contract could not be read, so only replacing 
 
 
 @workflow.defn
-class OnboardingWorkflow(Interview[OnboardingState], _Delivering, FlowFlags):
+class OnboardingWorkflow(Interview[OnboardingState], ReviewedInterview, _Delivering,
+                         FlowFlags):
     """One onboarding of an existing repository: the branch is checked out, the user
     confirms replacing a contract, contract tests or Dockerfile it already has, the LLM
     drafts the requirements, the API and the language from the code, and the user reviews
     the drafts in an interview of updates. Finalizing fixes the drafts as the contract and
     hands it to a DeliveryWorkflow, which writes and verifies the contract tests and the
-    Dockerfile against the existing code, reviews and publishes them; the onboarding stays
-    open as long as its delivery is."""
+    Dockerfile against the existing code, reviews and publishes them.
+
+    As the onboarding interview stage of a task flow (task_flow_id), finalizing first has
+    the task's requirements review check the drafted requirements for contradictions,
+    asked in the interview as questions, unless the user continues despite them; the
+    onboarding then hands its delivery to the task flow, which starts it. An onboarding
+    from before task flows runs its delivery itself and stays open as long as it is."""
 
     TOO_LONG = REVIEW_TOO_LONG
     CLOSED = "This onboarding is no longer accepting messages."
@@ -74,13 +85,76 @@ class OnboardingWorkflow(Interview[OnboardingState], _Delivering, FlowFlags):
         questions, or whatever its delivery waits for; unresolved with its delivery."""
         own = (self.state.status == "awaiting_confirmation"
                or (self.state.status == "interviewing"
-                   and bool(pending_questions(self.state.messages))))
+                   and (bool(pending_questions(self.state.messages))
+                        or self._review_applies()
+                        and self._review().status == "failed")))
         unresolved = (any(item for _, item in self._children_flags.values())
                       if self._children_flags else None)
         return own or self._children_waiting(), unresolved
 
+    # The requirements review.
+
+    def _review_applies(self) -> bool:
+        return bool(self.state.review_id) and not self.state.architecture_only
+
+    async def _review_existing(self) -> tuple[list[Any], bool]:
+        """The existing contract's requirements, which the activity reads from the
+        checkout, when the onboarding replaces it."""
+        replaces = (self.state.replaced_contract
+                    and "contract" in self.state.existing_artifacts)
+        return [], replaces
+
+    async def _review_cleared(self) -> None:
+        self._complete()
+
+    def _complete(self) -> None:
+        self.state.status = "finalizing"
+        self.state.error = None
+        workflow.logger.info("Onboarding finalized")
+        self.state.status = "completed"
+
+    def _questions_open(self) -> bool:
+        if self._review_questions_open():
+            return False
+        return super()._questions_open()
+
+    def _answers_given(self, answers: list[str]) -> None:
+        self._review_answers(answers)
+
+    def _user_replies(self) -> None:
+        self._review_replied()
+
+    async def _after_turn(self, ok: Any) -> None:
+        await self._review_after_turn(bool(ok))
+
+    @workflow.signal
+    async def review_result(self, result: ReviewRoundResult) -> None:
+        """The result of a round of the requirements review of the drafts."""
+        async with self._turn_lock:
+            if self._ended():
+                return
+            await self._review_result(result)
+
+    def _review_failed(self) -> bool:
+        return (self.state.status == "interviewing" and self._review_applies()
+                and self._review().status == "failed")
+
+    @workflow.update
+    async def retry_review(self) -> None:
+        """Run the failed review round again with its original input."""
+        self._updates += 1
+        async with self._turn_lock:
+            if not self._review_failed():
+                raise ApplicationError("The last requirements review round did not fail.")
+            await self._start_review_round(retry=True)
+
+    @retry_review.validator
+    def validate_retry_review(self) -> None:
+        if not self._review_failed():
+            raise ValueError("The last requirements review round did not fail.")
+
     @workflow.run
-    async def run(self, state: OnboardingState) -> dict[str, Any] | None:
+    async def run(self, state: OnboardingState) -> Any:
         self._keep_flags()
         if not self.state.checkout:
             await self._check_out()
@@ -97,6 +171,8 @@ class OnboardingWorkflow(Interview[OnboardingState], _Delivering, FlowFlags):
                 )
             except asyncio.TimeoutError:
                 if self.state.status in ("interviewing", "awaiting_confirmation"):
+                    # Closed without a review, which its task flow skips.
+                    self._review_skipped()
                     self.state.status = "failed"
                     self.state.error = ("The onboarding expired after a day without "
                                         "activity. Start a new one.")
@@ -107,6 +183,16 @@ class OnboardingWorkflow(Interview[OnboardingState], _Delivering, FlowFlags):
                 workflow.logger.info("Continuing as new")
                 workflow.continue_as_new(self.state)
         await workflow.wait_condition(workflow.all_handlers_finished)
+        if self.state.task_flow_id:
+            # A stage of a task flow hands its delivery to the task flow, which starts it.
+            finalized = self.state.status == "completed"
+            if not finalized:
+                self._review_skipped()
+            result = OnboardingResult(
+                finalized=finalized, reviewed=finalized and self._review_reported(),
+                delivery=self._delivery_state() if finalized else None)
+            await self._close_flags()
+            return result
         if self.state.status == "completed":
             await self._deliver()
             await self._close_flags()
@@ -284,6 +370,8 @@ class OnboardingWorkflow(Interview[OnboardingState], _Delivering, FlowFlags):
         return self.state
 
     def _check_open(self) -> None:
+        if self._review_running():
+            raise ValueError(ROUND_RUNNING)
         if self.state.status != "interviewing" or not self.state.drafted:
             raise ValueError("The onboarding is not waiting for a message.")
         if self.state.messages and self.state.messages[-1]["role"] == "user":
@@ -304,7 +392,7 @@ class OnboardingWorkflow(Interview[OnboardingState], _Delivering, FlowFlags):
             if not self.state.drafted:
                 await self._draft()
             else:
-                await self._turn()
+                await self._after_turn(await self._turn())
 
     @retry_message.validator
     def validate_retry_message(self) -> None:
@@ -450,24 +538,36 @@ class OnboardingWorkflow(Interview[OnboardingState], _Delivering, FlowFlags):
             raise ValueError("Retry the unanswered message before updating the checkout.")
 
     @workflow.update
-    async def finalize(self) -> None:
-        """Fix the drafts as the contract; the delivery starts once the run sees it."""
+    async def finalize(self, force: bool = False) -> None:
+        """Fix the drafts as the contract once the requirements review cleared them, or
+        with `force` despite it; the delivery starts once the run sees it."""
         self._updates += 1
         async with self._turn_lock:
             problems = onboarding_problems(self.state)
-            if self.state.status != "interviewing" or problems:
+            if problems or not (self.state.status == "interviewing"
+                                or force and self._review_running()):
                 raise ApplicationError("The onboarding cannot be finalized now.")
-            self.state.status = "finalizing"
-            self.state.error = None
-            workflow.logger.info("Onboarding finalized")
-            self.state.status = "completed"
+            if self._review_applies() and self._review().status not in CLEARED:
+                if not force:
+                    workflow.logger.info("Onboarding finalized; reviewing its requirements")
+                    await self._start_review_round()
+                    return
+                await self._force_review()
+            elif self.state.review_id and not self._review_applies():
+                # An architecture-only onboarding has no requirements to review.
+                self._review_skipped()
+            self._complete()
 
     @finalize.validator
-    def validate_finalize(self) -> None:
-        if self.state.status != "interviewing":
-            raise ValueError("Wait for the running turn to finish before finalizing.")
-        if self.state.messages and self.state.messages[-1]["role"] == "user":
-            raise ValueError("Retry the unanswered message before finalizing.")
+    def validate_finalize(self, force: bool = False) -> None:
+        if not (force and self._review_running()):
+            if self.state.status != "interviewing":
+                if self._review_running():
+                    raise ValueError(ROUND_RUNNING)
+                raise ValueError("Wait for the running turn to finish before finalizing.")
+            if self.state.messages and self.state.messages[-1]["role"] == "user":
+                raise ValueError("Retry the unanswered message before finalizing.")
+            self._review_check(force)
         problems = onboarding_problems(self.state)
         if problems:
             raise ValueError("Fix these problems first: " + " ".join(problems))
@@ -482,7 +582,10 @@ class OnboardingWorkflow(Interview[OnboardingState], _Delivering, FlowFlags):
     def validate_supersede(self) -> None:
         if self.state.status in FINISHED_STATUSES:
             raise ValueError("Only an unfinished onboarding can be forked.")
-        # A running turn, drafting or checkout update would write its status over it.
+        # A running turn, drafting or checkout update would write its status over it; a
+        # running review round reports to an onboarding that has ended, which ignores it.
+        if self._review_running() and not self._turn_lock.locked():
+            return
         if (self.state.status not in ("interviewing", "awaiting_confirmation")
                 or self._turn_lock.locked()):
             raise ValueError("Wait for the running turn, drafting or checkout update to "
@@ -505,10 +608,14 @@ class OnboardingWorkflow(Interview[OnboardingState], _Delivering, FlowFlags):
 
     async def _deliver(self) -> None:
         """Hand the contract to the delivery and stay open until that ends."""
+        await self._run_delivery(self._delivery_state())
+
+    def _delivery_state(self) -> DeliveryState:
+        """The delivery of the contract, or of the architecture alone."""
         architecture, structure = self._architecture()
         if self.state.architecture_only:
             # Only contracts/architecture.md and contracts/architecture.json are pushed.
-            await self._run_delivery(DeliveryState(spec=TaskSpec(
+            return DeliveryState(spec=TaskSpec(
                 session_id=workflow.info().workflow_id,
                 requirements=[],
                 requirements_document="",
@@ -519,12 +626,15 @@ class OnboardingWorkflow(Interview[OnboardingState], _Delivering, FlowFlags):
                 architecture=architecture,
                 architecture_structure=structure,
                 architecture_only=True,
-            )))
-            return
-        await self._run_delivery(DeliveryState(spec=TaskSpec(
+            ))
+        contradictions = self._remaining_contradictions()
+        return DeliveryState(spec=TaskSpec(
             session_id=workflow.info().workflow_id,
             requirements=self.state.requirements,
-            requirements_document=render_requirements_markdown(self.state.requirements),
+            requirements_document=render_requirements_markdown(
+                self.state.requirements,
+                # Those the user continued despite are listed in the document.
+                contradictions=contradictions or None),
             api=self.state.api,
             language=self.state.language,
             repository=self.state.repository,
@@ -532,4 +642,4 @@ class OnboardingWorkflow(Interview[OnboardingState], _Delivering, FlowFlags):
             onboarding=True,
             architecture=architecture,
             architecture_structure=structure,
-        )))
+        ))

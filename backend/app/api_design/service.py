@@ -7,6 +7,7 @@ from typing import Any
 from app.api_design.models import ApiDesignState
 from app.api_design.openapi import design_problems
 from app.requirements.lookup import source_session_lookup
+from app.requirements_review.models import review_id
 from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, RetryStage
 from app.config import TASK_QUEUE
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 async def _start(state: ApiDesignState, original_task_flow_id: str | None,
-                 linked: list[str], task_queue: str | None = None) -> dict[str, str]:
+                 linked: list[str | None], task_queue: str | None = None) -> dict[str, str]:
     """Start the session as the first stage of a new top-level task flow, linked to the
     original task's earlier stages, with its delivery pending."""
     ids = new_ids()
@@ -89,7 +90,10 @@ async def fork(session_id: str, message_index: int) -> dict[str, str]:
         architecture_session_id=source.architecture_session_id,
         architecture=source.architecture,
         architecture_structure=source.architecture_structure,
-    ), source.task_flow_id, [source.source_session_id, source.architecture_session_id],
+    ), source.task_flow_id, [source.source_session_id,
+                             review_id(source.source_session_id)
+                             if source.source_session_id else None,
+                             source.architecture_session_id],
         await task_queue_of(session_id, await connect_temporal()))
     logger.info("Forked API design session %s after message %d as %s",
                 session_id, message_index, created["session_id"])

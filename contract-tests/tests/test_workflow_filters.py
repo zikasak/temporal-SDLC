@@ -25,16 +25,11 @@ def test_empty_branch_filter_is_rejected(admin):
     assert_unprocessable(admin.get("/workflows", params={"branch": ""}))
 
 
-@pytest.mark.parametrize("value", (
-    "onboarding-session-unknown",
-    "onboarding-session-",
-    f"onboarding-session-{uuid.uuid4().hex[:31]}",
-    f"onboarding-session-{uuid.uuid4().hex}0",
-    f"requirements-session-{uuid.uuid4().hex}",
-    uuid.uuid4().hex,
-), ids=("word", "no-digits", "31-digits", "33-digits", "other-prefix", "no-prefix"))
-def test_onboarding_id_filter_must_be_an_onboarding_session_id(admin, value):
-    assert_unprocessable(admin.get("/workflows", params={"onboarding_id": value}))
+@pytest.mark.parametrize("value", ("other", "task", "delivery", "requirements,onboarding",
+                                   "onboarding-session-" + "0" * 32),
+                         ids=("other", "task", "delivery", "both", "onboarding-session-id"))
+def test_origin_filter_must_be_requirements_or_onboarding(admin, value):
+    assert_unprocessable(admin.get("/workflows", params={"origin": value}))
 
 
 def test_malformed_filters_are_rejected_together_with_a_type(admin):
@@ -44,7 +39,7 @@ def test_malformed_filters_are_rejected_together_with_a_type(admin):
 
 def test_one_malformed_filter_rejects_the_whole_request(admin):
     assert_unprocessable(admin.get("/workflows", params={
-        "repository": "Owner/Repo", "branch": "main", "onboarding_id": "bad"}))
+        "repository": "Owner/Repo", "branch": "main", "origin": "bad"}))
 
 
 def test_well_formed_filters_are_not_rejected(admin):

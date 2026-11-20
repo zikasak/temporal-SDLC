@@ -13,9 +13,12 @@ with workflow.unsafe.imports_passed_through():
     from app.architecture.models import ArchitectureResult, ArchitectureState
     from app.delivery.models import TASK_IDLE_TIMEOUT, DeliveryState, TaskSpec, delivery_id
     from app.requirements.models import DIRECT_KINDS
+    from app.requirements_review.models import (
+        Contradiction, ReviewFlowState, ReviewRoundInput,
+    )
     from app.tasks.activities import name_task_flow
     from app.tasks.models import (
-        DesignResult, RequirementsResult, TaskFlowState, bounded_name,
+        DesignResult, OnboardingResult, RequirementsResult, TaskFlowState, bounded_name,
         fallback_name, stages_for,
     )
     from app.temporal.activities import register_session
@@ -26,7 +29,9 @@ with workflow.unsafe.imports_passed_through():
     )
 
 STAGE_TYPES = {
+    "onboarding": "OnboardingWorkflow",
     "requirements": "RequirementsWorkflow",
+    "review": "RequirementsReviewWorkflow",
     "architecture": "ArchitectureWorkflow",
     "api_design": "ApiDesignWorkflow",
     "delivery": "DeliveryWorkflow",
@@ -36,9 +41,11 @@ TASK_CANCELLED = "The task ended without a delivery, or its pull request was clo
 
 @workflow.defn
 class TaskWorkflow(FlowFlags):
-    """The top-level flow of one task. It creates its stages as its children up front for
-    the kind of task (requirements, architecture, API design and delivery for a new
-    service or an API change; requirements and delivery for a bugfix or documentation),
+    """The top-level flow of one task or onboarding. It creates its stages as its children
+    up front for the kind of task (requirements, requirements review, architecture, API
+    design and delivery for a new service or an API change; requirements, requirements
+    review and delivery for a bugfix; requirements and delivery for documentation;
+    onboarding interview, requirements review and delivery for an onboarding),
     each one pending until the stages it depends on have finished, then starts it with
     what the stage before handed on, and closes the stages that will never run as skipped.
     It keeps the task's short name, aggregates its children's waiting-for-user and
@@ -61,12 +68,18 @@ class TaskWorkflow(FlowFlags):
         # A delivery stopped from outside waits here for the user to start it again.
         self._delivery_stopped = False
         self._redelivery: DeliveryState | None = None
+        # Rounds and the finish of the requirements review, handed on in order.
+        self._review_lock = asyncio.Lock()
 
     # The stages' workflow IDs.
 
     def _id(self, stage: str) -> str | None:
+        if stage == "onboarding":
+            return self.state.onboarding_session_id
         if stage == "requirements":
             return self.state.requirements_session_id
+        if stage == "review":
+            return self.state.review_session_id
         if stage == "architecture":
             return self.state.architecture_session_id
         if stage == "api_design":
@@ -153,6 +166,8 @@ class TaskWorkflow(FlowFlags):
     # Stages.
 
     def _first_stage(self) -> str:
+        if self.state.onboarding is not None:
+            return "onboarding"
         if self.state.requirements is not None:
             return "requirements"
         if self.state.architecture is not None:
@@ -165,13 +180,24 @@ class TaskWorkflow(FlowFlags):
         """The stages this task flow creates: its first and every one after it."""
         if self.state.origin == "fix" or first == "delivery":
             return ["delivery"]
-        stages = (list(STAGE_TYPES) if first in ("architecture", "api_design")
-                  else list(stages_for(self.state.kind)))
+        stages = (["architecture", "api_design", "delivery"]
+                  if first in ("architecture", "api_design")
+                  else list(stages_for(self.state.kind, self.state.source)))
         return stages[stages.index(first):]
+
+    def _reviewed_session(self) -> str:
+        """The interview the requirements review checks."""
+        if self.state.source == "onboarding":
+            return self.state.onboarding_session_id or ""
+        return self.state.requirements_session_id or ""
 
     def _placeholder(self, stage: str) -> Any:
         """The state a pending stage is created with."""
         workflow_id = workflow.info().workflow_id
+        if stage == "review":
+            return ReviewFlowState(session_id=self._reviewed_session(),
+                                   repository=self.state.repository,
+                                   task_flow_id=workflow_id, pending=True)
         if stage == "architecture":
             return ArchitectureState(
                 source_session_id=self.state.requirements_session_id or "",
@@ -186,10 +212,12 @@ class TaskWorkflow(FlowFlags):
         return DeliveryState(spec=TaskSpec(
             session_id=self.state.delivery_session_id or "", requirements=[],
             requirements_document="", api=empty_api(), kind=self.state.kind,
-            repository=self.state.repository), pending=True)
+            repository=self.state.repository,
+            onboarding=self.state.source == "onboarding"), pending=True)
 
     def _first_state(self, stage: str) -> Any:
-        return {"requirements": self.state.requirements,
+        return {"onboarding": self.state.onboarding,
+                "requirements": self.state.requirements,
                 "architecture": self.state.architecture,
                 "api_design": self.state.api_design,
                 "delivery": self.state.delivery}[stage]
@@ -218,7 +246,9 @@ class TaskWorkflow(FlowFlags):
                 fields = execution_fields(state.spec.repository, pending=True)
         else:
             fields = execution_fields(self.state.repository, pending=pending)
-        result_types = {"requirements": RequirementsResult,
+        result_types = {"onboarding": OnboardingResult,
+                        "requirements": RequirementsResult,
+                        "review": ReviewFlowState,
                         "architecture": ArchitectureResult,
                         "api_design": DesignResult, "delivery": dict}
         self._handles[workflow_id] = await workflow.start_child_workflow(
@@ -229,7 +259,7 @@ class TaskWorkflow(FlowFlags):
             self.state.started.append(workflow_id)
         workflow.logger.info("Stage %s %s %s", stage, workflow_id,
                              "created, pending" if pending else "started")
-        if stage != "delivery":
+        if stage not in ("delivery", "review"):
             self._registrations.append(asyncio.create_task(self._register(workflow_id)))
 
     async def _register(self, session_id: str) -> None:
@@ -260,7 +290,11 @@ class TaskWorkflow(FlowFlags):
         for stage in stages:
             workflow_id = self._id(stage)
             if (not workflow_id or workflow_id not in self._handles
-                    or workflow_id in self.state.started or workflow_id in self.state.skipped):
+                    or workflow_id in self.state.skipped):
+                continue
+            # A review that ran rounds without deciding will never decide either.
+            if workflow_id in self.state.started and (
+                    stage != "review" or workflow_id in self.state.closed):
                 continue
             await self._skip_id(workflow_id)
 
@@ -287,6 +321,8 @@ class TaskWorkflow(FlowFlags):
     async def _follow(self, first: str) -> str:
         """Follow the stages from `first` on; how the task's delivery ended."""
         stage = first
+        if stage == "onboarding":
+            stage = await self._after_onboarding()
         if stage == "requirements":
             stage = await self._after_requirements()
         if stage == "architecture":
@@ -295,14 +331,71 @@ class TaskWorkflow(FlowFlags):
             stage = await self._after_design()
         if stage == "delivery":
             return await self._follow_delivery()
-        await self._skip("architecture", "api_design", "delivery")
+        await self._skip("review", "architecture", "api_design", "delivery")
         return "skipped"
+
+    # The requirements review.
+
+    async def _after_review(self, reviewed: bool) -> None:
+        """Let the review close on its own once it decided; skip it otherwise."""
+        workflow_id = self._id("review")
+        if reviewed and workflow_id and workflow_id in self._handles:
+            if workflow_id not in self.state.started:
+                self.state.started.append(workflow_id)
+            # Awaited before the task flow closes.
+            self._registrations.append(asyncio.create_task(self._closed_quietly(workflow_id)))
+            return
+        await self._skip("review")
+
+    async def _closed_quietly(self, workflow_id: str) -> None:
+        await self._closed(workflow_id)
+
+    async def _to_review(self, signal: str, *args: Any) -> None:
+        """Hand the interview's round or finish to the requirements review, starting the
+        pending review with the first, or creating it when the task did not need one
+        when it began, such as after the kind of task changed."""
+        workflow_id = self._id("review")
+        if not workflow_id:
+            workflow.logger.warning("Requirements review %s without a review", signal)
+            return
+        async with self._review_lock:
+            if workflow_id not in self._handles:
+                state = self._placeholder("review")
+                state.pending = False
+                await self._create("review", state, pending=False)
+            elif workflow_id not in self.state.started:
+                self.state.started.append(workflow_id)
+                workflow.logger.info("Stage review %s started", workflow_id)
+            try:
+                await self._handles[workflow_id].signal(signal, args=list(args))
+            except Exception as exc:  # noqa: BLE001 - a closed review takes no rounds
+                workflow.logger.warning("Requirements review not given %s: %s", signal, exc)
+
+    @workflow.signal
+    async def review_round(self, round_input: ReviewRoundInput) -> None:
+        """A round of the requirements review, from the interview it checks."""
+        await self._to_review("review_round", round_input)
+
+    @workflow.signal
+    async def review_finish(self, status: str, contradictions: list[Contradiction]) -> None:
+        """The user continued despite the requirements review."""
+        await self._to_review("finish", status, contradictions)
+
+    async def _after_onboarding(self) -> str | None:
+        result: OnboardingResult | None = await self._closed(self._id("onboarding"))
+        if not result or not result.finalized or result.delivery is None:
+            # Declined, superseded by a fork, failed or expired: no later stage will run.
+            return None
+        await self._after_review(result.reviewed)
+        await self._start("delivery", result.delivery)
+        return "delivery"
 
     async def _after_requirements(self) -> str | None:
         result: RequirementsResult | None = await self._closed(self._id("requirements"))
         if not result or not result.finalized:
             # Expired, failed or stopped: no later stage will run.
             return None
+        await self._after_review(result.reviewed)
         self.state.kind = result.kind
         requirements = list(result.requirements)
         if result.delivery is not None and result.kind in DIRECT_KINDS:

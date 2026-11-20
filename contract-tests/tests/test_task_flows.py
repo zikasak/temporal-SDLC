@@ -83,8 +83,8 @@ def test_parent_combines_with_type_and_the_other_filters(admin):
 @pytest.mark.parametrize("extra", (
     {"repository": "not-a-repository"},
     {"branch": ""},
-    {"onboarding_id": "onboarding-session-unknown"},
-), ids=("repository", "branch", "onboarding-id"))
+    {"origin": "somewhere-else"},
+), ids=("repository", "branch", "origin"))
 def test_parent_does_not_excuse_a_malformed_filter(admin, extra):
     response = admin.get("/workflows", params={"parent": task_flow_id(), **extra})
     assert response.status_code == 422, response.text

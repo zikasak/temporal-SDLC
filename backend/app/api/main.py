@@ -17,6 +17,7 @@ from app.delivery.mentions import ensure_schema as ensure_mention_schema
 from app.documents import cleanup_expired_documents, ensure_document_schema
 from app.logging_setup import configure_logging
 from app.github.storage import ensure_schema as ensure_github_schema
+from app.onboarding.service import cancel_old_shape_onboardings_loop
 from app.onboarding.storage import ensure_schema as ensure_onboarding_schema
 from app.llm.pi_credentials import refresh_pi_credentials_loop
 from app.temporal.client import TemporalUnavailable
@@ -47,7 +48,9 @@ async def lifespan(_: FastAPI):
     await ensure_acceptance_schema()
     await ensure_onboarding_schema()
     tasks = [asyncio.create_task(_cleanup_loop()), asyncio.create_task(refresh_pi_credentials_loop()),
-             asyncio.create_task(github.recover_mentions_loop())]
+             asyncio.create_task(github.recover_mentions_loop()),
+             # Onboardings from before they ran under task flows are cancelled once.
+             asyncio.create_task(cancel_old_shape_onboardings_loop())]
     logger.info("API started")
     try:
         yield

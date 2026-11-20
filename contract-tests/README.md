@@ -115,10 +115,11 @@ Contract ambiguities and how the suite reads them:
   Temporal are accepted. Contract decisions, forks, the one-unfinished-onboarding rule
   (409), existing artifacts, checkout updates and the pushed branch name
   `onboarding/<source branch>-<short id>` need a real repository and are not tested.
-- `GET /workflows` filters `repository`, `branch` and `onboarding_id`
-  (FR-71 to FR-74, `tests/test_workflow_filters.py`): without Temporal the suite can only
+- `GET /workflows` filters `repository`, `branch` and `origin`
+  (FR-71 to FR-74, FR-166, `tests/test_workflow_filters.py`): without Temporal the suite can only
   check that malformed values answer 422 with a `detail` (repository not `owner/name`,
-  empty branch, onboarding ID not `onboarding-session-` plus 32 hex digits), assuming
+  empty branch, origin other than `requirements` or `onboarding`). The former `onboarding_id`
+  filter and field were removed (FR-164), so its 422 checks were replaced by `origin` ones; assuming
   this validation happens before Temporal is contacted, as the contract says "like an
   invalid type or page_token". Well formed filters must give 200 or 503. When Temporal
   is available and the list is not empty, the new fields (always present, null when
@@ -192,3 +193,29 @@ architecture workflow's parent is not a `requirements-session-*` ID.
 `test_workflow_listing_accepts_the_architecture_type` is retained unchanged and still asserts the
 superseded `requirements-session-` prefix. It only applies when the listing returns architecture
 items, so it needs a service with Temporal.
+
+## Requirements review, settings and the `origin` filter
+
+- `tests/test_requirements_review.py` (FR-144 to FR-147, FR-153, FR-157, FR-158, FR-168, FR-169):
+  a review round runs only on a finalized session, which needs GitHub, Temporal and an LLM. The
+  suite covers sign-in, `POST .../review/retry` of unknown requirements and onboarding sessions
+  (404), the boolean `force` query parameter of `finalize` (422 for a non-boolean, assumed to be
+  checked before the session lookup like other input; 404 for an unknown session when valid) and
+  the `answers` body of requirements and API design sessions. Review rounds themselves,
+  contradictions, `409` rules and `force` behaviour need the real dependencies and are not tested.
+- `tests/test_settings.py` (FR-148): `GET /settings` is 200 or 503 (the contract documents 503 for
+  an unavailable provider); on 200 the ten workflow types including `requirements_review` and the
+  label `Requirements review` are checked. `PUT /settings` input validation (every type
+  required, no unknown type, entry bounds) is asserted as 422 without assuming a provider. A
+  successful save is not tested: it needs a model the providers offer, which the suite cannot know
+  without an LLM provider, and it would change the shared settings.
+- `tests/test_workflow_origin.py` (FR-149, FR-163, FR-164, FR-166, FR-167): `origin` filter and
+  field, `RequirementsReviewWorkflow` type, no `onboarding_id`, stages never top-level, pending and
+  skipped statuses. Everything except the 422 checks and sign-in needs Temporal, and without it
+  verifies only the documented 503.
+- Existing tests that mention `onboarding_id` or an architecture parent of `requirements-session-`
+  (`test_executions_carry_the_new_fields_and_keep_the_old_ones`,
+  `test_well_formed_filters_are_not_rejected`, `test_workflow_listing_accepts_the_architecture_type`
+  and similar) only inspect executions when Temporal answers; they are kept unchanged, because
+  without Temporal they observe nothing but the documented 503. Only the part of the suite that
+  asserted the removed `onboarding_id` filter's 422 was replaced.

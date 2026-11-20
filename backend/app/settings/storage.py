@@ -4,6 +4,9 @@ from psycopg.types.json import Jsonb
 from app.db import connect
 from app.settings.models import ModelSettings, WORKFLOW_LABELS, WorkflowSettings, WorkflowType
 
+# Workflow types added after others, by the type whose stored settings they start with.
+INITIAL_SOURCES: dict[str, str] = {'requirements_review': 'requirements'}
+
 
 async def ensure_schema() -> None:
     async with await connect() as conn:
@@ -15,6 +18,14 @@ async def ensure_schema() -> None:
             )
         ''')
         for workflow_type in WORKFLOW_LABELS:
+            source = INITIAL_SOURCES.get(workflow_type)
+            if source:
+                # A type added later starts with the model of the one it splits from.
+                await conn.execute('''
+                    INSERT INTO app.workflow_settings (workflow_type, settings)
+                    SELECT %s, settings FROM app.workflow_settings WHERE workflow_type = %s
+                    ON CONFLICT (workflow_type) DO NOTHING
+                ''', (workflow_type, source))
             await conn.execute('''
                 INSERT INTO app.workflow_settings (workflow_type, settings) VALUES (%s, %s)
                 ON CONFLICT (workflow_type) DO NOTHING
