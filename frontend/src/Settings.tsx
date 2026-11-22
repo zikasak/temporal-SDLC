@@ -84,6 +84,10 @@ export default function Settings() {
   const [notice, setNotice] = useState("");
   const [reload, setReload] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  // An endpoint save or removal in flight: it writes the saved workflow settings back, so the
+  // workflow form stays locked until it ends rather than have its save overwritten.
+  const [endpointBusy, setEndpointBusy] = useState(false);
+  const locked = saving || refreshing || endpointBusy;
   const dirty = data !== null && JSON.stringify(draft) !== JSON.stringify(data.workflows);
   const valid = data !== null && Object.values(draft).every((item) => validSelection(data.providers, item));
 
@@ -153,7 +157,7 @@ export default function Settings() {
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!data || !dirty || !valid || saving || refreshing) return;
+    if (!data || !dirty || !valid || locked) return;
     setSaving(true);
     setError("");
     setNotice("");
@@ -193,7 +197,7 @@ export default function Settings() {
           <div className="settings-heading">
             <h2>Workflow models</h2>
             <p>Shared across the application. Changes apply to the next model run; running agents keep their current settings.</p>
-            <button className="workflows-refresh" type="button" disabled={saving || refreshing}
+            <button className="workflows-refresh" type="button" disabled={locked}
               onClick={() => void refreshProviders()}>{refreshing ? "Refreshing providers…" : "Refresh provider options"}</button>
           </div>
           {Object.entries(data.providers).map(([adapter, provider]) => provider.error && (
@@ -212,7 +216,7 @@ export default function Settings() {
             const levels = model?.thinking_levels ?? [];
             const selectionValid = validSelection(data.providers, item);
             return (
-              <fieldset className="settings-row" key={key} disabled={saving || refreshing}>
+              <fieldset className="settings-row" key={key} disabled={locked}>
                 <legend>{label}</legend>
                 <div className="settings-fields">
                   <label htmlFor={`${key}-adapter`}><span className="settings-field-label">Adapter</span>
@@ -262,12 +266,12 @@ export default function Settings() {
           ))}
           <div className="settings-actions">
             <div className="repository-actions">
-              <button className="submit-button" type="submit" disabled={!dirty || !valid || saving || refreshing}>{saving ? "Saving…" : "Save settings"}</button>
-              <button className="workflows-refresh" type="button" disabled={!dirty || saving || refreshing} onClick={() => {
+              <button className="submit-button" type="submit" disabled={!dirty || !valid || locked}>{saving ? "Saving…" : "Save settings"}</button>
+              <button className="workflows-refresh" type="button" disabled={!dirty || locked} onClick={() => {
                 setDraft(data.workflows); setError(""); setNotice("");
               }}>Discard changes</button>
             </div>
-            <span className="field-hint" role="status">{saving ? "Saving settings…" : refreshing ? "Refreshing provider options…" : !valid ? "Resolve unavailable selections before saving" : dirty ? "Unsaved changes" : "All changes saved"}</span>
+            <span className="field-hint" role="status">{saving ? "Saving settings…" : endpointBusy ? "Saving the OpenAI endpoint…" : refreshing ? "Refreshing provider options…" : !valid ? "Resolve unavailable selections before saving" : dirty ? "Unsaved changes" : "All changes saved"}</span>
           </div>
           {error && <p className="connector-error" role="alert">{error}</p>}
           <p className="connector-notice" role="status">{notice}</p>
@@ -275,6 +279,7 @@ export default function Settings() {
       )}
       {data && typeof data.openai_endpoint.api_key_set === "boolean" && (
         <OpenAIEndpointSettings settings={data} disabled={saving || refreshing}
+          onBusyChange={setEndpointBusy}
           onSaved={(saved) => {
             // Unsaved workflow edits stay in the draft.
             setData(saved);
@@ -300,8 +305,9 @@ function validBaseUrl(value: string) {
 
 /** The shared OpenAI endpoint, administrator only: saved with the saved workflow settings
  * (PUT /settings), checked by the backend first; the API key is never shown again. */
-function OpenAIEndpointSettings({ settings, disabled, onSaved }: {
-  settings: SettingsResponse; disabled: boolean; onSaved: (saved: SettingsResponse) => void;
+function OpenAIEndpointSettings({ settings, disabled, onBusyChange, onSaved }: {
+  settings: SettingsResponse; disabled: boolean; onBusyChange: (busy: boolean) => void;
+  onSaved: (saved: SettingsResponse) => void;
 }) {
   const endpoint = settings.openai_endpoint;
   const savedUrl = endpoint.base_url ?? "";
@@ -332,6 +338,7 @@ function OpenAIEndpointSettings({ settings, disabled, onSaved }: {
 
   async function send(section: object | null, action: "save" | "remove") {
     setBusy(action);
+    onBusyChange(true);
     setError("");
     setNotice("");
     try {
@@ -350,6 +357,7 @@ function OpenAIEndpointSettings({ settings, disabled, onSaved }: {
         "Could not save the OpenAI endpoint. Your entries are still here; try again."));
     } finally {
       setBusy("");
+      onBusyChange(false);
     }
   }
 

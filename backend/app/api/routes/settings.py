@@ -57,14 +57,31 @@ def _validation_error(exc: ValidationError) -> HTTPException:
         [{**error, 'loc': ('body', *error['loc'])} for error in exc.errors()]))
 
 
+async def _stored_providers(stored: endpoints.StoredEndpoint | None,
+                            ) -> tuple[OpenAIEndpoint | None, dict[str, ProviderOptions]]:
+    """The saved endpoint with its key decrypted, and the provider options it offers.
+
+    A saved key that can no longer be decrypted does not fail the whole response: the
+    openai provider then reports it as its error, so the administrator can still load
+    the Settings page and enter the key again."""
+    try:
+        endpoint = endpoints.resolve(stored)
+    except EndpointError as exc:
+        assert stored is not None
+        providers = await get_provider_options(endpoint=None)
+        providers['openai'] = ProviderOptions(label=stored.display_name or endpoints.DEFAULT_LABEL,
+                                              error=exc.detail)
+        return None, providers
+    return endpoint, await get_provider_options(endpoint=endpoint)
+
+
 @router.get('')
 async def read_settings(user: dict = Depends(require_user)):
     try:
         admin = await _is_admin(user)
         stored = await endpoints.get_stored_endpoint()
-        endpoint = endpoints.resolve(stored)
         settings = await storage.get_settings()
-        providers = await get_provider_options(endpoint=endpoint)
+        _, providers = await _stored_providers(stored)
         return _view(settings, providers, stored, admin)
     except Exception as exc:
         raise _error(exc) from exc
@@ -73,7 +90,12 @@ async def read_settings(user: dict = Depends(require_user)):
 @router.get('/providers')
 async def read_providers():
     try:
-        endpoint = await endpoints.get_openai_endpoint()
+        try:
+            endpoint = await endpoints.get_openai_endpoint()
+        except EndpointError:
+            # The saved key cannot be decrypted: reported on the openai entry instead.
+            _, providers = await _stored_providers(await endpoints.get_stored_endpoint())
+            return providers
     except Exception as exc:
         raise _error(exc) from exc
     return await get_provider_options(endpoint=endpoint)
@@ -86,13 +108,13 @@ async def _endpoint_change(section: OpenAIEndpointInput | None,
     key encrypted for storage."""
     if section is None:
         return None, None
-    current = endpoints.resolve(stored) if stored is not None else None
-    base_url_changed = current is None or section.base_url != current.base_url
     if section.api_key is None:
-        if base_url_changed:
+        if stored is None or section.base_url != stored.base_url:
             raise EndpointError(422, 'Enter the API key for the new base URL, or save an '
                                 'empty API key to use the endpoint without one.')
-        assert current is not None and stored is not None
+        # Only a request that keeps the saved key reads it.
+        current = endpoints.resolve(stored)
+        assert current is not None
         endpoint = OpenAIEndpoint(base_url=section.base_url, api_key=current.api_key,
                                   display_name=section.display_name)
         # The display name alone changed: saved without a check, the key as it is.
@@ -134,13 +156,15 @@ async def update_settings(body: Any = Body(...), user: dict = Depends(require_us
                     'workflow_types': using})
         if changes_endpoint:
             endpoint, encrypted = await _endpoint_change(update.openai_endpoint, stored)
+            providers = await get_provider_options(endpoint=endpoint)
         else:
-            endpoint, encrypted = endpoints.resolve(stored), None
-        providers = await get_provider_options(endpoint=endpoint)
+            encrypted = None
+            endpoint, providers = await _stored_providers(stored)
         for workflow, item in settings.workflows.items():
-            if item == saved.get(workflow) and (item.adapter != 'openai' or endpoint is not None):
-                # Kept as saved: such as the defaults, or the saved choices sent along with
-                # the OpenAI endpoint, which a catalog change must not make unsavable.
+            if item == saved.get(workflow):
+                # Kept as saved: such as the defaults, the saved choices sent along with the
+                # OpenAI endpoint, which a catalog change must not make unsavable, or a saved
+                # openai choice while no endpoint is set up, whose runs fail until it is.
                 continue
             provider = providers.get(item.adapter)
             if provider is None:
