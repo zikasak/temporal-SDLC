@@ -8,6 +8,23 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 INLINE_DOCUMENT_CHARS = 8000
 MAX_REMEMBERED_CHARS = 12000
 
+# Told in a session's system prompt, which then stays the same on every turn.
+CURRENT_STATE_GUIDANCE = (
+    "\nThe latest user message ends with the session's current state in <current_state>; "
+    "it is always up to date."
+)
+
+
+def with_current_state(messages: list[BaseMessage], state: str) -> list[BaseMessage]:
+    """Add what changes from turn to turn (recorded drafts, open problems) to the latest
+    user message. Each turn is a new provider request, which reuses the cached prompt only
+    up to its first change: state in the system prompt would have every turn write the
+    whole prompt to the cache again."""
+    block = f"<current_state>\n{state}\n</current_state>"
+    if messages and isinstance(messages[-1], HumanMessage):
+        return [*messages[:-1], HumanMessage(content=f"{messages[-1].text}\n\n{block}")]
+    return [*messages, HumanMessage(content=block)]
+
 
 def model_messages(
     messages: list[dict[str, object]],
@@ -55,16 +72,12 @@ def model_messages(
         "have checked the whole document; if it is not there, say so. "
         "Model-created documents can be edited or deleted only within this conversation. "
         "After a document tool call, briefly report its result to the user."
-    ) + extra_guidance
-    if generated_documents:
-        inventory = [
-            {"uri": f"document://{item['document_id']}",
-             "filename": item["filename"], "revision": item["revision"]}
-            for item in generated_documents
-        ]
-        guidance += "\nCurrent model-created documents: " + json.dumps(
-            inventory, ensure_ascii=False
-        )
+    ) + extra_guidance + CURRENT_STATE_GUIDANCE
+    inventory = [
+        {"uri": f"document://{item['document_id']}",
+         "filename": item["filename"], "revision": item["revision"]}
+        for item in generated_documents
+    ]
     if remembered_passages and prompt and isinstance(prompt[-1], HumanMessage):
         context = (
             "\n\n<retrieved_context>\nPassages you retrieved earlier in this "
@@ -79,4 +92,6 @@ def model_messages(
         prompt[-1] = HumanMessage(content=str(prompt[-1].content) + context
                                   + "\n</retrieved_context>")
     prompt.insert(0, SystemMessage(content=guidance))
+    prompt = with_current_state(prompt, "Current model-created documents: "
+                                + json.dumps(inventory, ensure_ascii=False))
     return prompt, document_ids

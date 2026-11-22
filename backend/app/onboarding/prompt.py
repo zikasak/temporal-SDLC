@@ -10,6 +10,7 @@ from app.api_design.prompt import language_guidance
 from app.architecture.prompt import TOOLS_GUIDANCE as ARCHITECTURE_TOOLS_GUIDANCE
 from app.conversations.models import ConversationMessage
 from app.languages import describe_supported
+from app.llm.prompt import CURRENT_STATE_GUIDANCE, with_current_state
 from app.llm.questions import message_text
 from app.onboarding.models import OnboardingState, onboarding_problems
 from app.tools.questions import GUIDANCE as QUESTIONS_GUIDANCE
@@ -133,23 +134,26 @@ def turn_messages(state: OnboardingState, extra_guidance: str = "",
             f"\n\nExisting requirements: "
             f"{json.dumps((contract or {}).get('requirements', []), ensure_ascii=False)}"
             f"\nExisting API: {json.dumps((contract or {}).get('api', {}), ensure_ascii=False)}"
-            f"\nCurrent architecture: "
+            f"{CURRENT_STATE_GUIDANCE}"
+        )
+        return with_current_state(
+            [SystemMessage(content=guidance), *_conversation(state, ARCHITECTURE_DRAFT_MESSAGE)],
+            f"Current architecture: "
             f"{json.dumps(state.architecture_structure, ensure_ascii=False)}"
             f"\nRecorded conflicts: {json.dumps(state.conflicts, ensure_ascii=False)}"
-            f"\nOpen problems: {json.dumps(onboarding_problems(state), ensure_ascii=False)}"
-        )
-        return [SystemMessage(content=guidance), *_conversation(state, ARCHITECTURE_DRAFT_MESSAGE)]
+            f"\nOpen problems: {json.dumps(onboarding_problems(state), ensure_ascii=False)}")
     guidance = (
         f"{GUIDANCE}{QUESTIONS_GUIDANCE}{REVIEW_GUIDANCE if state.drafted else ''}"
         f"{language_guidance(state.language)}{extra_guidance}"
-        f"\nSupported languages: {describe_supported()}."
-        f"\n\nCurrent requirements: {json.dumps(state.requirements, ensure_ascii=False)}"
+        f"\nSupported languages: {describe_supported()}.{CURRENT_STATE_GUIDANCE}"
+    )
+    return with_current_state(
+        [SystemMessage(content=guidance), *_conversation(state, DRAFT_MESSAGE)],
+        f"Current requirements: {json.dumps(state.requirements, ensure_ascii=False)}"
         f"\nCurrent API model: {json.dumps(state.api, ensure_ascii=False)}"
         f"\nCurrent architecture: "
         f"{json.dumps(state.architecture_structure, ensure_ascii=False)}"
-        f"\nOpen problems: {json.dumps(onboarding_problems(state), ensure_ascii=False)}"
-    )
-    return [SystemMessage(content=guidance), *_conversation(state, DRAFT_MESSAGE)]
+        f"\nOpen problems: {json.dumps(onboarding_problems(state), ensure_ascii=False)}")
 
 
 def draft_fallback(requirements: int, endpoints: int, schemas: int) -> ConversationMessage:

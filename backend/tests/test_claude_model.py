@@ -99,3 +99,43 @@ async def test_claude_harness_requires_credentials(created_container, monkeypatc
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(RuntimeError, match='Claude credentials not found'):
         await created_container()
+
+
+async def test_architecture_turns_keep_the_cached_system_prompt(claude_http, monkeypatch):
+    # Each user turn is a new activity and a new native session; the provider reuses
+    # the cached prompt only up to its first change, so the system prompt must not
+    # carry the draft the previous turn recorded.
+    from temporalio.testing import ActivityEnvironment
+
+    from app.architecture import activities
+    from app.architecture.models import ArchitectureState
+
+    async def claude(workflow_type):
+        return ChatClaude(model='claude-opus-5-5', timeout=30)
+
+    monkeypatch.setattr(activities, 'get_model', claude)
+    replies, requests = claude_http
+    replies.extend([
+        [{'type': 'tool_use', 'id': 'record', 'name': 'mcp__flow__record_component',
+          'input': {'name': 'Gateway', 'responsibilities': ['Routes requests']}}],
+        [{'type': 'text', 'text': 'Drafted the gateway.'}],
+        [{'type': 'text', 'text': 'Noted.'}],
+    ])
+    state = ArchitectureState(requirements_document='FR-1: route requests')
+    environment = ActivityEnvironment()
+
+    first = await environment.run(activities.architecture_turn, state)
+    state.structure = first['structure']
+    state.messages = [{'role': 'assistant', 'content': first['reply']},
+                      {'role': 'user', 'content': 'Looks good'}]
+    await environment.run(activities.architecture_turn, state)
+
+    def system(request):
+        # The API strips the CLI's per-session billing header before caching.
+        return [block for block in request['system']
+                if not block['text'].startswith('x-anthropic-billing-header:')]
+
+    opening, _, follow_up = requests
+    assert system(follow_up) == system(opening)
+    assert 'Gateway' not in str(opening['system'])
+    assert 'Gateway' in str([item for item in follow_up['messages'] if item['role'] == 'user'])

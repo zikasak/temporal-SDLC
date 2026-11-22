@@ -6,6 +6,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from app.conversations.models import ConversationMessage
+from app.llm.prompt import CURRENT_STATE_GUIDANCE, with_current_state
 from app.llm.questions import Question, answers_text, message_text
 from app.requirements.models import TASK_KINDS, Requirement, TaskKind
 from app.tools.questions import GUIDANCE as QUESTIONS_GUIDANCE
@@ -196,14 +197,12 @@ SERVICE_GUIDANCE = (
 )
 
 
-def service_guidance(published: list[Requirement], retired: list[Requirement]) -> str:
+def service_guidance(published: list[Requirement]) -> str:
     """What a change to an existing service is told about the contract it changes."""
     if not published:
         return ""
     return (SERVICE_GUIDANCE + "\nThe service's requirements: "
-            + json.dumps(published, ensure_ascii=False)
-            + "\nRetired by this change so far: "
-            + json.dumps([item["id"] for item in retired]))
+            + json.dumps(published, ensure_ascii=False))
 
 
 def kind_guidance(kind: TaskKind | None) -> str:
@@ -240,10 +239,12 @@ def interview_messages(
 ) -> list[BaseMessage]:
     """`published` are the requirements of the service a change starts from."""
     guidance = (INTERVIEWER_GUIDANCE + QUESTIONS_GUIDANCE + kind_guidance(kind) + extra_guidance
-                + service_guidance(published or [], retired or [])
-                + "\nRequirements recorded so far: "
-                + json.dumps(requirements, ensure_ascii=False))
-    return [SystemMessage(content=guidance), *_conversation(messages)]
+                + service_guidance(published or []) + CURRENT_STATE_GUIDANCE)
+    state = "Requirements recorded so far: " + json.dumps(requirements, ensure_ascii=False)
+    if published:
+        state += ("\nRetired by this change so far: "
+                  + json.dumps([item["id"] for item in retired or []]))
+    return with_current_state([SystemMessage(content=guidance), *_conversation(messages)], state)
 
 
 def document_messages(

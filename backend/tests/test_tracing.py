@@ -40,6 +40,8 @@ def tracing_server():
             payload = json.loads(body)
             user = next(item['content'] for item in reversed(payload['messages'])
                         if item['role'] == 'user')
+            # Echo what the user wrote, without the session state the prompt appends.
+            user = user.split('\n\n<current_state>')[0]
             if 'provider-error' in user:
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
