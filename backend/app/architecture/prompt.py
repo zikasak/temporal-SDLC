@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 
 from app.architecture.models import ArchitectureState, architecture_problems
 from app.conversations.models import ConversationMessage
-from app.llm.prompt import CURRENT_STATE_GUIDANCE, with_current_state
+from app.llm.prompt import CURRENT_STATE_GUIDANCE, changes_since, with_current_state
 from app.llm.questions import message_text
 from app.tools.questions import GUIDANCE as QUESTIONS_GUIDANCE
 
@@ -44,6 +44,17 @@ CHANGE_GUIDANCE = (
     "repository's existing contracts/architecture.md; change only what the change document "
     "needs and keep everything else as it is."
 )
+
+EXISTING_STRUCTURE_GUIDANCE = (
+    " The current state lists only what this session changed of the existing architecture: "
+    "the components, data flows and technology choices recorded (added or replaced, in "
+    "full), and the names, \"source → target\" pairs and topics of those removed."
+)
+STRUCTURE_KEYS = {
+    "components": lambda item: item["name"],
+    "data_flows": lambda item: f"{item['source']} → {item['target']}",
+    "technology_choices": lambda item: item["topic"],
+}
 
 SKIP_GUIDANCE = (
     "\nBefore drafting, judge whether this API change needs any new architecture at all. "
@@ -98,6 +109,8 @@ def turn_messages(state: ArchitectureState, may_skip: bool,
                   extra_guidance: str = "") -> list[BaseMessage]:
     change = bool(state.change_document)
     current = state.structure if state.structure is not None else state.existing_structure
+    # The existing architecture the system prompt shows; the state is then its changes.
+    baseline = state.existing_structure if state.existing_architecture else None
     guidance = (
         f"{ARCHITECT_GUIDANCE}{QUESTIONS_GUIDANCE}{CHANGE_GUIDANCE if change else ''}"
         f"{SKIP_GUIDANCE if may_skip else ''}"
@@ -107,6 +120,7 @@ def turn_messages(state: ArchitectureState, may_skip: bool,
            if change else "")
         + (f"\n\n<existing_architecture>\n{state.existing_architecture}\n"
            "</existing_architecture>" if state.existing_architecture else "")
+        + (EXISTING_STRUCTURE_GUIDANCE if baseline is not None else "")
         + CURRENT_STATE_GUIDANCE
     )
     conversation: list[BaseMessage] = [
@@ -116,7 +130,13 @@ def turn_messages(state: ArchitectureState, may_skip: bool,
         else AIMessage(content=message_text(item))
         for item in state.messages
     ]
+    shown = (
+        f"Current architecture: {json.dumps(current, ensure_ascii=False)}"
+        if baseline is None or current is None
+        else "Changes to the existing architecture so far: " + json.dumps(
+            changes_since(baseline, current, STRUCTURE_KEYS),
+            ensure_ascii=False))
     return with_current_state(
         [SystemMessage(content=guidance), *conversation],
-        f"Current architecture: {json.dumps(current, ensure_ascii=False)}"
-        f"\nOpen problems: {json.dumps(architecture_problems(current), ensure_ascii=False)}")
+        f"{shown}\nOpen problems: "
+        f"{json.dumps(architecture_problems(current), ensure_ascii=False)}")
