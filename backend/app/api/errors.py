@@ -1,7 +1,10 @@
 import logging
+from collections.abc import Sequence
+from typing import Any
 
 import psycopg
 from fastapi import HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -49,6 +52,21 @@ async def temporal_unavailable_response(request: Request, exc: Exception) -> JSO
             return JSONResponse(status_code=404, content={"detail": detail})
     detail = exc.detail if isinstance(exc, HTTPException) else TEMPORAL_UNAVAILABLE
     return JSONResponse(status_code=503, content={"detail": detail or TEMPORAL_UNAVAILABLE})
+
+
+def validation_detail(errors: Sequence[Any]) -> str:
+    """One readable message for validation errors, built from their locations and
+    messages only: the submitted inputs could hold secrets."""
+    parts = []
+    for error in errors:
+        loc = [str(part) for part in error.get('loc', ()) if part != 'body']
+        msg = str(error.get('msg') or 'Invalid value')
+        parts.append(f"{'.'.join(loc)}: {msg}" if loc else msg)
+    return '; '.join(parts) or 'The request is invalid.'
+
+
+async def request_validation_response(_: Request, exc: RequestValidationError) -> JSONResponse:
+    return JSONResponse(status_code=422, content={'detail': validation_detail(exc.errors())})
 
 
 def http_error(exc: Exception) -> HTTPException:

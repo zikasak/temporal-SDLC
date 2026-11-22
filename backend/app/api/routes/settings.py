@@ -5,7 +5,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from app.api.errors import http_error
+from app.api.errors import http_error, validation_detail
 from app.api.routes.auth import require_user
 from app.auth import storage as auth_storage
 from app.settings import endpoint as endpoints
@@ -53,9 +53,8 @@ def _view(settings: WorkflowSettings, providers: dict[str, ProviderOptions],
 
 def _validation_error(exc: ValidationError) -> HTTPException:
     # Without the inputs: they could hold the API key.
-    return HTTPException(status_code=422, detail=[
-        {'loc': ['body', *error['loc']], 'msg': error['msg'], 'type': error['type']}
-        for error in exc.errors()])
+    return HTTPException(status_code=422, detail=validation_detail(
+        [{**error, 'loc': ('body', *error['loc'])} for error in exc.errors()]))
 
 
 @router.get('')
