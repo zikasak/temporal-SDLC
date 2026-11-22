@@ -38,8 +38,8 @@ from app.temporal.executions import ensure_search_attributes
 from app.temporal.workflows import ApiDesignWorkflow, RequirementsWorkflow
 from tests.pipeline import (
     ADDED_COMPONENT_TESTS, ADDED_TESTS, BASELINE_IMAGE, BROKEN_TEST, CHANGED_COMPONENT_IMAGE,
-    ADDED_SEAM, CODE, COMPONENT_IMAGE, SEAM, SEAM_IMAGE, FakeCodegenWorkflow, FakeStages,
-    finished, legacy_patch_markers, patch_ids, stage_workers,
+    ADDED_PAGE, ADDED_SEAM, CODE, COMPONENT_IMAGE, PAGE, SEAM, SEAM_IMAGE, FakeCodegenWorkflow,
+    FakeStages, finished, legacy_patch_markers, patch_ids, stage_workers,
 )
 from tests.dev_server import start_dev_server
 
@@ -1048,6 +1048,52 @@ async def test_a_seam_the_code_lacks_is_added_first_and_the_bug_reproduced_throu
     change, = worker.pull_request_changes
     assert change['proofs'] == {'component': [
         {'id': 'FR-2', 'title': 'Rooms double-book', 'seam': ADDED_SEAM}]}
+
+
+async def test_a_criterion_only_a_laid_out_page_shows_gets_browser_tests_red_then_green(
+        env, worker, repository_selection):
+    worker.routes = [{'FR-2': 'browser'}]
+    handle, state = await fixed(env, repository_selection)
+    # The component author writes the browser tests, and the component runs prove them.
+    assert worker.stages == ['routing', 'component-tests', 'baseline', 'component-baseline',
+                             'implementation', 'component-runner', 'component-verification']
+    context, = worker.component_contexts
+    assert context['routes'] == {'FR-2': {'route': 'browser', 'reason': 'Route of FR-2.',
+                                          'source': 'routing', 'page': PAGE}}
+    assert state.routing_status == 'routed' and state.baseline_status == 'reproduced'
+    assert state.verification_status == 'completed'
+    # The fix and the review know the page the criterion is observed at.
+    implementation, = worker.implementation_contexts
+    assert implementation['component_routes'] == context['routes']
+    change, = worker.pull_request_changes
+    assert change['proofs'] == {'browser': [
+        {'id': 'FR-2', 'title': 'Rooms double-book', 'page': PAGE}]}
+
+
+async def test_an_element_the_page_lacks_is_added_first_through_the_seam_step(
+        env, worker, repository_selection):
+    worker.routes = [{'FR-2': 'browser-added'}]
+    handle, state = await fixed(env, repository_selection)
+    assert worker.stages[:3] == ['routing', 'seam', 'component-tests']
+    seam, = worker.seam_contexts
+    assert seam['seam'] == {'frontend/page:/': ['testid=popup']}
+    assert seam['component_routes']['FR-2']['page'] == ADDED_PAGE
+    assert state.seam_status == 'prepared' and state.verification_status == 'completed'
+
+
+async def test_a_run_from_before_the_browser_tests_stops_at_a_browser_route(
+        env, worker, repository_selection, monkeypatch):
+    from temporalio import workflow
+    patched = workflow.patched
+    # The run's history was recorded without the patch's marker.
+    monkeypatch.setattr(workflow, 'patched',
+                        lambda id: False if id == 'browser-tests' else patched(id))
+    worker.routes = [{'FR-2': 'browser'}]
+    handle, state = await fixed(env, repository_selection)
+    assert worker.stages == ['routing']
+    assert state.routing_status == 'unsupported'
+    assert 'FR-2' in (state.routing_error or '')
+    assert state.baseline_status == 'skipped' and state.publication_status == 'skipped'
 
 
 @pytest.mark.parametrize('outcome', ['failed', 'nonconforming'])

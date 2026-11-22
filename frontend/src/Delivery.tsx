@@ -32,17 +32,27 @@ type ProviderWait = { workflow_id: string; stage: string; until: string; message
 type BaselineStatus = "not_applicable" | "waiting" | "running" | "reproduced" | "not_reproduced" |
   "skipped" | "error";
 // Which suite can prove each acceptance criterion of a change: `routed` when every one has
-// one, `unobservable` when one has none and the delivery stopped before its tests ran.
-type RoutingStatus = "not_applicable" | "waiting" | "running" | "routed" | "unobservable" | "error";
+// one, `unobservable` when one has none and the delivery stopped before its tests ran,
+// `unsupported` when a delivery started before browser tests existed routed one to them.
+type RoutingStatus = "not_applicable" | "waiting" | "running" | "routed" | "unobservable" |
+  "unsupported" | "error";
 // The module and symbols of the code at which a `component` route observes its criterion;
 // `added` are those the code does not have yet, which the change adds first. `part` names
 // the part of the repository the seam is in, such as `frontend`; absent for the service.
 type Seam = { part?: string; module: string; symbols: string[]; added: string[] };
+// An element of a page as a browser test finds it: an ARIA role with its accessible name,
+// or a data-testid.
+type PageElement = { role?: string; name?: string; testid?: string };
+// The page of a part's web client at which a `browser` route observes its criterion in a
+// real browser: its entry, the viewports it holds in and the elements its test finds;
+// `added` are those the page lacks yet, which the change adds first.
+type Page = { part: string; entry: string; viewports: string[]; roles: PageElement[]; added: PageElement[] };
 // `prepared`: the code has the seam the change adds first, matching its component contract.
 type SeamStatus = "not_applicable" | "waiting" | "running" | "prepared" | "error";
 // `source`: who decided the route, the routing stage or the test author.
 type RequirementRoute = {
-  route: "contract" | "component" | "unobservable"; reason: string; source: "routing" | "tests"; seam?: Seam;
+  route: "contract" | "component" | "browser" | "unobservable"; reason: string; source: "routing" | "tests";
+  seam?: Seam; page?: Page;
 };
 // `tests` are the failing tests the diagnosis found broken: the only ones a repair may change.
 // `suite` names the tests a repair of a change with component tests corrected.
@@ -245,7 +255,7 @@ const baselineStatuses: BaselineStatus[] = [
   "not_applicable", "waiting", "running", "reproduced", "not_reproduced", "skipped", "error",
 ];
 const routingStatuses: RoutingStatus[] = [
-  "not_applicable", "waiting", "running", "routed", "unobservable", "error",
+  "not_applicable", "waiting", "running", "routed", "unobservable", "unsupported", "error",
 ];
 const seamStatuses: SeamStatus[] = ["not_applicable", "waiting", "running", "prepared", "error"];
 const publicationStatuses: PublicationStatus[] = [
@@ -280,13 +290,35 @@ function seam(value: unknown): Seam | undefined {
     } : undefined;
 }
 
+function pageElements(value: unknown): PageElement[] {
+  return Array.isArray(value) ? value.filter((item): item is PageElement => isObject(item) &&
+    (typeof item.testid === "string" || typeof item.role === "string")) : [];
+}
+
+function page(value: unknown): Page | undefined {
+  return isObject(value) && typeof value.part === "string" && typeof value.entry === "string"
+    ? { part: value.part, entry: value.entry, viewports: strings(value.viewports),
+      roles: pageElements(value.roles), added: pageElements(value.added) } : undefined;
+}
+
+/** How a page's element is named, as the page contract's checks name it. */
+export function elementLabel(element: PageElement): string {
+  if (element.testid !== undefined) return `testid=${element.testid}`;
+  return element.name !== undefined ? `role=${element.role}[name=${JSON.stringify(element.name)}]`
+    : `role=${element.role}`;
+}
+
 function routes(value: unknown): Record<string, RequirementRoute> | null {
   if (!isObject(value)) return null;
   return Object.fromEntries(Object.entries(value).filter(([, item]) => isObject(item) &&
     (item.route === "contract" || item.route === "unobservable" ||
-      item.route === "component" && seam(item.seam) !== undefined) && typeof item.reason === "string" &&
+      item.route === "component" && seam(item.seam) !== undefined ||
+      item.route === "browser" && page(item.page) !== undefined) && typeof item.reason === "string" &&
     (item.source === "routing" || item.source === "tests"))
-    .map(([requirement, item]) => [requirement, { ...item as RequirementRoute, seam: seam((item as RequirementRoute).seam) }]));
+    .map(([requirement, item]) => [requirement, {
+      ...item as RequirementRoute, seam: seam((item as RequirementRoute).seam),
+      page: page((item as RequirementRoute).page),
+    }]));
 }
 
 function reviewRounds(value: unknown): ReviewRound[] {
@@ -603,6 +635,15 @@ function failurePart(item: TestFailure, parts: string[]): string {
     .sort((a, b) => b.length - a.length)[0] ?? "service";
 }
 
+/** How a member of a component run is named: the service, a part, or a part's browser tests
+ * (`frontend~browser`). */
+function partTitle(part: string): ReactNode {
+  if (part === "service") return "Service";
+  return part.endsWith("~browser")
+    ? <>Part <code>{part.slice(0, -"~browser".length)}</code> (browser)</>
+    : <>Part <code>{part}</code></>;
+}
+
 /** A component run's tests of each part of the repository, with that part's failures. */
 function PartRuns({ result }: { result: VerificationResult }) {
   const parts = Object.keys(result.parts ?? {})
@@ -613,7 +654,7 @@ function PartRuns({ result }: { result: VerificationResult }) {
       .map((item) => part === "service" ? item
         : { ...item, class_name: item.class_name.slice(part.length + 1) });
     return <div key={part} className="part-run">
-      <h5>{part === "service" ? "Service" : <>Part <code>{part}</code></>}</h5>
+      <h5>{partTitle(part)}</h5>
       <p className="verification-counts">
         {counts.tests} tests · {counts.passed} passed · {counts.failures} failed · {counts.errors} errors · {counts.skipped} skipped
       </p>
@@ -681,12 +722,17 @@ function Routing({ progress, retrying, disabled, onRetry }: {
         Deciding which tests can prove each acceptance criterion…
       </p>}
       {stage === "routed" && <p className="verification-outcome verification-passed" role="status">
-        {entries.some(([, item]) => item.route === "component")
-          ? "Every acceptance criterion can be proved by the contract or component tests"
-          : "Every acceptance criterion can be proved by the contract tests"}
+        {entries.some(([, item]) => item.route === "browser")
+          ? "Every acceptance criterion can be proved by the contract, component or browser tests"
+          : entries.some(([, item]) => item.route === "component")
+            ? "Every acceptance criterion can be proved by the contract or component tests"
+            : "Every acceptance criterion can be proved by the contract tests"}
       </p>}
       {stage === "unobservable" && <p className="verification-outcome verification-failed" role="status">
         Some acceptance criteria cannot be proved by any test
+      </p>}
+      {stage === "unsupported" && <p className="verification-outcome verification-failed" role="status">
+        Some acceptance criteria were routed to browser tests, which this run cannot run
       </p>}
       {stage === "error" && <p className="verification-outcome verification-error" role="status">
         The routing did not complete
@@ -695,6 +741,7 @@ function Routing({ progress, retrying, disabled, onRetry }: {
         {entries.map(([requirement, item]) => <li key={requirement}>
           <strong>{requirement}: {item.route === "contract" ? "contract tests"
             : item.route === "component" ? (item.seam?.part ? `component tests of part ${item.seam.part}` : "component tests")
+            : item.route === "browser" ? `browser tests of part ${item.page?.part ?? ""}`
             : "cannot be observed"}</strong>
           <span>{item.reason}{item.source === "tests" ? " (found by the test author)" : ""}</span>
           {item.seam && <span>Seam: <code>{item.seam.part ? `${item.seam.part}: ` : ""}{item.seam.module}</code>
@@ -703,6 +750,12 @@ function Routing({ progress, retrying, disabled, onRetry }: {
           {item.seam && item.seam.added.length > 0 && <span>
             Added by the change first: {item.seam.added.map((symbol, index) =>
               <span key={symbol}>{index > 0 && ", "}<code>{symbol}</code></span>)}</span>}
+          {item.page && <span>Page: <code>{item.page.part}: {item.page.entry}</code>
+            {item.page.viewports.length > 0 && <> at {item.page.viewports.map((name, index) =>
+              <span key={name}>{index > 0 && ", "}<code>{name}</code></span>)}</>}</span>}
+          {item.page && item.page.added.length > 0 && <span>
+            Added by the change first: {item.page.added.map((element, index) =>
+              <span key={elementLabel(element)}>{index > 0 && ", "}<code>{elementLabel(element)}</code></span>)}</span>}
         </li>)}
       </ul>}
       {progress.seam_status === "running" && <p role="status">

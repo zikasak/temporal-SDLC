@@ -43,6 +43,12 @@ SEAM = {"module": "service.rooms", "symbols": ["Rooms.close"]}
 ADDED_SEAM = {"module": "service.rooms", "symbols": ["Rooms.close", "Rooms.merged"],
               "added": ["Rooms.merged"]}
 SEAM_IMAGE = "sha256:" + "7" * 64
+# A page of the web client a `browser` route observes its criterion at, and one with an
+# element the page lacks yet, which the change adds first.
+PAGE = {"part": "frontend", "entry": "/", "viewports": ["desktop", "narrow"],
+        "roles": [{"role": "button", "name": "FR-1"}, {"role": "tooltip"}]}
+ADDED_PAGE = {**PAGE, "roles": [*PAGE["roles"], {"testid": "popup"}],
+              "added": [{"testid": "popup"}]}
 BROKEN_TEST = {"class_name": "RoomsTest", "name": "lists"}
 # How long `abandoned` waits in real time for a flow session to close.
 ABANDON_POLLS = 400
@@ -335,14 +341,17 @@ class FakeStages:
                 non_retryable=True)
         routes = self.routes[min(len(self.routed), len(self.routes) - 1)]
         self.routed.append(context)
+        kinds = {'component-added': 'component', 'browser-added': 'browser'}
+        details = {'component': {'seam': SEAM}, 'component-added': {'seam': ADDED_SEAM},
+                   'browser': {'page': PAGE}, 'browser-added': {'page': ADDED_PAGE}}
         return {'session_id': session_id, 'path': '/routing', 'routes': {
-            item['id']: {'route': ('component' if routes.get(item['id']) == 'component-added'
-                                   else routes.get(item['id'], 'contract')),
+            item['id']: {'route': kinds.get(routes.get(item['id'], 'contract'),
+                                            routes.get(item['id'], 'contract')),
                          'reason': f'Route of {item["id"]}.',
-                         **({'seam': SEAM} if routes.get(item['id']) == 'component'
-                            else {'seam': ADDED_SEAM}
-                            if routes.get(item['id']) == 'component-added' else {})}
-            for item in context['brief']['requirements']}}
+                         **details.get(routes.get(item['id'], 'contract'), {})}
+            for item in context['brief']['requirements']},
+            **({'repository_parts': ['frontend']} if any(
+                route.startswith('browser') for route in routes.values()) else {})}
 
     @activity.defn(name='generate_component_tests')
     async def generate_component_tests(self, session_id: str,

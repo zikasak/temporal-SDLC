@@ -20,6 +20,10 @@ with workflow.unsafe.imports_passed_through():
 RESTORE_KEPT_PATCH = 'restore-kept-tests'
 COMPONENT_TESTS_PATCH = 'component-tests'
 COMPONENT_REPAIRS_PATCH = 'component-repairs'
+# Marks the workflow code that takes criteria routed to a page of a part's web client
+# (the `browser` route) to the component author and its runners. A delivery whose
+# history was recorded before it stops at such a route as `unsupported`.
+BROWSER_TESTS_PATCH = 'browser-tests'
 # Marks the workflow code that sends a review finding reported again after its correction
 # for another one, up to MAX_FINDING_CORRECTIONS; tells the analysis of failed checks the
 # findings being corrected, and leaves a finding it finds failing tests no author may
@@ -120,9 +124,10 @@ class Stages(FlowBase):
         return context
 
     def _component_routes(self) -> dict[str, Any]:
-        """The criteria routed to a seam, with their reasons and seams."""
+        """The criteria routed to a seam, with their reasons and seams, and those routed to
+        a page of a part's web client, with their pages: the component suite proves both."""
         return {requirement: route for requirement, route in (self.progress.routing or {}).items()
-                if route['route'] == 'component'}
+                if route['route'] in ('component', 'browser')}
 
     def _seam_prepared(self) -> bool:
         return self.progress.seam_status == 'prepared' and self.progress.seam is not None
@@ -131,7 +136,14 @@ class Stages(FlowBase):
                       ) -> tuple[RoutingStatus, str | None]:
         if any(item['route'] == 'component' for item in routing.values()):
             workflow.deprecate_patch(COMPONENT_TESTS_PATCH)
-        return judge_routes(routing)
+        browser = [requirement for requirement, item in routing.items()
+                   if item['route'] == 'browser']
+        if browser and not workflow.patched(BROWSER_TESTS_PATCH):
+            return 'unsupported', (
+                f'The acceptance criteria {", ".join(browser)} were routed to browser tests, '
+                'which this run of the delivery, started before they existed, cannot run. '
+                'Retry the tests to route them again with browser tests.')
+        return judge_routes(routing, self.state.routing_parts)
 
     def _declined(self, unobservable: list[dict[str, str]]) -> None:
         """Record criteria a test author found its suite cannot observe."""
@@ -140,9 +152,12 @@ class Stages(FlowBase):
             # The seam it was routed to, if any, is kept: a new routing is told of it.
             earlier = routing.get(item['requirement_id'])
             seam = earlier.get('seam') if earlier else None
+            page = earlier.get('page') if earlier else None
             route = RequirementRoute(route='unobservable', reason=item['reason'], source='tests')
             if seam:
                 route['seam'] = seam
+            if page:
+                route['page'] = page
             routing[item['requirement_id']] = route
         self.progress.routing = routing
         self.progress.routing_status, self.progress.routing_error = self._judge_routes(routing)

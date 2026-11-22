@@ -186,6 +186,30 @@ not fed back into the completed coding agent, and automatic Temporal/model retri
 disabled, except that a provider's limits are waited for (see
 [the model provider's limits](#the-model-providers-limits)).
 
+## Images pulled ahead of use
+
+The browser tests' runners are built on the pinned Playwright image (about 1.5 GB), which
+no delivery should wait for or fail on when the registry is unreachable.
+`PREPULLED_IMAGES` (`app/images.py`, re-exported by `app/docker_agents.py`) lists such
+images by tag and digest; the browser suite's and page contract's Dockerfiles are built
+`FROM ${BASE_IMAGE}`, a build argument generated from the same constant, with
+`--pull=false`. The sandbox worker (`app/agent_workflows/worker.py`) starts
+`ensure_images(PREPULLED_IMAGES)` in the background before its workers poll: for each
+image, `docker image inspect`, then `docker pull` only when it is missing, bounded to 15
+minutes and three attempts with backoff, logging the outcome and the time taken. Every
+activity that builds or runs a browser runner calls `ensure_image` first; it costs one
+inspect when the image is there, and otherwise waits for the same pull as any other
+caller in the process. A pull that fails there raises `ImageUnavailable`, naming the
+image: an infrastructure error of the stage, never a test failure or a contract
+mismatch. The images live in the daemon the sandbox worker drives: the `sandbox`
+service's `sandbox_data` volume in `docker-compose.coolify.yml`, so a redeploy pulls
+nothing, and the host's daemon in local development (`backend/tools/dev_stack.py` starts
+the same worker). Nothing in the platform prunes images; any cleanup of that daemon must
+spare `PREPULLED_IMAGES`. Changing a reference there makes the next worker start pull the
+new image, and the old one stays until a person removes it, so a delivery still running
+on it is not broken mid-run. A backend test fails when the browser suite's
+`@playwright/test` version differs from the image's tag.
+
 ## Shared execution machinery
 
 `backend/app/agent_workflows/` contains the reusable execution machinery:
@@ -747,6 +771,91 @@ flowchart LR
    failures, errors, skipped}, frontend: {…}}`, by `CompositeSuite.part_of`), and the
    delivery page shows each part's counts and failures under its name, and names the part
    in the routing line of a criterion routed to it.
+   A criterion that only a laid-out page shows (cut off by a scrolling panel, covered,
+   inside the window or not, at a window size, by hover or by tap) is routed **`browser`**
+   (`plans/browser-route.md`): jsdom does no layout, so neither a contract nor a
+   component test can decide it. A part language opts in with `detect_browser`,
+   `browser_contract` and `browser_suite` (`PartLanguage`); TypeScript's
+   (`app/languages/typescript/browser.py`) takes a part with `vite` among its
+   dependencies and an `index.html`, which `component_parts` then lists a second time as
+   that part's browser tests (`ComponentPart(browser=True)`, key `frontend~browser`). The
+   routing input marks such a part `browser: true`, `language.json` gives the page
+   contract's instructions as `part_browser`, and the prompt (`BROWSER_PROMPT`) prefers
+   `contract` and `component` and asks the agent to define the viewports from the
+   criterion and the client's CSS breakpoints. A browser route names its page,
+   `page: {part, entry, viewports, roles, added?}`, which `read_page` checks. The **page
+   contract** is written in `parts/P/browser/`, published in `contracts/parts/P/browser/`
+   and kept in `routing/parts/P/browser/`, with the API's operations beside it in
+   `routing/parts/P/operations.json`. It holds `pages.json` (`api_prefix` and, per page,
+   its `entry`, the `operations` it calls on load, the `elements` present once it is idle
+   as `{role, name?}` or `{testid}`, and `actions`: a `target`, an `input` of `reveal`,
+   `hover`, `tap`, `click` or `focus`, the elements it `shows` and the operations it
+   calls), `fixtures/<operationId>[.<case>].json` (`{status, body}`) and
+   `viewports.json` (`{name: {width, height, input: mouse | touch, scale?}}`).
+   `app/routing/browser.py` checks it: every fixture body validates against its
+   operation's response schema in the API's OpenAPI document (rendered from the
+   delivery's API design, or `contracts/openapi.yaml`, whose OpenAPI 3.0 `nullable`
+   schemas are read as JSON Schema's null type), every operation exists and has a
+   default fixture, viewports are lowercase names of 280–3840 × 400–2160 at scale 1–3,
+   every route's page, viewports and roles are declared, every new viewport is named by
+   a route, and a published page, element, action, fixture or viewport is only extended.
+   The trusted conformance runner (`app/languages/typescript/browser_contract/`) builds
+   the part with `npm ci --ignore-scripts` and `vite build` on the pinned Playwright
+   image and opens every page at every viewport without a network, answering the API from
+   the fixtures (`check-pages.mjs`, also given to the routing agent in
+   `/workspace/tools/`). It fails when a declared element is not found once the page is
+   idle (`Page / at desktop: role=tooltip is not present`), when an element a route
+   `added` is there already on that route's page (only there: another page may show it),
+   or when the page calls an operation the contract does not declare. Both runners send a
+   fixture's `body: null` as the JSON literal `null` where the operation's response for
+   its status has a JSON body (`json` in `operations.json`), and as no body where it has
+   none. The **browser suite** (`BrowserSuite`, template in `browser_suite/`) is a
+   Playwright project pinned to `@playwright/test` 1.65.1, whose trusted
+   `playwright.config.mjs` makes one project per viewport, each running only the tests
+   tagged with its name (`test('…', { tag: ['@narrow'] }, …)`), with `reducedMotion`,
+   `locale`, `timezoneId`, `serviceWorkers: 'block'` and the viewport's
+   `deviceScaleFactor` fixed. The trusted helpers in `tests/support/` (`fixture`,
+   `expectFullyVisible`, `expectInViewport`, `reveal`, `settle`) answer every API request
+   from the fixtures and fail a test on any it did not answer, naming the operation;
+   `ComponentSuite.trusted` puts them over the author's copies whenever the suite is
+   copied. The runner builds the part, serves `dist/` on 127.0.0.1 with a SPA fallback,
+   collects the suite with `playwright test --list` and runs it under one 600-second
+   timeout, writing JUnit with its own reporter: the class name is the file and the
+   viewport (`tests/popup.spec.ts#narrow`) after `CLASSNAME_PREFIX`, which `build_runner`
+   builds into the image as the member's prefix (`frontend~browser:`), since the browser
+   runner runs on its own rather than inside the composite runner. The build also
+   refuses a suite whose installed `@playwright/test` is not the image's release
+   (`PLAYWRIGHT_VERSION`). So a test's identity is
+   `tests/popup.spec.ts#narrow > the requirement popup > is fully visible`, one per
+   viewport tag, read on the host from the tokens. A test without a literal viewport tag
+   cannot be tracked, and `check_viewports` rejects a tag the page contract lacks. In the
+   delivery's `CompositeSuite` the browser tests of part `P` are a member named
+   `P~browser`, at `browser/P/` of the suite, with test names and class names starting
+   `P~browser:`; the repository keeps them in `P/browser-tests/` (left out by
+   `is_service_file`) and the snapshot in `repository-tests/components/browser/P/`. The
+   Playwright image cannot join the in-process runners' image, so `build_runner` builds
+   it on its own and records, under the image the workflow runs
+   (`component-runners/<image>.json`, `record_runners`), the runners beside it;
+   `run_component_suite` runs each in turn without a network (the browser runner with a
+   larger `/dev/shm` and process limit) within one 28-minute bound for all of them
+   (`RUN_SECONDS`, inside the activity's 30 minutes; a runner no time is left for is
+   reported as stopped), merges their reports under names the service
+   language's pattern matches and reads them as one run, its exit status the worst of
+   theirs. A delivery whose criteria are all `browser` runs the browser runner alone. The
+   workflow treats `browser` routes as component routes (`_component_routes`): one author
+   writes every project, the fix and the review are given the pages, and the pull
+   request's proofs name `frontend (browser): /` with the viewports. An element a page
+   lacks (`page.added`) is added first through the seam step, keyed `P/page:<entry>` by
+   `added_seams`, as an attribute on an element the page already renders. The
+   `browser-tests` workflow patch gates the route: a run recorded before it sets
+   `routing_status: unsupported` for a browser route and stops. When the repository has
+   parts, the stop message for an unobservable criterion asks for behaviour "the HTTP
+   API, a seam of the code or a page of the web client shows", and for a criterion whose
+   reason is about layout it suggests the measurable form the requirements interview now
+   asks for (`LAYOUT_CRITERIA` in `app/requirements/prompt.py`).
+   `tests/test_browser_route.py` covers the host side; `tests/test_browser_docker.py`
+   builds and runs both runners against `tests/browser_page/` with
+   `RUN_DOCKER_VERIFICATION_TESTS=1`.
 1a. **Seam.** When a route has `added` symbols, the delivery adds them before any test is
    written (`_prepare_seam` in `DeliveryWorkflow`): `ImplementationWorkflow` runs with
    `seam` (the symbols by module) in its context, and `implement_service` hands it to

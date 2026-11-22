@@ -20,7 +20,9 @@ from app.agent_workflows.host import (
 from app.agent_workflows.parts import repository_parts
 from app.config import GENERATED_CODE_DIR
 from app.docker_agents import default_agent_image
-from app.github.checkout import CHECKOUT_DIR, COMPONENT_TESTS_DIR, CONTRACTS_DIR, TESTS_DIR
+from app.github.checkout import (
+    BROWSER_TESTS_DIR, CHECKOUT_DIR, COMPONENT_TESTS_DIR, CONTRACTS_DIR, TESTS_DIR,
+)
 from app.languages import Language
 from app.requirements.document import without_repeated_tables
 from app.routing.models import SEAM_ERROR
@@ -37,13 +39,15 @@ BARE_REPOSITORY = re.compile(r'(readme|licen[cs]e|copying)(\..*)?|\.git.*|\.gith
 
 def is_service_file(language: Language, relative: Path, unit_tests: bool = False) -> bool:
     """Source files only: never build metadata, agent logs or the repository's contract
-    tests, published contracts (of every part, under contracts/) and component tests, the
-    service's at the root and each other part's inside it. The project's own unit tests
-    (in the language's test directories) only with `unit_tests`."""
+    tests, published contracts (of every part, under contracts/), component tests, the
+    service's at the root and each other part's inside it, and each part's browser tests.
+    The project's own unit tests (in the language's test directories) only with
+    `unit_tests`."""
     excluded = (EXCLUDED | set(language.build_dirs)
                 | (set() if unit_tests else set(language.implementation.test_dirs)))
     return (relative.parts[0] not in (TESTS_DIR, CONTRACTS_DIR)
             and COMPONENT_TESTS_DIR not in relative.parts
+            and BROWSER_TESTS_DIR not in relative.parts
             and not any(part.lower() in excluded for part in relative.parts))
 
 
@@ -301,7 +305,10 @@ async def prepare_seam(language: Language, session_id: str,
     except ValueError as exc:
         raise seam_error(str(exc)) from exc
     for part in parts:
-        if part.contract is None:
+        if part.browser:
+            if part.browser_contract is None:
+                raise seam_error(f'{part.language.label} has no page contracts.')
+        elif part.contract is None:
             raise seam_error(f'{part.language.label} has no component contracts.')
     spec = dataclasses.replace(stage(language, SEAM_DIR), validate_output=_seam_output,
                                build_output=_build_seam)

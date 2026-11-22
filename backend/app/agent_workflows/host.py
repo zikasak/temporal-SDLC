@@ -115,11 +115,14 @@ def copy_regular_files(source: Path, target: Path, *,
 
 
 async def build_image(context: Path, label: str, log_path: Path,
-                      build_args: dict[str, str] | None = None) -> str:
-    """Build the image of a sanitized source tree and return its immutable ID."""
+                      build_args: dict[str, str] | None = None, pull: bool = True) -> str:
+    """Build the image of a sanitized source tree and return its immutable ID. Without
+    `pull`, its base is the copy the worker pulled ahead (docker_agents.ensure_image)."""
     iid = context.parent / 'image-id'
     arguments = [argument for key, value in (build_args or {}).items()
                  for argument in ('--build-arg', f'{key}={value}')]
+    if not pull:
+        arguments.append('--pull=false')
     await docker_agents.docker('build', *arguments, '--iidfile', str(iid), str(context),
                                log_path=log_path)
     image_id = (await run_sync(iid.read_text)).strip()

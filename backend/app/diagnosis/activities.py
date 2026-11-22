@@ -24,7 +24,7 @@ from app.diagnosis.agent import VERDICT
 from app.diagnosis.models import (
     INSTRUCTION_CHARS, SUITES, SUMMARY_CHARS, TARGETS, Diagnosis, RepairSuite, failed_tests,
 )
-from app.github.checkout import SNAPSHOT_DIR
+from app.github.checkout import BROWSER_DIR, SNAPSHOT_DIR
 from app.implementation.activities import copy_service
 from app.languages import Language
 from app.requirements.document import without_repeated_tables
@@ -100,8 +100,10 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
     if component is not None:
         tests = session_dir / COMPONENT_TESTS_ARTIFACT / 'suite'
         parts, _ = delivery_suite(language, session_dir)
+        # A part's page contract beside its stubs, under browser/.
         stubs = [(part.routed_contract(session_dir), review / COMPONENT_CONTRACT
-                  if part.is_service else review / COMPONENT_CONTRACT / PARTS_DIR / part.name)
+                  if part.is_service else review / COMPONENT_CONTRACT / PARTS_DIR / part.name
+                  / (BROWSER_DIR if part.browser else '.'))
                  for part in parts]
         if not tests.is_dir() or not all(contract.is_dir() for contract, _ in stubs):
             raise ApplicationError('The component tests are unavailable', non_retryable=True)

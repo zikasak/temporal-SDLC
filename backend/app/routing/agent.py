@@ -15,6 +15,8 @@ ROUTES = 'routes.json'
 # under PARTS/<part>/COMPONENTS.
 COMPONENTS = 'components'
 PARTS = 'parts'
+# The page contract of a part, under PARTS/<part>/BROWSER.
+BROWSER = 'browser'
 
 # What the session's language calls itself and its tests, written by the host.
 LANGUAGE = Path('/workspace/language.json')
@@ -106,10 +108,11 @@ can observe the requirement, an existing seam over an added one, and choose
 {parts}{instructions}
 
 When the input has a `declined` entry, the criteria it lists were routed before, to the
-`seam` it names or else to the contract tests, and the test author found them
-unobservable there for the `reason` it gives, having seen only the stubs or the API. Read each reason as what the stubs lacked: route the
-criterion again with stubs that give the author what it names, at that seam or at a
-better one, and route it `unobservable` only when no stub could.
+`seam` or the `page` it names or else to the contract tests, and the test author found
+them unobservable there for the `reason` it gives, having seen only the stubs, the page
+contract or the API. Read each reason as what the stubs or the page contract lacked:
+route the criterion again with a contract that gives the author what it names, at that
+seam or page or at a better one, and route it `unobservable` only when none could.
 """
 
 PARTS_PROMPT = """
@@ -131,33 +134,72 @@ a page lists but not how they are drawn.
 
 """
 
+BROWSER_PROMPT = """
+A part whose `parts` entry has `browser` is a web client that can also be opened in a real
+browser: such a part also takes `browser` routes, for a requirement that only the laid-out
+page decides, through its layout, painting, stacking, focus or real input events: an
+element cut off by a scrolling panel or covered by another, inside the window or not, its
+place at a window size, shown by hover or by tap. A browser test opens a page of the
+part's built client in headless Chromium at the viewports you define, with every API call
+answered from fixtures you write, and checks the page with trusted helpers (on top and not
+cut off at its corners and centre, inside the window). Prefer `component` whenever a
+function of the part could show the requirement in jsdom (which does no layout), and
+`contract` whenever the API shows it. For a `browser` route, write or extend the part's
+page contract as its instructions below say, and name in the route's `page` the part,
+the page's `entry`, the viewports and the elements (`roles`) the test uses; its `reason`
+says what the page shows and at which viewports, and why each viewport is there. Define
+the viewports from the requirement and from the client's CSS: where the bug is tied to a
+window size, read the client's breakpoints (@media rules) and name only the side the bug
+is on, plus the other side as a guard only when the fix could move the bug there. An
+element the page lacks, such as a role or a data-testid on an element it already renders,
+goes in the page's `added`: the change adds it first, with no other change.
+
+"""
+
 
 def prompt(language: dict) -> str:
     """The prompt, with the component route where the service's language or another part's
-    has component contracts."""
+    has component contracts, and the browser route where a part's web client has browser
+    tests."""
     parts = language.get('part_components') or {}
+    browser = language.get('part_browser') or {}
     instructions = '\n\n'.join([*([language['components']] if language.get('components')
-                                   else []), *parts.values()])
+                                   else []), *parts.values(), *browser.values()])
     if not instructions:
         return PROMPT.format(label=language['label'], component='', component_reason='', writes='',
                              routes='"contract" or "unobservable"', seam='')
+    routes = ['"contract"', '"component"', *(['"browser"'] if browser else []), '"unobservable"']
+    page = (',\n  "page": {"part": "…", "entry": "/…", "viewports": ["…"], '
+            '"roles": [{"role": "…", "name": "…"} or {"testid": "…"}], "added": [the same]} '
+            'for `browser` only, `added` only for elements the page does not have yet'
+            if browser else '')
     return PROMPT.format(
-        label=language['label'], writes=' and the component contract in components/',
-        component=COMPONENT_PROMPT.format(instructions=instructions,
-                                          parts=PARTS_PROMPT if parts else ''),
-        routes='"contract", "component" or "unobservable"',
+        label=language['label'],
+        writes=' and the component contract in components/'
+               + (' or the page contract in parts/<part>/browser/' if browser else ''),
+        component=COMPONENT_PROMPT.format(
+            instructions=instructions,
+            parts=(PARTS_PROMPT if parts else '') + (BROWSER_PROMPT if browser else '')),
+        routes=', '.join(routes[:-1]) + ' or ' + routes[-1],
         seam=(',\n  "seam": {' + ('"part": "…", ' if parts else '')
               + '"module": "…", "symbols": ["…"], "added": ["…"], '
               + '"added_elsewhere": {"<module>": ["…"]}} for `component` only, '
               + ('`part` only for a seam of a part other than the service, ' if parts else '')
-              + '`added` and `added_elsewhere` only for symbols the code does not have yet'),
+              + '`added` and `added_elsewhere` only for symbols the code does not have yet'
+              + page),
         component_reason=(' For `component`, `reason` says how a test drives the seam to '
                           'observe the behaviour, and `seam` names the module of its stub, '
                           'as its contract\'s instructions name modules, and the symbols of '
                           'it the test uses, by dotted name within the module (`Class` or '
                           '`Class.method`). `added` lists those of its stub\'s symbols that '
                           'the change adds first, if any, and `added_elsewhere` those it adds '
-                          'first to other stubbed modules of the same part, by module.'))
+                          'first to other stubbed modules of the same part, by module.'
+                          + (' For `browser`, `reason` says what the page shows and at which '
+                             'viewports, and why each viewport is there; `page` names the '
+                             'part, the page\'s `entry` in its pages.json, the viewports of '
+                             'its viewports.json the criterion must hold in, and the elements '
+                             'the test finds, with those the page lacks yet in `added`.'
+                             if browser else '')))
 
 
 def validate_completion(root: Path) -> None:
@@ -168,6 +210,16 @@ def validate_completion(root: Path) -> None:
     if not isinstance(routes, dict) or not isinstance(routes.get('routes'), list):
         raise RuntimeError('routes.json does not hold a list of routes')
     for item in routes['routes']:
+        if isinstance(item, dict) and item.get('route') == 'browser':
+            page = item.get('page')
+            part = page.get('part') if isinstance(page, dict) else None
+            if not isinstance(part, str) or not part or '..' in part.split('/'):
+                raise RuntimeError(f'A page names an invalid part: {str(part)[:80]}')
+            for name in ('pages.json', 'viewports.json'):
+                if not (root / PARTS / part / BROWSER / name).is_file():
+                    raise RuntimeError(f'A requirement is routed to a page, but '
+                                       f'{PARTS}/{part}/{BROWSER}/{name} is missing')
+            continue
         if not isinstance(item, dict) or item.get('route') != 'component':
             continue
         seam = item.get('seam')

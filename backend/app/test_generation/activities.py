@@ -21,6 +21,7 @@ from app.config import GENERATED_CODE_DIR
 from app.docker_agents import default_agent_image
 from app.github.checkout import SNAPSHOT_DIR
 from app.languages import ComponentSuite, Language, TestSuite
+from app.languages.composite import suite_members
 from app.requirements.document import without_repeated_tables
 from app.routing.models import UNOBSERVABLE_FILE, read_routes
 
@@ -35,6 +36,13 @@ def copy_test_suite(suite: TestSuite, source: Path, target: Path) -> None:
         relative in published or not published.isdisjoint(relative.parents)
     ))
     if isinstance(suite, ComponentSuite):
+        # Trusted files the tests import, such as the browser tests' helpers, are always
+        # the template's.
+        for member in suite_members(suite):
+            for name in member.suite.trusted:
+                destination = target / member.directory / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(member.suite.template / name, destination)
         # Its runner is put around it, with the code it tests, only when it is built.
         return
     # The runner always compiles tests, even if the agent changes its Dockerfile; it is

@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from typing import Any, TypedDict
 
 from app.review.models import commit_findings
+from app.routing.models import element_key
 
 TITLE_CHARS = 200
 # The LLM's summary; GitHub takes descriptions of up to 65536 characters, and the open
@@ -81,6 +82,7 @@ SUITES = {
     'contract': 'Contract tests (`contract-tests/`), over HTTP against the service',
     'component': ('Component tests (`component-tests/`), in-process at seams of the code '
                   'whose stubs are in `contracts/components/`'),
+    'browser': 'Browser tests, in headless Chromium against the built web client: {places}',
 }
 # The component suite's heading when criteria are proved at seams of other parts of the
 # repository than the service, such as its web client: each part's tests and stubs.
@@ -94,6 +96,14 @@ LISTED_CRITERIA = 50
 def _heading(suite: str, criteria: list[dict[str, Any]]) -> str:
     """The heading of a suite's criteria. The component suite's names where each part's
     tests and stubs are when a criterion is proved at a seam of another part."""
+    if suite == 'browser':
+        pages = sorted(dict.fromkeys(_line(str((item.get('page') or {}).get('part') or ''), 100)
+                                     for item in criteria))
+        places = [f"part `{part}`'s in `{part}/browser-tests/`, with its page contract in "
+                  f"`contracts/parts/{part}/browser/`" for part in pages[:LISTED_PARTS]]
+        if len(pages) > LISTED_PARTS:
+            places.append(f'and {len(pages) - LISTED_PARTS} more parts')
+        return SUITES[suite].format(places='; '.join(places))
     parts = list(dict.fromkeys(str((item.get('seam') or {}).get('part') or '')
                                for item in criteria))
     if suite != 'component' or parts == ['']:
@@ -137,6 +147,16 @@ def _proofs(change: dict[str, Any]) -> list[str]:
                 line += f" (at `{part}{_line(seam['module'], 200)}`" + (
                     f": {symbols}" if symbols else "") + (
                     f"; this change adds {added}" if added else "") + ")"
+            page = item.get('page') or {}
+            if page.get('entry'):
+                viewports = ', '.join(f'`{_line(name, 40)}`'
+                                      for name in list(page.get('viewports') or [])[:8])
+                added = ', '.join(f'`{_line(element_key(element), 100)}`'
+                                  for element in list(page.get('added') or [])[:10])
+                line += (f" (at `{_line(str(page.get('part') or ''), 100)} (browser): "
+                         f"{_line(page['entry'], 200)}`"
+                         + (f", in {viewports}" if viewports else "")
+                         + (f"; this change adds {added}" if added else "") + ")")
             lines.append(line)
         if len(criteria) > LISTED_CRITERIA:
             lines.append(f'- and {len(criteria) - LISTED_CRITERIA} more')

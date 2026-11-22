@@ -33,10 +33,10 @@ from app.test_generation.activities import copy_test_suite
 from app.languages import (
     Language, TestReports, TestSuite, UnsupportedLanguage, get_language,
 )
-from app.languages.composite import PARTS_DIR as SUITE_PARTS_DIR, CompositeSuite
+from app.languages.composite import CompositeSuite
 from app.routing.parts import check_parts, component_parts
 from app.test_generation.components import ARTIFACT_DIR as COMPONENT_TESTS_ARTIFACT
-from app.test_generation.components import build_runner, delivery_suite
+from app.test_generation.components import build_runner, delivery_suite, read_runners
 from app.config import GENERATED_CODE_DIR
 from app.verification.models import (
     COMPONENT_RUNS_DIR, TestFailure, TestSkip, TrackedTest, VerificationResult,
@@ -410,7 +410,8 @@ async def snapshot_repository_tests(session_id: str, language: str) -> dict[str,
     """Copy the repository's tests aside, as the checkout holds them before any author has
     run: its contract tests, its component tests in a language that has them, and those
     of each other part with a part language, under parts/P of the component tests'
-    record, the layout of a suite of several parts. Each is taken once: a later call,
+    record, the layout of a suite of several parts, and the browser tests of each part
+    whose web client has them, under browser/P of it. Each is taken once: a later call,
     such as a retried delivery's, keeps the first copy, whatever the checkout holds by
     then."""
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
@@ -451,8 +452,8 @@ async def _record_suites(registered: Language, session_id: str, checkout: Path,
     for part in (await run_sync(component_parts, registered, checkout))[1:]:
         assert part.suite is not None  # every part language has component tests
         suites.append((part.suite, part.tests_dir().as_posix(),
-                       f'component_tests_of_{part.name}',
-                       snapshot / COMPONENT_SNAPSHOT / SUITE_PARTS_DIR / part.name, True))
+                       f'{"browser" if part.browser else "component"}_tests_of_{part.name}',
+                       snapshot / COMPONENT_SNAPSHOT / part.snapshot_dir(), True))
     counts = {}
     for suite, directory, key, target, optional in suites:
         await _snapshot(suite, checkout / directory, target)
@@ -594,99 +595,110 @@ def _empty_result(session_id: str, path: Path) -> VerificationResult:
             'service_log': '', 'runner_log': '', 'error': None, 'path': str(path)}
 
 
-@activity.defn
-@trace_activity('run-component-suite', feature='verification', input_parameter='runner_image')
-async def run_component_suite(session_id: str, runner_image: str, language: str,
-                              tracked_tests: list[str]) -> VerificationResult:
-    """Run the component tests in-process in their runner, one container without a
-    network, and read its reports as a verification reads the contract tests'. The run
-    answers for every test of the suite, and for each of `tracked_tests` singly."""
-    if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
-        raise ApplicationError('Invalid session ID', non_retryable=True)
-    if not re.fullmatch(r'sha256:[0-9a-f]{64}', runner_image):
-        raise ApplicationError('Invalid component test image ID', non_retryable=True)
-    if len(tracked_tests) > MAX_TRACKED_TESTS:
-        raise ApplicationError('Too many tests to track', non_retryable=True)
-    stack = session_language(language)
-    session_dir = GENERATED_CODE_DIR / session_id
-    _, suite = await run_sync(delivery_suite, stack, session_dir)
-    suite_tests = await run_sync(_component_suite_tests, session_dir, runner_image, suite)
-    tracked: dict[str, TrackedTest] = {item: {'tests': 0, 'failed': 0} for item in tracked_tests}
-    token = uuid.uuid4().hex
-    runner = f'component-tests-{token}'
-    artifact_dir = session_dir / COMPONENT_RUNS_DIR
-    run_dir = artifact_dir / token
-    await run_sync(run_dir.mkdir, parents=True)
-    result: VerificationResult = {**_empty_result(session_id, run_dir), 'tracked': tracked}
-    started = time.monotonic()
-    logger.info('Component tests starting (session=%s, runner=%s)', session_id, runner)
+# How a browser test runner is confined beside the in-process runners' CONSTRAINTS:
+# Chromium starts several processes and needs a larger /dev/shm.
+BROWSER_CONSTRAINTS = (
+    '--cap-drop=ALL', '--security-opt=no-new-privileges', '--pids-limit=1024',
+    '--memory=4g', '--cpus=2', '--shm-size=512m',
+)
+
+
+def worst_exit(statuses: list[int | None]) -> int | None:
+    """The exit status of several runners as one, as the composite runner's run-parts.sh
+    gives it: a stopped run first, then any other error, then failed tests."""
+    status: int | None = 0
+    for item in statuses:
+        if item is None:
+            return None
+        if item in STOPPED_EXIT_CODES:
+            status = item
+        elif item == 1:
+            status = 1 if status == 0 else status
+        elif item != 0 and status not in STOPPED_EXIT_CODES:
+            status = item
+    return status
+
+
+def merge_reports(source: Path, destination: Path, pattern: str, index: int) -> None:
+    """Move the reports of the runner at `index` (beside the first) into the directory of
+    every runner's reports, renamed so that `pattern`, the service language's, matches
+    them."""
+    destination.mkdir(parents=True, exist_ok=True)
+    for number, file in enumerate(sorted(source.iterdir())):
+        name = pattern.replace('*', f'-runner-{index}-{number}', 1)
+        if '*' in name or not fnmatch.fnmatchcase(name, pattern):
+            raise RuntimeError('The reports of the browser tests cannot be named as the '
+                               "service language's test reports are")
+        os.replace(file, destination / name)
+
+
+# How long a runner may take to its end: its own 600-second bound and its forced-kill
+# grace period, with room to start.
+RUNNER_SECONDS = 750
+# How long all runners of one run may take together, within the workflow's 30-minute
+# bound of the activity, leaving room to collect and read the reports. A run whose
+# runners would take longer stops the next runner and reports it as stopped.
+RUN_SECONDS = 1680
+# The least time a runner is started with.
+MIN_RUNNER_SECONDS = 120
+
+
+async def _run_runner(session_id: str, image: str, browser: bool, reports: TestReports,
+                      destination: Path, log_file: Path,
+                      seconds: int = RUNNER_SECONDS) -> dict:
+    """Run one runner image of the component tests to its end, without a network, and
+    collect its reports into `destination`: its `exit_code`, `error`, `log` and
+    `oom_killed`."""
+    runner = f'component-tests-{uuid.uuid4().hex}'
+    outcome: dict = {'exit_code': None, 'error': None, 'log': '', 'oom_killed': False}
     created = False
-    state: dict = {}
     try:
-        async with docker_agents.keep_activity_alive('Running the component tests'):
-            try:
-                user = await docker_agents.docker(
-                    'image', 'inspect', '--format', '{{.Config.User}}', runner_image, timeout=30)
-                account = user.split(':', 1)[0]
-                if not account or account == 'root' or (account.isdigit() and int(account) == 0):
-                    raise RuntimeError('The component test image must declare a non-root '
-                                       'runtime user')
-                # In-process tests: no service, and no network at all.
-                await docker_agents.docker(
-                    'create', '--name', runner, '--pull=never', '--network=none',
-                    '--label', f'temporal.verification={session_id}', *CONSTRAINTS,
-                    runner_image, timeout=30)
-                created = True
-                await docker_agents.docker('start', runner, timeout=30)
-                async with docker_agents.forward_logs(runner, f'component tests {session_id}'):
-                    # The runner's own timeout and its forced-kill grace period.
-                    await docker_agents.docker('wait', runner, timeout=750)
-            except Exception as exc:
-                result['error'] = str(exc)[-2000:]
-                logger.error('Component test Docker execution failed (session=%s): %s',
-                             session_id, result['error'])
-            finally:
-                if created:
-                    try:
-                        log = await docker_agents.docker('logs', '--tail', '200', runner,
-                                                         timeout=30)
-                        result['runner_log'] = log[-LOG_LIMIT:]
-                        await run_sync((run_dir / 'runner_log.log').write_text,
-                                       result['runner_log'], encoding='utf-8')
-                    except Exception as exc:
-                        result['runner_log'] = f'Could not retrieve logs: {str(exc)[-1000:]}'
-                    try:
-                        state = json.loads(await docker_agents.docker(
-                            'inspect', '--format', '{{json .State}}', runner, timeout=30))
-                        result['exit_code'] = state['ExitCode']
-                    except Exception as exc:
-                        result['error'] = (result['error']
-                                           or f'Could not inspect container: {str(exc)[-1000:]}')
-                    try:
-                        await collect_reports(runner, run_dir / 'reports', stack.test_reports)
-                        result.update(await run_sync(
-                            summarize_reports, run_dir / 'reports', stack.test_reports,
-                            tracked, suite.case_id, suite_tests,
-                            # A suite of more than the service counts each part's tests.
-                            suite.part_of if isinstance(suite, CompositeSuite) else None))
-                    except Exception as exc:
-                        result['error'] = (result['error']
-                                           or f'Could not read test reports: {str(exc)[-1000:]}')
-            if state.get('OOMKilled'):
-                result['error'] = 'The component test container was OOM killed'
-            elif result['exit_code'] in STOPPED_EXIT_CODES:
-                # The runner reports the tests that finished before it was stopped.
-                result['error'] = 'The component tests timed out or were terminated' + (
-                    f" after {result['tests']} of {len(suite_tests)} tests finished"
-                    if result['tests'] else '')
-            if not result['error']:
-                has_failures = result['failures'] + result['errors'] > 0
-                if result['exit_code'] == 0 and not has_failures:
-                    result['status'] = 'passed'
-                elif result['exit_code'] == 1 and has_failures:
-                    result['status'] = 'failed'
-                else:
-                    result['error'] = 'Runner exit status does not match the test reports'
+        try:
+            user = await docker_agents.docker(
+                'image', 'inspect', '--format', '{{.Config.User}}', image, timeout=30)
+            account = user.split(':', 1)[0]
+            if not account or account == 'root' or (account.isdigit() and int(account) == 0):
+                raise RuntimeError('The component test image must declare a non-root '
+                                   'runtime user')
+            # In-process tests, or a browser against the client's own server on its
+            # loopback: no service, and no network at all.
+            await docker_agents.docker(
+                'create', '--name', runner, '--pull=never', '--network=none',
+                '--label', f'temporal.verification={session_id}',
+                *(BROWSER_CONSTRAINTS if browser else CONSTRAINTS), image, timeout=30)
+            created = True
+            await docker_agents.docker('start', runner, timeout=30)
+            async with docker_agents.forward_logs(
+                    runner, f'{"browser" if browser else "component"} tests {session_id}'):
+                # The runner's own timeout and its forced-kill grace period, within what
+                # is left of the run's.
+                await docker_agents.docker('wait', runner, timeout=seconds)
+        except Exception as exc:
+            outcome['error'] = str(exc)[-2000:]
+            logger.error('Component test Docker execution failed (session=%s): %s',
+                         session_id, outcome['error'])
+        finally:
+            if created:
+                try:
+                    log = await docker_agents.docker('logs', '--tail', '200', runner,
+                                                     timeout=30)
+                    outcome['log'] = log[-LOG_LIMIT:]
+                    await run_sync(log_file.write_text, outcome['log'], encoding='utf-8')
+                except Exception as exc:
+                    outcome['log'] = f'Could not retrieve logs: {str(exc)[-1000:]}'
+                try:
+                    state = json.loads(await docker_agents.docker(
+                        'inspect', '--format', '{{json .State}}', runner, timeout=30))
+                    outcome['exit_code'] = state['ExitCode']
+                    outcome['oom_killed'] = bool(state.get('OOMKilled'))
+                except Exception as exc:
+                    outcome['error'] = (outcome['error']
+                                        or f'Could not inspect container: {str(exc)[-1000:]}')
+                try:
+                    await collect_reports(runner, destination, reports)
+                except Exception as exc:
+                    outcome['error'] = (outcome['error']
+                                        or f'Could not read test reports: {str(exc)[-1000:]}')
     finally:
         if created:
             # Removed whatever cancelled the run, but bounded like every Docker operation.
@@ -698,6 +710,92 @@ async def run_component_suite(session_id: str, runner_image: str, language: str,
                 raise
             except Exception:
                 activity.logger.warning('Could not remove component test container %s', runner)
+    return outcome
+
+
+@activity.defn
+@trace_activity('run-component-suite', feature='verification', input_parameter='runner_image')
+async def run_component_suite(session_id: str, runner_image: str, language: str,
+                              tracked_tests: list[str]) -> VerificationResult:
+    """Run the component tests in-process in their runner, one container without a
+    network, and the browser tests of each part in theirs after it, and read their
+    reports as one, as a verification reads the contract tests'. The run answers for
+    every test of the suite, and for each of `tracked_tests` singly."""
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', session_id):
+        raise ApplicationError('Invalid session ID', non_retryable=True)
+    if not re.fullmatch(r'sha256:[0-9a-f]{64}', runner_image):
+        raise ApplicationError('Invalid component test image ID', non_retryable=True)
+    if len(tracked_tests) > MAX_TRACKED_TESTS:
+        raise ApplicationError('Too many tests to track', non_retryable=True)
+    stack = session_language(language)
+    session_dir = GENERATED_CODE_DIR / session_id
+    _, suite = await run_sync(delivery_suite, stack, session_dir)
+    suite_tests = await run_sync(_component_suite_tests, session_dir, runner_image, suite)
+    runners = await run_sync(read_runners, session_dir, runner_image, stack.test_reports)
+    tracked: dict[str, TrackedTest] = {item: {'tests': 0, 'failed': 0} for item in tracked_tests}
+    token = uuid.uuid4().hex
+    artifact_dir = session_dir / COMPONENT_RUNS_DIR
+    run_dir = artifact_dir / token
+    await run_sync(run_dir.mkdir, parents=True)
+    result: VerificationResult = {**_empty_result(session_id, run_dir), 'tracked': tracked}
+    started = time.monotonic()
+    logger.info('Component tests starting (session=%s, runners=%d)', session_id, len(runners))
+    outcomes: list[dict] = []
+    async with docker_agents.keep_activity_alive('Running the component tests'):
+        for index, runner in enumerate(runners):
+            reports = TestReports(runner['reports']['directory'], runner['reports']['pattern'])
+            browser = runner.get('member') is not None
+            own = run_dir / ('reports' if index == 0 and reports == stack.test_reports
+                             else f'reports-{index}')
+            log_file = run_dir / ('runner_log.log' if index == 0 else f'runner_log-{index}.log')
+            left = int(RUN_SECONDS - (time.monotonic() - started))
+            if left < MIN_RUNNER_SECONDS:
+                outcomes.append({'exit_code': 124, 'error': None, 'log': '',
+                                 'oom_killed': False})
+                logger.warning('Component tests: no time is left for runner %d of %d '
+                               '(session=%s)', index + 1, len(runners), session_id)
+                break
+            if browser:
+                # Built on it; a worker that lost it since pulls it again.
+                try:
+                    await docker_agents.ensure_image(docker_agents.PLAYWRIGHT_IMAGE)
+                except docker_agents.ImageUnavailable as exc:
+                    outcomes.append({'exit_code': None, 'error': str(exc), 'log': '',
+                                     'oom_killed': False})
+                    break
+            outcome = await _run_runner(session_id, runner['image'], browser, reports, own,
+                                        log_file, min(RUNNER_SECONDS, left))
+            outcomes.append(outcome)
+            if own.name != 'reports' and await run_sync(own.is_dir):
+                await run_sync(merge_reports, own, run_dir / 'reports',
+                               stack.test_reports.pattern, index)
+    result['runner_log'] = '\n'.join(item['log'] for item in outcomes if item['log'])[-LOG_LIMIT:]
+    result['exit_code'] = worst_exit([item['exit_code'] for item in outcomes])
+    result['error'] = next((item['error'] for item in outcomes if item['error']), None)
+    try:
+        result.update(await run_sync(
+            summarize_reports, run_dir / 'reports', stack.test_reports,
+            tracked, suite.case_id, suite_tests,
+            # A suite of more than the service counts each part's tests.
+            suite.part_of if isinstance(suite, CompositeSuite) else None))
+    except Exception as exc:
+        result['error'] = (result['error']
+                           or f'Could not read test reports: {str(exc)[-1000:]}')
+    if any(item['oom_killed'] for item in outcomes):
+        result['error'] = 'The component test container was OOM killed'
+    elif result['exit_code'] in STOPPED_EXIT_CODES:
+        # The runner reports the tests that finished before it was stopped.
+        result['error'] = 'The component tests timed out or were terminated' + (
+            f" after {result['tests']} of {len(suite_tests)} tests finished"
+            if result['tests'] else '')
+    if not result['error']:
+        has_failures = result['failures'] + result['errors'] > 0
+        if result['exit_code'] == 0 and not has_failures:
+            result['status'] = 'passed'
+        elif result['exit_code'] == 1 and has_failures:
+            result['status'] = 'failed'
+        else:
+            result['error'] = 'Runner exit status does not match the test reports'
     result['duration_seconds'] = round(time.monotonic() - started, 3)
     await run_sync((run_dir / 'result.json').write_text,
                    json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')

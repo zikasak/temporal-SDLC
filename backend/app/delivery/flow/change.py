@@ -109,6 +109,9 @@ class Change(FlowBase):
             self.progress.routing_status = 'error'
             return False
         self.state.declined_routes = None
+        # Whether the repository has parts beside the service, which the routing could
+        # route to: what the user is told to rephrase a criterion as depends on it.
+        self.state.routing_parts = bool(result.get('repository_parts'))
         routing = {requirement: cast(RequirementRoute, {**route, 'source': 'routing'})
                    for requirement, route in result['routes'].items()}
         self.progress.routing = routing

@@ -162,6 +162,9 @@ services:
         exec dockerd-entrypoint.sh dockerd --host=unix:///run/sandbox/docker.sock --group=10001
     volumes:
       - sandbox_socket:/run/sandbox
+      # The daemon's images, kept across redeploys: among them those the sandbox worker
+      # pulls ahead of use (PREPULLED_IMAGES in backend/app/images.py, such as the pinned
+      # Playwright image of the browser tests, about 1.5 GB). Never prune them.
       - sandbox_data:/var/lib/docker
       # Agent bind sources are resolved inside this daemon, not the worker.
       - pi_credentials:/pi/agent

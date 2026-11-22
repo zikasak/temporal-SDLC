@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Browser test fixture</title>
+    <style>
+      body { margin: 0; font: 16px sans-serif; }
+      .workspace { display: grid; grid-template-columns: 300px 1fr; height: 100vh; }
+      .panel { position: relative; overflow: auto; padding: 16px; border-right: 1px solid #ccc; }
+      .history { padding: 16px; background: #f6f7f3; }
+      .ref { position: relative; display: inline-block; }
+      .popup { width: 340px; padding: 8px; border: 1px solid #888; background: #fff; }
+      .popup.inside { position: absolute; top: calc(100% + 6px); left: 120px; z-index: 30; }
+      .popup.portaled { position: fixed; top: 140px; left: 16px; max-width: calc(100vw - 50px); z-index: 1000; }
+      /* A spinner that ignores reduced motion: settle() must not wait for it. */
+      .spinner { display: inline-block; width: 8px; height: 8px; background: #888;
+                 animation: spin 1s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      @media (max-width: 600px) {
+        .workspace { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="workspace">
+      <section class="panel" aria-label="Answer">
+        <p>Items: <span id="items">loading</span> <span class="spinner"></span></p>
+        <span class="ref"><span role="button" tabindex="0" id="ref">FR-1</span></span>
+      </section>
+      <section class="history" aria-label="History"><p>The conversation so far.</p></section>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
