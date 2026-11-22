@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import (
     AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ClaudeSDKError, HookContext,
@@ -23,6 +23,10 @@ from langchain_core.tools import BaseTool
 from app.asyncio_utils import async_context, run_sync
 from app.llm.mcp import TOOL_PREFIX, TOOL_SERVER, flow_server
 from app.tracing import claude_trace_environment
+
+if TYPE_CHECKING:
+    # Host-only: agent images run this module without it.
+    from app.llm.saved_conversations import ConversationRef
 
 logger = logging.getLogger(__name__)
 PLUGIN = Path(__file__).with_name('plugins') / 'langfuse-observability'
@@ -52,6 +56,10 @@ class ChatClaude(Runnable):
     cwd: Path | None = None
     config_dir: Path | None = None
     resume: str | None = None
+    # The application conversation whose turns resume one native session, saved between
+    # turns to the shared storage (app.llm.saved_conversations). Without the storage, or
+    # with a cwd or config_dir of its own, every session starts anew.
+    conversation: 'ConversationRef | None' = None
     session_id: str | None = field(default=None, init=False)
     turns_used: int = field(default=0, init=False)
     _stack: AsyncExitStack | None = field(default=None, init=False, repr=False)
@@ -59,6 +67,10 @@ class ChatClaude(Runnable):
     # The native session's ID, exported once more after the CLI exits.
     _native_session: str | None = field(default=None, init=False, repr=False)
     _messages: list[BaseMessage] = field(default_factory=list, init=False, repr=False)
+    # The application messages this session started from, and whether its last turn
+    # completed: what a saved conversation records.
+    _history: list[BaseMessage] = field(default_factory=list, init=False, repr=False)
+    _completed: bool = field(default=False, init=False, repr=False)
 
     @asynccontextmanager
     async def async_session(self):
@@ -98,10 +110,30 @@ class ChatClaude(Runnable):
                 return {'continue_': False, 'stopReason': 'Paused for the user'}
             return {}
 
+        self._completed = False
+        history = [message for message in messages if not isinstance(message, SystemMessage)]
+        resumed = 0
         if self._client is None:
             stack = self._stack
             assert stack is not None  # ainvoke opens a session before any turn
-            cwd = self.cwd
+            cwd, config_dir, resume = self.cwd, self.config_dir, self.resume
+            store = None
+            if self.conversation and cwd is None and config_dir is None:
+                from app.llm import saved_conversations
+                store = saved_conversations.get_store()
+            if store is not None:
+                # The CLI finds a transcript by its project directory, which is the cwd:
+                # the same path for every conversation and worker. No tool writes there.
+                cwd = Path(tempfile.gettempdir()) / 'claude-conversation'
+                await run_sync(cwd.mkdir, parents=True, exist_ok=True)
+                config_dir = Path(await stack.enter_async_context(
+                    async_context(tempfile.TemporaryDirectory, prefix='claude-native-')))
+                resumed = await self._restore(store, history, config_dir)
+                if resumed:
+                    resume = self._native_session
+                self._history = history
+                # Saved once the CLI and the final trace export are done.
+                stack.push_async_exit(self._exit_saving(store, config_dir))
             if cwd is None:
                 cwd = Path(await stack.enter_async_context(
                     async_context(tempfile.TemporaryDirectory, prefix='claude-native-')))
@@ -109,15 +141,15 @@ class ChatClaude(Runnable):
             env.update(CLAUDE_CODE_ENTRYPOINT=ENTRYPOINT, APP_CLAUDE_HOOK_PYTHON=sys.executable,
                        PYTHONPATH=os.pathsep.join(filter(None, [str(Path(__file__).parents[2]),
                                                                os.getenv('PYTHONPATH')])))
-            env['CC_LANGFUSE_STATE_DIR'] = str((self.config_dir or cwd) / '.langfuse-state')
+            env['CC_LANGFUSE_STATE_DIR'] = str((config_dir or cwd) / '.langfuse-state')
             # The CLI's own limit on one tool call, in milliseconds: above the longest
             # shell command (app.agent_workflows.runtime.SHELL_MAX_TIMEOUT, 900 seconds).
             env['MCP_TOOL_TIMEOUT'] = str(MCP_TOOL_TIMEOUT_MS)
-            if self.config_dir is not None:
-                await run_sync(self.config_dir.mkdir, parents=True, exist_ok=True, mode=0o700)
-                env['CLAUDE_CONFIG_DIR'] = str(self.config_dir)
+            if config_dir is not None:
+                await run_sync(config_dir.mkdir, parents=True, exist_ok=True, mode=0o700)
+                env['CLAUDE_CONFIG_DIR'] = str(config_dir)
             native_tracing = env.get('APP_CLAUDE_TRACING_ENABLED') == 'true'
-            if self.config_dir is None and native_tracing:
+            if config_dir is None and native_tracing:
                 # The plugin reads native transcripts. Keep them only for this host
                 # session, under the same temporary-directory cleanup as its cwd.
                 if self.cwd is not None:
@@ -151,10 +183,10 @@ class ChatClaude(Runnable):
                        if until else None),
                 plugins=[{'type': 'local', 'path': str(PLUGIN)}] if native_tracing else [],
                 extra_args=({'no-session-persistence': None}
-                            if self.config_dir is None and not native_tracing else {}),
-                env=env, resume=self.resume,
+                            if config_dir is None and not native_tracing else {}),
+                env=env, resume=resume,
             )
-            self._native_session = self.resume
+            self._native_session = resume
             if native_tracing:
                 # Runs once the CLI has exited and before its transcript is removed.
                 stack.push_async_callback(
@@ -165,9 +197,11 @@ class ChatClaude(Runnable):
         if self._messages:
             if messages[:len(self._messages)] != self._messages:
                 raise ValueError('A native Claude session only accepts appended messages')
-            added = messages[len(self._messages):]
-            prompt = '\n\n'.join(message.text for message in added
-                                 if not isinstance(message, SystemMessage))
+            prompt = _continuation([message for message in messages[len(self._messages):]
+                                    if not isinstance(message, SystemMessage)])
+        elif resumed:
+            # A saved session holds the conversation up to its last reply.
+            prompt = _continuation(history[resumed:])
         else:
             prompt = _prompt(messages)
         result = None
@@ -213,7 +247,66 @@ class ChatClaude(Runnable):
                                'total_cost_usd': result.total_cost_usd},
         )
         self._messages = [*messages, reply]
+        self._completed = True
         return reply
+
+    async def _restore(self, store, history: list[BaseMessage], config_dir: Path) -> int:
+        """Restore the conversation's saved session into `config_dir`; returns how many
+        of `history`'s messages it holds, 0 when this turn starts a new session."""
+        from app.llm import claude_sessions
+
+        assert self.conversation is not None
+        try:
+            data = await run_sync(store.load,
+                                  claude_sessions.object_name(self.conversation.source))
+            if data is None:
+                return 0
+            meta = await run_sync(claude_sessions.unpack, data, config_dir)
+        except Exception:
+            logger.warning('Could not restore the Claude session of %s; starting a new one',
+                           self.conversation.source, exc_info=True)
+            return 0
+        resumed = await run_sync(claude_sessions.resumable, meta, history, config_dir,
+                                 self.conversation.context)
+        if resumed:
+            self._native_session = meta['session_id']
+            logger.info('Resuming Claude session %s of %s after %d messages',
+                        meta['session_id'], self.conversation.source, resumed)
+        else:
+            logger.info('The saved Claude session of %s does not continue this '
+                        'conversation; starting a new one', self.conversation.source)
+            # Not saved again with the new session.
+            await run_sync(claude_sessions.clear, config_dir)
+        return resumed
+
+    def _exit_saving(self, store, config_dir: Path):
+        async def save(exc_type, exc, traceback) -> bool:
+            # A failed turn keeps the session saved before it, which its retry resumes.
+            if exc_type is None and self._completed and self._native_session:
+                await self._save(store, config_dir)
+            return False
+        return save
+
+    async def _save(self, store, config_dir: Path) -> None:
+        from app.llm import claude_sessions
+        from app.llm.saved_conversations import saved_meta
+
+        assert self.conversation is not None
+        history = self._history
+        # The conversation goes on from this session's first messages and its final
+        # reply; the corrections a turn sent in between are not part of it.
+        meta = {'session_id': self._native_session,
+                **saved_meta(history, self.conversation.context)}
+        try:
+            data = await run_sync(claude_sessions.pack, config_dir, meta)
+            await run_sync(store.save, claude_sessions.object_name(self.conversation.name),
+                           data)
+        except Exception:
+            logger.warning('Could not save the Claude session of %s', self.conversation.name,
+                           exc_info=True)
+            return
+        logger.info('Saved Claude session %s of %s (%d bytes)', self._native_session,
+                    self.conversation.name, len(data))
 
     async def _export_session(self, env: dict[str, str], config_dir: Path) -> None:
         """Final export of the session once the CLI has exited. The plugin's Stop hook
@@ -258,6 +351,16 @@ def _prompt(messages: list[BaseMessage]) -> str:
     # Claude transcript rows. Subsequent requests use the native session itself.
     return 'Conversation context:\n' + json.dumps([
         {'role': message.type, 'content': message.content} for message in history
+    ], ensure_ascii=False) + '\n\nContinue the conversation and complete the latest user request.'
+
+
+def _continuation(added: list[BaseMessage]) -> str:
+    """The prompt that appends `added` to a native session: the user's text, or the
+    whole exchange when it also holds replies the session has not seen."""
+    if all(isinstance(message, HumanMessage) for message in added):
+        return '\n\n'.join(message.text for message in added)
+    return 'Conversation since your last reply:\n' + json.dumps([
+        {'role': message.type, 'content': message.content} for message in added
     ], ensure_ascii=False) + '\n\nContinue the conversation and complete the latest user request.'
 
 

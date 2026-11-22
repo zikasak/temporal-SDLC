@@ -111,6 +111,16 @@ async def _git(*args: str, cwd: Path, token: str | None = None,
     return text
 
 
+def checked_out_commit(base: Path, session_id: str) -> str:
+    """The commit the session's working copy holds; empty without one."""
+    try:
+        manifest = json.loads((checkout_path(base, session_id).parent / MANIFEST).read_text())
+    except (OSError, ValueError):
+        return ''
+    commit = manifest.get('commit') if isinstance(manifest, dict) else None
+    return commit if isinstance(commit, str) else ''
+
+
 def _recorded(session_dir: Path, repository: RepositorySelection) -> RepositoryCheckout | None:
     """The earlier checkout of this same selection, if it is still on disk."""
     try:

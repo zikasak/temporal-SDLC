@@ -62,6 +62,15 @@ PI_CREDENTIALS_DIR = Path(
 # Keep false for a developer's Pi home, which can also contain extensions/sessions.
 PI_CREDENTIALS_SHARED = os.getenv('PI_CREDENTIALS_SHARED', '').lower() in {'1', 'true', 'yes'}
 
+# S3-compatible storage shared by every worker, such as the provider conversations a
+# conversation resumes on its next turn (app.llm.saved_conversations). Only path-style
+# addressing is used. Unset: each turn starts anew from the session's messages.
+S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "").strip() or None
+S3_REGION = os.getenv("S3_REGION", "").strip() or "us-east-1"
+S3_BUCKET = os.getenv("S3_BUCKET", "").strip()
+S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "").strip()
+S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "").strip()
+
 # Contracts larger than this are supplied to coding agents as an index plus read-only
 # files instead of being embedded whole in every model invocation.
 CONTRACT_EMBED_CHARS = int(os.getenv("CONTRACT_EMBED_CHARS", "32000"))

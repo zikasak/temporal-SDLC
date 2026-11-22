@@ -142,6 +142,37 @@ def claude_http(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def no_conversation_storage(monkeypatch):
+    """Tests never reach a developer's S3 storage; a test that saves conversations
+    supplies an in-memory one."""
+    from app.llm import saved_conversations
+
+    monkeypatch.setattr(saved_conversations, 'get_store', lambda: None)
+
+
+class MemoryConversationStore:
+    """The shared S3 storage, as every worker sees it."""
+
+    def __init__(self):
+        self.objects = {}
+
+    def load(self, name):
+        return self.objects.get(name)
+
+    def save(self, name, data):
+        self.objects[name] = data
+
+
+@pytest.fixture
+def conversation_storage(monkeypatch):
+    from app.llm import saved_conversations
+
+    store = MemoryConversationStore()
+    monkeypatch.setattr(saved_conversations, 'get_store', lambda: store)
+    return store
+
+
+@pytest.fixture(autouse=True)
 def no_database(monkeypatch):
     """Tests never use a database: any connection attempt fails the test that makes it,
     so that none silently reads or writes a developer's PostgreSQL. A test replaces the
