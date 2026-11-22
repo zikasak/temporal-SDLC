@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 
 from app.architecture.models import ArchitectureState, architecture_problems
 from app.conversations.models import ConversationMessage
+from app.llm.prompt import CURRENT_STATE_GUIDANCE, with_current_state
 from app.llm.questions import message_text
 from app.tools.questions import GUIDANCE as QUESTIONS_GUIDANCE
 
@@ -106,8 +107,7 @@ def turn_messages(state: ArchitectureState, may_skip: bool,
            if change else "")
         + (f"\n\n<existing_architecture>\n{state.existing_architecture}\n"
            "</existing_architecture>" if state.existing_architecture else "")
-        + f"\n\nCurrent architecture: {json.dumps(current, ensure_ascii=False)}"
-        + f"\nOpen problems: {json.dumps(architecture_problems(current), ensure_ascii=False)}"
+        + CURRENT_STATE_GUIDANCE
     )
     conversation: list[BaseMessage] = [
         HumanMessage(content=CHANGE_KICKOFF_MESSAGE if change else KICKOFF_MESSAGE)]
@@ -116,4 +116,7 @@ def turn_messages(state: ArchitectureState, may_skip: bool,
         else AIMessage(content=message_text(item))
         for item in state.messages
     ]
-    return [SystemMessage(content=guidance), *conversation]
+    return with_current_state(
+        [SystemMessage(content=guidance), *conversation],
+        f"Current architecture: {json.dumps(current, ensure_ascii=False)}"
+        f"\nOpen problems: {json.dumps(architecture_problems(current), ensure_ascii=False)}")

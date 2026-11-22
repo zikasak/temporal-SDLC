@@ -8,6 +8,7 @@ from app.api_design.models import ApiDesignState
 from app.api_design.openapi import design_problems
 from app.conversations.models import ConversationMessage
 from app.languages import describe_supported
+from app.llm.prompt import CURRENT_STATE_GUIDANCE, with_current_state
 from app.llm.questions import Question, message_text
 from app.tools.questions import GUIDANCE as QUESTIONS_GUIDANCE
 
@@ -130,9 +131,7 @@ def api_turn_messages(state: ApiDesignState, extra_guidance: str = "") -> list[B
            if change else "")
         + (f"{ARCHITECTURE_GUIDANCE}\n<architecture>\n{state.architecture}\n"
            "</architecture>\n\n" if state.architecture else "")
-        + f"Current API model: "
-        f"{json.dumps(state.api, ensure_ascii=False)}\nOpen problems: "
-        f"{json.dumps(problems, ensure_ascii=False)}"
+        + CURRENT_STATE_GUIDANCE.lstrip()
     )
     # Chat templates expect the conversation to start with a user turn.
     conversation: list[BaseMessage] = [
@@ -142,4 +141,7 @@ def api_turn_messages(state: ApiDesignState, extra_guidance: str = "") -> list[B
         else AIMessage(content=message_text(item))
         for item in state.messages
     ]
-    return [SystemMessage(content=guidance), *conversation]
+    return with_current_state(
+        [SystemMessage(content=guidance), *conversation],
+        f"Current API model: {json.dumps(state.api, ensure_ascii=False)}"
+        f"\nOpen problems: {json.dumps(problems, ensure_ascii=False)}")
