@@ -338,7 +338,7 @@
     },
     {
       "topic": "Workflow orchestration",
-      "choice": "Temporal (temporalio Python SDK, server 1.31) with separate task queues for the main, codegen and each sandboxed stage worker",
+      "choice": "Temporal (temporalio Python SDK, server 1.32) with separate task queues for the main, codegen and each sandboxed stage worker",
       "rationale": "Long-running sessions that wait on the user, retries of single stages and child workflows per stage; separate queues keep each stage to one container at a time."
     },
     {

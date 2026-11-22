@@ -183,7 +183,7 @@
 | Topic | Choice | Rationale |
 | --- | --- | --- |
 | Backend language and web framework | Python 3.12 with FastAPI, served by uvicorn | Required by TR-1; async request handling fits the Temporal and httpx clients. |
-| Workflow orchestration | Temporal (temporalio Python SDK, server 1.31) with separate task queues for the main, codegen and each sandboxed stage worker | Long-running sessions that wait on the user, retries of single stages and child workflows per stage; separate queues keep each stage to one container at a time. |
+| Workflow orchestration | Temporal (temporalio Python SDK, server 1.32) with separate task queues for the main, codegen and each sandboxed stage worker | Long-running sessions that wait on the user, retries of single stages and child workflows per stage; separate queues keep each stage to one container at a time. |
 | Storage | PostgreSQL 16 through psycopg 3 for application data and Temporal persistence; uploaded originals and generated code on a disk volume | Required by TR-1; one database server serves both the app and Temporal. |
 | Web client | React 19 with TypeScript, built with Vite, react-markdown for rendered documents | Required by TR-1. |
 | LLM access | LangChain/LangGraph tool-calling agents over OpenAI-compatible endpoints or Google Gemini, plus the Pi coding agent CLI and the Claude Agent SDK as alternative adapters, chosen per workflow type in the model settings | Lets each workflow use a different provider and model without code changes. |
