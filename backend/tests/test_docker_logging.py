@@ -27,7 +27,6 @@ async def test_docker_preserves_redacted_bounded_diagnostics_and_reaps_process(
         'sys.exit(1 if os.environ["OUTCOME"] == "failure" else 0)\n'
     )
     executable.chmod(0o755)
-    monkeypatch.setattr(docker_agents, 'OPENAI_API_KEY', 'test-api-key')
     env = {**os.environ, 'PATH': str(tmp_path) + os.pathsep + os.environ['PATH'],
            'OPENAI_API_KEY': 'test-api-key', 'PRIVATE_TOKEN': 'hidden-provider-token',
            'OUTCOME': outcome}
@@ -74,7 +73,6 @@ async def test_docker_preserves_redacted_bounded_diagnostics_and_reaps_process(
 
 
 def test_short_settings_named_like_secrets_do_not_corrupt_output(monkeypatch):
-    monkeypatch.setattr(docker_agents, 'OPENAI_API_KEY', '')
     state = '{"Running":true,"Pid":146000,"ExitCode":0}'
     env = {'AGENT_CONTEXT_TOKENS': '46000', 'AUTH_TOKEN_TTL_HOURS': '12',
            'PRIVATE_TOKEN': 'hidden-provider-token'}
@@ -101,7 +99,6 @@ async def test_container_output_reaches_the_worker_log_at_its_own_level(tmp_path
     )
     executable.chmod(0o755)
     monkeypatch.setenv('PATH', str(tmp_path) + os.pathsep + os.environ['PATH'])
-    monkeypatch.setattr(docker_agents, 'OPENAI_API_KEY', '')
     caplog.set_level(logging.DEBUG, logger='app.containers')
 
     async with docker_agents.forward_logs('agent-1', 'implementation agent s1',

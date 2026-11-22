@@ -8,7 +8,21 @@ import pytest
 from fastapi import FastAPI
 
 from app.api.routes.settings import router
+from app.settings import endpoint as endpoints
 from app.settings import providers
+from app.settings.endpoint import OpenAIEndpoint
+
+
+@pytest.fixture(autouse=True)
+def saved_endpoint(monkeypatch):
+    """The OpenAI endpoint saved in Settings, in place of its table; none by default."""
+    saved: dict[str, OpenAIEndpoint | None] = {'endpoint': None}
+
+    async def load():
+        return saved['endpoint']
+
+    monkeypatch.setattr(endpoints, 'get_openai_endpoint', load)
+    return saved
 
 
 @pytest.fixture
@@ -19,7 +33,8 @@ async def client():
         yield client
 
 
-async def test_openai_catalog_uses_configured_endpoint_without_guessing_effort(client, monkeypatch):
+async def test_openai_catalog_uses_configured_endpoint_without_guessing_effort(
+        client, monkeypatch, saved_endpoint):
     requests = []
 
     def serve(request):
@@ -29,8 +44,8 @@ async def test_openai_catalog_uses_configured_endpoint_without_guessing_effort(c
     real_client = httpx.AsyncClient
     monkeypatch.setattr(providers.httpx, 'AsyncClient', lambda **kwargs: real_client(
         transport=httpx.MockTransport(serve), **kwargs))
-    monkeypatch.setattr(providers, 'OPENAI_BASE_URL', 'https://configured-provider.test/v1/')
-    monkeypatch.setattr(providers, 'OPENAI_API_KEY', 'test-key')
+    saved_endpoint['endpoint'] = OpenAIEndpoint(
+        base_url='https://configured-provider.test/v1/', api_key='test-key')
     monkeypatch.setattr(providers, 'PROVIDERS', {'openai': ('OpenAI', providers._openai_models)})
     response = await client.get('/settings/providers')
     assert response.status_code == 200
@@ -59,7 +74,8 @@ async def test_claude_catalog_reads_model_capabilities_without_sending_a_prompt(
         ('fast', ['default']), ('smart', ['default', 'low', 'high'])]
 
 
-async def test_google_catalog_follows_pages_and_excludes_embedding_models(client, monkeypatch):
+async def test_google_catalog_follows_pages_and_excludes_embedding_models(
+        client, monkeypatch, saved_endpoint):
     requests = []
 
     def serve(request):
@@ -75,8 +91,8 @@ async def test_google_catalog_follows_pages_and_excludes_embedding_models(client
     real_client = httpx.AsyncClient
     monkeypatch.setattr(providers.httpx, 'AsyncClient', lambda **kwargs: real_client(
         transport=httpx.MockTransport(serve), **kwargs))
-    monkeypatch.setattr(providers, 'OPENAI_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta/openai')
-    monkeypatch.setattr(providers, 'OPENAI_API_KEY', 'google-test-key')
+    saved_endpoint['endpoint'] = OpenAIEndpoint(
+        base_url='https://generativelanguage.googleapis.com/v1beta/openai', api_key='google-test-key')
     monkeypatch.setattr(providers, 'PROVIDERS', {'openai': ('OpenAI', providers._openai_models)})
     response = await client.get('/settings/providers')
     assert response.status_code == 200

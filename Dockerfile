@@ -30,5 +30,6 @@ ENV APP_DATABASE_URL=postgresql://app@127.0.0.1:5432/postgres
 ENV DOCUMENT_STORAGE_DIR=/data/documents
 ENV GENERATED_CODE_DIR=/data/generated
 EXPOSE 8080
-# Sessions are signed with a key of this container's own unless one is supplied.
-CMD ["sh", "-ec", "/opt/postgresql/pg_ctl --pgdata=/data/postgres --wait --silent --log=/data/postgres.log -o '-c listen_addresses=127.0.0.1 -c unix_socket_directories=/tmp' start\nexport AUTH_JWT_SECRET=\"${AUTH_JWT_SECRET:-$(python -c 'import secrets; print(secrets.token_urlsafe(48))')}\"\nexec uvicorn app.api.main:app --host 0.0.0.0 --port 8080"]
+# Sessions are signed, and the saved OpenAI API key encrypted, with keys of this
+# container's own unless they are supplied.
+CMD ["sh", "-ec", "/opt/postgresql/pg_ctl --pgdata=/data/postgres --wait --silent --log=/data/postgres.log -o '-c listen_addresses=127.0.0.1 -c unix_socket_directories=/tmp' start\nexport AUTH_JWT_SECRET=\"${AUTH_JWT_SECRET:-$(python -c 'import secrets; print(secrets.token_urlsafe(48))')}\"\nexport SETTINGS_ENCRYPTION_KEY=\"${SETTINGS_ENCRYPTION_KEY:-$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')}\"\nexec uvicorn app.api.main:app --host 0.0.0.0 --port 8080"]

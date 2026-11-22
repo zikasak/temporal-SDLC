@@ -52,10 +52,6 @@ def session(tmp_path, monkeypatch):
     return session_dir
 
 
-# Captured at import, before the autouse fixture stands in for it.
-CHECK_OPENAI_CREDENTIALS = docker_agents.check_openai_credentials
-
-
 def fake_docker(monkeypatch, routes, sent: dict):
     """Stands in for the Docker CLI and the external agent's filesystem only."""
     async def docker(*args, **kwargs):
@@ -125,9 +121,11 @@ async def test_routing_needs_the_checkout_and_a_brief(session, monkeypatch):
 
 async def test_a_routing_model_without_credentials_says_how_to_fix_it(session, monkeypatch):
     fake_docker(monkeypatch, ROUTES, {})
-    # The real credential check, not the fixture's stand-in.
-    monkeypatch.setattr(docker_agents, 'check_openai_credentials', CHECK_OPENAI_CREDENTIALS)
-    monkeypatch.setattr(docker_agents, 'OPENAI_API_KEY', '')
+    # No OpenAI endpoint is saved in Settings, unlike the fixture's stand-in.
+    async def no_endpoint():
+        return None
+
+    monkeypatch.setattr(docker_agents, 'get_openai_endpoint', no_endpoint)
 
     async def settings(role):
         return docker_agents.ModelSettings(adapter='openai', model='gpt-test')
@@ -136,7 +134,7 @@ async def test_a_routing_model_without_credentials_says_how_to_fix_it(session, m
     with pytest.raises(ApplicationError) as raised:
         await ActivityEnvironment().run(activities.route_requirements, 'session', CONTEXT)
     assert raised.value.type == ROUTING_ERROR and raised.value.non_retryable
-    assert 'OPENAI_API_KEY is not set' in raised.value.message
+    assert 'no OpenAI endpoint is set up in Settings' in raised.value.message
     assert 'choose another model for the Routing stage in Settings' in raised.value.message
 
 

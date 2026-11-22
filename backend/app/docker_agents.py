@@ -26,9 +26,11 @@ from app.agent_workflows.runtime import ANSWERS_FILENAME, PAUSE_EXIT, STATE_FILE
 # The images pulled ahead of use, by digest; the languages build their runners on them.
 from app.images import PLAYWRIGHT_IMAGE, PREPULLED_IMAGES  # noqa: F401
 from app.llm.limits import LIMIT_FILENAME, MESSAGE_CHARS, PROVIDER_LIMIT_EXIT
-from app.config import OPENAI_API_KEY, OPENAI_BASE_URL, PI_CREDENTIALS_DIR, PI_CREDENTIALS_SHARED
+from app.config import PI_CREDENTIALS_DIR, PI_CREDENTIALS_SHARED
+from app.llm.factory import NO_API_KEY
 from app.llm.questions import Question, normalize_questions
 from app.settings.models import ModelSettings, SETTINGS_FILENAME, WORKFLOW_LABELS, WorkflowType
+from app.settings.endpoint import OpenAIEndpoint, get_openai_endpoint
 from app.settings.storage import get_workflow_settings
 from app.tracing import container_trace_environment
 
@@ -172,6 +174,14 @@ def default_agent_image(role: str, workspace_name: str) -> AgentImageBuild:
 
 
 MIN_SECRET_LENGTH = 8
+# Secrets known to this worker beyond its environment, such as the saved OpenAI API key.
+_KNOWN_SECRETS: set[str] = set()
+
+
+def remember_secret(value: str) -> None:
+    """Redact `value` from every output from now on."""
+    if len(value) >= MIN_SECRET_LENGTH:
+        _KNOWN_SECRETS.add(value)
 
 
 def redact_output(output: str, env: Mapping[str, str] | None = None) -> str:
@@ -184,7 +194,7 @@ def redact_output(output: str, env: Mapping[str, str] | None = None) -> str:
 
 
 def _secret_values(env: Mapping[str, str] | None) -> list[str]:
-    secrets = {OPENAI_API_KEY} if OPENAI_API_KEY else set()
+    secrets = set(_KNOWN_SECRETS)
     for key, value in (env if env is not None else os.environ).items():
         if (len(value) >= MIN_SECRET_LENGTH
                 and any(part in key.upper() for part in ('KEY', 'TOKEN', 'PASSWORD', 'SECRET'))):
@@ -415,9 +425,9 @@ async def ensure_images(references: tuple[str, ...] = PREPULLED_IMAGES) -> None:
                         time.monotonic() - started)
 
 
-def container_base_url() -> str:
+def container_base_url(base_url: str) -> str:
     """Reach a local provider from Docker while preserving remote provider URLs."""
-    return _container_url(OPENAI_BASE_URL)
+    return _container_url(base_url)
 
 
 def _container_url(base_url: str) -> str:
@@ -487,13 +497,27 @@ def claude_container_args(settings: ModelSettings) -> list[str]:
     return args
 
 
-def check_openai_credentials(settings: ModelSettings) -> None:
-    """The OpenAI-compatible adapter cannot even start without an API key, local servers
-    included, so a stage set to it fails here, saying why, rather than in its container."""
-    if settings.adapter == 'openai' and not OPENAI_API_KEY:
+def check_openai_credentials(settings: ModelSettings, endpoint: OpenAIEndpoint | None) -> None:
+    """The OpenAI-compatible adapter cannot start without the OpenAI endpoint saved in
+    Settings, so a stage set to it fails here, saying why, rather than in its container."""
+    if settings.adapter == 'openai' and endpoint is None:
         raise AgentCredentialsError(
-            f'The selected model ({settings.model}) uses the OpenAI-compatible adapter, but '
-            'OPENAI_API_KEY is not set on the worker (any value works for a local server).')
+            f'The selected model ({settings.model}) uses the openai adapter, but no OpenAI '
+            'endpoint is set up in Settings.')
+
+
+async def openai_environment(settings: ModelSettings) -> dict[str, str]:
+    """The saved OpenAI endpoint as the container's OPENAI_API_KEY and OPENAI_BASE_URL,
+    for a stage set to the openai adapter; nothing for any other."""
+    if settings.adapter != 'openai':
+        return {}
+    endpoint = await get_openai_endpoint()
+    check_openai_credentials(settings, endpoint)
+    assert endpoint is not None
+    remember_secret(endpoint.api_key)
+    # A key is required by the client even where the endpoint needs none.
+    return {'OPENAI_API_KEY': endpoint.api_key or NO_API_KEY,
+            'OPENAI_BASE_URL': container_base_url(endpoint.base_url)}
 
 
 @asynccontextmanager
@@ -683,7 +707,7 @@ async def run_agent(role: str, session_id: str, workspace: Path,
     # The snapshot travels as input alongside the workspace, never as host selector env vars.
     await run_sync((workspace / SETTINGS_FILENAME).write_text, settings.model_dump_json())
     try:
-        check_openai_credentials(settings)
+        openai = await openai_environment(settings)
         adapter_args = [*(await run_sync(pi_container_args, settings)),
                         *claude_container_args(settings)]
     except AgentCredentialsError as exc:
@@ -695,8 +719,9 @@ async def run_agent(role: str, session_id: str, workspace: Path,
     # A self-hosted loopback Langfuse endpoint also needs Docker's host alias.
     if 'LANGFUSE_BASE_URL' in trace_environment:
         trace_environment['LANGFUSE_BASE_URL'] = _container_url(trace_environment['LANGFUSE_BASE_URL'])
-    environment = {**os.environ, **trace_environment, 'OPENAI_API_KEY': OPENAI_API_KEY,
-                   'OPENAI_BASE_URL': container_base_url()}
+    environment = {**os.environ, **trace_environment, **openai}
+    # Forwarded by name, so the saved key never enters Docker arguments.
+    openai_args = [argument for key in openai for argument in ('-e', key)]
     trace_args = [argument for key in trace_environment for argument in ('-e', key)]
     # Runtime tuning is forwarded by name; nothing else of the host environment is.
     setting_args = [argument for key in AGENT_SETTINGS if key in os.environ
@@ -714,8 +739,7 @@ async def run_agent(role: str, session_id: str, workspace: Path,
             # No bytecode caches in the project: they were copied into what tests read as
             # text, and failed them in the sandbox only.
             '-e', 'PYTHONDONTWRITEBYTECODE=1',
-            '-e', 'OPENAI_API_KEY', '-e', 'OPENAI_BASE_URL',
-            *trace_args, *setting_args, *adapter_args, agent_image, env=environment,
+            *openai_args, *trace_args, *setting_args, *adapter_args, agent_image, env=environment,
         )
         archive = workspace.parent / 'workspace.tar'
 
