@@ -189,7 +189,7 @@ services:
       retries: 10
 
   temporal-schema:
-    image: temporalio/admin-tools:1.31.0
+    image: temporalio/admin-tools:1.32.2
     exclude_from_hc: true
     restart: on-failure
     depends_on:
@@ -208,7 +208,7 @@ services:
         temporal-sql-tool --plugin postgres12 --ep postgres -u temporal -p 5432 --db temporal_visibility update-schema -d /etc/temporal/schema/postgresql/v12/visibility/versioned
 
   temporal:
-    image: temporalio/server:1.31.0
+    image: temporalio/server:1.32.2
     restart: unless-stopped
     depends_on:
       temporal-schema:
@@ -233,7 +233,7 @@ services:
       retries: 30
 
   temporal-namespace:
-    image: temporalio/admin-tools:1.31.0
+    image: temporalio/admin-tools:1.32.2
     exclude_from_hc: true
     depends_on:
       temporal:
@@ -252,7 +252,7 @@ services:
     restart: on-failure:5
 
   temporal-ui:
-    image: temporalio/ui:2.49.1
+    image: temporalio/ui:2.58.1
     restart: unless-stopped
     depends_on:
       temporal-namespace:
