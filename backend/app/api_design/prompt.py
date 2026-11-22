@@ -5,10 +5,10 @@ import json
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from app.api_design.models import ApiDesignState
-from app.api_design.openapi import design_problems
+from app.api_design.openapi import design_problems, endpoint_key
 from app.conversations.models import ConversationMessage
 from app.languages import describe_supported
-from app.llm.prompt import CURRENT_STATE_GUIDANCE, with_current_state
+from app.llm.prompt import CURRENT_STATE_GUIDANCE, changes_since, with_current_state
 from app.llm.questions import Question, message_text
 from app.tools.questions import GUIDANCE as QUESTIONS_GUIDANCE
 
@@ -105,6 +105,14 @@ ARCHITECTURE_GUIDANCE = (
     "technology choices it records."
 )
 
+EXISTING_API_GUIDANCE = (
+    "The API model started as the existing service's API below. The current state lists "
+    "only what this session changed of it: the schemas and endpoints recorded (added or "
+    "replaced, in full), the names of the schemas and the method and path of the "
+    "endpoints removed, and any changed info."
+)
+API_KEYS = {"schemas": lambda item: item["name"], "endpoints": endpoint_key}
+
 
 def opening_fallback() -> ConversationMessage:
     """The first message of a session whose first turn failed; a change session has
@@ -122,6 +130,7 @@ def language_guidance(language: str | None, fixed: bool = False) -> str:
 def api_turn_messages(state: ApiDesignState, extra_guidance: str = "") -> list[BaseMessage]:
     problems = design_problems(state.api, state.language)
     change = bool(state.change_document)
+    existing = (state.contract or {}).get("api")
     guidance = (
         f"{DESIGNER_GUIDANCE}{QUESTIONS_GUIDANCE}{CHANGE_GUIDANCE if change else ''}"
         f"{language_guidance(state.language, fixed=change)}{extra_guidance}"
@@ -131,6 +140,9 @@ def api_turn_messages(state: ApiDesignState, extra_guidance: str = "") -> list[B
            if change else "")
         + (f"{ARCHITECTURE_GUIDANCE}\n<architecture>\n{state.architecture}\n"
            "</architecture>\n\n" if state.architecture else "")
+        + (f"{EXISTING_API_GUIDANCE}\n<existing_api>\n"
+           f"{json.dumps(existing, ensure_ascii=False)}\n</existing_api>\n\n"
+           if existing is not None else "")
         + CURRENT_STATE_GUIDANCE.lstrip()
     )
     # Chat templates expect the conversation to start with a user turn.
@@ -141,7 +153,10 @@ def api_turn_messages(state: ApiDesignState, extra_guidance: str = "") -> list[B
         else AIMessage(content=message_text(item))
         for item in state.messages
     ]
+    current = (
+        f"Current API model: {json.dumps(state.api, ensure_ascii=False)}" if existing is None
+        else "Changes to the existing API so far: "
+        + json.dumps(changes_since(existing, state.api, API_KEYS), ensure_ascii=False))
     return with_current_state(
         [SystemMessage(content=guidance), *conversation],
-        f"Current API model: {json.dumps(state.api, ensure_ascii=False)}"
-        f"\nOpen problems: {json.dumps(problems, ensure_ascii=False)}")
+        f"{current}\nOpen problems: {json.dumps(problems, ensure_ascii=False)}")

@@ -2,6 +2,8 @@
 
 import json
 import re
+from collections.abc import Callable, Mapping
+from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
@@ -24,6 +26,29 @@ def with_current_state(messages: list[BaseMessage], state: str) -> list[BaseMess
     if messages and isinstance(messages[-1], HumanMessage):
         return [*messages[:-1], HumanMessage(content=f"{messages[-1].text}\n\n{block}")]
     return [*messages, HumanMessage(content=block)]
+
+
+def changes_since(baseline: Mapping[str, Any], current: Mapping[str, Any],
+                  keys: Mapping[str, Callable[[Any], str]]) -> dict[str, Any]:
+    """What `current` changed of `baseline`. A list named in `keys` gives the items added
+    or replaced, in full, and the keys of those removed; any other field its new value.
+    A state that starts from a large existing one (a service's whole API) is sent as
+    these changes, beside the unchanging original in the cached system prompt."""
+    changes: dict[str, Any] = {}
+    for name in sorted(baseline.keys() | current.keys()):
+        before, after = baseline.get(name), current.get(name)
+        if name not in keys:
+            if before != after:
+                changes[name] = after
+            continue
+        key = keys[name]
+        old = {key(item): item for item in before or []}
+        new = {key(item): item for item in after or []}
+        recorded = [item for item_key, item in new.items() if old.get(item_key) != item]
+        removed = [item_key for item_key in old if item_key not in new]
+        if recorded or removed:
+            changes[name] = {"recorded": recorded, "removed": removed}
+    return changes
 
 
 def model_messages(
