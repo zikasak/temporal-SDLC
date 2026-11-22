@@ -11,9 +11,13 @@ async function openInterview(page: Page): Promise<void> {
   await expect(page.getByRole('region', { name: 'Your answer', exact: true })).toBeVisible();
 }
 
-/** Reveal the popup of the requirement ID `id` in the left column and check it whole. */
-async function popupIsWhole(page: Page, id: string): Promise<void> {
-  const button = page.getByRole('button', { name: id, exact: true });
+/**
+ * Reveal the popup of the requirement ID `id` in the region `regionName` (the left column,
+ * 'Your answer', by default) and check it whole.
+ */
+async function popupIsWhole(page: Page, id: string, regionName = 'Your answer'): Promise<void> {
+  const region = page.getByRole('region', { name: regionName, exact: true });
+  const button = region.getByRole('button', { name: id, exact: true }).first();
   await reveal(button);
   const popup = page.getByRole('tooltip');
   await expect(popup).toBeVisible();
@@ -110,5 +114,21 @@ test.describe('whole popup in every window', () => {
       // requirement: FR-173
       await openInterview(page);
       await popupIsWhole(page, 'FR-122');
+    });
+});
+
+test.describe('whole popup of an ID in the interview history', () => {
+  test('revealing FR-117 in the interview history shows the whole popup',
+    { tag: ['@desktop', '@tablet', '@phone'] }, async ({ page }) => {
+      // requirement: FR-173
+      await openInterview(page);
+      await popupIsWhole(page, 'FR-117', 'Interview');
+    });
+
+  test('revealing FR-122 in the interview history shows the whole popup',
+    { tag: ['@desktop', '@tablet', '@phone'] }, async ({ page }) => {
+      // requirement: FR-173
+      await openInterview(page);
+      await popupIsWhole(page, 'FR-122', 'Interview');
     });
 });
