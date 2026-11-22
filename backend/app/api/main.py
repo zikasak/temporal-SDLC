@@ -5,8 +5,11 @@ from contextlib import asynccontextmanager, suppress
 
 import psycopg
 from fastapi import Depends, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 
-from app.api.errors import TemporalUnavailableError, temporal_unavailable_response
+from app.api.errors import (
+    TemporalUnavailableError, request_validation_response, temporal_unavailable_response,
+)
 from app.api.routes import (
     api_design, architecture, auth, github, llm_requests, onboarding, requirements, settings,
     workflows,
@@ -67,6 +70,8 @@ app = FastAPI(lifespan=lifespan)
 # Temporal failures answer 503, or 404 for a session or request this instance never started.
 app.add_exception_handler(TemporalUnavailableError, temporal_unavailable_response)
 app.add_exception_handler(TemporalUnavailable, temporal_unavailable_response)
+# Validation errors answer the Error schema: one readable message, without the inputs.
+app.add_exception_handler(RequestValidationError, request_validation_response)
 app.include_router(auth.router)
 # Called by GitHub, authenticated by its signature instead of a user token.
 app.include_router(github.events_router)

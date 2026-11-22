@@ -12,18 +12,20 @@
         "Old-shape requirements and onboarding flows from before this change and their stages are only listed and opened, with no waiting-for-user highlight and no unresolved findings marker",
         "Opens the next stage from a session's returned IDs: the architecture session, the API design session, or the delivery of a bugfix or documentation change",
         "Repository and branch picker, GitHub connection settings and the Settings page, which includes the requirements reviewer's model",
+        "Settings page: an OpenAI endpoint section (base URL, API key, optional display name, whether a key is set, and a Remove action showing a 409 detail) shown only to the administrator; model pickers offer the openai adapter only when GET /settings offers it and label it with the endpoint's display name, or 'OpenAI' when the display name is empty",
         "Shows delivery progress, agent questions, review findings and pull request links, and sends the user's answers and decisions"
       ]
     },
     {
       "name": "HTTP API",
       "responsibilities": [
-        "FastAPI application (app.api.main) exposing the auth, chat, requirements, architecture, API design, onboarding, workflows and GitHub connector routes",
+        "FastAPI application (app.api.main) exposing the auth, chat, requirements, architecture, API design, onboarding, workflows, settings and GitHub connector routes",
         "Requires a signed-in user on every router except auth and the GitHub webhook endpoint",
         "Validates input, bounds request sizes and maps Temporal and storage failures to 503 and session errors to 404/409/422",
         "Starts, queries, signals and updates Temporal workflows for each session through the session services",
-        "Creates the database schemas at startup (including the model settings table) and runs background loops: expired-document cleanup, Pi OAuth credential refresh and recovery of interrupted webhook mentions",
-        "At startup, cancels every still-running old-shape OnboardingWorkflow (top-level, without a parent task flow) started before this change; the step is idempotent, so later startups find none"
+        "Creates the database schemas at startup (including the model settings table and the OpenAI endpoint storage), runs the one-time model settings migration of old openai defaults to pi, and runs background loops: expired-document cleanup, Pi OAuth credential refresh, recovery of interrupted webhook mentions and deletion of superseded OpenAI endpoint versions no open execution pins (looked up by the OpenAIEndpointVersion search attribute)",
+        "At startup, cancels every still-running old-shape OnboardingWorkflow (top-level, without a parent task flow) started before this change; the step is idempotent, so later startups find none",
+        "Settings routes: return the OpenAI endpoint section shaped by role (base URL, display name and whether a key is set for the administrator; only the display name for anyone else), answer 403 to a non-administrator whose PUT contains the openai_endpoint section, and map a failed endpoint check or a changed base URL without a new key to 422, a blocked removal to 409, a removal with no endpoint saved to success and a missing SETTINGS_ENCRYPTION_KEY to 503"
       ]
     },
     {
@@ -89,7 +91,7 @@
       "responsibilities": [
         "One host process with a Temporal worker per sandboxed stage and its own task queue: implementation, test generation, verification, diagnosis, code review and documentation, one activity at a time each (app.agent_workflows.worker)",
         "Builds agent images and starts, monitors and removes coding agent containers through a Docker daemon (app.docker_agents)",
-        "Passes the workspace, LLM settings and provider credentials into containers and re-logs their output",
+        "Passes the workspace, LLM settings and provider credentials into containers and re-logs their output; for the openai adapter the base URL and API key come from the OpenAI endpoint version pinned by the stage's flow, read at each agent run, and the key is redacted from the re-logged output",
         "Keeps the workspace of an agent that paused with questions and resumes it with the user's answers",
         "Builds the service from its root Dockerfile and runs the contract test suites against it (Python and Java test-suite images) for verification and baseline checks"
       ]
@@ -108,6 +110,7 @@
       "name": "LLM adapters",
       "responsibilities": [
         "Build the chat model for a workflow from its model settings (app.llm.factory): OpenAI-compatible or Google Gemini through LangChain, the Pi coding agent CLI, or Claude through the Claude Agent SDK",
+        "Take the OpenAI-compatible base URL and API key from the stored OpenAI endpoint passed in with the model settings (in the workers) or from the container's environment set by the sandbox worker (in agent containers), never from the process's own OPENAI_* configuration",
         "Run the LangGraph tool-calling agent with the session tools (requirements, architecture, API design, repository, documents and questions tools in app.tools)",
         "Normalize the questions the LLM asks the user",
         "Optionally trace LLM calls to Langfuse"
@@ -135,7 +138,13 @@
       "responsibilities": [
         "Internal storage of the adapter, model and thinking level chosen for each LLM workflow type (app.settings), now including a requirements_review entry for the requirements reviewer of tasks and onboardings alike, separate from the code review entry",
         "Knows the models and thinking levels each provider offers",
-        "Provides the settings the workers and agent containers use for their LLM calls"
+        "Provides the settings the workers and agent containers use for their LLM calls",
+        "Stores the single shared OpenAI endpoint as versions: each save that changes the base URL or API key adds a new version (base URL and the API key encrypted with Fernet under the new SETTINGS_ENCRYPTION_KEY) and makes it current; the display name is kept apart from the versions, is optional, and a display-name-only change saves without a new version or check. Provides a version, decrypted, to the API's model listing, the workers and the sandbox worker in place of the OPENAI_BASE_URL and OPENAI_API_KEY environment variables, which are no longer read; without a valid SETTINGS_ENCRYPTION_KEY an endpoint with a key cannot be saved or read and the request answers 503",
+        "Running work keeps the endpoint it started with: every top-level flow (task flow or chat) pins the current endpoint version ID when it starts (no key in Temporal history) and passes it to its children, whose activities and agent runs read that version until the flow ends; a task flow started by a fork or a fix round pins the version that is current when it starts, not the original flow's; flows without a pinned version (started before this change, or started while none was saved) read the current one. Superseded versions are kept, however long that takes, until no open execution pins them, and then deleted",
+        "Checks the endpoint with GET {base URL}/models only when the base URL or API key changes, with the new key or, for an empty key field, the stored one; the stored key is reused only while the base URL stays the same, so a changed base URL with an empty key field is refused with 422 unless the key is explicitly set to empty; the endpoint and the workflow settings of the same request are saved in one transaction, so a failed check saves nothing",
+        "Removes the endpoint (every version and the display name) unless a workflow type's saved adapter is openai, and reports those workflow types when it refuses; removing when no endpoint is saved is a successful no-op",
+        "Offers the openai adapter only while an endpoint base URL is saved, and uses pi as the default adapter of a workflow type with no saved adapter while none is saved, also when filling in missing workflow types at startup; a saved openai choice stays and its runs fail with a clear error until the endpoint is set up",
+        "One-time, idempotent startup migration: while no endpoint is saved, every workflow type row that still holds the old default (adapter openai with the old default model) is switched to the pi default; rows the user changed are left as they are"
       ]
     },
     {
@@ -152,7 +161,8 @@
         "Keeps the Repository and Branch search attributes used to list executions; OnboardingId is no longer set on new executions or returned",
         "Keeps the FlowState (pending or skipped, overriding the Temporal status in listings), TaskName and LinkedTaskFlows (keyword list of task flows a stage is linked into by a fork or fix round) search attributes, upserted by the workflows",
         "Keeps the new TaskOrigin keyword search attribute (requirements or onboarding), set when a TaskWorkflow starts, which the origin filter queries",
-        "Keeps the WaitingForUser and UnresolvedFindings boolean search attributes, upserted by stages and task flows, so listings carry the backend-computed highlight and marker"
+        "Keeps the WaitingForUser and UnresolvedFindings boolean search attributes, upserted by stages and task flows, so listings carry the backend-computed highlight and marker",
+        "Keeps the new OpenAIEndpointVersion keyword search attribute, the OpenAI endpoint version a flow pinned at its start, so superseded versions still pinned by open executions are not deleted"
       ]
     },
     {
@@ -202,7 +212,7 @@
     {
       "source": "Session services",
       "target": "Temporal server",
-      "description": "Temporal client gRPC calls: start TaskWorkflows (with TaskOrigin) and chats with search attributes, send signals and updates to the task flow and its stages (including finalize with force and the retry of a failed review round), run queries for session and review state, and list executions by visibility queries over ParentWorkflowId, LinkedTaskFlows, FlowState, TaskOrigin and the other search attributes."
+      "description": "Temporal client gRPC calls: start TaskWorkflows (with TaskOrigin and the pinned OpenAIEndpointVersion) and chats with search attributes, send signals and updates to the task flow and its stages (including finalize with force and the retry of a failed review round), run queries for session and review state, and list executions by visibility queries over ParentWorkflowId, LinkedTaskFlows, FlowState, TaskOrigin, OpenAIEndpointVersion and the other search attributes."
     },
     {
       "source": "Session services",
@@ -232,7 +242,7 @@
     {
       "source": "Model settings",
       "target": "PostgreSQL",
-      "description": "The workflow_settings row with the model settings of every LLM workflow type."
+      "description": "The workflow_settings rows with the model settings of every LLM workflow type, the OpenAI endpoint versions (base URL and Fernet-encrypted API key) with the current one marked, and the display name, read and written with psycopg in one transaction per save."
     },
     {
       "source": "Temporal server",
@@ -267,17 +277,17 @@
     {
       "source": "Orchestration worker",
       "target": "Model settings",
-      "description": "Reads the model settings of the workflow type an LLM activity runs for."
+      "description": "Reads the model settings of the workflow type an LLM activity runs for and, for the openai adapter, the OpenAI endpoint version the flow pinned at its start (or the current one when none is pinned) with its decrypted key, at each activity run; reads the current version ID when a top-level flow starts."
     },
     {
       "source": "Sandbox worker",
       "target": "Coding agent containers",
-      "description": "Docker CLI calls to a dedicated Docker daemon: builds the agent image, copies in the workspace (contract, generated code, tests, review findings, answers) and the stage's model settings file, passes provider credentials as environment variables, and copies the workspace and agent state back out."
+      "description": "Docker CLI calls to a dedicated Docker daemon: builds the agent image, copies in the workspace (contract, generated code, tests, review findings, answers) and the stage's model settings file, passes provider credentials as environment variables (for openai, the stored endpoint's base URL, rewritten for the container network, and its key), and copies the workspace and agent state back out."
     },
     {
       "source": "Sandbox worker",
       "target": "Model settings",
-      "description": "Reads each stage's model settings to pass into its agent container."
+      "description": "Reads each stage's model settings to pass into its agent container and, for the openai adapter, the OpenAI endpoint version pinned by the stage's flow (or the current one when none is pinned) with its decrypted key, at each agent run."
     },
     {
       "source": "Coding agent containers",
@@ -328,6 +338,16 @@
       "source": "Codegen worker",
       "target": "Langfuse",
       "description": "Spans of the generate-server-code activity (CodegenWorkflow), tagged with the Temporal workflow, run, activity ID and attempt by the trace_activity decorator (app.temporal.tracing), exported over HTTPS with the Langfuse keys when tracing is enabled."
+    },
+    {
+      "source": "HTTP API",
+      "target": "Model settings",
+      "description": "In-process calls: read the workflow settings, offered adapters and models and the OpenAI endpoint for GET /settings, and save workflow settings together with an endpoint change or removal for PUT /settings, with the signed-in user's administrator flag already checked."
+    },
+    {
+      "source": "Model settings",
+      "target": "LLM provider",
+      "description": "GET {base URL}/models over HTTPS through httpx with the API key as a bearer token, to check an OpenAI endpoint before it is saved and to list the endpoint's models for the model pickers."
     }
   ],
   "technology_choices": [
@@ -373,8 +393,8 @@
     },
     {
       "topic": "Authentication and secrets",
-      "choice": "HS256 JWTs via PyJWT, scrypt password hashes from hashlib, Fernet (cryptography) encryption of the GitHub App key and webhook secret",
-      "rationale": "NFR-2 and NFR-3."
+      "choice": "HS256 JWTs via PyJWT, scrypt password hashes from hashlib, Fernet (cryptography) encryption of the GitHub App key and webhook secret with GITHUB_TOKEN_ENCRYPTION_KEY, and of the OpenAI API key with a new dedicated SETTINGS_ENCRYPTION_KEY",
+      "rationale": "NFR-2, NFR-3 and NFR-8; the user chose a dedicated key so the settings secret is independent of the GitHub connection's key."
     },
     {
       "topic": "Observability",
@@ -405,6 +425,11 @@
       "topic": "Migration of old-shape onboardings",
       "choice": "Cancelled on deploy: an idempotent startup step of the API cancels every running top-level OnboardingWorkflow (no parent task flow) with its children; they stay listed as cancelled in the All view and must be started again.",
       "rationale": "User's choice; avoids keeping the onboarding ID field and the old onboarding flow shape alive alongside the task flow shape (FR-159, FR-164)."
+    },
+    {
+      "topic": "OpenAI endpoint configuration",
+      "choice": "One shared OpenAI endpoint stored as versions by the Model settings component in PostgreSQL; each top-level flow (task flow, chat) pins the current version ID at start, passes it to its children and carries it as the new OpenAIEndpointVersion keyword search attribute, and every activity and agent run reads the pinned version; an API background loop deletes superseded versions no open execution pins; OPENAI_BASE_URL and OPENAI_API_KEY are removed from the configuration and not imported; the default adapter becomes pi while no endpoint is saved, and a one-time startup migration switches rows still holding the old openai default to pi; the stored key is only reused for an unchanged base URL",
+      "rationale": "FR-174 to FR-182 and TR-7. The user chose that running work keeps the endpoint it started with: pinning a version ID keeps the key out of Temporal history while a value set on the Settings page still reaches new flows in every process without a restart. The startup fill-in saved openai for every workflow type, so without the migration removal (FR-182) would be blocked for good. Not sending the stored key to a new address keeps the secret from leaking to another host (user's choice). Removal deletes every version, as no workflow type can use openai by then."
     }
   ]
 }

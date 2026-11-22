@@ -1169,5 +1169,93 @@
     "priority": "must",
     "rationale": "User's acceptance criterion.",
     "title": "Acceptance: whole popup visible in every session type"
+  },
+  {
+    "category": "functional",
+    "description": "The Settings page of the web client lets the user set the OpenAI endpoint's base URL, API key and display name, and the saved values are used for every LLM call and coding agent that uses the openai adapter.",
+    "id": "FR-174",
+    "priority": "must",
+    "rationale": "User: set up the OpenAI endpoint from the UI on the Settings page, with base URL, API key and display name.",
+    "title": "Configure the OpenAI endpoint in Settings"
+  },
+  {
+    "category": "functional",
+    "description": "Only the administrator can change the OpenAI endpoint's base URL, API key and display name; a PUT /settings from any other signed-in user that contains an openai_endpoint section answers 403, while one without that section saves their workflow settings and leaves the endpoint unchanged.",
+    "id": "FR-175",
+    "priority": "must",
+    "rationale": "User chose: only the administrator; non-administrators without the section save their workflow settings as today.",
+    "title": "Only the administrator changes the OpenAI endpoint"
+  },
+  {
+    "category": "functional",
+    "description": "In the Settings page's model pickers, the OpenAI endpoint's saved display name is shown as the provider label instead of \"OpenAI\".",
+    "id": "FR-176",
+    "priority": "must",
+    "rationale": "User chose: display name replaces \"OpenAI\" in the model pickers.",
+    "title": "Display name as the OpenAI provider label"
+  },
+  {
+    "category": "functional",
+    "description": "While no OpenAI endpoint base URL has been saved, the openai adapter is not offered in GET /settings or in the Settings page's model pickers.",
+    "id": "FR-177",
+    "priority": "must",
+    "rationale": "User chose: hide the OpenAI adapter until it is set up.",
+    "title": "OpenAI adapter hidden until set up"
+  },
+  {
+    "category": "functional",
+    "description": "GET /settings returns a new openai_endpoint section: to the administrator it holds the base URL, the display name and whether an API key is set; to any other signed-in user it holds only the display name. PUT /settings accepts that section to save the base URL, API key and display name.",
+    "id": "FR-178",
+    "priority": "must",
+    "rationale": "User chose a new openai_endpoint section of GET/PUT /settings; non-administrators get only the display name so model pickers can show it.",
+    "title": "OpenAI endpoint in GET/PUT /settings"
+  },
+  {
+    "category": "functional",
+    "description": "While no OpenAI endpoint base URL has been saved, a workflow type with no saved adapter uses the pi adapter by default; a workflow type whose saved adapter is openai keeps that choice, and its runs fail until the endpoint is set up.",
+    "id": "FR-179",
+    "priority": "must",
+    "rationale": "User chose: default adapter changes to pi; saved openai choices stay but fail until set up. Code: the default adapter is 'openai' today (app/settings/models.py).",
+    "title": "Default adapter is pi while OpenAI is not set up"
+  },
+  {
+    "category": "functional",
+    "description": "Saving the OpenAI endpoint sends GET {base URL}/models with the API key (the newly entered one, or the stored one when the field is empty); when it does not answer successfully, the PUT /settings answers 422 with a detail and saves nothing at all, neither the endpoint nor any other settings sent in the same request.",
+    "id": "FR-180",
+    "priority": "must",
+    "rationale": "User confirmed the stored key is used for an empty field and chose that a failed check saves nothing, including other settings in the same PUT.",
+    "title": "Endpoint checked when saved"
+  },
+  {
+    "category": "functional",
+    "description": "On the Settings page, the OpenAI endpoint section (base URL, API key and display name) is shown only to the administrator; a signed-in user who is not the administrator does not see it.",
+    "id": "FR-181",
+    "priority": "must",
+    "rationale": "User chose: nothing; the section is hidden from them.",
+    "title": "OpenAI endpoint section hidden from non-administrators"
+  },
+  {
+    "category": "functional",
+    "description": "The administrator can remove the saved OpenAI endpoint with a Remove action on the Settings page, which sends PUT /settings with openai_endpoint set to null; this clears the base URL, API key and display name, after which the openai adapter is no longer offered in GET /settings or the model pickers. While any workflow type's saved adapter is openai, removal answers 409 with a detail naming those workflow types and clears nothing, and the Settings page shows that detail. The same request from any other signed-in user answers 403.",
+    "id": "FR-182",
+    "priority": "must",
+    "rationale": "User chose: PUT /settings with openai_endpoint null clears it, administrator only, 403 otherwise. Resolving C-1, the user chose to block removal while any workflow type uses openai, answering 409 with a detail naming them, shown on the page.",
+    "title": "Remove the OpenAI endpoint"
+  },
+  {
+    "category": "non_functional",
+    "description": "The OpenAI API key is stored encrypted and is never part of any response; GET returns only whether a key is set, and saving the endpoint with an empty API key field keeps the stored key unchanged.",
+    "id": "NFR-8",
+    "priority": "must",
+    "rationale": "User chose: encrypted, never returned, empty field keeps the stored key.",
+    "title": "OpenAI API key stored encrypted and never returned"
+  },
+  {
+    "category": "technical",
+    "description": "The API and the workers no longer read the OPENAI_BASE_URL and OPENAI_API_KEY environment variables; the OpenAI endpoint comes only from the values set on the Settings page.",
+    "id": "TR-7",
+    "priority": "must",
+    "rationale": "User chose: the UI replaces the environment variables entirely.",
+    "title": "OPENAI_BASE_URL and OPENAI_API_KEY no longer read"
   }
 ]

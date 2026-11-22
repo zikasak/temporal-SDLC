@@ -2059,7 +2059,7 @@
       "tag": "requirements"
     },
     {
-      "description": "The adapter, model and thinking level of every LLM workflow type, including the new requirements_review entry used by the requirements reviewer of tasks and onboardings, with labels and the selectable models of each provider.",
+      "description": "The adapter, model and thinking level of every LLM workflow type, including the requirements_review entry used by the requirements reviewer of tasks and onboardings, with labels and the selectable models of each provider, and the openai_endpoint section shaped by role: base URL, display name and whether an API key is set for the administrator, only the display name for anyone else. The openai adapter is offered in providers only while an endpoint base URL is saved. 503 when a saved key cannot be read without a valid SETTINGS_ENCRYPTION_KEY.",
       "error_statuses": [
         401,
         503
@@ -2069,7 +2069,12 @@
       "path": "/settings",
       "request_schema": null,
       "requirement_ids": [
-        "FR-148"
+        "FR-148",
+        "FR-176",
+        "FR-177",
+        "FR-178",
+        "FR-179",
+        "NFR-8"
       ],
       "response_array": false,
       "response_schema": "SettingsView",
@@ -2078,21 +2083,30 @@
       "tag": "settings"
     },
     {
-      "description": "Replaces the settings of every LLM workflow type; the body must now include requirements_review too (422 otherwise, a breaking change for clients sending the former set). 422 when a selected model or thinking level is no longer offered; 503 when a provider's models cannot be listed.",
+      "description": "Replaces the settings of every LLM workflow type; the body must include requirements_review too (422 otherwise). 422 when a selected model or thinking level is no longer offered, including openai while no endpoint is saved. The optional openai_endpoint section is administrator only: 403 for any other user whose body contains it (also when null), while a body without it saves their workflow settings and leaves the endpoint unchanged. openai_endpoint.base_url must be an http or https URL of at most 2048 characters and display_name at most 100 characters after trimming (422 otherwise). Saving the endpoint with a changed base URL or API key first sends GET {base URL}/models with the new key, or the stored one when api_key is omitted or null, waiting at most 10 seconds; when it does not answer successfully, 422 with a detail giving the HTTP status it answered or the connection error (never the key); 422 also when the base URL changed and no new key was given. A change of the display name alone saves without a check. An empty api_key saves the endpoint without a key. openai_endpoint null removes the endpoint; while any workflow type's saved adapter is openai it answers 409 with an OpenAIEndpointRemovalConflict body (a detail naming those workflow types plus their workflow_types list) and clears nothing; it succeeds without change when no endpoint is saved. The endpoint and the workflow settings are saved in one transaction: any error saves nothing. 503 when a provider's models cannot be listed or SETTINGS_ENCRYPTION_KEY is missing. The response has the same shape as GET /settings (SettingsView, with its openai_endpoint section shaped by the caller's role), never the API key; its workflows field holds the saved workflow settings as before.",
       "error_statuses": [
         401,
+        403,
+        409,
         422,
         503
       ],
       "method": "PUT",
       "parameters": [],
       "path": "/settings",
-      "request_schema": "WorkflowSettings",
+      "request_schema": "SettingsUpdate",
       "requirement_ids": [
-        "FR-148"
+        "FR-148",
+        "FR-174",
+        "FR-175",
+        "FR-178",
+        "FR-180",
+        "FR-182",
+        "NFR-8",
+        "TR-7"
       ],
       "response_array": false,
-      "response_schema": "WorkflowSettings",
+      "response_schema": "SettingsView",
       "response_status": 200,
       "summary": "Save the model settings",
       "tag": "settings"
@@ -4576,7 +4590,7 @@
       "properties": [
         {
           "array": false,
-          "description": "ModelSettings by workflow type, including requirements_review.",
+          "description": "ModelSettings by workflow type, including requirements_review. A workflow type with no saved adapter defaults to pi while no OpenAI endpoint is saved.",
           "name": "workflows",
           "required": true,
           "type": "object"
@@ -4590,10 +4604,113 @@
         },
         {
           "array": false,
-          "description": "By adapter: label, models (id, label, thinking_levels), error and hint.",
+          "description": "By adapter: label, models (id, label, thinking_levels), error and hint. The openai adapter is listed only while an OpenAI endpoint base URL is saved, with the endpoint's display name as its label when one is set.",
           "name": "providers",
           "required": true,
           "type": "object"
+        },
+        {
+          "array": false,
+          "description": "The OpenAI endpoint: base URL, display name and api_key_set for the administrator; only the display name for any other user.",
+          "name": "openai_endpoint",
+          "required": true,
+          "type": "OpenAIEndpointView"
+        }
+      ]
+    },
+    {
+      "description": "The shared OpenAI endpoint as GET /settings shows it, shaped by the caller's role. Never contains the API key.",
+      "name": "OpenAIEndpointView",
+      "properties": [
+        {
+          "array": false,
+          "description": "Administrator only: the saved base URL; null when no endpoint is saved. Absent for any other user.",
+          "format": "uri",
+          "name": "base_url",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "The saved display name, shown as the openai provider label in the model pickers; null when none is saved (the client then shows OpenAI). Returned to every signed-in user.",
+          "name": "display_name",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "Administrator only: whether an API key is stored. Absent for any other user.",
+          "name": "api_key_set",
+          "required": false,
+          "type": "boolean"
+        }
+      ]
+    },
+    {
+      "description": "The OpenAI endpoint to save. When the base URL or API key changes, the service first sends GET {base_url}/models with the key, waiting at most 10 seconds; if it does not answer successfully, the whole PUT answers 422 and nothing is saved.",
+      "name": "OpenAIEndpointInput",
+      "properties": [
+        {
+          "array": false,
+          "description": "Base URL of the OpenAI-compatible endpoint: an http or https URL of at most 2048 characters; anything else answers 422 before any check is sent.",
+          "format": "uri",
+          "name": "base_url",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "The new API key, stored encrypted and never returned. Omitted or null keeps the stored key, which is allowed only while base_url stays the same (422 otherwise); an empty string saves the endpoint without a key.",
+          "name": "api_key",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "Optional label shown instead of OpenAI in the model pickers; trimmed, at most 100 characters (422 otherwise). Empty, null or omitted saves no display name (null), and the pickers then show OpenAI. Changing only the display name saves without a check.",
+          "name": "display_name",
+          "required": false,
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "description": "The body of PUT /settings: the model settings of every LLM workflow type and, optionally, the OpenAI endpoint. Everything is saved in one transaction.",
+      "name": "SettingsUpdate",
+      "properties": [
+        {
+          "array": false,
+          "description": "ModelSettings by workflow type; must hold exactly every type: chat, requirements, requirements_review, api_design, implementation, test_generation, diagnosis, documentation, review and routing; 422 otherwise.",
+          "name": "workflows",
+          "required": true,
+          "type": "object"
+        },
+        {
+          "array": false,
+          "description": "Administrator only (403 for anyone else whenever the key is present, including null). Absent leaves the endpoint unchanged; an object saves it; null removes it (base URL, API key and display name), which answers 409 naming the workflow types whose saved adapter is openai and clears nothing, and is a successful no-op when no endpoint is saved.",
+          "name": "openai_endpoint",
+          "required": false,
+          "type": "OpenAIEndpointInput"
+        }
+      ]
+    },
+    {
+      "description": "The 409 body of PUT /settings when removing the OpenAI endpoint is blocked because workflow types still use the openai adapter. Nothing is cleared.",
+      "name": "OpenAIEndpointRemovalConflict",
+      "properties": [
+        {
+          "array": false,
+          "description": "Says the endpoint cannot be removed and names the workflow types whose saved adapter is openai; the Settings page shows it.",
+          "name": "detail",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": true,
+          "description": "The workflow types whose saved adapter is openai, such as chat or requirements_review, in the order of the workflows keys.",
+          "name": "workflow_types",
+          "required": true,
+          "type": "string"
         }
       ]
     }

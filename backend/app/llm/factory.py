@@ -10,6 +10,10 @@ from pydantic import SecretStr
 
 from app.settings.models import ModelSettings
 
+# Sent in place of the key of an OpenAI endpoint saved without one: the client needs a
+# key, and would otherwise look for one in its environment.
+NO_API_KEY = 'no-api-key'
+
 
 def create_model(*, model_name: str, api_key: str, base_url: str,
                  thinking_level: str = 'default') -> BaseChatModel:
@@ -25,6 +29,7 @@ def create_model(*, model_name: str, api_key: str, base_url: str,
             thinking = {'thinking_level': 'high' if thinking_level in {'xhigh', 'max'} else thinking_level}
         return ChatGoogleGenerativeAI(model=model_name, api_key=SecretStr(api_key), max_retries=0,
                                       **thinking)
+    api_key = api_key or NO_API_KEY
     reasoning: dict[str, Any] = ({} if thinking_level == 'default' else
                                  {'reasoning_effort': thinking_level})
     # Streamed so the read timeout bounds the gap between chunks, not the whole generation.

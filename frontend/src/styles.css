@@ -1537,6 +1537,21 @@ h2 {
   caret-color: var(--green);
 }
 
+.github-token-form .checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.github-token-form .checkbox-label input {
+  width: auto;
+  min-height: 0;
+}
+
+.openai-endpoint-settings {
+  margin-top: 28px;
+}
+
 .login-form input:disabled,
 .github-token-form input:disabled,
 .repository-picker select:disabled {

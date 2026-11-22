@@ -18,6 +18,9 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 # Set before application imports/.env loading. Tracing transport tests opt in
 # explicitly in isolated child processes with disposable local credentials.
 os.environ['LANGFUSE_TRACING_ENABLED'] = 'false'
+# The OpenAI endpoint the saved_model_settings fixture stands in for.
+TEST_OPENAI_BASE_URL = 'http://localhost:1234/v1'
+TEST_OPENAI_API_KEY = 'test-secret-key'
 
 
 @pytest.fixture
@@ -272,8 +275,14 @@ def saved_model_settings(monkeypatch):
         return settings[workflow_type]
 
     monkeypatch.setattr(docker_agents, 'get_workflow_settings', load)
-    # The stand-in model needs no credentials; their check is tested on its own.
-    monkeypatch.setattr(docker_agents, 'check_openai_credentials', lambda settings: None)
+    # The OpenAI endpoint saved in Settings, which the stand-in model uses; its absence
+    # is tested on its own.
+    from app.settings.endpoint import OpenAIEndpoint
+
+    async def endpoint():
+        return OpenAIEndpoint(base_url=TEST_OPENAI_BASE_URL, api_key=TEST_OPENAI_API_KEY)
+
+    monkeypatch.setattr(docker_agents, 'get_openai_endpoint', endpoint)
     return settings
 
 

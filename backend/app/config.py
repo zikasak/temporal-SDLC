@@ -47,9 +47,11 @@ OPENAPI_GENERATOR_CMD = os.getenv(
 )
 CODEGEN_BASE_PACKAGE = os.getenv("CODEGEN_BASE_PACKAGE", "com.example")
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-# The SDK appends /chat/completions to this API base URL.
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:1234/v1")
+# The OpenAI endpoint (base URL, API key and display name) is set on the Settings page
+# and stored in app.openai_endpoint; OPENAI_BASE_URL and OPENAI_API_KEY are not read.
+# Encrypts the API key saved there (a Fernet key): generate once, keep it stable and store
+# it apart from the database; losing it means entering the API key again.
+SETTINGS_ENCRYPTION_KEY = os.getenv("SETTINGS_ENCRYPTION_KEY", "")
 # Adapter, model and thinking level are stored per workflow in app.workflow_settings.
 # Pi configuration directory: host Pi calls run against it, and its auth.json (and
 # models.json, when present) is mounted into coding-agent containers. Pi's own
