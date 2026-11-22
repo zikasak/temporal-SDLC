@@ -1,6 +1,6 @@
 import {
-  createContext, useContext, useEffect, useId, useMemo, useRef, useState,
-  type KeyboardEvent, type MouseEvent, type ReactNode,
+  createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState,
+  type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject,
 } from "react";
 import Markdown, { type Components, type Options } from "react-markdown";
 import { isObject } from "./api";
@@ -103,11 +103,51 @@ export function RequirementText({ text }: { text: string }) {
   ))}</>;
 }
 
-function RequirementPopup({ id, requirement, popupId }: {
+// The gap between a popup and its ID, and between a popup and the window's edges.
+const POPUP_GAP = 6;
+const WINDOW_MARGIN = 8;
+
+/** Places `popup` (fixed to the window) below `anchor`, moved left and/or up as far as it
+ * needs to stay inside the visible window. */
+function placePopup(anchor: HTMLElement, popup: HTMLElement) {
+  const rect = anchor.getBoundingClientRect();
+  const viewWidth = document.documentElement.clientWidth || window.innerWidth;
+  const viewHeight = window.innerHeight || document.documentElement.clientHeight;
+  const width = popup.offsetWidth;
+  const height = popup.offsetHeight;
+  let left = rect.left;
+  if (left + width > viewWidth - WINDOW_MARGIN) left = viewWidth - WINDOW_MARGIN - width;
+  left = Math.max(WINDOW_MARGIN, left);
+  let top = rect.bottom + POPUP_GAP;
+  if (top + height > viewHeight - WINDOW_MARGIN) {
+    const above = rect.top - POPUP_GAP - height;
+    top = above >= WINDOW_MARGIN ? above : viewHeight - WINDOW_MARGIN - height;
+  }
+  top = Math.max(WINDOW_MARGIN, top);
+  popup.style.left = `${Math.round(left)}px`;
+  popup.style.top = `${Math.round(top)}px`;
+}
+
+function RequirementPopup({ id, requirement, popupId, anchor }: {
   id: string; requirement: LookupRequirement | undefined; popupId: string;
+  anchor: RefObject<HTMLSpanElement | null>;
 }) {
+  const popup = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    function update() {
+      if (anchor.current && popup.current) placePopup(anchor.current, popup.current);
+    }
+    update();
+    // Any scrolling container moving the ID, or a resized window, moves the popup with it.
+    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", update);
+    return () => {
+      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", update);
+    };
+  }, [anchor, id, requirement]);
   return (
-    <span className="requirement-popup" role="tooltip" id={popupId}>
+    <span className="requirement-popup" role="tooltip" id={popupId} ref={popup}>
       {requirement ? (
         <>
           <span className="requirement-popup-heading">
@@ -139,6 +179,7 @@ export function RequirementRef({ text }: { text: string }) {
   const [hovered, setHovered] = useState(false);
   const [pinned, setPinned] = useState(false);
   const wrapper = useRef<HTMLSpanElement>(null);
+  const anchor = useRef<HTMLSpanElement>(null);
   const popupId = useId();
   const visible = hovered || pinned;
 
@@ -179,14 +220,15 @@ export function RequirementRef({ text }: { text: string }) {
   return (
     <span className="requirement-ref-wrapper" ref={wrapper}
       onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}>
-      <span role="button" tabIndex={0}
+      <span role="button" tabIndex={0} ref={anchor}
         className={`requirement-ref${requirement ? "" : " requirement-ref-unknown"}${requirement?.retired ? " requirement-ref-retired" : ""}`}
         aria-expanded={visible} aria-describedby={visible ? popupId : undefined}
         onClick={toggle} onKeyDown={onKey}
         onFocus={() => setHovered(true)} onBlur={() => { setHovered(false); setPinned(false); }}>
         {text}
       </span>
-      {visible && <RequirementPopup id={id} requirement={requirement} popupId={popupId} />}
+      {visible && <RequirementPopup id={id} requirement={requirement} popupId={popupId}
+        anchor={anchor} />}
     </span>
   );
 }
