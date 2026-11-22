@@ -167,9 +167,11 @@ def test_a_page_contract_is_read_against_the_api(tmp_path):
     assert read['viewports']['narrow'] == {'width': 390, 'height': 844, 'input': 'touch',
                                            'scale': 1}
     assert (tmp_path / 'kept/fixtures/getRoom.missing.json').is_file()
+    # Which responses have a JSON body: a fixture's null is sent as JSON null there.
     assert operations_list(DOCUMENT) == [
-        {'operationId': 'getMe', 'method': 'GET', 'path': '/me'},
-        {'operationId': 'getRoom', 'method': 'GET', 'path': '/rooms/{room}'}]
+        {'operationId': 'getMe', 'method': 'GET', 'path': '/me', 'json': {'200': True}},
+        {'operationId': 'getRoom', 'method': 'GET', 'path': '/rooms/{room}',
+         'json': {'200': True, '404': False}}]
 
 
 def _pages(**changes) -> dict:
@@ -277,6 +279,46 @@ def test_each_browser_route_uses_what_its_page_contract_declares(tmp_path, page,
             check_page_routes(routes, contract)
 
 
+def test_nullable_schemas_of_an_openapi_3_0_document_accept_null(tmp_path):
+    document = read_document('''
+openapi: 3.0.3
+info: {title: Rooms, version: 1.0.0}
+paths:
+  /rooms/{room}:
+    get:
+      operationId: getRoom
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: {type: string, nullable: true}
+                  state: {type: string, enum: [open, closed], nullable: true}
+                  owner: {allOf: [{$ref: '#/components/schemas/Owner'}], nullable: true}
+                required: [name, state, owner]
+components:
+  schemas:
+    Owner: {type: object, properties: {login: {type: string}}, required: [login]}
+''')
+    write(tmp_path / 'browser', contract_files(
+        pages={'pages': [{'entry': '/', 'operations': ['getRoom']}]},
+        viewports={'desktop': VIEWPORTS['desktop']},
+        fixtures={'getRoom.json': {'status': 200, 'body': {'name': None, 'state': None,
+                                                           'owner': None}}}))
+    read_page_contract(tmp_path / 'browser', tmp_path / 'none', document)
+    # Not nullable stays so.
+    write(tmp_path / 'other', contract_files(
+        pages={'pages': [{'entry': '/', 'operations': ['getRoom']}]},
+        viewports={'desktop': VIEWPORTS['desktop']},
+        fixtures={'getRoom.json': {'status': 200, 'body': {
+            'name': 'Blue', 'state': None, 'owner': {'login': None}}}}))
+    with pytest.raises(PageContractError, match='for 200 at owner: '):
+        read_page_contract(tmp_path / 'other', tmp_path / 'none', document)
+
+
 # ---- routes ----
 
 def test_a_browser_route_names_a_page_of_a_part_with_browser_tests():
@@ -312,9 +354,17 @@ def test_the_elements_a_page_lacks_are_added_first_as_a_seam_is():
         'FR-172': {'route': 'browser', 'page': {**PAGE, 'roles': [{'testid': 'popup'}],
                                                 'added': [{'testid': 'popup'}]}},
         'FR-173': {'route': 'browser', 'page': PAGE},
+        # The same element added to another page.
+        'FR-174': {'route': 'browser', 'page': {**PAGE, 'entry': '/', 'roles': [
+            {'role': 'tooltip'}], 'added': [{'role': 'tooltip'}]}},
     }
-    assert added_seams(routes) == {'frontend/page:/rooms/1': ['role=tooltip', 'testid=popup']}
-    assert absent_elements(routes) == [{'role': 'tooltip'}, {'testid': 'popup'}]
+    assert added_seams(routes) == {'frontend/page:/rooms/1': ['role=tooltip', 'testid=popup'],
+                                   'frontend/page:/': ['role=tooltip']}
+    # Each is absent only from the page that adds it: another page may show it already.
+    assert absent_elements(routes) == [
+        {'entry': '/rooms/1', 'element': {'role': 'tooltip'}},
+        {'entry': '/rooms/1', 'element': {'testid': 'popup'}},
+        {'entry': '/', 'element': {'role': 'tooltip'}}]
 
 
 def unobservable(reason: str) -> dict[str, RequirementRoute]:
@@ -782,7 +832,8 @@ async def test_the_routing_keeps_the_checked_page_contract_with_the_apis_operati
     assert routed == ['frontend~browser']
     # Checked against the code the delivery started from, the added element absent.
     assert checks == [('frontend', ['fixtures', 'pages.json', 'viewports.json'],
-                       ['getMe', 'getRoom'], [{'testid': 'popup'}], 'CLIENT SOURCE')]
+                       ['getMe', 'getRoom'], [{'entry': '/rooms/1', 'element': {'testid': 'popup'}}],
+                       'CLIENT SOURCE')]
     assert json.loads((artifact_dir / 'parts/frontend/browser/pages.json').read_text()) == PAGES
     assert json.loads(BROWSER.operations_file(session_dir).read_text()) == operations_list(
         DOCUMENT)

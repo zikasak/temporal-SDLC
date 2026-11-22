@@ -794,7 +794,8 @@ flowchart LR
    `viewports.json` (`{name: {width, height, input: mouse | touch, scale?}}`).
    `app/routing/browser.py` checks it: every fixture body validates against its
    operation's response schema in the API's OpenAPI document (rendered from the
-   delivery's API design, or `contracts/openapi.yaml`), every operation exists and has a
+   delivery's API design, or `contracts/openapi.yaml`, whose OpenAPI 3.0 `nullable`
+   schemas are read as JSON Schema's null type), every operation exists and has a
    default fixture, viewports are lowercase names of 280–3840 × 400–2160 at scale 1–3,
    every route's page, viewports and roles are declared, every new viewport is named by
    a route, and a published page, element, action, fixture or viewport is only extended.
@@ -804,8 +805,11 @@ flowchart LR
    the fixtures (`check-pages.mjs`, also given to the routing agent in
    `/workspace/tools/`). It fails when a declared element is not found once the page is
    idle (`Page / at desktop: role=tooltip is not present`), when an element a route
-   `added` is there already, or when the page calls an operation the contract does not
-   declare. The **browser suite** (`BrowserSuite`, template in `browser_suite/`) is a
+   `added` is there already on that route's page (only there: another page may show it),
+   or when the page calls an operation the contract does not declare. Both runners send a
+   fixture's `body: null` as the JSON literal `null` where the operation's response for
+   its status has a JSON body (`json` in `operations.json`), and as no body where it has
+   none. The **browser suite** (`BrowserSuite`, template in `browser_suite/`) is a
    Playwright project pinned to `@playwright/test` 1.65.1, whose trusted
    `playwright.config.mjs` makes one project per viewport, each running only the tests
    tagged with its name (`test('…', { tag: ['@narrow'] }, …)`), with `reducedMotion`,

@@ -8,8 +8,8 @@
 //   node check-pages.mjs --contract DIR --site DIR [--operations FILE] [--absent FILE]
 //
 // --site is the part's `vite build` output; --operations the API's operations
-// ([{operationId, method, path}]); --absent the elements the change adds, which must not
-// be found yet. Run it from a directory where @playwright/test is installed, with its
+// ([{operationId, method, path, json}]); --absent the elements the change adds, each with
+// the entry of its page ([{entry, element}]), which that page must not show yet. Run it from a directory where @playwright/test is installed, with its
 // Chromium.
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -33,7 +33,12 @@ const readJson = (file) => JSON.parse(readFileSync(file, 'utf8'));
 const pages = readJson(join(contract, 'pages.json'));
 const viewports = readJson(join(contract, 'viewports.json'));
 const operations = existsSync(operationsFile) ? readJson(operationsFile) : [];
-const absent = new Set((absentFile && existsSync(absentFile) ? readJson(absentFile) : []).map(key));
+// The keys of the elements each page lacks yet, by entry.
+const absentByEntry = new Map();
+for (const item of absentFile && existsSync(absentFile) ? readJson(absentFile) : []) {
+  if (!absentByEntry.has(item.entry)) absentByEntry.set(item.entry, new Set());
+  absentByEntry.get(item.entry).add(key(item.element));
+}
 const prefix = (pages.api_prefix || '').replace(/\/+$/, '');
 
 function escape(text) {
@@ -50,6 +55,15 @@ const matchers = operations.map((operation) => ({
 function isApi(pathname) {
   return prefix ? pathname === prefix || pathname.startsWith(`${prefix}/`)
     : matchers.some((operation) => operation.pattern.test(pathname));
+}
+
+/** The body a fixture is sent with: its JSON, `null` included, where the operation's
+ * response for the status has a JSON body, and none where it has no content. */
+function bodyOf(operationId, answer) {
+  const json = operations.find((item) => item.operationId === operationId)?.json ?? {};
+  const status = String(answer.status);
+  const has = json[status] ?? json[`${status[0]}XX`] ?? json.default ?? answer.body !== null;
+  return has && answer.body !== undefined ? JSON.stringify(answer.body) : '';
 }
 
 function operationOf(method, pathname) {
@@ -136,7 +150,7 @@ async function open(context, base, item, viewportName, action) {
     }
     const answer = readJson(file);
     await route.fulfill({ status: answer.status, contentType: 'application/json',
-      body: answer.body === null || answer.body === undefined ? '' : JSON.stringify(answer.body) });
+      body: bodyOf(operation, answer) });
   });
   try {
     await page.goto(new URL(item.entry, base).toString(), { waitUntil: 'load', timeout: 30_000 });
@@ -151,6 +165,7 @@ async function open(context, base, item, viewportName, action) {
 }
 
 async function check(context, base, item, viewportName, touch) {
+  const absent = absentByEntry.get(item.entry) ?? new Set();
   const opened = await open(context, base, item, viewportName, null);
   if (opened) {
     for (const element of item.elements || []) {

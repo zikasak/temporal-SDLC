@@ -76,6 +76,12 @@ def _contract(tmp_path: Path, viewports: dict | None = None) -> Path:
     (contract / 'viewports.json').write_text(json.dumps(viewports or VIEWPORTS))
     (contract / 'fixtures/listItems.json').write_text(
         json.dumps({'status': 200, 'body': {'items': ['a', 'b']}}))
+    # Runner fixtures beside them, not checked by the host here: JSON null for a JSON
+    # response, and the response without content.
+    (contract / 'fixtures/listItems.null.json').write_text(
+        json.dumps({'status': 200, 'body': None}))
+    (contract / 'fixtures/listItems.unavailable.json').write_text(
+        json.dumps({'status': 503, 'body': None}))
     return contract
 
 
@@ -188,17 +194,34 @@ test('the network is not reachable', { tag: '@desktop' }, async ({ page }) => {
   const outside = await fetch('http://1.1.1.1/').then(() => 'reached', () => 'unreachable');
   expect(outside).toBe('unreachable');
 });
+
+test('a null body is JSON null', { tag: '@desktop' }, async ({ page }) => {
+  await fixture(page, 'listItems', 'null');
+  await page.goto('/?popup=portaled');
+  expect(await page.evaluate(() => fetch('/api/items').then((response) => response.json())))
+    .toBeNull();
+  await fixture(page, 'listItems', 'unavailable');
+  expect(await page.evaluate(() => fetch('/api/items').then(
+    (response) => response.text().then((text) => [response.status, text]))))
+    .toEqual([503, '']);
+});
 '''})
     assert status == 1
     failure = cases['tests/requests.spec.ts#desktop > an unanswered operation fails the test']
     assert failure and 'did not answer with a fixture: listItems' in failure
     assert cases['tests/requests.spec.ts#desktop > the network is not reachable'] is None
+    assert cases['tests/requests.spec.ts#desktop > a null body is JSON null'] is None
 
 
 @pytest.mark.parametrize('change, absent, error', [
     (None, [], None),
-    # An element the change is to add that the page has already.
-    (None, [{'role': 'region', 'name': 'Answer'}], 'is present already'),
+    # An element the change is to add that its page has already.
+    (None, [{'entry': '/?popup=inside', 'element': {'role': 'region', 'name': 'Answer'}}],
+     'Page /\\?popup=inside at desktop: role=region\\[name="Answer"\\] is present already'),
+    # Added to one page, it may be on the others; one page lacking it is checked alone.
+    (lambda pages: pages['pages'].append({'entry': '/?popup=none', 'elements': [
+        {'role': 'region', 'name': 'Answer'}, {'testid': 'added'}], 'operations': ['listItems']}),
+     [{'entry': '/?popup=none', 'element': {'testid': 'added'}}], None),
     # A declared element the page does not have.
     (lambda pages: pages['pages'][0]['elements'].append({'testid': 'missing'}), [],
      'testid=missing is not present'),

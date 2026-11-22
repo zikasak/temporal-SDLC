@@ -184,10 +184,47 @@ def api_operations(document: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return operations
 
 
-def operations_list(document: dict[str, Any]) -> list[dict[str, str]]:
-    """What the runners match the page's requests with: OPERATIONS_FILE."""
-    return [{'operationId': name, 'method': item['method'], 'path': item['path']}
+def operations_list(document: dict[str, Any]) -> list[dict[str, Any]]:
+    """What the runners match the page's requests with: OPERATIONS_FILE. `json` says, by
+    response key (`200`, `2XX`, `default`), whether that response has a JSON body, so a
+    fixture's `body: null` is sent as the JSON literal null there and as no body
+    elsewhere."""
+    return [{'operationId': name, 'method': item['method'], 'path': item['path'],
+             'json': {str(key): _has_json(document, item['responses'][key])
+                      for key in item['responses']}}
             for name, item in sorted(api_operations(document).items())]
+
+
+def _has_json(document: dict[str, Any], response: Any) -> bool:
+    try:
+        while isinstance(response, dict) and isinstance(response.get('$ref'), str):
+            response = _resolve(document, response['$ref'].removeprefix('#'))
+    except PageContractError:
+        return False
+    content = response.get('content') if isinstance(response, dict) else None
+    return isinstance(content, dict) and any(
+        'json' in media and isinstance(value, dict) and 'schema' in value
+        for media, value in content.items())
+
+
+def _nullable(value: Any) -> Any:
+    """An OpenAPI 3.0 schema tree with `nullable: true` said as JSON Schema says it: null
+    among the types (and enum values), or, for a schema without a type, as one of
+    `anyOf` the schema and null."""
+    if isinstance(value, list):
+        return [_nullable(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    schema = {key: _nullable(item) for key, item in value.items()}
+    if schema.pop('nullable', False) is not True:
+        return schema
+    kind = schema.get('type')
+    if isinstance(kind, str):
+        schema['type'] = [kind, 'null']
+        if isinstance(schema.get('enum'), list) and None not in schema['enum']:
+            schema['enum'] = [*schema['enum'], None]
+        return schema
+    return {'anyOf': [schema, {'type': 'null'}]}
 
 
 def read_document(text: str) -> dict[str, Any]:
@@ -197,6 +234,9 @@ def read_document(text: str) -> dict[str, Any]:
         raise PageContractError('The API\'s OpenAPI document cannot be read') from exc
     if not isinstance(document, dict):
         raise PageContractError('The API\'s OpenAPI document is not an object')
+    if str(document.get('openapi', '')).startswith('3.0'):
+        # Its schemas are checked as JSON Schema 2020-12, which has no `nullable`.
+        document = _nullable(document)
     return document
 
 
@@ -434,18 +474,22 @@ def check_page_routes(routes: dict[str, dict[str, Any]], contract: dict[str, Any
                                 'run for nothing')
 
 
-def absent_elements(routes: dict[str, dict[str, Any]]) -> list[Element]:
-    """The elements the change adds to pages, which the client lacks yet."""
-    added: dict[str, Element] = {}
+def absent_elements(routes: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """The elements the change adds to pages, which the client lacks yet, each with the
+    entry of its page (`{entry, element}`): only that page must lack it."""
+    added: dict[tuple[str, str], dict[str, Any]] = {}
     for route in routes.values():
         page = route.get('page') if route.get('route') == 'browser' else None
-        for item in (page or {}).get('added') or []:
-            added.setdefault(element_key(item), item)
+        if page is None:
+            continue
+        for item in page.get('added') or []:
+            added.setdefault((page['entry'], element_key(item)),
+                             {'entry': page['entry'], 'element': item})
     return list(added.values())
 
 
 def _context(contract: BrowserContract, repository: Path, browser: Path, operations: Any,
-             absent: list[Element], context: Path) -> None:
+             absent: list[dict[str, Any]], context: Path) -> None:
     shutil.copytree(contract.conformance, context)
     copy_regular_files(repository, context / 'repository', include=lambda relative: True)
     # Validated already: regular files only.
@@ -458,11 +502,12 @@ def _context(contract: BrowserContract, repository: Path, browser: Path, operati
 
 async def check_page_conformance(contract: BrowserContract, repository: Path, project: str,
                                  browser: Path, operations: Any,
-                                 absent: list[Element], work: Path,
+                                 absent: list[dict[str, Any]], work: Path,
                                  log_dir: Path) -> None:
     """Check, without a network, that the part at `project` of `repository`, built,
     shows the page contract in `browser`: every declared element is found once a page is
-    idle at every viewport, but the `absent` ones, which must not be, and every API call
+    idle at every viewport, but the `absent` ones (`{entry, element}`), which their page
+    must not show, and every API call
     is declared and answered by a fixture. Raises RuntimeError naming the differences
     otherwise, and docker_agents.ImageUnavailable when the runner's base image cannot be
     pulled."""

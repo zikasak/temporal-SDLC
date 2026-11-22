@@ -11,7 +11,8 @@ export { expect };
 
 /** A response of the page contract: `fixtures/<operationId>[.<case>].json`. */
 type Fixture = { status: number; body: unknown };
-type Operation = { operationId: string; method: string; path: string };
+// `json`: by response key (`200`, `2XX`, `default`), whether that response has a JSON body.
+type Operation = { operationId: string; method: string; path: string; json?: Record<string, boolean> };
 type Matcher = Operation & { pattern: RegExp; literal: number };
 
 // The page contract as the runner holds it: pages.json, viewports.json, fixtures/, and
@@ -48,6 +49,15 @@ let cache: { prefix: string; operations: Matcher[] } | null = null;
 function api() {
   cache ??= { prefix: apiPrefix(), operations: matchers() };
   return cache;
+}
+
+/** The body a fixture is sent with: its JSON, `null` included, where the operation's
+ * response for the status has a JSON body, and none where it has no content. */
+function bodyOf(operationId: string, answer: Fixture): string {
+  const json = api().operations.find((item) => item.operationId === operationId)?.json ?? {};
+  const status = String(answer.status);
+  const has = json[status] ?? json[`${status[0]}XX`] ?? json.default ?? answer.body !== null;
+  return has && answer.body !== undefined ? JSON.stringify(answer.body) : '';
 }
 
 /** Whether a path of the page's own server is the API's: below the contract's
@@ -129,7 +139,7 @@ export const test = base.extend<{ api: void }>({
       await route.fulfill({
         status: answer.status,
         contentType: 'application/json',
-        body: answer.body === null || answer.body === undefined ? '' : JSON.stringify(answer.body),
+        body: bodyOf(operation, answer),
       });
     });
     await use();
