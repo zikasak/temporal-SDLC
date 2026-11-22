@@ -266,6 +266,8 @@ async def test_conversation_turns_resume_one_native_session_across_workers(
 ):
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+    from app.llm.saved_conversations import ConversationRef
+
     replies, requests = claude_http
     replies += [[{'type': 'text', 'text': 'First reply.'}],
                 [{'type': 'text', 'text': 'Second reply.'}],
@@ -275,7 +277,7 @@ async def test_conversation_turns_resume_one_native_session_across_workers(
     async def turn(*history):
         # A new model per turn, as each turn is a new activity on any worker.
         return await ChatClaude(model='claude-opus-5-5', timeout=30,
-                                conversation='workflow-1/requirements').ainvoke(
+                                conversation=ConversationRef('workflow-1/requirements')).ainvoke(
             [system, *history])
 
     await turn(HumanMessage('Kickoff\n\n<current_state>none</current_state>'))

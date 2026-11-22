@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import (
     AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ClaudeSDKError, HookContext,
@@ -23,6 +23,10 @@ from langchain_core.tools import BaseTool
 from app.asyncio_utils import async_context, run_sync
 from app.llm.mcp import TOOL_PREFIX, TOOL_SERVER, flow_server
 from app.tracing import claude_trace_environment
+
+if TYPE_CHECKING:
+    # Host-only: agent images run this module without it.
+    from app.llm.saved_conversations import ConversationRef
 
 logger = logging.getLogger(__name__)
 PLUGIN = Path(__file__).with_name('plugins') / 'langfuse-observability'
@@ -52,10 +56,10 @@ class ChatClaude(Runnable):
     cwd: Path | None = None
     config_dir: Path | None = None
     resume: str | None = None
-    # Names an application conversation whose turns resume one native session, saved
-    # between turns to the shared storage (app.llm.saved_conversations). Without the storage,
-    # or with a cwd or config_dir of its own, every session starts anew.
-    conversation: str | None = None
+    # The application conversation whose turns resume one native session, saved between
+    # turns to the shared storage (app.llm.saved_conversations). Without the storage, or
+    # with a cwd or config_dir of its own, every session starts anew.
+    conversation: 'ConversationRef | None' = None
     session_id: str | None = field(default=None, init=False)
     turns_used: int = field(default=0, init=False)
     _stack: AsyncExitStack | None = field(default=None, init=False, repr=False)
@@ -253,22 +257,24 @@ class ChatClaude(Runnable):
 
         assert self.conversation is not None
         try:
-            data = await run_sync(store.load, claude_sessions.object_name(self.conversation))
+            data = await run_sync(store.load,
+                                  claude_sessions.object_name(self.conversation.source))
             if data is None:
                 return 0
             meta = await run_sync(claude_sessions.unpack, data, config_dir)
         except Exception:
             logger.warning('Could not restore the Claude session of %s; starting a new one',
-                           self.conversation, exc_info=True)
+                           self.conversation.source, exc_info=True)
             return 0
-        resumed = await run_sync(claude_sessions.resumable, meta, history, config_dir)
+        resumed = await run_sync(claude_sessions.resumable, meta, history, config_dir,
+                                 self.conversation.context)
         if resumed:
             self._native_session = meta['session_id']
             logger.info('Resuming Claude session %s of %s after %d messages',
-                        meta['session_id'], self.conversation, resumed)
+                        meta['session_id'], self.conversation.source, resumed)
         else:
             logger.info('The saved Claude session of %s does not continue this '
-                        'conversation; starting a new one', self.conversation)
+                        'conversation; starting a new one', self.conversation.source)
             # Not saved again with the new session.
             await run_sync(claude_sessions.clear, config_dir)
         return resumed
@@ -289,16 +295,18 @@ class ChatClaude(Runnable):
         history = self._history
         # The conversation goes on from this session's first messages and its final
         # reply; the corrections a turn sent in between are not part of it.
-        meta = {'session_id': self._native_session, **saved_meta(history)}
+        meta = {'session_id': self._native_session,
+                **saved_meta(history, self.conversation.context)}
         try:
             data = await run_sync(claude_sessions.pack, config_dir, meta)
-            await run_sync(store.save, claude_sessions.object_name(self.conversation), data)
+            await run_sync(store.save, claude_sessions.object_name(self.conversation.name),
+                           data)
         except Exception:
-            logger.warning('Could not save the Claude session of %s', self.conversation,
+            logger.warning('Could not save the Claude session of %s', self.conversation.name,
                            exc_info=True)
             return
         logger.info('Saved Claude session %s of %s (%d bytes)', self._native_session,
-                    self.conversation, len(data))
+                    self.conversation.name, len(data))
 
     async def _export_session(self, env: dict[str, str], config_dir: Path) -> None:
         """Final export of the session once the CLI has exited. The plugin's Stop hook

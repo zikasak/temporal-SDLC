@@ -21,7 +21,7 @@ from app.architecture.prompt import draft_fallback, turn_messages
 from app.asyncio_utils import run_sync
 from app.llm.graph import get_message_graph, interview, native_session
 from app.llm.model import get_model
-from app.temporal.activities import _repository_tools, _save_session_document
+from app.temporal.activities import _conversation, _repository_tools, _save_session_document
 from app.temporal.tracing import trace_activity
 from app.tools import architecture as architecture_tools
 from app.tools import questions as question_tools
@@ -49,7 +49,7 @@ async def architecture_turn(state: ArchitectureState) -> dict[str, Any]:
         graph = get_message_graph(
             [*architecture_tools.build(ctx), *question_tools.build(asked), *repository],
             until=lambda: bool(asked.questions) or bool(ctx.skip_reason), model=model)
-        async with native_session(model, f"{activity.info().workflow_id}/architecture"):
+        async with native_session(model, _conversation("architecture")):
             reply = await interview(
                 graph, turn_messages(state, may_skip,
                                      repository_tools.GUIDANCE if repository else ""),

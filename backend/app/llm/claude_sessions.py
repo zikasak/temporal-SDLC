@@ -55,7 +55,7 @@ def clear(config_dir: Path) -> None:
 
 
 def resumable(meta: dict[str, Any] | None, history: Sequence[BaseMessage],
-              config_dir: Path) -> int:
+              config_dir: Path, context: str) -> int:
     """How many of `history`'s messages the restored session holds, or 0 when it cannot
     continue this conversation."""
     session = (meta or {}).get('session_id')
@@ -63,4 +63,4 @@ def resumable(meta: dict[str, Any] | None, history: Sequence[BaseMessage],
         return 0
     if not any(config_dir.glob(f'projects/*/{session}.jsonl')):
         return 0
-    return continues(meta, history)
+    return continues(meta, history, context)

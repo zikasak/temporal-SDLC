@@ -7,13 +7,16 @@ after a turn and restored before the next, which then sends only what is new.
 
 A saved conversation records how many of the application's messages it holds: those up
 to the last user message of its turn, sent then with that turn's current state, and its
-reply. It continues a later turn only when the messages before them are unchanged and
-the conversation has gone on since."""
+reply. It continues a later turn only when the conversation has gone on since, the
+messages before them are unchanged, that last user message is the one the conversation
+now holds, and the context its provider messages depend on (such as the repository
+checkout tool results came from) is still the same."""
 import functools
 import hashlib
 import json
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import quote
 
@@ -21,6 +24,24 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 logger = logging.getLogger(__name__)
 OBJECT_PREFIX = 'conversations/'
+
+
+@dataclass(frozen=True)
+class ConversationRef:
+    """Where a turn's provider conversation is saved and restored from."""
+
+    # What the turn is saved as, such as the session's workflow and stage.
+    name: str
+    # The saved turn this one continues, when not `name`: a chat request continues its
+    # parent request, so branches of one request never continue each other.
+    restore_from: str | None = None
+    # What the saved provider messages depend on beside the conversation, such as the
+    # commit of the repository checkout its tools read; a change starts anew.
+    context: str = ''
+
+    @property
+    def source(self) -> str:
+        return self.restore_from or self.name
 
 
 class ConversationStore(Protocol):
@@ -82,15 +103,17 @@ def fingerprint(history: Sequence[BaseMessage]) -> str:
     ).encode()).hexdigest()
 
 
-def saved_meta(history: Sequence[BaseMessage]) -> dict[str, Any]:
+def saved_meta(history: Sequence[BaseMessage], context: str) -> dict[str, Any]:
     """What a turn that started from `history` and replied records."""
-    return {'consumed': len(history) + 1, 'fingerprint': fingerprint(history[:-1])}
+    return {'consumed': len(history) + 1, 'fingerprint': fingerprint(history[:-1]),
+            'last_user': history[-1].text if history else '', 'context': context}
 
 
-def continues(meta: dict[str, Any] | None, history: Sequence[BaseMessage]) -> int:
+def continues(meta: dict[str, Any] | None, history: Sequence[BaseMessage],
+              context: str) -> int:
     """How many of `history`'s messages the saved conversation holds, or 0 when it
     cannot continue this conversation."""
-    if not meta:
+    if not meta or meta.get('context', '') != context:
         return 0
     consumed = meta.get('consumed')
     if not isinstance(consumed, int) or not 2 <= consumed < len(history):
@@ -99,5 +122,10 @@ def continues(meta: dict[str, Any] | None, history: Sequence[BaseMessage]) -> in
             and isinstance(history[consumed - 1], AIMessage)):
         return 0
     if fingerprint(history[:consumed - 2]) != meta.get('fingerprint'):
+        return 0
+    # The turn sent its user message with what then followed it, such as its current
+    # state; another branch that shares only the earlier messages sent another.
+    last_user = meta.get('last_user')
+    if not isinstance(last_user, str) or not last_user.startswith(history[consumed - 2].text):
         return 0
     return consumed

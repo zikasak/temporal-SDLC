@@ -84,7 +84,10 @@ turn its transcript and plugin export state are saved to the S3-compatible stora
 worker shares (`S3_*` variables, path-style addressing, `conversations/` in the bucket),
 and the next turn, on any worker, restores them and sends only the new user message. A
 saved session that no longer matches the conversation, or missing storage, starts a new
-session from the conversation context. Other providers (OpenAI-compatible, Gemini, Pi)
+session from the conversation context. So does a repository checkout of another commit,
+such as a refreshed one, since earlier tool results came from the old one. Each chat
+request saves its own session and continues its parent request's, so branches continued
+from one request never continue each other. Other providers (OpenAI-compatible, Gemini, Pi)
 have no native session: their turn's messages, with its tool calls and results, are saved
 the same way, and the next turn sends them, unchanged, before its new messages. A saved
 conversation over 400 kB starts anew from the session's messages, since these providers

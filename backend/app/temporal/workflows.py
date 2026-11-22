@@ -214,7 +214,9 @@ class LLMRequestWorkflow:
             )
         return await workflow.execute_activity(
             send_llm_message,
-            args=[messages, session_id, repository],
+            # The request this one answers, whose saved provider conversation it continues.
+            args=[messages, session_id, repository,
+                  workflow.memo_value("parent_request_id", "", type_hint=str)],
             start_to_close_timeout=timedelta(minutes=6),
             schedule_to_close_timeout=timedelta(minutes=7),
             retry_policy=RetryPolicy(maximum_attempts=1),

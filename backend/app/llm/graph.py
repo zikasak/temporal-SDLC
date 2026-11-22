@@ -62,8 +62,11 @@ class _SavedConversation:
     calls and results, which the application's own messages leave out, and the exact
     prompt the provider has cached."""
 
-    def __init__(self, store: Any, name: str):
-        self.store, self.name = store, name
+    def __init__(self, store: Any, conversation: saved_conversations.ConversationRef,
+                 provider: str):
+        self.store, self.conversation = store, conversation
+        self.name = f"{conversation.name}/{provider}.json"
+        self.source = f"{conversation.source}/{provider}.json"
         self.history: list[BaseMessage] | None = None
         self.result: list[BaseMessage] | None = None
 
@@ -78,19 +81,21 @@ class _SavedConversation:
         restored: list[BaseMessage] = []
         consumed = 0
         try:
-            data = await run_sync(self.store.load, self.name)
+            data = await run_sync(self.store.load, self.source)
             if data is not None and len(data) <= MAX_RESTORED_BYTES:
                 saved = json.loads(data)
-                consumed = saved_conversations.continues(saved.get("meta"), self.history)
+                consumed = saved_conversations.continues(
+                    saved.get("meta"), self.history, self.conversation.context)
                 if consumed:
                     restored = messages_from_dict(saved["messages"])
         except Exception:
-            logger.warning("Could not restore the conversation %s", self.name, exc_info=True)
+            logger.warning("Could not restore the conversation %s", self.source,
+                           exc_info=True)
             restored, consumed = [], 0
         if not consumed:
             return messages
         logger.info("Continuing the saved conversation %s after %d messages",
-                    self.name, consumed)
+                    self.source, consumed)
         return [*system, *restored, *self.history[consumed:]]
 
     def record(self, messages: list[BaseMessage]) -> None:
@@ -101,7 +106,8 @@ class _SavedConversation:
         if self.history is None or self.result is None:
             return
         try:
-            data = json.dumps({"meta": saved_conversations.saved_meta(self.history),
+            data = json.dumps({"meta": saved_conversations.saved_meta(
+                                   self.history, self.conversation.context),
                                "messages": messages_to_dict(self.result)},
                               ensure_ascii=False).encode()
             await run_sync(self.store.save, self.name, data)
@@ -117,7 +123,8 @@ _CONVERSATION: ContextVar[_SavedConversation | None] = ContextVar(
 
 
 @asynccontextmanager
-async def native_session(model: Runnable, conversation: str | None = None):
+async def native_session(model: Runnable,
+                         conversation: saved_conversations.ConversationRef | None = None):
     """Keep one provider conversation across the graph's model calls when the model
     offers it, so each call only appends to the prompt the provider has cached.
     `conversation` names the application conversation this turn belongs to: its provider
@@ -135,7 +142,8 @@ async def native_session(model: Runnable, conversation: str | None = None):
         yield
         return
     provider = PROVIDER_NAMES.get(type(model).__name__, type(model).__name__.lower())
-    saved = _SavedConversation(store, f"{conversation}/{provider}.json")
+    assert conversation is not None
+    saved = _SavedConversation(store, conversation, provider)
     token = _CONVERSATION.set(saved)
     try:
         yield

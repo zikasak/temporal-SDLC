@@ -50,6 +50,7 @@ from app.github.models import (
 from app.implementation.activities import is_service_file, published_files
 from app.onboarding.models import onboarding_branch
 from app.llm.graph import get_message_graph, interview, native_session
+from app.llm.saved_conversations import ConversationRef
 from app.llm.model import get_model
 from app.llm.prompt import INLINE_DOCUMENT_CHARS, MAX_REMEMBERED_CHARS, model_messages
 from app.temporal.registry import register
@@ -135,6 +136,22 @@ def _repository_tools(session_id: str | None = None) -> list[BaseTool]:
     root = repository_checkout.checkout_path(
         GENERATED_CODE_DIR, session_id or _workflow_id())
     return repository_tools.build(root) if root.is_dir() else []
+
+
+def _conversation(stage: str, session_id: str | None = None,
+                  restore_from: str | None = None) -> ConversationRef:
+    """The saved provider conversation of the running activity's session at `stage`.
+    Its tools read the session's checkout, so a checkout of another commit, such as one
+    refreshed since, starts the provider conversation anew."""
+    workflow_id = _workflow_id()
+    try:
+        commit = repository_checkout.checked_out_commit(
+            GENERATED_CODE_DIR, session_id or workflow_id)
+    except repository_checkout.CheckoutError:
+        commit = ''
+    return ConversationRef(f"{workflow_id}/{stage}",
+                           f"{restore_from}/{stage}" if restore_from else None,
+                           f"checkout:{commit}" if commit else "")
 
 
 def _published_requirements() -> tuple[Requirement, ...]:
@@ -490,7 +507,11 @@ async def parse_document(document_id: str) -> None:
 async def send_llm_message(
     messages: Any, session_id: str | None = None,
     repository: RepositorySelection | None = None,
+    parent_request_id: str | None = None,
 ) -> str:
+    """Each request of a chat is its own workflow and saves its provider conversation as
+    itself; it continues the one of the request it answers (`parent_request_id`), so the
+    branches continued from one request stay apart."""
 
     # Older workflows can still have a single string as their activity input.
     if isinstance(messages, str):
@@ -525,7 +546,8 @@ async def send_llm_message(
         graph = get_message_graph(
             [*build_tools(ToolContext(session_id, document_ids)), *repository_files],
             model=model)
-        async with native_session(model, f"{session_id}/chat"):
+        async with native_session(
+                model, _conversation("chat", session_id, parent_request_id or None)):
             result = await graph.ainvoke(
                 {"messages": prompt},
                 config=langchain_config(recursion_limit=20, run_name='respond-with-tools'),
@@ -564,7 +586,7 @@ async def requirements_turn(
         graph = get_message_graph(
             [*requirements_tools.build(ctx), *question_tools.build(asked), *repository],
             until=lambda: bool(asked.questions), model=model)
-        async with native_session(model, f"{_workflow_id()}/requirements"):
+        async with native_session(model, _conversation("requirements")):
             reply = await interview(
                 graph, interview_messages(
                     conversation, gathered, task_kind,
@@ -674,7 +696,7 @@ async def api_design_turn(state: ApiDesignState) -> dict[str, Any]:
         graph = get_message_graph(
             [*api_design_tools.build(ctx), *question_tools.build(asked), *repository],
             until=lambda: bool(asked.questions), model=model)
-        async with native_session(model, f"{_workflow_id()}/api-design"):
+        async with native_session(model, _conversation("api-design")):
             reply = await interview(
                 graph, api_turn_messages(state, repository_tools.GUIDANCE if repository else ""),
                 langchain_config(recursion_limit=40, run_name='draft-api-with-tools'),

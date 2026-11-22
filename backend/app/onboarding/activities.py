@@ -24,6 +24,7 @@ from app.onboarding.models import Artifact, OnboardingState
 from app.onboarding.prompt import (
     ARCHITECTURE_FIX_GUIDANCE, architecture_fallback, draft_fallback, turn_messages,
 )
+from app.temporal.activities import _conversation
 from app.temporal.tracing import trace_activity
 from app.tools import api_design as api_design_tools
 from app.tools import architecture as architecture_tools
@@ -119,7 +120,7 @@ async def onboarding_turn(state: OnboardingState) -> dict[str, Any]:
     try:
         model = await get_model('api_design')
         graph = get_message_graph(tools, until=lambda: bool(asked.questions), model=model)
-        async with native_session(model, f"{workflow_id}/onboarding"):
+        async with native_session(model, _conversation("onboarding")):
             reply = await interview(
                 graph, turn_messages(state, repository_tools.GUIDANCE),
                 langchain_config(recursion_limit=80 if not state.drafted else 40,
@@ -232,8 +233,7 @@ async def _architecture_turn(state: OnboardingState, root: Path,
     try:
         model = await get_model('api_design')
         graph = get_message_graph(tools, until=lambda: bool(asked.questions), model=model)
-        async with native_session(
-                model, f"{activity.info().workflow_id}/onboarding-architecture"):
+        async with native_session(model, _conversation("onboarding-architecture")):
             reply = await interview(
                 graph, turn_messages(state, repository_tools.GUIDANCE, contract=contract),
                 langchain_config(recursion_limit=60 if not state.drafted else 40,
