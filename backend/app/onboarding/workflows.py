@@ -26,7 +26,7 @@ with workflow.unsafe.imports_passed_through():
     from app.tasks.models import OnboardingResult
     from app.temporal.activities import checkout_repository, update_repository_checkout
     from app.temporal.closing import end_cancelled
-    from app.temporal.flags import FlowFlags
+    from app.temporal.flags import FlowFlags, OpenStage
     from app.temporal.interview import Interview, assistant_message, pending_questions
     from app.temporal.workflows import (
         FLOW_ABANDONED, FLOW_ABANDONED_PATCH, FLOW_CANCELLED, SESSION_IDLE_TIMEOUT, _Delivering,
@@ -50,7 +50,7 @@ CONTRACT_UNKNOWN = ("The existing contract could not be read, so only replacing 
 
 @workflow.defn
 class OnboardingWorkflow(Interview[OnboardingState], ReviewedInterview, _Delivering,
-                         FlowFlags):
+                         FlowFlags, OpenStage):
     """One onboarding of an existing repository: the branch is checked out, the user
     confirms replacing a contract, contract tests or Dockerfile it already has, the LLM
     drafts the requirements, the API and the language from the code, and the user reviews
@@ -79,6 +79,7 @@ class OnboardingWorkflow(Interview[OnboardingState], ReviewedInterview, _Deliver
         # Set when the onboarding expired without activity.
         self._expired = False
         self._init_flags()
+        self._init_open_stage()
 
     def _flags(self) -> tuple[bool | None, bool | None]:
         """Waiting for the user's contract decision, answers to the interviewer's
@@ -192,7 +193,8 @@ class OnboardingWorkflow(Interview[OnboardingState], ReviewedInterview, _Deliver
                 finalized=finalized, reviewed=finalized and self._review_reported(),
                 delivery=self._delivery_state() if finalized else None)
             await self._close_flags()
-            return result
+            # The onboarding stays open as long as its task flow does.
+            return await self._stay_open(result)
         if self.state.status == "completed":
             await self._deliver()
             await self._close_flags()

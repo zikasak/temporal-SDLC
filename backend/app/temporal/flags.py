@@ -15,6 +15,7 @@ from temporalio.common import TypedSearchAttributes
 
 from app.temporal.execution_fields import (
     FLOW_STATE_ATTRIBUTE,
+    HANDED_OFF,
     REPOSITORY_ATTRIBUTE,
     SKIPPED,
     UNRESOLVED_ATTRIBUTE,
@@ -157,3 +158,43 @@ class PendingStage:
 def mark_skipped() -> None:
     """List the current stage as skipped."""
     workflow.upsert_search_attributes([FLOW_STATE_ATTRIBUTE.value_set(SKIPPED)])
+
+
+class OpenStage:
+    """A stage of a task flow that stays open until its task flow closes. Retention only
+    deletes closed workflows, so a stage that closed as soon as it handed the task on
+    would be deleted while the task's later stages still run, and its session could no
+    longer be read. Instead the stage hands its result to the task flow by the
+    `stage_result` signal and waits, listed as completed, for `release_stage`, which the
+    task flow sends as it closes; the stage then closes with the same result."""
+
+    def _init_open_stage(self) -> None:
+        self._released = False
+
+    @workflow.signal
+    def release_stage(self) -> None:
+        """The task flow closes: so may this stage."""
+        self._released = True
+
+    async def _stay_open(self, result: Any) -> Any:
+        """Hand `result` to the task flow and stay open until it releases the stage;
+        returns `result`. A stage whose parent is no task flow, or that cannot reach it,
+        returns at once."""
+        parent = workflow.info().parent
+        if parent is None or not parent.workflow_id.startswith(TASK_FLOW_PREFIX):
+            return result
+        try:
+            await workflow.get_external_workflow_handle(parent.workflow_id).signal(
+                "stage_result", args=[workflow.info().workflow_id, result])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a closed task flow takes no result
+            workflow.logger.warning("Result not handed to %s: %s", parent.workflow_id, exc)
+            return result
+        state = workflow.info().typed_search_attributes.get(FLOW_STATE_ATTRIBUTE)
+        if state != SKIPPED:
+            workflow.upsert_search_attributes([FLOW_STATE_ATTRIBUTE.value_set(HANDED_OFF)])
+        workflow.logger.info("Stage handed on, open until its task flow closes")
+        await workflow.wait_condition(lambda: self._released)
+        await workflow.wait_condition(workflow.all_handlers_finished)
+        return result
