@@ -119,7 +119,7 @@ async def onboarding_turn(state: OnboardingState) -> dict[str, Any]:
     try:
         model = await get_model('api_design')
         graph = get_message_graph(tools, until=lambda: bool(asked.questions), model=model)
-        async with native_session(model):
+        async with native_session(model, f"{workflow_id}/onboarding"):
             reply = await interview(
                 graph, turn_messages(state, repository_tools.GUIDANCE),
                 langchain_config(recursion_limit=80 if not state.drafted else 40,
@@ -232,7 +232,8 @@ async def _architecture_turn(state: OnboardingState, root: Path,
     try:
         model = await get_model('api_design')
         graph = get_message_graph(tools, until=lambda: bool(asked.questions), model=model)
-        async with native_session(model):
+        async with native_session(
+                model, f"{activity.info().workflow_id}/onboarding-architecture"):
             reply = await interview(
                 graph, turn_messages(state, repository_tools.GUIDANCE, contract=contract),
                 langchain_config(recursion_limit=60 if not state.drafted else 40,

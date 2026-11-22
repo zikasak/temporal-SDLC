@@ -525,7 +525,7 @@ async def send_llm_message(
         graph = get_message_graph(
             [*build_tools(ToolContext(session_id, document_ids)), *repository_files],
             model=model)
-        async with native_session(model):
+        async with native_session(model, f"{session_id}/chat"):
             result = await graph.ainvoke(
                 {"messages": prompt},
                 config=langchain_config(recursion_limit=20, run_name='respond-with-tools'),
@@ -564,7 +564,7 @@ async def requirements_turn(
         graph = get_message_graph(
             [*requirements_tools.build(ctx), *question_tools.build(asked), *repository],
             until=lambda: bool(asked.questions), model=model)
-        async with native_session(model):
+        async with native_session(model, f"{_workflow_id()}/requirements"):
             reply = await interview(
                 graph, interview_messages(
                     conversation, gathered, task_kind,
@@ -674,7 +674,7 @@ async def api_design_turn(state: ApiDesignState) -> dict[str, Any]:
         graph = get_message_graph(
             [*api_design_tools.build(ctx), *question_tools.build(asked), *repository],
             until=lambda: bool(asked.questions), model=model)
-        async with native_session(model):
+        async with native_session(model, f"{_workflow_id()}/api-design"):
             reply = await interview(
                 graph, api_turn_messages(state, repository_tools.GUIDANCE if repository else ""),
                 langchain_config(recursion_limit=40, run_name='draft-api-with-tools'),

@@ -49,7 +49,7 @@ async def architecture_turn(state: ArchitectureState) -> dict[str, Any]:
         graph = get_message_graph(
             [*architecture_tools.build(ctx), *question_tools.build(asked), *repository],
             until=lambda: bool(asked.questions) or bool(ctx.skip_reason), model=model)
-        async with native_session(model):
+        async with native_session(model, f"{activity.info().workflow_id}/architecture"):
             reply = await interview(
                 graph, turn_messages(state, may_skip,
                                      repository_tools.GUIDANCE if repository else ""),

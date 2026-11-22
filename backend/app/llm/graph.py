@@ -45,13 +45,17 @@ class _BindsTools(Protocol):
 
 
 @asynccontextmanager
-async def native_session(model: Runnable):
+async def native_session(model: Runnable, conversation: str | None = None):
     """Keep one provider conversation across the graph's model calls when the model
-    offers it, so each call only appends to the prompt the provider has cached."""
+    offers it, so each call only appends to the prompt the provider has cached.
+    `conversation` names the application conversation this turn belongs to: a model that
+    can resumes the same provider session on every turn of it."""
     session = getattr(model, "async_session", None)
     if session is None:
         yield
         return
+    if conversation is not None and hasattr(model, "conversation"):
+        setattr(model, "conversation", conversation)
     async with session():
         yield
 

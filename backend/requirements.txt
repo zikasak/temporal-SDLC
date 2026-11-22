@@ -8,6 +8,7 @@ langchain-google-genai
 claude-agent-sdk==0.2.186
 fastapi
 httpx
+boto3
 cryptography
 pyjwt
 uvicorn

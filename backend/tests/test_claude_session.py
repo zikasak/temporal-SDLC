@@ -253,3 +253,72 @@ def test_interview_graph_appends_to_one_native_conversation(claude_http):
     messages = str(native_messages(requests[-1]))
     assert 'FIRST' in messages and 'SECOND' in messages
     assert 'No response requested.' not in messages
+
+
+class MemoryConversationStore:
+    """The shared S3 storage, as every worker sees it."""
+
+    def __init__(self):
+        self.objects = {}
+
+    def load(self, key):
+        return self.objects.get(key)
+
+    def save(self, key, data):
+        self.objects[key] = data
+
+
+def last_user_text(request):
+    content = [message for message in request['messages']
+               if message['role'] == 'user'][-1]['content']
+    return content if isinstance(content, str) else content[-1]['text']
+
+
+async def test_conversation_turns_resume_one_native_session_across_workers(
+    claude_http, monkeypatch
+):
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+    from app.llm import claude_sessions
+
+    replies, requests = claude_http
+    store = MemoryConversationStore()
+    monkeypatch.setattr(claude_sessions, 'conversation_store', lambda: store)
+    replies += [[{'type': 'text', 'text': 'First reply.'}],
+                [{'type': 'text', 'text': 'Second reply.'}],
+                [{'type': 'text', 'text': 'Third reply.'}]]
+    system = SystemMessage('Interview the user.')
+
+    async def turn(*history):
+        # A new model per turn, as each turn is a new activity on any worker.
+        return await ChatClaude(model='claude-opus-5-5', timeout=30,
+                                conversation='workflow-1/requirements').ainvoke(
+            [system, *history])
+
+    await turn(HumanMessage('Kickoff\n\n<current_state>none</current_state>'))
+    second = await turn(HumanMessage('Kickoff'), AIMessage('First reply.'),
+                        HumanMessage('Add login\n\n<current_state>one</current_state>'))
+    # An earlier message the session never saw: it cannot continue this conversation.
+    await turn(HumanMessage('Another kickoff'), AIMessage('First reply.'),
+               HumanMessage('Add login'), AIMessage('Second reply.'),
+               HumanMessage('Add logout'))
+
+    first_native = native_messages(requests[0])
+    second_native = native_messages(requests[1])
+    assert second.text == 'Second reply.'
+    assert second_native[:len(first_native)] == first_native
+    assert second_native[len(first_native)]['role'] == 'assistant'
+    assert last_user_text(requests[1]) == 'Add login\n\n<current_state>one</current_state>'
+    # The CLI adds its environment as a trailing system message.
+    assert [message['role'] for message in native_messages(requests[2])
+            if message['role'] != 'system'] == ['user']
+    assert requests[2]['messages'][0]['content'].startswith('Conversation context:')
+
+
+def test_s3_storage_addresses_buckets_by_path():
+    from app.llm.claude_sessions import S3ConversationStore, s3_client
+
+    client = s3_client('https://s3.zikasak.uk', 'us-east-1', 'key', 'secret')
+    url = client.generate_presigned_url('get_object', Params={
+        'Bucket': 'sessions', 'Key': S3ConversationStore.object_key('workflow-1/chat')})
+    assert url.startswith('https://s3.zikasak.uk/sessions/claude-sessions/workflow-1/chat.tar.gz?')

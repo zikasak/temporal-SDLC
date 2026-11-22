@@ -6,7 +6,7 @@ A web application that turns a task described in conversation into requirements,
 
 - **Backend:** Python 3.12, FastAPI, in `backend/`.
 - **Workflows:** Temporal, with several workers (main, codegen, implementation and test generation).
-- **Storage:** PostgreSQL for application data and Temporal persistence; uploaded originals on disk.
+- **Storage:** PostgreSQL for application data and Temporal persistence; uploaded originals on disk; S3-compatible storage for the native Claude sessions conversations resume across turns.
 - **Frontend:** React and TypeScript, built with Vite, in `frontend/`.
 - **LLM access:** a LangGraph agent over a configured provider (for example an OpenAI-compatible endpoint or Google Gemini) and the Pi adapter; optional Langfuse tracing.
 - **Coding agents:** run in isolated Docker containers.
@@ -46,7 +46,7 @@ Then install the backend dependencies and start a worker, the API and the fronte
 
 ### On Coolify
 
-Deploy `docker-compose.coolify.yml`, configure the provider keys (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`) and `AUTH_JWT_SECRET` in Coolify, and create the first account before exposing the deployment. For ChatGPT OAuth models see [Pi OAuth in Coolify](docs/pi-oauth.md).
+Deploy `docker-compose.coolify.yml`, configure the provider keys (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`), `AUTH_JWT_SECRET` and the S3 storage (`S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`; `S3_ENDPOINT_URL` defaults to `https://s3.zikasak.uk`) in Coolify, and create the first account before exposing the deployment. For ChatGPT OAuth models see [Pi OAuth in Coolify](docs/pi-oauth.md).
 
 ## Documentation
 

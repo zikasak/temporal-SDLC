@@ -78,11 +78,17 @@ separate cache-write durations when supplied), alongside uncached input and outp
 Claude owns its history and automatic compaction. The SDK's built-in tool loop calls the
 flow MCP server directly; the application never hands back placeholder tool results.
 Host activities start a native session from application conversation context and keep it
-open through tool calls and any corrective follow-ups. Coding pauses retain `.claude-native`
+open through tool calls and any corrective follow-ups. The turns of a conversation (chat,
+requirements, architecture, API design and onboarding) resume one native session: after a
+turn its transcript and plugin export state are saved to the S3-compatible storage every
+worker shares (`S3_*` variables, path-style addressing, `claude-sessions/` in the bucket),
+and the next turn, on any worker, restores them and sends only the new user message. A
+saved session that no longer matches the conversation, or missing storage, starts a new
+session from the conversation context. Coding pauses retain `.claude-native`
 beside the project and resume the same native session in the next container. Normal
 completion, errors, timeouts and limits close the SDK client.
 
-Host sessions disable transcript persistence when native tracing is off. The tracing
+Other host sessions disable transcript persistence when native tracing is off. The tracing
 plugin reads Claude's JSONL files, so traced host sessions use a temporary Claude config
 directory that is deleted when the SDK session closes. They never store transcripts in
 the worker's default Claude directory. These temporary files contain unmasked session
