@@ -201,3 +201,37 @@ def test_tool_schemas_still_describe_lists():
     options = [option.get("type") for option in schema["properties"]["properties"]["anyOf"]]
     assert "array" in options
     assert "string" not in options
+
+
+def test_change_turns_send_only_their_changes_to_the_existing_api():
+    # A service's whole API in every turn's message is written to the prompt cache again
+    # each turn; the unchanging original belongs in the cached system prompt.
+    from langchain_core.messages import SystemMessage
+
+    from app.api_design.models import ApiDesignState
+    from app.api_design.prompt import api_turn_messages
+
+    def endpoint(path: str, summary: str) -> dict:
+        return {"method": "GET", "path": path, "summary": summary, "description": "",
+                "tag": "items", "parameters": [], "request_schema": None,
+                "response_status": 200, "response_schema": None, "response_array": False,
+                "error_statuses": [], "requirement_ids": ["FR-1"]}
+
+    existing = {**empty_api(), "endpoints": [endpoint("/kept", "Untouched endpoint"),
+                                             endpoint("/edited", "Old summary"),
+                                             endpoint("/dropped", "Removed endpoint")]}
+    state = ApiDesignState(requirements_document="FR-1", change_document="Change it",
+                           contract={"api": existing}, api=existing, language="java")
+    opening = api_turn_messages(state)
+    state.api = {**existing, "endpoints": [endpoint("/kept", "Untouched endpoint"),
+                                           endpoint("/edited", "New summary")]}
+    state.messages = [{"role": "assistant", "content": "Done."},
+                      {"role": "user", "content": "Thanks"}]
+    follow_up = api_turn_messages(state)
+
+    assert isinstance(follow_up[0], SystemMessage)
+    assert follow_up[0].content == opening[0].content
+    assert "Untouched endpoint" in follow_up[0].content
+    latest = follow_up[-1].text
+    assert "New summary" in latest and "GET /dropped" in latest
+    assert "Untouched endpoint" not in latest and "Old summary" not in latest
