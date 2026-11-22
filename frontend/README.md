@@ -36,7 +36,9 @@ Set `AUTH_JWT_SECRET` (at least 32 random characters) in `backend/.env` first; w
 
 ## Model settings
 
-The **Settings** tab stores the adapter, model, and thinking level for each workflow in PostgreSQL, including the requirements reviewer (Requirements review), which checks the requirements of tasks and onboardings for contradictions and starts with the Requirements model. Choices are discovered from the configured providers: Pi's RPC model list and per-model thinking levels (using `PI_CREDENTIALS_DIR`), Claude Agent SDK initialization metadata, or the configured `OPENAI_BASE_URL` model endpoint. The Google endpoint uses its native model list. Discovery sends no model prompts. Both Docker application images include Pi; a local API needs Pi installed on its PATH, with support for `get_available_thinking_levels`. Claude uses the SDK's bundled CLI.
+The **Settings** tab stores the adapter, model, and thinking level for each workflow in PostgreSQL, including the requirements reviewer (Requirements review), which checks the requirements of tasks and onboardings for contradictions and starts with the Requirements model. Choices are discovered from the configured providers: Pi's RPC model list and per-model thinking levels (using `PI_CREDENTIALS_DIR`), Claude Agent SDK initialization metadata, or the `/models` list of the OpenAI endpoint saved on this page. The Google endpoint uses its native model list. Discovery sends no model prompts. Both Docker application images include Pi; a local API needs Pi installed on its PATH, with support for `get_available_thinking_levels`. Claude uses the SDK's bundled CLI.
+
+The **OpenAI endpoint** section, shown to the administrator (the first user) only, sets the base URL, API key and display name of the OpenAI-compatible endpoint that every model run and coding agent of the openai adapter uses; the environment variables `OPENAI_BASE_URL` and `OPENAI_API_KEY` are no longer read for it. Saving a new base URL or key first checks it with `GET {base URL}/models` and saves nothing when that fails. The key is stored encrypted with `SETTINGS_ENCRYPTION_KEY` (a Fernet key in the backend's environment) and never returned; leaving the field empty keeps the saved key. The display name replaces "OpenAI" in the model pickers. Until a base URL is saved, the openai adapter is not offered and workflow types with nothing saved default to Pi. **Remove** clears the endpoint, unless a workflow type still uses the openai adapter.
 
 In Coolify, configure `OPENAI_API_KEY` for Pi's `openai/*` models or `ANTHROPIC_API_KEY` for its `anthropic/*` models. For `openai-codex/*`, sign in through Pi in the API container as user `app`: `pi --no-session`, then `/login openai-codex`. The Compose deployment persists its dedicated credential volume across redeploys and shares it with workers and the sandbox daemon, including token-refresh locks. See [Pi OAuth login and deployment](../docs/pi-oauth.md) for the one-time setup. Rebuild and redeploy the application image after upgrading from an image without Pi.
 
@@ -59,18 +61,16 @@ Start Temporal services from the project root:
 docker compose -f backend/docker-compose.yml up
 ```
 
-Install backend dependencies and configure the worker with an OpenAI compatible chat endpoint that supports tool calling:
+Install backend dependencies and start the worker; set `SETTINGS_ENCRYPTION_KEY` for the API and workers alike, so the OpenAI endpoint's API key can be saved:
 
 ```sh
 backend/env/bin/pip install -r backend/requirements.txt
-export OPENAI_API_KEY="your-api-key"
-# Optional for a compatible provider; the default is the local MLX endpoint.
-# export OPENAI_BASE_URL="http://localhost:1234/v1"
+export SETTINGS_ENCRYPTION_KEY="$(backend/env/bin/python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
 cd backend
 env/bin/python -m app.temporal.worker
 ```
 
-For a local provider that does not require authentication, set `OPENAI_API_KEY` to the placeholder accepted by that provider. If the worker runs in a container, use an endpoint address reachable from that container. The defaults target the local MLX endpoint at `http://localhost:1234/v1`. `TEMPORAL_ADDRESS` defaults to `localhost:7233` for both the worker and API.
+To use an OpenAI-compatible chat endpoint that supports tool calling, such as a local MLX endpoint at `http://localhost:1234/v1`, set it up on the Settings page as the administrator; an endpoint that needs no authentication can be saved without a key. If the worker runs in a container, use an endpoint address reachable from that container. `TEMPORAL_ADDRESS` defaults to `localhost:7233` for both the worker and API.
 
 The API and worker both use `APP_DATABASE_URL` (default `postgresql://temporal:temporal@localhost:5433/temporal`) and `DOCUMENT_STORAGE_DIR` (default `backend/data/documents`). They create an `app.documents` table in the existing PostgreSQL service. If the API and worker run on different hosts, mount the same persistent document directory into both. The local Compose file exposes PostgreSQL on port 5433. Uploaded originals are stored on disk; generated text documents are stored in PostgreSQL. Documents expire about one day after the latest request that references them; the API removes expired documents hourly.
 

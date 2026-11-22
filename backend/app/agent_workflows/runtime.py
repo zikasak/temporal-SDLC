@@ -582,6 +582,7 @@ async def _run_agent(profile: AgentProfile) -> str:
     LIMITED by the provider's limits."""
     settings = ModelSettings.model_validate_json(
         await run_sync((profile.root.parent / SETTINGS_FILENAME).read_text))
+    # The worker sets these from the OpenAI endpoint saved in Settings (openai adapter only).
     provider = create_adapter(settings, api_key=os.getenv('OPENAI_API_KEY', ''),
                               base_url=os.getenv('OPENAI_BASE_URL', ''))
     if settings.adapter == 'claude':

@@ -33,8 +33,8 @@ async def record_repository_tests(tmp_path, monkeypatch) -> dict:
 async def test_contract_only_generation_publishes_compiled_suite(tmp_path, monkeypatch, failure):
     """Owns source isolation, Docker lifecycle and publication at the host boundary."""
     monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
-    monkeypatch.setattr(docker_agents, 'OPENAI_API_KEY', 'test-secret-key')
-    monkeypatch.setattr(docker_agents, 'OPENAI_BASE_URL', 'http://localhost:1234/v1')
+    # The saved OpenAI endpoint, http://localhost:1234/v1 with the key test-secret-key,
+    # comes from the saved_model_settings fixture.
     implementation = tmp_path / 'session/implementation/service'
     implementation.mkdir(parents=True)
     private_source = implementation / 'Private.java'

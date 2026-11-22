@@ -2,10 +2,16 @@
 from psycopg.types.json import Jsonb
 
 from app.db import connect
-from app.settings.models import ModelSettings, WORKFLOW_LABELS, WorkflowSettings, WorkflowType
+from app.settings import endpoint as endpoint_storage
+from app.settings.endpoint import OpenAIEndpoint
+from app.settings.models import (
+    ModelSettings, WORKFLOW_LABELS, WorkflowSettings, WorkflowType, default_model_settings,
+)
 
 # Workflow types added after others, by the type whose stored settings they start with.
 INITIAL_SOURCES: dict[str, str] = {'requirements_review': 'requirements'}
+# Marks a save that leaves the OpenAI endpoint as it is.
+UNCHANGED = object()
 
 
 async def ensure_schema() -> None:
@@ -17,26 +23,33 @@ async def ensure_schema() -> None:
                 settings jsonb NOT NULL
             )
         ''')
-        for workflow_type in WORKFLOW_LABELS:
-            source = INITIAL_SOURCES.get(workflow_type)
-            if source:
-                # A type added later starts with the model of the one it splits from.
-                await conn.execute('''
-                    INSERT INTO app.workflow_settings (workflow_type, settings)
-                    SELECT %s, settings FROM app.workflow_settings WHERE workflow_type = %s
-                    ON CONFLICT (workflow_type) DO NOTHING
-                ''', (workflow_type, source))
+        await endpoint_storage.ensure_schema(conn)
+        for workflow_type, source in INITIAL_SOURCES.items():
+            # A type added later starts with the model of the one it splits from. A type
+            # with nothing saved gets its default when read (default_model_settings).
             await conn.execute('''
-                INSERT INTO app.workflow_settings (workflow_type, settings) VALUES (%s, %s)
+                INSERT INTO app.workflow_settings (workflow_type, settings)
+                SELECT %s, settings FROM app.workflow_settings WHERE workflow_type = %s
                 ON CONFLICT (workflow_type) DO NOTHING
-            ''', (workflow_type, Jsonb(ModelSettings().model_dump())))
+            ''', (workflow_type, source))
+
+
+async def _openai_ready(conn) -> bool:
+    row = await (await conn.execute('SELECT 1 FROM app.openai_endpoint')).fetchone()
+    return row is not None
 
 
 async def get_settings() -> WorkflowSettings:
     async with await connect() as conn:
         rows = await (await conn.execute(
             'SELECT workflow_type, settings FROM app.workflow_settings')).fetchall()
-    return WorkflowSettings(workflows={row['workflow_type']: row['settings'] for row in rows})
+        saved = {row['workflow_type']: row['settings'] for row in rows
+                 if row['workflow_type'] in WORKFLOW_LABELS}
+        default = None
+        if set(saved) != set(WORKFLOW_LABELS):
+            default = default_model_settings(await _openai_ready(conn)).model_dump()
+    return WorkflowSettings(workflows={
+        workflow_type: saved.get(workflow_type, default) for workflow_type in WORKFLOW_LABELS})
 
 
 async def get_workflow_settings(workflow_type: WorkflowType) -> ModelSettings:
@@ -44,17 +57,26 @@ async def get_workflow_settings(workflow_type: WorkflowType) -> ModelSettings:
         row = await (await conn.execute(
             'SELECT settings FROM app.workflow_settings WHERE workflow_type = %s',
             (workflow_type,))).fetchone()
-    if row is None:
-        raise ValueError(f'Missing settings for workflow: {workflow_type}')
+        if row is None:
+            if workflow_type not in WORKFLOW_LABELS:
+                raise ValueError(f'Missing settings for workflow: {workflow_type}')
+            return default_model_settings(await _openai_ready(conn))
     return ModelSettings.model_validate(row['settings'])
 
 
-async def save_settings(settings: WorkflowSettings) -> WorkflowSettings:
-    # One transaction: a failed save never leaves a partially updated page.
+async def save_settings(settings: WorkflowSettings, endpoint: object = UNCHANGED,
+                        encrypted_api_key: bytes | None = None) -> WorkflowSettings:
+    """Save the workflow settings and, unless `endpoint` is UNCHANGED, replace (an
+    OpenAIEndpoint) or remove (None) the OpenAI endpoint, all in one transaction: a failed
+    save never leaves a partially updated page."""
     async with await connect() as conn:
-        for workflow_type, model in sorted(settings.workflows.items()):
-            await conn.execute('''
-                INSERT INTO app.workflow_settings (workflow_type, settings) VALUES (%s, %s)
-                ON CONFLICT (workflow_type) DO UPDATE SET settings = EXCLUDED.settings
-            ''', (workflow_type, Jsonb(model.model_dump())))
+        async with conn.transaction():
+            for workflow_type, model in sorted(settings.workflows.items()):
+                await conn.execute('''
+                    INSERT INTO app.workflow_settings (workflow_type, settings) VALUES (%s, %s)
+                    ON CONFLICT (workflow_type) DO UPDATE SET settings = EXCLUDED.settings
+                ''', (workflow_type, Jsonb(model.model_dump())))
+            if endpoint is not UNCHANGED:
+                assert endpoint is None or isinstance(endpoint, OpenAIEndpoint)
+                await endpoint_storage.save_endpoint(conn, endpoint, encrypted_api_key)
     return settings

@@ -18,7 +18,7 @@ from app.routing.models import SEAM_ERROR
 async def test_implementation_publishes_only_successful_images(tmp_path, monkeypatch, failure, previous):
     """Owns Docker lifecycle, test isolation and durable image publication."""
     monkeypatch.setattr(activities, 'GENERATED_CODE_DIR', tmp_path)
-    monkeypatch.setattr(docker_agents, 'OPENAI_API_KEY', 'test-secret-key')
+    # The saved OpenAI endpoint's key, test-secret-key, comes from the saved_model_settings fixture.
     source = tmp_path / 'session' / 'server'
     (source / 'src/main').mkdir(parents=True)
     (source / 'src/main/Service.java').write_text('generated interface')

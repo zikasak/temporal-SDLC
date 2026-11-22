@@ -113,7 +113,8 @@ An agent already running keeps its snapshot. Pi receives `--thinking`, OpenAI re
 requests and native coding sessions. `default` leaves the provider's reasoning default
 unchanged. Model support for individual thinking levels is provider-dependent.
 
-Configure `OPENAI_API_KEY` and `OPENAI_BASE_URL` through the environment.
+The openai adapter's endpoint (base URL and API key) is the one saved on the Settings page;
+the worker hands it to the container as `OPENAI_BASE_URL` and `OPENAI_API_KEY`.
 Loopback provider URLs are translated to `host.docker.internal` inside Docker; remote
 URLs are preserved. `TEMPORAL_IMPLEMENTATION_TASK_QUEUE` defaults to `implementation`
 and `TEMPORAL_TEST_GENERATION_TASK_QUEUE` defaults to `test-generation`. The containers

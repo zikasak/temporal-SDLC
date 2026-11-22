@@ -27,7 +27,8 @@ service that already has accounts, supply the first user's credentials as
 `CONTRACT_TESTS_ADMIN_LOGIN` and `CONTRACT_TESTS_ADMIN_PASSWORD`.
 
 The API allows 10 sign-in and registration attempts per client address per minute by
-default. The suite's other tests make 7. `tests/test_zz_rate_limit.py` runs last (pytest
+default. The suite's other tests make 8 (one is the non-administrator account of
+`tests/test_openai_endpoint.py`). `tests/test_zz_rate_limit.py` runs last (pytest
 runs modules in name order) and makes failed sign-ins until it gets 429 with
 `Retry-After`, using up the budget for that minute. Keep new sign-ins out of modules
 that sort after it. Wait a minute before running the suite again. The service must run
@@ -209,6 +210,31 @@ items, so it needs a service with Temporal.
   required, no unknown type, entry bounds) is asserted as 422 without assuming a provider. A
   successful save is not tested: it needs a model the providers offer, which the suite cannot know
   without an LLM provider, and it would change the shared settings.
+- `tests/test_openai_endpoint.py` (FR-174 to FR-182, NFR-8, TR-7): the `openai_endpoint` section of
+  `GET`/`PUT /settings`. Checked: section shape by role (administrator: `base_url`,
+  `display_name`, `api_key_set`; another user: no `base_url` or `api_key_set`), no `api_key`
+  field anywhere, `openai` listed in `providers` exactly while a base URL is saved, 403 for a
+  non-administrator whose body contains the section (also `null`) with the stored endpoint
+  unchanged, validation of the section (422: missing/non-http(s)/over-2048 base URL, display
+  name over 100 characters after trimming, wrong types, non-object section), a changed base URL
+  without a new key (422), an unreachable endpoint (422, nothing saved, key not echoed), removal
+  of an unsaved endpoint as a no-op, and a non-administrator saving workflow settings without
+  the section. The suite has no OpenAI-compatible server to point the service at (the service
+  runs in another container), so a successful endpoint save, the display name as provider
+  label, keeping the stored key on an empty field, the 409 removal conflict and the
+  workflow-settings-roll-back-with-a-failed-check rule are not tested. Notes on how the
+  contract is read:
+  - Tests that must succeed re-send the workflows returned by `GET /settings`; because the
+    contract documents 503 when a provider's models cannot be listed, `200` or `503` is
+    accepted there (the 503 needs a `detail`).
+  - The tests that look at an unsaved endpoint assume a service whose OpenAI endpoint has
+    never been saved (a fresh database) and fail with a message otherwise.
+  - The contract does not say in which order a non-administrator's 403 and other
+    validation errors apply; the suite sends otherwise valid workflows with the section.
+  - The non-administrator's `display_name` is read with `.get`, since the contract does not
+    say whether a null name is omitted or sent as null.
+  - `OPENAI_BASE_URL` and `OPENAI_API_KEY` (TR-7) are service configuration and are not
+    observable over HTTP, so they are not tested.
 - `tests/test_workflow_origin.py` (FR-149, FR-163, FR-164, FR-166, FR-167): `origin` filter and
   field, `RequirementsReviewWorkflow` type, no `onboarding_id`, stages never top-level, pending and
   skipped statuses. Everything except the 422 checks and sign-in needs Temporal, and without it

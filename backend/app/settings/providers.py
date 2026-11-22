@@ -14,7 +14,8 @@ import httpx
 from pydantic import BaseModel, Field
 
 from app.asyncio_utils import async_context
-from app.config import OPENAI_API_KEY, OPENAI_BASE_URL, PI_CREDENTIALS_DIR
+from app.config import PI_CREDENTIALS_DIR
+from app.settings.endpoint import OpenAIEndpoint, authorization, models_url
 from app.settings.models import Adapter
 
 
@@ -35,17 +36,17 @@ class ProviderDiscoveryError(RuntimeError):
     """An actionable, credential-free discovery error safe to show in settings."""
 
 
-async def _openai_models() -> list[ModelOption]:
-    headers = {'Authorization': f'Bearer {OPENAI_API_KEY}'} if OPENAI_API_KEY else {}
+async def _openai_models(endpoint: OpenAIEndpoint) -> list[ModelOption]:
+    base_url, api_key = endpoint.base_url, endpoint.api_key
     async with httpx.AsyncClient(timeout=10) as client:
-        if urlparse(OPENAI_BASE_URL).hostname == 'generativelanguage.googleapis.com':
+        if urlparse(base_url).hostname == 'generativelanguage.googleapis.com':
             # The factory uses the native Google SDK for this endpoint as well.
             models = []
             params = {}
             while True:
                 response = await client.get(
                     'https://generativelanguage.googleapis.com/v1beta/models',
-                    headers={'x-goog-api-key': OPENAI_API_KEY}, params=params)
+                    headers={'x-goog-api-key': api_key}, params=params)
                 response.raise_for_status()
                 body = response.json()
                 models.extend(ModelOption(id=item['name'].removeprefix('models/'),
@@ -55,7 +56,7 @@ async def _openai_models() -> list[ModelOption]:
                 if not body.get('nextPageToken'):
                     return models
                 params = {'pageToken': body['nextPageToken']}
-        response = await client.get(f'{OPENAI_BASE_URL.rstrip("/")}/models', headers=headers)
+        response = await client.get(models_url(base_url), headers=authorization(api_key))
         response.raise_for_status()
         return [ModelOption(id=item['id'], label=item['id']) for item in response.json()['data']]
 
@@ -153,11 +154,18 @@ PROVIDERS = {
 }
 
 
-async def get_provider_options(adapters: Iterable[Adapter] | None = None) -> dict[str, ProviderOptions]:
+async def get_provider_options(adapters: Iterable[Adapter] | None = None, *,
+                               endpoint: OpenAIEndpoint | None = None) -> dict[str, ProviderOptions]:
+    """The selectable models of each adapter, or of `adapters`. The openai adapter is
+    offered only with a saved OpenAI `endpoint`, labelled with its display name."""
     async def discover(adapter):
         label, discover_models = PROVIDERS[adapter]
+        if adapter == 'openai':
+            assert endpoint is not None
+            label = endpoint.display_name or label
         try:
-            models = await asyncio.wait_for(discover_models(), timeout=20)
+            models = await asyncio.wait_for(
+                discover_models(endpoint) if adapter == 'openai' else discover_models(), timeout=20)
             models = sorted({item.id: item for item in models}.values(), key=lambda item: item.label.lower())
             return adapter, ProviderOptions(
                 label=label, models=models,
@@ -174,5 +182,6 @@ async def get_provider_options(adapters: Iterable[Adapter] | None = None) -> dic
             # Provider errors can contain credentials or private endpoint URLs.
             return adapter, ProviderOptions(label=label, error=f'Could not load {label} models. Check the provider connection and retry.')
 
-    return dict(await asyncio.gather(*(discover(adapter) for adapter in
-                                      (PROVIDERS if adapters is None else sorted(set(adapters))))))
+    selected = [adapter for adapter in (PROVIDERS if adapters is None else sorted(set(adapters)))
+                if adapter in PROVIDERS and (adapter != 'openai' or endpoint is not None)]
+    return dict(await asyncio.gather(*(discover(adapter) for adapter in selected)))

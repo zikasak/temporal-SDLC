@@ -123,6 +123,12 @@ from app.settings.models import ModelSettings
 async def saved_settings(workflow_type):
     return ModelSettings.model_validate_json(os.environ['TEST_MODEL_SETTINGS'])
 model.get_workflow_settings = saved_settings
+# The OpenAI endpoint saved in Settings: the local stand-in server and its key.
+from app.settings.endpoint import OpenAIEndpoint
+async def saved_endpoint():
+    return OpenAIEndpoint(base_url=os.environ['OPENAI_BASE_URL'],
+                          api_key=os.environ['OPENAI_API_KEY'])
+model.get_openai_endpoint = saved_endpoint
 ''' + script
     result = subprocess.run([sys.executable, '-c', script], env=environment,
                             cwd=Path(__file__).resolve().parents[1], text=True,

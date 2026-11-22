@@ -35,6 +35,12 @@ class ModelSettings(BaseModel):
         return value
 
 
+def default_model_settings(openai_ready: bool) -> ModelSettings:
+    """The settings of a workflow type with none saved: the openai adapter only while an
+    OpenAI endpoint is saved, pi otherwise."""
+    return ModelSettings() if openai_ready else ModelSettings(adapter='pi')
+
+
 class WorkflowSettings(BaseModel):
     model_config = ConfigDict(extra='forbid')
 

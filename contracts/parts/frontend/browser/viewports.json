@@ -1,5 +1,0 @@
-{
-  "desktop": {"width": 1280, "height": 800, "input": "mouse"},
-  "tablet": {"width": 768, "height": 1024, "input": "touch"},
-  "phone": {"width": 390, "height": 844, "input": "touch"}
-}

@@ -13,7 +13,7 @@
 # python -m app.auth.users add you@example.com
 #
 # Set in Coolify: the credentials and service URL for the adapters selected in Settings,
-# GITHUB_TOKEN_ENCRYPTION_KEY and GITHUB_ALLOWED_ORIGINS (the public origin, such as
+# GITHUB_TOKEN_ENCRYPTION_KEY, SETTINGS_ENCRYPTION_KEY and GITHUB_ALLOWED_ORIGINS (the public origin, such as
 # https://app.example.com). Pi uses OPENAI_API_KEY for openai/* models and
 # ANTHROPIC_API_KEY for anthropic/* models. For openai-codex/*, sign in with Pi in
 # the API container as user app (UID 10001); its dedicated credential volume is
@@ -29,7 +29,9 @@ x-app: &app
     TEMPORAL_ADDRESS: temporal:7233
     LOG_LEVEL: ${LOG_LEVEL:-INFO}
     OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-    OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+    # Encrypts the OpenAI endpoint's API key saved on the Settings page, where the
+    # endpoint (base URL, key, display name) is set up; generate a Fernet key once.
+    SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
     PI_CREDENTIALS_DIR: /pi/agent

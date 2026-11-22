@@ -46,7 +46,7 @@ Then install the backend dependencies and start a worker, the API and the fronte
 
 ### On Coolify
 
-Deploy `docker-compose.coolify.yml`, configure the provider keys (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`) and `AUTH_JWT_SECRET` in Coolify, and create the first account before exposing the deployment. For ChatGPT OAuth models see [Pi OAuth in Coolify](docs/pi-oauth.md).
+Deploy `docker-compose.coolify.yml`, configure the provider keys (`ANTHROPIC_API_KEY`, or `OPENAI_API_KEY` for Pi's `openai/*` models), `SETTINGS_ENCRYPTION_KEY` and `AUTH_JWT_SECRET` in Coolify, set up an OpenAI-compatible endpoint on the Settings page if you use one, and create the first account before exposing the deployment. For ChatGPT OAuth models see [Pi OAuth in Coolify](docs/pi-oauth.md).
 
 ## Documentation
 
