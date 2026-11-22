@@ -1145,5 +1145,29 @@
     "priority": "must",
     "rationale": "User chose: like a forked requirements session.",
     "title": "A forked onboarding starts a new task flow"
+  },
+  {
+    "category": "functional",
+    "description": "Today, in a flow's panel (modal window) on the Flows page, hovering the mouse pointer over a marked requirement ID in the questions or their options in the left column opens its popup, but the interview history on the right side of the panel covers the popup, so the requirement's text cannot be read.",
+    "id": "FR-171",
+    "priority": "must",
+    "rationale": "User report: the ID is in the questions or options in the left column. Code: the popup (.requirement-popup) is positioned absolutely inside its column, and the left column (.request-panel) and the interview history (.response-content) both scroll (overflow-y: auto), so a popup can't extend past its own column.",
+    "title": "Problem: requirement popup hidden behind the interview history"
+  },
+  {
+    "category": "functional",
+    "description": "A requirement ID's popup is shown on top of every other part of the flow's panel, including the interview history, and when it would extend past the visible window it is moved left and/or up so that it stays entirely inside the visible window.",
+    "id": "FR-172",
+    "priority": "must",
+    "rationale": "User chose: shown on top and moves left/up to stay inside the visible window.",
+    "title": "Popup shown on top and kept inside the window"
+  },
+  {
+    "category": "functional",
+    "description": "Hovering over or tapping any marked requirement ID in a flow's panel shows the whole popup, neither covered by another part of the panel nor cut off, in requirements, architecture, API design and onboarding sessions and in the coding agents' questions in the delivery progress.",
+    "id": "FR-173",
+    "priority": "must",
+    "rationale": "User's acceptance criterion.",
+    "title": "Acceptance: whole popup visible in every session type"
   }
 ]
