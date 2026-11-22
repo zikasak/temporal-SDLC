@@ -19,9 +19,10 @@ ONBOARDING_ATTRIBUTE = SearchAttributeKey.for_keyword("OnboardingId")
 # What started a task flow: a requirements interview or an onboarding (or a fork or fix
 # round of one); the origin filter of GET /workflows queries it.
 TASK_ORIGIN_ATTRIBUTE = SearchAttributeKey.for_keyword("TaskOrigin")
-# A stage of a task flow that waits for the stages it depends on ('pending'), or that will
-# never run ('skipped'); unset while it works or once it closed otherwise. Listings show
-# it instead of the Temporal status.
+# A stage of a task flow that waits for the stages it depends on ('pending'), that will
+# never run ('skipped'), or that handed the task on and stays open only until its task flow
+# closes ('completed'); unset while it works. Listings show it instead of the Temporal
+# status.
 FLOW_STATE_ATTRIBUTE = SearchAttributeKey.for_keyword("FlowState")
 # A task flow's current short name.
 TASK_NAME_ATTRIBUTE = SearchAttributeKey.for_keyword("TaskName")
@@ -42,6 +43,7 @@ LINKED_STAGES_MEMO = "linked_stages"
 DELIVERY_SESSION_MEMO = "delivery_session_id"
 PENDING = "pending"
 SKIPPED = "skipped"
+HANDED_OFF = "completed"
 
 
 def execution_fields(repository: Any = None, onboarding_id: str | None = None, *,

@@ -7,7 +7,9 @@ from typing import Any
 import pytest
 from temporalio import activity, workflow
 from temporalio.exceptions import ApplicationError
-from temporalio.client import WorkflowUpdateFailedError, WorkflowUpdateStage
+from temporalio.client import (
+    WorkflowExecutionStatus, WorkflowUpdateFailedError, WorkflowUpdateStage,
+)
 from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
@@ -22,6 +24,8 @@ from app.temporal.sessions import InvalidForkPoint
 from app.temporal import workflows as session_workflows
 from app.temporal.workflows import RequirementsWorkflow
 from app.tasks import service as task_service
+from app.tasks.models import TaskFlowState
+from app.temporal.execution_fields import FLOW_STATE_ATTRIBUTE
 from app.tasks.workflows import TaskWorkflow
 from tests.pipeline import abandoned
 from tests.dev_server import start_dev_server
@@ -338,6 +342,117 @@ async def test_finalized_session_starts_its_api_design(server, live, repository_
     assert description.parent_id == handle.id
     # The design was delivered, and the flow ends with it.
     assert await handle.result() == DOCUMENT
+
+
+# The architecture sessions of the task flow below, by ID: whether each has started.
+held_architectures: dict[str, bool] = {}
+
+
+@workflow.defn(name="ArchitectureWorkflow", sandboxed=False)
+class HeldArchitecture:
+    """Started by its task flow, it works until `finish`, then hands nothing on."""
+
+    def __init__(self) -> None:
+        self.started = False
+        self.finished = False
+
+    @workflow.run
+    async def run(self, state: ArchitectureState) -> None:
+        await workflow.wait_condition(lambda: self.started)
+        held_architectures[workflow.info().workflow_id] = True
+        await workflow.wait_condition(lambda: self.finished)
+
+    @workflow.signal
+    def start_stage(self, state: Any) -> None:
+        self.started = True
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.finished = True
+
+
+@workflow.defn(name="ApiDesignWorkflow", sandboxed=False)
+class SkippedStage:
+    """A pending stage its task flow only ever skips."""
+
+    def __init__(self) -> None:
+        self.skipped = False
+
+    @workflow.run
+    async def run(self, state: Any) -> None:
+        await workflow.wait_condition(lambda: self.skipped)
+
+    @workflow.signal
+    def skip_stage(self) -> None:
+        self.skipped = True
+
+
+@workflow.defn(name="DeliveryWorkflow", sandboxed=False)
+class SkippedDelivery(SkippedStage):
+    @workflow.run
+    async def run(self, state: Any) -> None:
+        await workflow.wait_condition(lambda: self.skipped)
+
+
+@activity.defn(name="name_task_flow")
+async def name_task_flow(task: str, requirements: list[dict[str, Any]]) -> str:
+    return "Book rooms"
+
+
+async def test_handed_off_session_stays_open_until_its_task_flow_closes(
+        server, repository_selection):
+    """Retention deletes closed workflows only: a session that closed as soon as it handed
+    the task on would be deleted while later stages still run, and could not be opened."""
+    activities = FakeActivities()
+    queue = f"open-stage-{uuid.uuid4().hex}"
+    ids = task_service.new_ids()
+    flow_id = ids["task_flow_id"]
+    session_id = ids["requirements_session_id"]
+    state = TaskFlowState(
+        kind="new_service", repository=repository_selection, task="Book rooms",
+        name="Book rooms", **{key: value for key, value in ids.items() if key != "task_flow_id"},
+        requirements=RequirementsState(messages=[{"role": "assistant", "content": "Hello"}],
+                                       repository=repository_selection,
+                                       task_flow_id=flow_id))
+    async with Worker(
+        server.client, task_queue=queue,
+        workflows=[TaskWorkflow, RequirementsWorkflow, HeldArchitecture, SkippedStage,
+                   SkippedDelivery],
+        activities=[activities.requirements_turn, activities.write_requirements_document,
+                    activities.checkout_repository, activities.read_requirements_document,
+                    activities.register_session, name_task_flow],
+    ):
+        flow = await server.client.start_workflow(TaskWorkflow.run, state, id=flow_id,
+                                                  task_queue=queue)
+        session = server.client.get_workflow_handle(session_id)
+        for _ in range(100):
+            try:
+                await wait_for_status(session, "interviewing")
+                break
+            except Exception:  # noqa: BLE001 - not created yet
+                await asyncio.sleep(0.05)
+        await session.execute_update(RequirementsWorkflow.send_message, "Book rooms")
+        await session.execute_update(RequirementsWorkflow.finalize)
+        architecture_id = ids["architecture_session_id"]
+        for _ in range(200):
+            if held_architectures.get(architecture_id):
+                break
+            await asyncio.sleep(0.05)
+        assert held_architectures.get(architecture_id), "the architecture never started"
+
+        # The session handed the task on, and stays open, listed as completed.
+        description = await session.describe()
+        assert description.status == WorkflowExecutionStatus.RUNNING
+        assert description.typed_search_attributes.get(FLOW_STATE_ATTRIBUTE) == "completed"
+        assert (await session.query(RequirementsWorkflow.get_state)).status == "completed"
+
+        # The architecture hands nothing on: the task flow skips the rest and closes, and
+        # its session closes with it, with the result it handed on.
+        await server.client.get_workflow_handle(architecture_id).signal("finish")
+        await abandoned(flow)
+        result = await session.result()
+        assert result["finalized"] is True and result["kind"] == "new_service"
+        assert (await session.describe()).status == WorkflowExecutionStatus.COMPLETED
 
 
 async def test_expired_session_starts_no_api_design(server, idle, repository_selection):

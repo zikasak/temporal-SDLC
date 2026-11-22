@@ -3,7 +3,7 @@ from datetime import timedelta
 from typing import Any
 
 from temporalio import workflow
-from temporalio.common import RetryPolicy
+from temporalio.common import RawValue, RetryPolicy
 from temporalio.exceptions import ActivityError, CancelledError, ChildWorkflowError
 
 from app.temporal.flags import FlowFlags
@@ -70,6 +70,10 @@ class TaskWorkflow(FlowFlags):
         self._redelivery: DeliveryState | None = None
         # Rounds and the finish of the requirements review, handed on in order.
         self._review_lock = asyncio.Lock()
+        # The result type of each stage, and the results the stages handed on as they
+        # finished (`stage_result`); they stay open until this task flow closes.
+        self._result_types: dict[str, Any] = {}
+        self._results: dict[str, RawValue] = {}
 
     # The stages' workflow IDs.
 
@@ -113,6 +117,7 @@ class TaskWorkflow(FlowFlags):
         if self._naming is not None:
             await self._naming
         await workflow.wait_condition(workflow.all_handlers_finished)
+        await self._release_stages()
         await self._close_flags()
         if outcome != "completed":
             workflow.logger.info("Task flow closes as cancelled (delivery %s)", outcome)
@@ -251,6 +256,7 @@ class TaskWorkflow(FlowFlags):
                         "review": ReviewFlowState,
                         "architecture": ArchitectureResult,
                         "api_design": DesignResult, "delivery": dict}
+        self._result_types[workflow_id] = result_types[stage]
         self._handles[workflow_id] = await workflow.start_child_workflow(
             STAGE_TYPES[stage], state, id=workflow_id, result_type=result_types[stage],
             **fields)
@@ -306,10 +312,23 @@ class TaskWorkflow(FlowFlags):
         self.state.skipped.append(workflow_id)
         await self._closed(workflow_id)
 
+    @workflow.signal
+    def stage_result(self, workflow_id: str, result: RawValue) -> None:
+        """A stage finished and hands on its result; it stays open until this task flow
+        closes (`release_stage`), so that it is not deleted while later stages run."""
+        self._results.setdefault(workflow_id, result)
+
     async def _closed(self, workflow_id: str) -> Any:
-        """Wait for the stage to close; its result, or None when it did not complete."""
+        """Wait for the stage to finish: its result as it hands it on, or as it closes;
+        None when it did not complete."""
+        handle = self._handles[workflow_id]
         try:
-            return await self._handles[workflow_id]
+            await workflow.wait_condition(
+                lambda: workflow_id in self._results or handle.done())
+            if workflow_id in self._results:
+                return workflow.payload_converter().from_payload(
+                    self._results[workflow_id].payload, self._result_types[workflow_id])
+            return await handle
         except ChildWorkflowError as exc:
             workflow.logger.warning("Stage %s did not complete: %s", workflow_id,
                                     exc.cause or exc)
@@ -317,6 +336,25 @@ class TaskWorkflow(FlowFlags):
         finally:
             if workflow_id not in self.state.closed:
                 self.state.closed.append(workflow_id)
+
+    async def _release_stages(self) -> None:
+        """Let the stages that handed on their results close with this task flow, and
+        wait until they have. A stage that never handed on is closed by Temporal with the
+        task flow, as before."""
+        delivery = self._id("delivery")
+        released = [workflow_id for workflow_id in self._results
+                    if workflow_id != delivery and workflow_id in self._handles]
+        for workflow_id in released:
+            try:
+                await self._handles[workflow_id].signal("release_stage")
+            except Exception as exc:  # noqa: BLE001 - a closed stage needs no release
+                workflow.logger.warning("Stage %s not released: %s", workflow_id, exc)
+        for workflow_id in released:
+            try:
+                await self._handles[workflow_id]
+            except ChildWorkflowError as exc:
+                workflow.logger.warning("Stage %s did not close: %s", workflow_id,
+                                        exc.cause or exc)
 
     async def _follow(self, first: str) -> str:
         """Follow the stages from `first` on; how the task's delivery ended."""

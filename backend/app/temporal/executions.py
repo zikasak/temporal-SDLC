@@ -223,8 +223,9 @@ async def _execution(item: WorkflowExecution, client: Client | None = None,
     branch = repository["branch"] if repository else None
     status = item.status.name.lower() if item.status else "unknown"
     flow_state = attributes.get(FLOW_STATE_ATTRIBUTE)
-    if flow_state in ("pending", "skipped"):
-        # A stage created before the stages it depends on finished, or one that never ran.
+    if flow_state in ("pending", "skipped", "completed"):
+        # A stage created before the stages it depends on finished, one that never ran,
+        # or one that handed the task on and stays open until its task flow closes.
         status = flow_state
     closed = status not in OPEN_STATUSES and status != "pending"
     waiting = attributes.get(WAITING_ATTRIBUTE)

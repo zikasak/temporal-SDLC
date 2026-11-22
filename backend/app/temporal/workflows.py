@@ -8,7 +8,7 @@ from temporalio.exceptions import (
     ActivityError, ApplicationError, CancelledError, ChildWorkflowError,
 )
 
-from app.temporal.flags import FlowFlags, PendingStage
+from app.temporal.flags import FlowFlags, OpenStage, PendingStage
 from app.temporal.interview import Interview, assistant_message, pending_questions
 from app.requirements_review.interview import ReviewedInterview
 
@@ -229,7 +229,7 @@ def _interview_flags(state: RequirementsState | ApiDesignState) -> tuple[bool, N
 
 @workflow.defn
 class RequirementsWorkflow(Interview[RequirementsState], ReviewedInterview, _Delivering,
-                           FlowFlags):
+                           FlowFlags, OpenStage):
     """One requirements interview: each user message is an update, and the
     finalize update turns the gathered requirements into a document. A task that
     leaves the API as it is has no API design to follow, so the session then hands
@@ -272,6 +272,7 @@ class RequirementsWorkflow(Interview[RequirementsState], ReviewedInterview, _Del
         # Set when the session expired after a day without messages.
         self._expired = False
         self._init_flags()
+        self._init_open_stage()
 
     def _flags(self) -> tuple[bool | None, bool | None]:
         waiting, unresolved = _interview_flags(self.state)
@@ -364,8 +365,8 @@ class RequirementsWorkflow(Interview[RequirementsState], ReviewedInterview, _Del
         await workflow.wait_condition(workflow.all_handlers_finished)
         if self.state.task_flow_id:
             # A stage of a task flow hands the task on to it; the task flow starts the
-            # next stage.
-            return await self._hand_off()
+            # next stage. The session stays open as long as the task flow does.
+            return await self._stay_open(await self._hand_off())
         if self.state.status == "completed" and self.state.kind in DIRECT_KINDS:
             await self._deliver()
             if self._delivery_cancelled:
@@ -853,7 +854,8 @@ class RequirementsWorkflow(Interview[RequirementsState], ReviewedInterview, _Del
 
 
 @workflow.defn
-class ApiDesignWorkflow(Interview[ApiDesignState], _Delivering, FlowFlags, PendingStage):
+class ApiDesignWorkflow(Interview[ApiDesignState], _Delivering, FlowFlags, PendingStage,
+                        OpenStage):
     """One API design discussion based on a finished requirements session: the
     model drafts the API first, or for a change to an existing service applies the
     change to the API its repository holds, each user message is an update, and the
@@ -879,6 +881,7 @@ class ApiDesignWorkflow(Interview[ApiDesignState], _Delivering, FlowFlags, Pendi
         self._expired = False
         self._init_flags()
         self._init_pending()
+        self._init_open_stage()
 
     def _flags(self) -> tuple[bool | None, bool | None]:
         return _interview_flags(self.state)
@@ -888,7 +891,7 @@ class ApiDesignWorkflow(Interview[ApiDesignState], _Delivering, FlowFlags, Pendi
         if self.state.pending:
             # Created by its task flow before the architecture was finalized or skipped.
             await self._wait_pending()
-            return None
+            return await self._stay_open(None)
         if self.state.task_flow_id:
             self._keep_flags()
         ready = (await _check_out(self.state, self._resume_status)
@@ -931,7 +934,7 @@ class ApiDesignWorkflow(Interview[ApiDesignState], _Delivering, FlowFlags, Pendi
             if self.state.status == "completed" and self.state.document:
                 result.delivery = self._delivery_state()
             await self._close_flags()
-            return result
+            return await self._stay_open(result)
         if self.state.status == "completed" and self.state.document:
             await self._deliver()
             if self._delivery_cancelled:

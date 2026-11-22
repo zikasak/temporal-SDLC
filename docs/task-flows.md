@@ -49,7 +49,12 @@ task flow's `start_stage` signal, which carries the state it continues as a new 
 or for `skip_stage`, which closes it with `FlowState=skipped` (`app/temporal/flags.py`).
 
 Stages hand the task on to the task flow by their result instead of starting the next stage
-themselves:
+themselves. A stage does not close as it hands its result on: it sends it with the task
+flow's `stage_result` signal, is listed with `FlowState=completed` (or stays `skipped`), and
+stays open, still answering its queries, until the task flow sends `release_stage` as it
+closes (`OpenStage` in `app/temporal/flags.py`). The stage then closes with the same
+result. Retention only deletes closed workflows, so no stage of a running task is deleted
+and every session page stays readable while the later stages run. The stages are:
 
 - the requirements stage returns `RequirementsResult`: the architecture to start for a new
   service or an API change, or the delivery of a bugfix or documentation task, and whether
@@ -66,7 +71,8 @@ reports its `architecture_session_id` and the architecture session its
 (`delivery-<api design session>`), or after the requirements session for a bugfix or
 documentation task, so the session endpoints keep reaching it.
 
-The task flow closes once every child has closed, with its delivery's status: completed
+The task flow closes once every child has closed (it releases the stages that handed on
+their results and waits for them first), with its delivery's status: completed
 when the pull request was merged (or the delivery pushed without one), cancelled otherwise,
 including when the delivery was skipped.
 

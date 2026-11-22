@@ -6,7 +6,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError
 
-from app.temporal.flags import FlowFlags, mark_skipped
+from app.temporal.flags import FlowFlags, OpenStage, mark_skipped
 
 with workflow.unsafe.imports_passed_through():
     from app.requirements_review.activities import review_requirements
@@ -17,7 +17,7 @@ with workflow.unsafe.imports_passed_through():
 
 
 @workflow.defn
-class RequirementsReviewWorkflow(FlowFlags):
+class RequirementsReviewWorkflow(FlowFlags, OpenStage):
     """The requirements review of one task or onboarding, a child of its task flow. The
     task flow creates it pending; the first round the requirements or onboarding interview
     hands it (`review_round`) starts it. Each round an LLM checks the requirements for
@@ -36,6 +36,7 @@ class RequirementsReviewWorkflow(FlowFlags):
         self._finish: tuple[str, list[Contradiction]] | None = None
         self._skip = False
         self._init_flags()
+        self._init_open_stage()
 
     def _flags(self) -> tuple[bool | None, bool | None]:
         """Waiting for the user while the contradictions' questions or a failed round wait
@@ -109,7 +110,8 @@ class RequirementsReviewWorkflow(FlowFlags):
                                  status, len(contradictions))
         await workflow.wait_condition(workflow.all_handlers_finished)
         await self._close_flags()
-        return self.state
+        # The review stays open as long as its task flow does.
+        return await self._stay_open(self.state)
 
     async def _close_skipped(self) -> ReviewFlowState:
         self.state.status = "skipped"
@@ -117,7 +119,7 @@ class RequirementsReviewWorkflow(FlowFlags):
         workflow.logger.info("Requirements review skipped")
         await workflow.wait_condition(workflow.all_handlers_finished)
         await self._close_flags()
-        return self.state
+        return await self._stay_open(self.state)
 
     async def _round(self, round_input: ReviewRoundInput) -> None:
         """Run the round, unless the user continues anyway first, and report its result."""

@@ -411,10 +411,12 @@ fresh authoring attempt from the original inputs, not repair using failure logs.
 
 ### One workflow tree per task
 
-Requirements, API design, delivery and every retry of it are one Temporal workflow tree
-whose root is the requirements session, so no part of a task falls to the namespace's
-retention while another part goes on. Retention only deletes closed workflows, and here
-nothing closes while anything below it is open:
+Requirements, API design, delivery and every retry of it are one Temporal workflow tree,
+so no part of a task falls to the namespace's retention while another part goes on.
+Retention only deletes closed workflows, and here nothing closes while anything below it
+is open. A task started as a task flow (`TaskWorkflow`, see [task flows](task-flows.md))
+is the root of its stages: each stage hands its result on and stays open until the task
+flow closes. Sessions from before task flows are their own roots:
 
 ```mermaid
 flowchart TD

@@ -16,7 +16,7 @@ with workflow.unsafe.imports_passed_through():
     from app.temporal.activities import register_session
     from app.temporal.closing import end_cancelled
     from app.temporal.execution_fields import execution_fields
-    from app.temporal.flags import FlowFlags, PendingStage, mark_skipped
+    from app.temporal.flags import FlowFlags, OpenStage, PendingStage, mark_skipped
     from app.temporal.interview import Interview, assistant_message, pending_questions
     from app.temporal.workflows import FLOW_ABANDONED, FLOW_ABANDONED_PATCH, _check_out
 
@@ -28,7 +28,8 @@ NO_SKIP = ("A new service always goes through the architecture stage; only the s
 
 
 @workflow.defn
-class ArchitectureWorkflow(Interview[ArchitectureState], FlowFlags, PendingStage):
+class ArchitectureWorkflow(Interview[ArchitectureState], FlowFlags, PendingStage,
+                           OpenStage):
     """One architecture session of a task: the LLM drafts the top-level architecture from
     the requirements (an API change starting from the repository's existing one, or
     proposing to skip the stage instead), and the user reviews it in a conversation of
@@ -57,6 +58,7 @@ class ArchitectureWorkflow(Interview[ArchitectureState], FlowFlags, PendingStage
         self._turn_lock = asyncio.Lock()
         self._init_flags()
         self._init_pending()
+        self._init_open_stage()
 
     def _flags(self) -> tuple[bool | None, bool | None]:
         """Waiting for the user while it asks questions or proposes skipping the stage."""
@@ -74,7 +76,7 @@ class ArchitectureWorkflow(Interview[ArchitectureState], FlowFlags, PendingStage
         if self.state.pending:
             # Created by its task flow before the requirements were finalized.
             await self._wait_pending()
-            return None
+            return await self._stay_open(None)
         if self.state.task_flow_id:
             self._keep_flags()
         ready = await _check_out(self.state, self._resume_status)
@@ -111,8 +113,9 @@ class ArchitectureWorkflow(Interview[ArchitectureState], FlowFlags, PendingStage
             # itself, which outlives it.
             await self._start_design_alone(design)
             return None
-        return ArchitectureResult(api_design_session_id=self.state.api_design_session_id,
-                                  design=design)
+        # In a task flow, the session stays open as long as the task flow does.
+        return await self._stay_open(ArchitectureResult(
+            api_design_session_id=self.state.api_design_session_id, design=design))
 
     async def _start_design_alone(self, design: Any) -> None:
         session_id = self.state.api_design_session_id
