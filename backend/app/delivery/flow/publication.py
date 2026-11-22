@@ -259,17 +259,21 @@ class Publication(FlowBase):
 
     def _proofs(self) -> dict[str, list[dict[str, Any]]]:
         """Which suite proves each criterion of a routed change, by suite, for its pull
-        request: each criterion's ID, title and, at a seam, the seam. Empty for a change that
+        request: each criterion's ID, title and, at a seam, the seam, or at a page, the page.
+        Empty for a change that
         was not routed, or with no criterion a suite proves."""
         titles = {item['id']: item.get('title') or ''
                   for item in (self.spec.brief or {}).get('requirements') or []}
         proofs: dict[str, list[dict[str, Any]]] = {}
         for requirement, route in (self.progress.routing or {}).items():
-            if route['route'] not in ('contract', 'component'):
+            if route['route'] not in ('contract', 'component', 'browser'):
                 continue
             item: dict[str, Any] = {'id': requirement, 'title': titles.get(requirement, '')}
             seam = route.get('seam')
             if seam:
                 item['seam'] = seam
+            page = route.get('page')
+            if page:
+                item['page'] = page
             proofs.setdefault(route['route'], []).append(item)
         return proofs

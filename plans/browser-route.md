@@ -329,20 +329,69 @@ the `sandbox_data` volume, and the host's daemon in local development
 
 ## 5. Steps
 
-- [ ] 1. Browser suite template and trusted runner for TypeScript parts: config,
+- [x] 1. Browser suite template and trusted runner for TypeScript parts: config,
   helpers, fixture interception, JUnit with prefix. Prove it on this repository by hand
   with a test for FR-171–173 that fails on `main`.
-- [ ] 1a. Pull the image ahead of use: `PREPULLED_IMAGES`, background pull at the sandbox
+  *Done.* Notes:
+  - The proof: a page contract of the requirements interview
+    (`/?mode=requirements&session_id=…`, answering `getAuthMe`, `getWorkflows` and
+    `getRequirementsSessionsBySessionId`) and one test tagged `@desktop` and `@narrow`
+    that reveals the `FR-1` button of the "Your answer" region and asserts
+    `expectFullyVisible` on the tooltip. On `main` it fails at both viewports, saying why:
+    at desktop "top right (471, 411) shows code; bottom right (471, 554) shows
+    ol.conversation-list" (cut off and under the history column), at narrow "is not
+    inside the window of 390×844". With the popup made `position: fixed` it passes, 40 of
+    40 runs twice (`--repeat-each 20`).
+  - The runner writes JUnit with a trusted reporter of its own (`reporter.mjs`), not
+    Playwright's, so the class name is `file#viewport` after `CLASSNAME_PREFIX`.
+  - A viewport's `scale` is its `deviceScaleFactor` (1 by default), so "fixes
+    `deviceScaleFactor: 1`" holds unless the contract says otherwise.
+  - `ComponentSuite.trusted` names the helpers, which `copy_test_suite` always puts
+    over the author's copies, so the runner and the repository get the template's.
+- [x] 1a. Pull the image ahead of use: `PREPULLED_IMAGES`, background pull at the sandbox
   worker's start and in `dev_stack.py`, `ensure_image` before every browser-runner
   build or run, and `--pull=false` builds.
-- [ ] 2. Page contract: format, host checks, OpenAPI fixture validation, conformance
+  *Done.* Notes:
+  - The constants live in `app/images.py`, which imports nothing, and
+    `app/docker_agents.py` re-exports them: the languages build their Dockerfiles'
+    `BASE_IMAGE` argument from them without importing the Docker machinery.
+  - `dev_stack.py` starts the sandbox worker, which pulls at its own start against the
+    host's daemon; it does not pull a second time.
+  - `ImageUnavailable` is not a `RuntimeError`, so no caller mistakes it for a test
+    failure or a contract mismatch; it fails the activity, naming the image.
+- [x] 2. Page contract: format, host checks, OpenAPI fixture validation, conformance
   runner, and `check-pages.mjs` for the agent.
-- [ ] 3. Route: `read_routes`, prompt, `language.json`, publication of the checked
+  *Done.* Notes:
+  - `pages.json` also holds `api_prefix` (this repository's client calls the API under
+    `/api`, which its dev server strips) and per page `actions`: a target, an input and
+    the elements it shows. The popup exists only after hover or tap, so "found once the
+    page is idle" could not cover it otherwise.
+  - The fixtures are checked against the OpenAPI document rendered from the delivery's
+    API design, or `contracts/openapi.yaml` without one; the routing keeps the API's
+    operations in `routing/parts/P/operations.json` for the runners, since the
+    repository the runners are built from holds no `contracts/`.
+  - Conformance always runs at routing, with the route's `added` elements expected
+    absent, rather than waiting for the seam as stubs with `added` symbols do.
+  - The routing agent's `check-pages.mjs` needs a Chromium it may not be able to
+    install; its instructions say so, and the host runs the same check regardless.
+- [x] 3. Route: `read_routes`, prompt, `language.json`, publication of the checked
   contract; `browser-tests` patch.
-- [ ] 4. Composition: a separate runner member, baseline, verification and repair loop,
+  *Done.* Notes: the routing's result names `repository_parts`, which the workflow keeps
+  in `DeliveryState.routing_parts` for the stop message.
+- [x] 4. Composition: a separate runner member, baseline, verification and repair loop,
   report merge, delivery page.
-- [ ] 5. Added page elements through the seam step.
-- [ ] 6. Interview and stop message; review instructions; docs.
+  *Done.* Notes:
+  - The workflow keeps one runner image per run, so its arguments do not change:
+    `build_runner` records the runners beside it in
+    `component-runners/<image>.json`, and `run_component_suite` runs them in turn and
+    merges their reports. Its start-to-close timeout is 30 minutes instead of 15.
+  - The browser member's tests live at `browser/P/` of the delivery's suite, and so the
+    snapshot keeps them in `repository-tests/components/browser/P/`, not
+    `repository-tests/browser/parts/P/`: the record is the suite's layout.
+  - The workflow treats `browser` routes as component routes (`_component_routes`), so
+    authoring, repair, diagnosis and review needed only prompts and paths.
+- [x] 5. Added page elements through the seam step.
+- [x] 6. Interview and stop message; review instructions; docs.
 - [ ] 7. Re-run the popup bugfix (FR-171–173) through the platform end to end.
 
 ## 6. Verification

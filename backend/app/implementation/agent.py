@@ -113,6 +113,16 @@ src/Flows.d.ts), and the same holds for them: keep every declaration they make e
 it is, and do not create, change or remove contracts/parts or any component-tests
 directory of a part. The component test names of such a part start with the part's name
 and a colon.
+""" + """
+A criterion routed `browser` is observed instead on a page of a part's web client in a
+real browser: its `page` names the part, the page's `entry`, the viewports (window sizes
+and inputs) and the elements (`roles`) its browser tests find, which
+/workspace/contracts/parts/<part>/browser describes (pages.json, viewports.json and the
+API fixtures). Keep every element that contract declares findable as it says (its ARIA
+role and accessible name, or its data-testid), and make the criterion true in the page as
+laid out at those viewports, such as with the client's CSS. Do not create, change or remove
+contracts/parts or any browser-tests directory. Those test names start with the part's
+name, `~browser:` and the viewport they ran in (`frontend~browser:tests/a.spec.ts#narrow`).
 """
 
 SEAM_PROMPT = """Prepare a change to the existing service in /workspace/service, a checkout
@@ -139,6 +149,12 @@ module's path within the part (src/Flows.d.ts). An added symbol of a TypeScript 
 `export` added to a declaration the module already has, or a new exported function that
 does the least its declared type allows, with no behaviour change; build that part with
 its own toolchain too.
+A `seam` entry named `<part>/page:<entry>` lists elements of a page of that part's web
+client, as `role=<ARIA role>[name="<accessible name>"]` or `testid=<data-testid>`, that
+browser tests will find on the page at that entry, described in
+/workspace/contracts/parts/<part>/browser/pages.json. An added element of a browser page
+is an attribute (`role`, `aria-label` or `data-testid`) on an element the page already
+renders, with no other change: no new element, style or behaviour.
 The symbols you add get no behaviour of their own yet: each does the least its signature
 allows and changes nothing the code does today, such as an update or signal that is
 accepted and ignored, a query that returns state the code already keeps, or a method that
@@ -151,8 +167,8 @@ against it unchanged; the fix is written in a later run, from the code as you le
 Read the code around each symbol before adding it. Locate code with list_files and
 search_files and read only the relevant line ranges with read_file, and add the symbols
 with edit_file. Do not change, rename or remove anything else, and do not create, change
-or remove contracts/components, contracts/parts or any component-tests directory. Use
-shell for builds.
+or remove contracts/components, contracts/parts or any component-tests or browser-tests
+directory. Use shell for builds.
 Do not generate, read, or execute tests.
 Build the service without running tests. Fix build failures. Keep the Dockerfile at the
 project root as it is. You have no Docker daemon; the outer worker builds the Dockerfile

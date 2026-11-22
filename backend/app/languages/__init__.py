@@ -87,6 +87,56 @@ class ComponentSuite(TestSuite):
     # is built on the service's runner. The first is run with `--version` when that image
     # is built, so a base without the libraries it needs fails the build, not the tests.
     part_runtime: tuple[str, ...] = ()
+    # Files of the template the suite always holds as the template has them, such as
+    # trusted helpers its tests import: put over the author's copies whenever the suite is
+    # copied, so neither the runner nor the repository ever gets another version.
+    trusted: tuple[str, ...] = ()
+
+
+def browser_viewport(case: str) -> str | None:
+    """The viewport of a browser test's identity, `<file>#<viewport> > …`."""
+    file, separator, rest = case.partition('#')
+    viewport, separator, _ = rest.partition(' > ') if separator else ('', '', '')
+    return viewport or None if separator and file else None
+
+
+@dataclass(frozen=True)
+class BrowserSuite(ComponentSuite):
+    """The standalone end-to-end test project of criteria routed to a page of a part's
+    built web client (the `browser` route): written from the page contract alone and run
+    by the trusted runner in a real browser, with the API answered from the contract's
+    fixtures. It never joins the image of the other parts' component tests: its runner is
+    built and run beside it (app/test_generation/components.py).
+
+    The runner's build context holds the template's runner files, the repository's
+    sources under `repository/`, the suite's published files under `suite/` and the
+    page contract under `contract/`, with the API's operations as `operations.json`.
+    Its test identities are `<file>#<viewport> > <describe> > <test>`: one per viewport a
+    test is tagged with."""
+    # Where the runner image leaves its JUnit report.
+    reports: TestReports = TestReports('/tests/reports', '*.xml')
+    # The viewport of one of its test identities.
+    viewport_of: Callable[[str], str | None] = browser_viewport
+
+
+@dataclass(frozen=True)
+class BrowserContract:
+    """How a criterion that only a laid-out page shows is described: a page contract in
+    `contracts/parts/P/browser/` (pages.json, fixtures/, viewports.json), whose format
+    the host checks the same for every part language (app/routing/browser.py). Its
+    language supplies the instructions and the conformance runner."""
+    # What the routing agent is told about writing the page contract and checking it.
+    instructions: str
+    # Trusted runner project of the conformance check: built with the repository under
+    # `repository/`, the contract under `contract/` and the host's inputs under `checks/`
+    # (operations.json, the API's operations, and absent.json, the elements the change
+    # adds), it exits non-zero when the built page does not match the contract.
+    conformance: Path
+    # Docker build arguments of the conformance image and of the suite's runner, by the
+    # part's directory in the repository.
+    build_args: Callable[[str], dict[str, str]]
+    # Trusted files the routing agent checks the contract with, given to it in TOOLS_DIR.
+    tools: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -191,6 +241,12 @@ class PartLanguage:
     # Its runner is built with the part's sources under `repository/` and the contract's
     # build arguments, like a service language's.
     component_suite: ComponentSuite
+    # Whether a part of the language is a web client that the browser route can open in a
+    # real browser, such as a Vite project with an index.html. None: never.
+    detect_browser: Callable[[Path], bool] | None = None
+    # The page contract and the browser suite of such a part; given with `detect_browser`.
+    browser_contract: BrowserContract | None = None
+    browser_suite: BrowserSuite | None = None
 
 
 # Dependencies and build output of the other projects a repository may hold beside the

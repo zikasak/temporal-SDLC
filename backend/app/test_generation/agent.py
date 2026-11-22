@@ -198,6 +198,23 @@ from that part's stubs in /workspace/contracts/parts/<part>/components. The name
 part's tests in `repair` and in the runs start with the part's name and a colon.
 """
 
+COMPONENT_BROWSER_PROMPT = """
+Some criteria of `routes` are routed `browser` rather than to a seam: their `page` names a
+part, the page's `entry`, the viewports the criterion must hold in and the elements
+(`roles`) a test finds, and `reason` says what the page shows. They are proved by browser
+tests of that part, in headless Chromium against its built web client, written from its
+page contract in /workspace/contracts/parts/<part>/browser alone (pages.json,
+viewports.json and fixtures/), in the part's browser project as the instructions above
+lay out; what is said above of stubs and seams holds there for the page contract and its
+pages. The client's code is unavailable. Answer every operation the page calls from the
+contract's fixtures, show what the criterion is about as a user would, and assert it with
+the trusted helpers only; tag each test with every viewport its route's `page` names. The
+names of its tests in `repair` and in the runs start with the part's name, `~browser:`,
+the test file and the viewport (`frontend~browser:tests/popup.spec.ts#narrow > …`). A
+criterion of a page may turn out not to be observable through the elements and fixtures
+its contract declares: decline it as said below, saying what the contract lacked.
+"""
+
 COMPONENT_UNOBSERVABLE_PROMPT = """
 A criterion of `routes` may turn out not to be observable through the stubbed symbols
 after all: the behaviour it is about happens outside every symbol the stubs declare, or
@@ -448,6 +465,12 @@ def validate_completion(test_glob: str, root: Path, test_globs: list[str] | None
                                + (f' matching {glob}' if test_globs else ''))
 
 
+def _browser_routes(inputs: dict) -> bool:
+    routes = inputs.get('routes')
+    return isinstance(routes, dict) and any(
+        isinstance(route, dict) and route.get('route') == 'browser' for route in routes.values())
+
+
 def prompt(inputs: dict, language: dict) -> str:
     instructions = language['instructions']
     if inputs.get('component'):
@@ -455,6 +478,7 @@ def prompt(inputs: dict, language: dict) -> str:
         repair = inputs.get('repair')
         return (COMPONENT_PROMPT.format(instructions=instructions)
                 + (COMPONENT_PARTS_PROMPT if inputs.get('parts') else '')
+                + (COMPONENT_BROWSER_PROMPT if _browser_routes(inputs) else '')
                 + (COMPONENT_UNOBSERVABLE_PROMPT if not repair
                    else COMPONENT_REGRESSION_REVIEW_PROMPT
                    if (repair.get('review') or {}).get('before_fix')

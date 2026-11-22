@@ -130,10 +130,19 @@ KIND_KNOWN = (
 
 # The service may be one project of several in its repository, such as a web frontend
 # beside the backend, and a task that changes what the users can do concerns them too.
+# A criterion about how a page looks or fits, recorded so that a browser test can decide
+# it rather than a person's judgement.
+LAYOUT_CRITERIA = (
+    " When a criterion is about how a page looks or fits, record it in measurable form: "
+    "which element, at which window sizes (such as a desktop window by mouse, or a phone "
+    "by tap), by which input, and what must hold (inside the window, on top and not cut "
+    "off, before or after another element). \"Looks right\" is not a criterion."
+)
 PARTS_INTERVIEW = (
     " The task covers the whole project, not only its API: when the project has a user "
     "interface or other parts that use the service, such as a web frontend, also gather "
     "what changes in them (the pages, forms and user actions, and what they show)."
+    + LAYOUT_CRITERIA
 )
 
 KIND_INTERVIEWS: dict[str, str] = {
@@ -162,7 +171,7 @@ KIND_INTERVIEWS: dict[str, str] = {
         "criteria that show it is fixed. Record each part as functional requirements "
         "and do not gather anything about the rest of the system. Each turn, ask one "
         "to three focused questions about the missing parts. Once all three are "
-        "recorded, tell the user they can press \"Generate document\"."
+        "recorded, tell the user they can press \"Generate document\"." + LAYOUT_CRITERIA
     ),
     "docs": (
         " Keep the interview to a short brief: which documentation should change, what "

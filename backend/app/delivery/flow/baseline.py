@@ -191,7 +191,9 @@ class Baseline(FlowBase):
                 'run_component_suite',
                 args=[self.spec.session_id, runner_image, self.spec.language, tracked],
                 task_queue=VERIFICATION_TASK_QUEUE, result_type=dict,
-                start_to_close_timeout=timedelta(minutes=15),
+                # The in-process runner and each part's browser runner after it, each
+                # bounded to ten minutes of tests.
+                start_to_close_timeout=timedelta(minutes=30),
                 heartbeat_timeout=timedelta(minutes=2),
                 retry_policy=RetryPolicy(maximum_attempts=1),
             )

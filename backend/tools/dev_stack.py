@@ -33,6 +33,9 @@ async def main() -> int:
                               "--host", "127.0.0.1", "--port", "8000"]),
             ("Temporal worker", BACKEND, [sys.executable, "-m", "app.temporal.worker"]),
             ("Codegen worker", BACKEND, [sys.executable, "-m", "app.codegen.worker"]),
+            # It pulls the pinned images of docker_agents.PREPULLED_IMAGES (ensure_images)
+            # into the host's Docker daemon in the background when it starts, as the
+            # sandbox worker does into the sandbox's daemon in a deployment.
             ("Sandbox worker", BACKEND,
              [sys.executable, "-m", "app.agent_workflows.worker"]),
             # Launch Vite directly so graceful shutdown does not leave npm's child alive.

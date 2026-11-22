@@ -38,6 +38,10 @@ COMPONENT_SNAPSHOT = 'components'
 CONTRACTS_DIR = 'contracts'
 # Where, inside it, the component contract is: the stubs of the seams component tests use.
 COMPONENTS_DIR = 'components'
+# A part's page contract, beside its component contract: contracts/parts/P/browser/.
+BROWSER_DIR = 'browser'
+# Where a part keeps its browser tests: P/browser-tests/.
+BROWSER_TESTS_DIR = 'browser-tests'
 BRANCH_PREFIX = 'generated/'
 GITHUB_URL = 'https://github.com/'
 GIT_TIMEOUT = 540

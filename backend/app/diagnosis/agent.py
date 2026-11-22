@@ -89,6 +89,13 @@ A seam may be in another part of the repository than the service, such as a web 
 beside it, whose code is in service/ under the part's directory: then the tests of part P
 are in component-tests/parts/P/, its stubs in component-contract/parts/P/, and the names of
 its tests, in the input and the reports, start with "P:".
+A criterion may instead be routed to a page of a part's web client, proved by browser
+tests in headless Chromium: then the tests of part P are in component-tests/browser/P/,
+its page contract (pages.json, viewports.json and the API fixtures) in
+component-contract/parts/P/browser/, the trusted helpers the tests use in
+component-tests/browser/P/tests/support/, and the names of its tests start with
+"P~browser:" and name the viewport they ran in (`P~browser:tests/a.spec.ts#narrow > …`).
+They are the component suite too. The page contract is their authority, as stubs are.
 The `component_verification` entry of the input lists their failing tests, and the
 `verification` entry those of the contract tests, when the change has contract tests; the
 `status` of each says whether that run failed. The brief and the stubs' docstrings are the

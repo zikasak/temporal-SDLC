@@ -300,6 +300,25 @@ Report each docstring that breaks this rule, with the stub's path and target "bo
 author of this delivery may change the stubs, so such a finding is left for the user.
 """
 
+BROWSER_PROMPT = """
+Some criteria are routed `browser` instead (`page`: a part, the page's `entry`, its
+viewports and the elements its test finds): browser tests prove them on the part's built
+web client in headless Chromium, with the API answered from fixtures. Their author wrote
+them from the page contract alone. Those of part P are in component-tests/browser/P/, and
+the page contract in contracts/parts/P/browser/: pages.json (the pages, the elements they
+declare and the operations they call), viewports.json (the window sizes and inputs) and
+fixtures/ (responses checked against the API's OpenAPI document). The tests' trusted
+helpers, which the runner always supplies as they are, are in
+component-tests/browser/P/tests/support/index.ts: rely on what they check (fixture,
+expectFullyVisible: inside the window and on top at the corners and centre,
+expectInViewport, reveal: hover by mouse and tap by touch, settle) rather than reading
+geometry code; expectFullyVisible, like document.elementFromPoint, does not see an
+overlay with `pointer-events: none`. Also report a browser test that asserts layout, size or position without
+these helpers, that is not tagged with every viewport its criterion's `page` names, that
+finds elements other than as pages.json declares them, or that would pass whether or not
+the page shows the criterion, such as one that never reveals what it checks.
+"""
+
 INSTRUCTIONS_PROMPT = """
 The user gave instructions about the findings of the previous review, in the
 `instructions` entry of the input. The fixes were made from them: take them into account
@@ -315,6 +334,13 @@ again only when the code still clearly has the problem, and then set its `repeat
 finding's number. Otherwise hold new findings to a high bar: report only what is clearly
 wrong, not further hardening of code an earlier round already judged.
 """
+
+
+def _browser(inputs: dict) -> bool:
+    """Whether a criterion of the change is proved by browser tests."""
+    routes = inputs.get('component_routes')
+    return isinstance(routes, dict) and any(
+        isinstance(route, dict) and route.get('route') == 'browser' for route in routes.values())
 
 
 def prompt(inputs: dict, label: str) -> str:
@@ -334,6 +360,7 @@ def prompt(inputs: dict, label: str) -> str:
                                   findings_format=FINDINGS_FORMAT)
         return (REGRESSION_PROMPT.format(label=label, work=work) + part + settled
                 + (REGRESSION_COMPONENT_PROMPT if inputs.get('component_routes') else '')
+                + (BROWSER_PROMPT if _browser(inputs) else '')
                 + (CRITERIA_TESTS_PROMPT if inputs.get('criteria_tests') else '')
                 + previous)
     work = WORK_PROMPT.format(readonly='service/ or tests/', findings_format=FINDINGS_FORMAT)
@@ -345,6 +372,7 @@ def prompt(inputs: dict, label: str) -> str:
             + (PARTS_PROMPT if inputs.get('repository_parts') else '')
             + (ONBOARDING_PROMPT if inputs.get('onboarding') else '')
             + (COMPONENT_PROMPT if inputs.get('component_routes') else '')
+            + (BROWSER_PROMPT if _browser(inputs) else '')
             + (INSTRUCTIONS_PROMPT if inputs.get('instructions') else '')
             + previous)
 

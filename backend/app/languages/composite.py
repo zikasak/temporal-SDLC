@@ -13,6 +13,11 @@ from app.languages import ComponentSuite
 
 # Where the suite of a part other than the service lives within the composite suite.
 PARTS_DIR = 'parts'
+# Where the browser tests of part P live within it: browser/P/.
+BROWSER_MEMBER = 'browser'
+# What follows a part's name in the name of the member of its browser tests, and so in
+# their identities and class names (`frontend~browser:`).
+BROWSER_SUFFIX = '~browser'
 # What separates a part's name from the identity of a test in its suite.
 PART_SEPARATOR = ':'
 
@@ -27,10 +32,20 @@ class SuiteMember:
     service: bool = False
     # The label of the part's language, as its author is told it.
     label: str = ''
+    # The browser tests of a part (its name ends in BROWSER_SUFFIX): their runner is
+    # built and run on its own, beside the image of the other members' tests.
+    browser: bool = False
+
+    @property
+    def part(self) -> str:
+        """The name of the member's part: its directory in the repository, or `service`."""
+        return self.name.removesuffix(BROWSER_SUFFIX) if self.browser else self.name
 
     @property
     def directory(self) -> PurePosixPath:
         """Where the member's suite is within the composite suite."""
+        if self.browser:
+            return PurePosixPath(BROWSER_MEMBER, self.part)
         return PurePosixPath('.') if self.service else PurePosixPath(PARTS_DIR, self.name)
 
     @property
@@ -73,6 +88,11 @@ project, and the stubs of part P are in /workspace/contracts/parts/P/components 
 service's in /workspace/contracts/components). Never put a test of one part in another's
 project, or import one part's code from another's tests."""
 
+BROWSER_INSTRUCTIONS = """A `routes` entry whose route is `browser` names a page of a part's
+web client instead of a seam (`page`: its part, entry, viewports and roles). Its tests go
+in that part's browser project, written as the browser tests' instructions below say, from
+the part's page contract alone, in /workspace/contracts/parts/P/browser."""
+
 
 def composite_suite(members: list[SuiteMember]) -> CompositeSuite:
     """The suite of `members`, the service's first when it is one of them."""
@@ -80,15 +100,21 @@ def composite_suite(members: list[SuiteMember]) -> CompositeSuite:
         raise ValueError('A composite suite needs a member')
     ordered = tuple(sorted(members, key=lambda member: not member.service))
 
+    def title(member: SuiteMember) -> str:
+        if member.service:
+            return 'the service'
+        return f'the browser tests of part {member.part}' if member.browser \
+            else f'part {member.name}'
+
     def describe(member: SuiteMember) -> str:
         where = ('the root of /workspace/tests' if member.service
                  else f'/workspace/tests/{member.directory.as_posix()}')
-        return f'the {"service" if member.service else "part " + member.name} ' \
-               f'({member.label or "its language"}) at {where}'
+        return f'{title(member)} ({member.label or "its language"}) at {where}'
 
     instructions = '\n\n'.join([
         INSTRUCTIONS.format(layout='; '.join(describe(member) for member in ordered)),
-        *(f'Instructions for {"the service" if member.service else "part " + member.name}'
+        *([BROWSER_INSTRUCTIONS] if any(member.browser for member in ordered) else []),
+        *(f'Instructions for {title(member)}'
           f'{"" if member.service else " (in its project, " + member.directory.as_posix() + ")"}'
           f':\n{member.suite.instructions}' for member in ordered)])
 

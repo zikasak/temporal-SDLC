@@ -7,6 +7,7 @@ client beside it. The suite then has one project per part with routes, and its r
 put together from each part's own runner (app/languages/composite.py)."""
 import dataclasses
 import json
+import os
 import re
 import shlex
 import shutil
@@ -29,16 +30,22 @@ from app.config import GENERATED_CODE_DIR
 from app.docker_agents import default_agent_image
 from app.github.checkout import COMPONENT_TESTS_DIR, COMPONENT_SNAPSHOT, SNAPSHOT_DIR
 from app.implementation.activities import SEAM_DIR
-from app.languages import RUNTIME_FILE, TOOLS_DIR, ComponentSuite, Language
-from app.languages.composite import CompositeSuite, SuiteMember, suite_members
+from app.images import PLAYWRIGHT_IMAGE
+from app.languages import (
+    RUNTIME_FILE, TOOLS_DIR, BrowserSuite, ComponentSuite, Language, TestReports,
+)
+from app.languages.composite import BROWSER_SUFFIX, CompositeSuite, SuiteMember, suite_members
 from app.requirements.document import without_repeated_tables
 from app.review.activities import record_baseline
-from app.routing.models import read_seam
+from app.routing.browser import OPERATIONS_FILE, PAGES_FILE, VIEWPORTS_FILE
+from app.routing.models import read_page, read_seam
 from app.routing.parts import (
-    SERVICE_PART, ComponentPart, component_suite, read_routed_parts,
+    SERVICE_PART, ComponentPart, component_suite, read_operations, read_routed_parts,
 )
 from app.verification.models import COMPONENT_TESTS_ARTIFACT
-from app.test_generation.activities import copy_test_suite, read_unobservable, validate_output
+from app.test_generation.activities import (
+    MAX_NAMED_TESTS, copy_test_suite, read_unobservable, validate_output,
+)
 
 ARTIFACT_DIR = COMPONENT_TESTS_ARTIFACT
 # The parts of the runner's build context around the trusted runner files.
@@ -73,23 +80,41 @@ def delivery_suite(language: Language, session_dir: Path
         raise ApplicationError(str(exc), non_retryable=True) from exc
 
 
-def component_routes(routes: Any, parts: tuple[str, ...] = ()) -> dict[str, dict[str, Any]]:
+def component_routes(routes: Any, parts: tuple[str, ...] = (),
+                     browser_parts: tuple[str, ...] = ()) -> dict[str, dict[str, Any]]:
     """The `component` routes of a delivery's routing, each with its reason and seam, at a
-    seam of the service or of one of `parts`."""
+    seam of the service or of one of `parts`, and its `browser` routes, each with its
+    reason and page, of one of `browser_parts`: the criteria the component suite proves."""
     if not isinstance(routes, dict):
         return {}
-    return {requirement: {'route': 'component', 'reason': str(route.get('reason') or ''),
-                          'seam': read_seam(requirement, route.get('seam'), parts)}
-            for requirement, route in routes.items()
-            if isinstance(route, dict) and route.get('route') == 'component'}
+    result: dict[str, dict[str, Any]] = {}
+    for requirement, route in routes.items():
+        if not isinstance(route, dict):
+            continue
+        if route.get('route') == 'component':
+            result[requirement] = {'route': 'component', 'reason': str(route.get('reason') or ''),
+                                   'seam': read_seam(requirement, route.get('seam'), parts)}
+        elif route.get('route') == 'browser':
+            result[requirement] = {'route': 'browser', 'reason': str(route.get('reason') or ''),
+                                   'page': read_page(requirement, route.get('page'),
+                                                     browser_parts)}
+    return result
+
+
+def route_part(route: dict[str, Any]) -> str:
+    """The key (ComponentPart.key) of the part whose suite proves a route."""
+    if route['route'] == 'browser':
+        return f'{route["page"]["part"]}{BROWSER_SUFFIX}'
+    return route['seam'].get('part', SERVICE_PART)
 
 
 def _contract(session_dir: Path, part: ComponentPart) -> Path:
     contract = part.routed_contract(session_dir)
-    if not (contract / RUNTIME_FILE).is_file():
+    if not (contract / (PAGES_FILE if part.browser else RUNTIME_FILE)).is_file():
         raise ApplicationError(
             'The component contract of the routing is unavailable' if part.is_service
-            else f'The component contract of part {part.name} is unavailable',
+            else f'The {"page" if part.browser else "component"} contract of part '
+                 f'{part.name} is unavailable',
             non_retryable=True)
     return contract
 
@@ -97,7 +122,7 @@ def _contract(session_dir: Path, part: ComponentPart) -> Path:
 def _members(suite: ComponentSuite, parts: list[ComponentPart]
              ) -> list[tuple[ComponentPart, SuiteMember]]:
     """Each member of the suite with the part it tests."""
-    by_name = {part.name: part for part in parts}
+    by_name = {part.key: part for part in parts}
     return [(by_name[member.name], member) for member in suite_members(suite)]
 
 
@@ -169,6 +194,10 @@ def runner_context(suite: ComponentSuite, repository: Path, tests: Path, context
 
 
 def _runtime(part: ComponentPart, session_dir: Path, repository: Path) -> dict[str, Any]:
+    if part.browser:
+        # The page contract names no project: the part is its own.
+        _contract(session_dir, part)
+        return {'project': part.root}
     text = (_contract(session_dir, part) / RUNTIME_FILE).read_text()
     contract = part.contract
     assert contract is not None  # only a part with component tests is routed to
@@ -179,13 +208,37 @@ def _runtime(part: ComponentPart, session_dir: Path, repository: Path) -> dict[s
                            f'{exc}') from exc
 
 
+def browser_context(part: ComponentPart, session_dir: Path, context: Path) -> None:
+    """The page contract in a browser runner's build context, with the API's operations
+    by which its helpers name the page's requests."""
+    contract = _contract(session_dir, part)
+    shutil.copytree(contract, context / 'contract')
+    try:
+        operations = read_operations(part, session_dir)
+    except ValueError as exc:
+        raise ApplicationError(str(exc), non_retryable=True) from exc
+    (context / 'contract' / OPERATIONS_FILE).write_text(json.dumps(operations),
+                                                        encoding='utf-8')
+
+
 async def _build_member(part: ComponentPart, suite: ComponentSuite, session_dir: Path,
-                        repository: Path, tests: Path, work: Path, log_path: Path) -> str:
+                        repository: Path, tests: Path, work: Path, log_path: Path,
+                        prefix: str = '') -> str:
+    """Build one member's runner. A browser runner is run on its own, not inside the
+    composite runner that sets each part's CLASSNAME_PREFIX, so its `prefix` is built
+    into its image."""
     runtime = await run_sync(_runtime, part, session_dir, repository)
     context = work / 'context'
     await run_sync(runner_context, suite, repository, tests, context)
-    return await build_image(context, 'component test runner', log_path,
-                             build_args=suite.build_args(runtime))
+    if not part.browser:
+        return await build_image(context, 'component test runner', log_path,
+                                 build_args=suite.build_args(runtime))
+    await run_sync(browser_context, part, session_dir, context)
+    # Built on the image the worker pulled ahead, never pulled during the build.
+    await docker_agents.ensure_image(PLAYWRIGHT_IMAGE)
+    return await build_image(context, 'browser test runner', log_path,
+                             build_args={**suite.build_args(runtime),
+                                         'CLASSNAME_PREFIX': prefix}, pull=False)
 
 
 def _slug(name: str) -> str:
@@ -283,12 +336,61 @@ async def _remove_tags(tags: list[str]) -> None:
             activity.logger.warning('Could not remove the component runner image %s', tag)
 
 
+# Where the host records, by the image a delivery's workflow runs the component tests
+# with, the runners that run beside it: the browser tests of each part, whose Playwright
+# image cannot join the other parts' (plans/browser-route.md, section 3.4).
+RUNNERS_DIR = 'component-runners'
+
+
+def _runners_file(session_dir: Path, image: str) -> Path:
+    return session_dir / RUNNERS_DIR / f'{image.removeprefix("sha256:")}.json'
+
+
+def record_runners(session_dir: Path, image: str, runners: list[dict[str, Any]]) -> None:
+    """Record the runners of the image `image`: each with its `image`, its `member` (None
+    for the image of the in-process tests) and the `reports` it leaves."""
+    file = _runners_file(session_dir, image)
+    file.parent.mkdir(parents=True, exist_ok=True)
+    temporary = file.with_name(f'{uuid.uuid4().hex}.json')
+    temporary.write_text(json.dumps({'runners': runners}, indent=2), encoding='utf-8')
+    os.replace(temporary, file)
+
+
+def read_runners(session_dir: Path, image: str, reports: TestReports) -> list[dict[str, Any]]:
+    """The runners a run of the component tests with `image` runs, in order: as recorded
+    when the image was built, or `image` alone, leaving `reports`."""
+    try:
+        data = json.loads(_runners_file(session_dir, image).read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return [{'image': image, 'member': None,
+                 'reports': {'directory': reports.directory, 'pattern': reports.pattern}}]
+    except (OSError, ValueError) as exc:
+        raise ApplicationError('The runners of the component tests are unreadable',
+                               non_retryable=True) from exc
+    runners = data.get('runners') if isinstance(data, dict) else None
+    if (not isinstance(runners, list) or not runners
+            or runners[0].get('image') != image
+            or not all(isinstance(item, dict)
+                       and re.fullmatch(r'sha256:[0-9a-f]{64}', str(item.get('image')))
+                       and isinstance(item.get('reports'), dict) for item in runners)):
+        raise ApplicationError('The runners of the component tests are unreadable',
+                               non_retryable=True)
+    return runners
+
+
+def _reports(suite: ComponentSuite, language: Language) -> dict[str, str]:
+    reports = suite.reports if isinstance(suite, BrowserSuite) else language.test_reports
+    return {'directory': reports.directory, 'pattern': reports.pattern}
+
+
 async def build_runner(language: Language, session_dir: Path, tests: Path,
                        log_path: Path, repository: Path | None = None) -> str:
     """Build the suite's runner with the sources in `repository`, by default as the
     delivery started from them: the build collects the suite, so a test that does not
     even import fails here. A suite of several parts builds each part's runner first and
-    then one image that runs them all."""
+    then one image that runs them all, but the browser tests of a part, which keep a
+    runner of their own: the image returned is then the first runner, and those beside
+    it are recorded under it (record_runners)."""
     parts, suite = await run_sync(delivery_suite, language, session_dir)
     if repository is None:
         repository = await run_sync(record_baseline, language, session_dir)
@@ -298,36 +400,88 @@ async def build_runner(language: Language, session_dir: Path, tests: Path,
         await run_sync(work.mkdir)
         return await _build_member(parts[0], suite, session_dir, repository, tests, work,
                                    log_path)
+    in_process = [(part, member) for part, member in members if not member.browser]
     token = uuid.uuid4().hex
     images: dict[str, str] = {}
     tags: list[str] = []
+    runners: list[dict[str, Any]] = []
     try:
         for index, (part, member) in enumerate(members):
             own = work / str(index)
             await run_sync(own.mkdir, parents=True)
-            log = log_path.with_name(f'{log_path.stem}-{_slug(part.name)}{log_path.suffix}')
+            log = log_path.with_name(f'{log_path.stem}-{_slug(part.key)}{log_path.suffix}')
             try:
                 image = await _build_member(part, member.suite, session_dir, repository,
-                                            tests / member.directory, own, log)
+                                            tests / member.directory, own, log,
+                                            member.prefix)
             except RuntimeError as exc:
                 raise RuntimeError(
-                    f'The component tests of {"the service" if part.is_service else "part " + part.name} '
+                    f'The {"browser" if part.browser else "component"} tests of '
+                    f'{"the service" if part.is_service else "part " + part.name} '
                     f'could not be built: {exc}') from exc
+            if member.browser:
+                runners.append({'image': image, 'member': member.name,
+                                'reports': _reports(member.suite, language)})
+                continue
+            if [item.name for _, item in in_process] == [SERVICE_PART]:
+                # The service's runner alone runs every in-process test.
+                runners.insert(0, {'image': image, 'member': None,
+                                   'reports': _reports(member.suite, language)})
+                continue
             tag = f'temporal-component-part:{token}-{index}'
             await docker_agents.docker('tag', image, tag, timeout=60)
             tags.append(tag)
             images[member.name] = tag
-        context = work / 'composite' / 'context'
-        await run_sync(context.mkdir, parents=True)
-        for name, text in composite_files(language, members, images).items():
-            await run_sync((context / name).write_text, text, encoding='utf-8')
-        try:
-            return await build_image(context, 'component test runner', log_path)
-        except RuntimeError as exc:
-            raise RuntimeError('The runner of the component tests of every part could not '
-                               f'be built: {exc}') from exc
+        if images:
+            context = work / 'composite' / 'context'
+            await run_sync(context.mkdir, parents=True)
+            for name, text in composite_files(language, in_process, images).items():
+                await run_sync((context / name).write_text, text, encoding='utf-8')
+            try:
+                image = await build_image(context, 'component test runner', log_path)
+            except RuntimeError as exc:
+                raise RuntimeError('The runner of the component tests of every part could not '
+                                   f'be built: {exc}') from exc
+            runners.insert(0, {'image': image, 'member': None,
+                               'reports': _reports(suite, language)})
     finally:
         await _remove_tags(tags)
+    first = runners[0]['image']
+    await run_sync(record_runners, session_dir, first, runners)
+    return first
+
+
+def check_viewports(suite: ComponentSuite, parts: list[ComponentPart], session_dir: Path,
+                    clean: Path) -> None:
+    """Every browser test is tagged only with viewports of its part's page contract: one
+    with another tag would run in no viewport, so it cannot be tracked."""
+    by_key = {part.key: part for part in parts}
+    for member in suite_members(suite):
+        part = by_key.get(member.name)
+        if not member.browser or part is None:
+            continue
+        try:
+            viewports = json.loads((_contract(session_dir, part) / VIEWPORTS_FILE).read_text(
+                encoding='utf-8'))
+        except (OSError, ValueError) as exc:
+            raise ApplicationError(f'The viewports of the page contract of part {part.name} '
+                                   'are unavailable', non_retryable=True) from exc
+        assert isinstance(member.suite, BrowserSuite)  # a browser member's suite
+        viewport_of = member.suite.viewport_of
+        unknown = sorted({f'{member.prefix}{case} (@{viewport})'
+                          for case in member.suite.test_cases(clean / member.directory)
+                          if (viewport := viewport_of(case)) not in viewports})
+        if unknown:
+            raise RuntimeError(
+                'Test generation wrote browser tests that cannot be tracked: they are tagged '
+                f'with a viewport the page contract of part {part.name} does not have '
+                f'({", ".join(sorted(viewports))}): {"; ".join(unknown[:MAX_NAMED_TESTS])}')
+
+
+def _validate(suite: ComponentSuite, parts: list[ComponentPart], session_dir: Path,
+              frozen: dict[str, str], must_add: bool, clean: Path) -> None:
+    validate_output(suite, frozen, must_add, clean)
+    check_viewports(suite, parts, session_dir, clean)
 
 
 def stage(language: Language, parts: list[ComponentPart], suite: ComponentSuite,
@@ -345,7 +499,8 @@ def stage(language: Language, parts: list[ComponentPart], suite: ComponentSuite,
                                         dockerfile=language.agent_dockerfile),
         prepare_inputs=partial(prepare_inputs, language, parts, suite),
         sanitize_output=partial(copy_test_suite, suite),
-        validate_output=partial(validate_output, suite, frozen, requirement_ids is not None),
+        validate_output=partial(_validate, suite, parts, session_dir, frozen,
+                                requirement_ids is not None),
         declined_result=(partial(read_unobservable, requirement_ids)
                          if requirement_ids is not None else None),
         build_output=partial(build_runner, language, session_dir, repository=repository),
@@ -386,19 +541,20 @@ async def generate_component_tests(session_id: str, context: dict[str, Any]) -> 
                                non_retryable=True)
     session_dir = GENERATED_CODE_DIR / session_id
     parts, suite = await run_sync(delivery_suite, language, session_dir)
-    names = {part.name for part in parts}
+    names = {part.key for part in parts}
     try:
-        routes = component_routes(context.get('routes'),
-                                  tuple(part.name for part in parts if not part.is_service))
+        routes = component_routes(
+            context.get('routes'),
+            tuple(part.name for part in parts if not part.is_service and not part.browser),
+            tuple(part.name for part in parts if part.browser))
     except RuntimeError as exc:
         raise ApplicationError(str(exc), non_retryable=True) from exc
     if not routes:
         raise ApplicationError('No criterion is routed to the component tests',
                                non_retryable=True)
-    unchecked = sorted({route['seam'].get('part', SERVICE_PART) for route in routes.values()}
-                       - names)
+    unchecked = sorted({route_part(route) for route in routes.values()} - names)
     if unchecked:
-        raise ApplicationError('Criteria are routed to seams of parts whose component contract '
+        raise ApplicationError('Criteria are routed to seams or pages of parts whose contract '
                                f'the routing did not check: {", ".join(unchecked)}',
                                non_retryable=True)
     context = {**context, 'routes': routes}

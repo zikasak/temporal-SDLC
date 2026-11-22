@@ -23,6 +23,8 @@ from temporalio.exceptions import ApplicationError
 
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.runtime import ANSWERS_FILENAME, PAUSE_EXIT, STATE_FILENAME
+# The images pulled ahead of use, by digest; the languages build their runners on them.
+from app.images import PLAYWRIGHT_IMAGE, PREPULLED_IMAGES  # noqa: F401
 from app.llm.limits import LIMIT_FILENAME, MESSAGE_CHARS, PROVIDER_LIMIT_EXIT
 from app.config import OPENAI_API_KEY, OPENAI_BASE_URL, PI_CREDENTIALS_DIR, PI_CREDENTIALS_SHARED
 from app.llm.questions import Question, normalize_questions
@@ -333,6 +335,84 @@ async def docker(*args: str, timeout: int = 1800, env: dict | None = None,
         if process.returncode:
             raise RuntimeError(f'Docker {args[0]} failed: {output}')
         return output
+
+
+# How long one pull of a pinned image may take, how often it is tried, and how long the
+# worker waits before trying it again.
+PULL_SECONDS = 900
+PULL_ATTEMPTS = 3
+PULL_BACKOFF_SECONDS = (15, 60)
+# The pull of each image in progress in this process, shared by every caller.
+_pulls: dict[str, asyncio.Task] = {}
+
+
+class ImageUnavailable(Exception):
+    """A pinned image the worker needs could not be pulled: an infrastructure error of the
+    stage, not a test failure or a contract mismatch, so it is no RuntimeError, which
+    those are."""
+
+
+async def _image_present(reference: str) -> bool:
+    try:
+        await docker('image', 'inspect', '--format', '{{.Id}}', reference, timeout=60)
+    except RuntimeError:
+        return False
+    return True
+
+
+async def _pull(reference: str) -> None:
+    started = time.monotonic()
+    logger.info('Pulling the image %s ahead of use', reference)
+    failure: BaseException | None = None
+    for attempt in range(1, PULL_ATTEMPTS + 1):
+        try:
+            await docker('pull', '--quiet', reference, timeout=PULL_SECONDS)
+        except (RuntimeError, TimeoutError) as exc:
+            failure = exc
+            logger.warning('Pulling the image %s failed (attempt %d of %d): %s', reference,
+                           attempt, PULL_ATTEMPTS, str(exc)[-500:])
+            if attempt < PULL_ATTEMPTS:
+                await asyncio.sleep(PULL_BACKOFF_SECONDS[min(attempt, len(PULL_BACKOFF_SECONDS)) - 1])
+            continue
+        logger.info('Pulled the image %s in %.1fs', reference, time.monotonic() - started)
+        return
+    logger.error('Could not pull the image %s in %d attempts (%.1fs)', reference,
+                 PULL_ATTEMPTS, time.monotonic() - started)
+    raise ImageUnavailable(
+        f'The image {reference} is not on the worker and could not be pulled: '
+        f'{str(failure)[-500:]}')
+
+
+async def ensure_image(reference: str) -> None:
+    """Make sure the Docker daemon holds `reference`: one inspect when it does, otherwise
+    a pull, shared with any other caller in this process that waits for the same image
+    (such as the pull the worker starts with). Raises ImageUnavailable, naming the image,
+    when it cannot be pulled."""
+    if await _image_present(reference):
+        return
+    task = _pulls.get(reference)
+    if task is None or task.done():
+        task = asyncio.create_task(_pull(reference), name=f'pull {reference}')
+        _pulls[reference] = task
+    # A caller that is cancelled leaves the pull to the others.
+    await asyncio.shield(task)
+
+
+async def ensure_images(references: tuple[str, ...] = PREPULLED_IMAGES) -> None:
+    """Pull each image the worker will need that its Docker daemon lacks, one after the
+    other, logging what failed: run in the background at the worker's start, so that
+    nothing waits for it but a stage that needs the image."""
+    for reference in references:
+        started = time.monotonic()
+        try:
+            await ensure_image(reference)
+        except ImageUnavailable as exc:
+            logger.error('%s', exc)
+        except Exception:
+            logger.exception('Could not make sure the image %s is pulled', reference)
+        else:
+            logger.info('The image %s is on the worker (%.1fs)', reference,
+                        time.monotonic() - started)
 
 
 def container_base_url() -> str:

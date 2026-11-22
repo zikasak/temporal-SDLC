@@ -646,6 +646,9 @@ class DeliveryState:
     # reasons: a retry of the tests routes them again told so, so the new stubs name
     # what the author lacked, such as collaborators the seam calls by name.
     declined_routes: dict[str, Any] | None = None
+    # Whether the last routing found parts beside the service in the repository, such as
+    # a web client, whose seams or pages could show a criterion.
+    routing_parts: bool = False
     # The mentions waiting for their round, in the order they arrived, each as
     # [comment type, comment ID]; a state from before has bare comment IDs.
     mention_queue: list[Any] = field(default_factory=list)

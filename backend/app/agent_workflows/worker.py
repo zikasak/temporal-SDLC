@@ -10,6 +10,8 @@ import logging
 from temporalio.client import Client
 from temporalio.worker import Worker
 
+from app import docker_agents
+
 from app.config import (
     COMPONENT_TEST_GENERATION_TASK_QUEUE, DIAGNOSIS_TASK_QUEUE, DOCUMENTATION_TASK_QUEUE, IMPLEMENTATION_TASK_QUEUE,
     REVIEW_TASK_QUEUE, ROUTING_TASK_QUEUE, TEMPORAL_ADDRESS, TEST_GENERATION_TASK_QUEUE,
@@ -61,6 +63,11 @@ STAGES = (
 
 async def main() -> None:
     configure_logging()
+    # The pinned images some stages build on, such as the browser tests' Playwright image,
+    # pulled in the background: no stage that does not need them waits, and one that does
+    # waits for this same pull (docker_agents.ensure_image).
+    prepull = asyncio.create_task(docker_agents.ensure_images(docker_agents.PREPULLED_IMAGES),
+                                  name='prepull images')
     await ensure_settings_schema()
     client = await Client.connect(TEMPORAL_ADDRESS)
     workers = []
@@ -68,7 +75,11 @@ async def main() -> None:
         workers.append(Worker(client, task_queue=task_queue, workflows=[workflow_type],
                               activities=activities, max_concurrent_activities=1))
         logger.info('%s worker started on %s', label, task_queue)
-    await run_worker(*workers)
+    try:
+        await run_worker(*workers)
+    finally:
+        prepull.cancel()
+        await asyncio.gather(prepull, return_exceptions=True)
 
 
 if __name__ == '__main__':

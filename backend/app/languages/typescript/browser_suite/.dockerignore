@@ -1,0 +1,7 @@
+repository/.git
+repository/**/node_modules
+repository/**/dist
+suite/node_modules
+suite/reports
+suite/test-results
+suite/.contract

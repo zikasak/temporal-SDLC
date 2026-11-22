@@ -267,7 +267,7 @@ async def publish_repository(
         except ValueError as exc:
             raise ApplicationError(f"The component tests cannot be pushed: {exc}",
                                    non_retryable=True) from exc
-        by_name = {part.name: part for part in parts}
+        by_name = {part.key: part for part in parts}
         for member in suite_members(components_suite):
             part = by_name[member.name]
             pushed.append((tests / member.directory, target / part.tests_dir(),
