@@ -255,19 +255,6 @@ def test_interview_graph_appends_to_one_native_conversation(claude_http):
     assert 'No response requested.' not in messages
 
 
-class MemoryConversationStore:
-    """The shared S3 storage, as every worker sees it."""
-
-    def __init__(self):
-        self.objects = {}
-
-    def load(self, key):
-        return self.objects.get(key)
-
-    def save(self, key, data):
-        self.objects[key] = data
-
-
 def last_user_text(request):
     content = [message for message in request['messages']
                if message['role'] == 'user'][-1]['content']
@@ -275,15 +262,11 @@ def last_user_text(request):
 
 
 async def test_conversation_turns_resume_one_native_session_across_workers(
-    claude_http, monkeypatch
+    claude_http, conversation_storage
 ):
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-    from app.llm import claude_sessions
-
     replies, requests = claude_http
-    store = MemoryConversationStore()
-    monkeypatch.setattr(claude_sessions, 'conversation_store', lambda: store)
     replies += [[{'type': 'text', 'text': 'First reply.'}],
                 [{'type': 'text', 'text': 'Second reply.'}],
                 [{'type': 'text', 'text': 'Third reply.'}]]
@@ -316,9 +299,9 @@ async def test_conversation_turns_resume_one_native_session_across_workers(
 
 
 def test_s3_storage_addresses_buckets_by_path():
-    from app.llm.claude_sessions import S3ConversationStore, s3_client
+    from app.llm.saved_conversations import S3ConversationStore, s3_client
 
     client = s3_client('https://s3.zikasak.uk', 'us-east-1', 'key', 'secret')
     url = client.generate_presigned_url('get_object', Params={
-        'Bucket': 'sessions', 'Key': S3ConversationStore.object_key('workflow-1/chat')})
-    assert url.startswith('https://s3.zikasak.uk/sessions/claude-sessions/workflow-1/chat.tar.gz?')
+        'Bucket': 'sessions', 'Key': S3ConversationStore.object_key('workflow-1/chat/pi.json')})
+    assert url.startswith('https://s3.zikasak.uk/sessions/conversations/workflow-1/chat/pi.json?')

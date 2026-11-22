@@ -81,10 +81,14 @@ Host activities start a native session from application conversation context and
 open through tool calls and any corrective follow-ups. The turns of a conversation (chat,
 requirements, architecture, API design and onboarding) resume one native session: after a
 turn its transcript and plugin export state are saved to the S3-compatible storage every
-worker shares (`S3_*` variables, path-style addressing, `claude-sessions/` in the bucket),
+worker shares (`S3_*` variables, path-style addressing, `conversations/` in the bucket),
 and the next turn, on any worker, restores them and sends only the new user message. A
 saved session that no longer matches the conversation, or missing storage, starts a new
-session from the conversation context. Coding pauses retain `.claude-native`
+session from the conversation context. Other providers (OpenAI-compatible, Gemini, Pi)
+have no native session: their turn's messages, with its tool calls and results, are saved
+the same way, and the next turn sends them, unchanged, before its new messages. A saved
+conversation over 400 kB starts anew from the session's messages, since these providers
+do not compact their history. Coding pauses retain `.claude-native`
 beside the project and resume the same native session in the next container. Normal
 completion, errors, timeouts and limits close the SDK client.
 

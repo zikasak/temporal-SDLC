@@ -679,3 +679,40 @@ async def test_interviewer_asks_only_with_the_tool(monkeypatch):
     with pytest.raises(ApplicationError, match="instead of with ask_user"):
         await ActivityEnvironment().run(
             requirements_turn, [opening, {"role": "user", "content": "A new service"}], [])
+
+
+async def test_turns_continue_the_saved_provider_conversation(monkeypatch, conversation_storage):
+    """Providers other than Claude get back the tool calls and results of earlier turns,
+    which the session's own messages leave out, on any worker."""
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from app.temporal import activities
+    from app.temporal.activities import requirements_turn
+
+    first = InterviewModel([
+        AIMessage(content="", tool_calls=[
+            {"name": "set_task_kind", "args": {"kind": "new_service"}, "id": "kind"}]),
+        AIMessage(content="Tell me about the rooms."),
+    ])
+    second = InterviewModel([AIMessage(content="Noted.")])
+    models = iter([first, second])
+
+    async def get_model(workflow_type):
+        return next(models)
+    monkeypatch.setattr(activities, "get_model", get_model)
+    opening = {"role": "assistant", "content": "Hi"}
+    turn = [opening, {"role": "user", "content": "A new service"}]
+    await ActivityEnvironment().run(requirements_turn, turn, [])
+    await ActivityEnvironment().run(
+        requirements_turn,
+        [*turn, {"role": "assistant", "content": "Tell me about the rooms."},
+         {"role": "user", "content": "Meeting rooms"}], [])
+
+    [request] = second.requests
+    # The first turn's whole exchange, as the provider saw it, then the new message.
+    seen = len(first.requests[1])
+    assert request[1:seen] == first.requests[1][1:]
+    assert request[seen].text == "Tell me about the rooms."
+    assert any(isinstance(message, ToolMessage) and message.tool_call_id == "kind"
+               for message in request)
+    assert isinstance(request[-1], HumanMessage)
+    assert request[-1].content.startswith("Meeting rooms")

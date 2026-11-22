@@ -70,8 +70,9 @@ x-app: &app
     LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-}
     LANGFUSE_TRACING_ENVIRONMENT: ${LANGFUSE_TRACING_ENVIRONMENT:-production}
     APP_TRACE_CONTENT_ENABLED: ${APP_TRACE_CONTENT_ENABLED:-false}
-    # S3-compatible storage shared by every worker (path-style addressing): the native
-    # Claude sessions conversations resume across turns. The bucket must exist.
+    # S3-compatible storage shared by every worker (path-style addressing): the provider
+    # conversations (Claude sessions, OpenAI/Gemini/Pi messages) resumed across turns.
+    # The bucket must exist.
     S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-https://s3.zikasak.uk}
     S3_REGION: ${S3_REGION:-us-east-1}
     S3_BUCKET: ${S3_BUCKET:-}

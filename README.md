@@ -6,7 +6,7 @@ A web application that turns a task described in conversation into requirements,
 
 - **Backend:** Python 3.12, FastAPI, in `backend/`.
 - **Workflows:** Temporal, with several workers (main, codegen, implementation and test generation).
-- **Storage:** PostgreSQL for application data and Temporal persistence; uploaded originals on disk; S3-compatible storage for the native Claude sessions conversations resume across turns.
+- **Storage:** PostgreSQL for application data and Temporal persistence; uploaded originals on disk; S3-compatible storage for the provider conversations (Claude sessions, OpenAI and Pi messages with their tool calls) that conversations resume across turns.
 - **Frontend:** React and TypeScript, built with Vite, in `frontend/`.
 - **LLM access:** a LangGraph agent over a configured provider (for example an OpenAI-compatible endpoint or Google Gemini) and the Pi adapter; optional Langfuse tracing.
 - **Coding agents:** run in isolated Docker containers.

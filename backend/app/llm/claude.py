@@ -53,7 +53,7 @@ class ChatClaude(Runnable):
     config_dir: Path | None = None
     resume: str | None = None
     # Names an application conversation whose turns resume one native session, saved
-    # between turns to the shared storage (app.llm.claude_sessions). Without the storage,
+    # between turns to the shared storage (app.llm.saved_conversations). Without the storage,
     # or with a cwd or config_dir of its own, every session starts anew.
     conversation: str | None = None
     session_id: str | None = field(default=None, init=False)
@@ -115,8 +115,8 @@ class ChatClaude(Runnable):
             cwd, config_dir, resume = self.cwd, self.config_dir, self.resume
             store = None
             if self.conversation and cwd is None and config_dir is None:
-                from app.llm import claude_sessions
-                store = claude_sessions.conversation_store()
+                from app.llm import saved_conversations
+                store = saved_conversations.get_store()
             if store is not None:
                 # The CLI finds a transcript by its project directory, which is the cwd:
                 # the same path for every conversation and worker. No tool writes there.
@@ -253,7 +253,7 @@ class ChatClaude(Runnable):
 
         assert self.conversation is not None
         try:
-            data = await run_sync(store.load, self.conversation)
+            data = await run_sync(store.load, claude_sessions.object_name(self.conversation))
             if data is None:
                 return 0
             meta = await run_sync(claude_sessions.unpack, data, config_dir)
@@ -283,16 +283,16 @@ class ChatClaude(Runnable):
 
     async def _save(self, store, config_dir: Path) -> None:
         from app.llm import claude_sessions
+        from app.llm.saved_conversations import saved_meta
 
         assert self.conversation is not None
         history = self._history
         # The conversation goes on from this session's first messages and its final
         # reply; the corrections a turn sent in between are not part of it.
-        meta = {'session_id': self._native_session, 'consumed': len(history) + 1,
-                'fingerprint': claude_sessions.fingerprint(history[:-1])}
+        meta = {'session_id': self._native_session, **saved_meta(history)}
         try:
             data = await run_sync(claude_sessions.pack, config_dir, meta)
-            await run_sync(store.save, self.conversation, data)
+            await run_sync(store.save, claude_sessions.object_name(self.conversation), data)
         except Exception:
             logger.warning('Could not save the Claude session of %s', self.conversation,
                            exc_info=True)
