@@ -56,6 +56,7 @@ from app.llm.model import get_model
 from app.llm.prompt import INLINE_DOCUMENT_CHARS, MAX_REMEMBERED_CHARS, model_messages
 from app.temporal.registry import register
 from app.temporal.tracing import trace_activity
+from app.llm.limits import AGENT_RECURSION_LIMIT
 from app.tracing import langchain_config
 from app.requirements.document import DOCUMENT_FILENAME, render_requirements_markdown
 from app.requirements.models import Requirement, TaskKind
@@ -590,7 +591,7 @@ async def send_llm_message(
                 model, _conversation("chat", session_id, parent_request_id or None)):
             result = await graph.ainvoke(
                 {"messages": prompt},
-                config=langchain_config(recursion_limit=100, run_name='respond-with-tools'),
+                config=langchain_config(recursion_limit=AGENT_RECURSION_LIMIT, run_name='respond-with-tools'),
             )
         answer = str(result["messages"][-1].text).strip()
         if not answer:
@@ -632,7 +633,7 @@ async def requirements_turn(
                     conversation, gathered, task_kind,
                     repository_tools.GUIDANCE if repository else "",
                     list(ctx.service_requirements()), ctx.retired_list()),
-                langchain_config(recursion_limit=100, run_name='interview-with-tools'),
+                langchain_config(recursion_limit=AGENT_RECURSION_LIMIT, run_name='interview-with-tools'),
                 lambda: bool(asked.questions))
     except ValueError as exc:
         activity.logger.warning("Requirements turn failed: %s", exc)
@@ -739,7 +740,7 @@ async def api_design_turn(state: ApiDesignState) -> dict[str, Any]:
         async with native_session(model, _conversation("api-design")):
             reply = await interview(
                 graph, api_turn_messages(state, repository_tools.GUIDANCE if repository else ""),
-                langchain_config(recursion_limit=120, run_name='draft-api-with-tools'),
+                langchain_config(recursion_limit=AGENT_RECURSION_LIMIT, run_name='draft-api-with-tools'),
                 lambda: bool(asked.questions))
     except GraphRecursionError:
         # Drafting can take many tool calls; keep what was recorded.

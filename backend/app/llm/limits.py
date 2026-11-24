@@ -29,6 +29,8 @@ _AFTER = re.compile(
     re.IGNORECASE)
 # Claude's "usage limit reached|<epoch seconds>" and "resets at <epoch>".
 _RESET_EPOCH = re.compile(r'(?:limit reached|resets?(?: at)?)\|?\s*(\d{10})\b', re.IGNORECASE)
+# The step/turn budget of every agent: LangGraph recursion limits and tool-turn budgets.
+AGENT_RECURSION_LIMIT = 10_000
 # How much of an error's message a limit report keeps.
 MESSAGE_CHARS = 300
 

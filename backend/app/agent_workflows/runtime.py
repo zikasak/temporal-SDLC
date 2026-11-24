@@ -29,6 +29,7 @@ from app.settings.models import ModelSettings, SETTINGS_FILENAME
 from app.llm.questions import (
     ASK_USER, DESCRIPTION, AskUserInput, answers_result, asks_directly, normalize_questions,
 )
+from app.llm.limits import AGENT_RECURSION_LIMIT
 from app.tracing import (
     container_trace_context, langchain_config, shutdown_tracing, trace_operation,
 )
@@ -43,7 +44,7 @@ class AgentProfile:
     validate_completion: Callable[[Path], None]
     completion_message: str
     exhaustion_message: str
-    default_max_turns: int = 200
+    default_max_turns: int = AGENT_RECURSION_LIMIT
     # Read-only contract files supplied instead of embedding large contracts in full.
     contracts: Path | None = None
     # Directory names holding the language's build output and installed dependencies.

@@ -11,6 +11,7 @@ from app.llm.graph import final_reply, get_message_graph, native_session
 from app.llm.model import get_model
 from app.tasks.models import NAME_CHARS, fallback_name
 from app.temporal.tracing import trace_activity
+from app.llm.limits import AGENT_RECURSION_LIMIT
 from app.tracing import langchain_config
 
 # Bounds of what the LLM receives.
@@ -61,7 +62,7 @@ async def name_task_flow(task: str, requirements: list[dict[str, Any]]) -> str:
         async with native_session(model):
             result = await graph.ainvoke(
                 {"messages": [HumanMessage(content=f"{PROMPT}\n\n{source}")]},
-                config=langchain_config(recursion_limit=10, run_name="name-task-flow"),
+                config=langchain_config(recursion_limit=AGENT_RECURSION_LIMIT, run_name="name-task-flow"),
             )
         return clean_name(final_reply(result["messages"]))
     except ValueError as exc:

@@ -19,6 +19,7 @@ from app.requirements_review.models import (
     ReviewRoundResult,
 )
 from app.temporal.tracing import trace_activity
+from app.llm.limits import AGENT_RECURSION_LIMIT
 from app.tracing import langchain_config
 
 # Bounds of what the reviewer receives.
@@ -188,7 +189,7 @@ async def review_requirements(round_input: ReviewRoundInput) -> ReviewRoundResul
             async with native_session(model):
                 result = await graph.ainvoke(
                     {"messages": [HumanMessage(content=prompt)]},
-                    config=langchain_config(recursion_limit=10,
+                    config=langchain_config(recursion_limit=AGENT_RECURSION_LIMIT,
                                             run_name="review-requirements"),
                 )
         except Exception as exc:  # noqa: BLE001 - retried by Temporal

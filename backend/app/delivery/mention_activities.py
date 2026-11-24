@@ -24,6 +24,7 @@ from app.llm.graph import final_reply, get_message_graph, native_session
 from app.llm.model import get_model
 from app.temporal.activities import _github_token
 from app.tools import repository as repository_tools
+from app.llm.limits import AGENT_RECURSION_LIMIT
 from app.tracing import langchain_config
 
 logger = logging.getLogger(__name__)
@@ -85,7 +86,7 @@ async def classify(session_id: str, body: str) -> str:
             result = await graph.ainvoke(
                 {'messages': [HumanMessage(content=(
                     f'{CLASSIFY_PROMPT}\n\nThe comment, in full:\n{body}'))]},
-                config=langchain_config(recursion_limit=10, run_name='classify-mention'),
+                config=langchain_config(recursion_limit=AGENT_RECURSION_LIMIT, run_name='classify-mention'),
             )
     except ValueError as exc:
         raise ApplicationError(str(exc), non_retryable=True) from exc
@@ -153,7 +154,7 @@ async def _answer(session_id: str, body: str, context: dict[str, Any],
                            else 'The code of the last pushed commit is not available.')
                         + f'\n\nThe comment, in full:\n{body}')),
                 ]},
-                config=langchain_config(recursion_limit=100, run_name='answer-mention'),
+                config=langchain_config(recursion_limit=AGENT_RECURSION_LIMIT, run_name='answer-mention'),
             )
     except ValueError as exc:
         raise ApplicationError(str(exc), non_retryable=True) from exc

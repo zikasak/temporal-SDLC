@@ -380,7 +380,7 @@ async def main() -> None:
         root=ROOT, prompt=(base_prompt(inputs, language['instructions'])
                            + unit_tests_prompt(inputs) + repair_prompt(inputs)),
         initial_messages=[context],
-        max_turns_env='IMPLEMENTATION_MAX_TURNS', default_max_turns=400,
+        max_turns_env='IMPLEMENTATION_MAX_TURNS',
         validate_completion=validate_completion,
         completion_message='Implementation completed',
         exhaustion_message='Implementation exceeded the tool-turn limit',

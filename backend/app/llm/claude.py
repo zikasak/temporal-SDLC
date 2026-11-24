@@ -22,6 +22,7 @@ from langchain_core.tools import BaseTool
 
 from app.asyncio_utils import async_context, run_sync
 from app.llm.mcp import TOOL_PREFIX, TOOL_SERVER, flow_server
+from app.llm.limits import AGENT_RECURSION_LIMIT
 from app.tracing import claude_trace_environment
 
 if TYPE_CHECKING:
@@ -94,7 +95,7 @@ class ChatClaude(Runnable):
         return asyncio.run(self.ainvoke(input, config, **kwargs))
 
     async def ainvoke(self, input, config=None, *, tools=(), until=None,
-                      max_turns=100, **kwargs) -> AIMessage:
+                      max_turns=AGENT_RECURSION_LIMIT, **kwargs) -> AIMessage:
         messages = [HumanMessage(input)] if isinstance(input, str) else list(input)
         if not any(not isinstance(message, SystemMessage) for message in messages):
             raise ValueError('Claude needs at least one non-system message')
@@ -374,7 +375,7 @@ class ClaudeGraph:
         try:
             reply = await self.model.ainvoke(
                 state['messages'], tools=self.tools, until=self.until,
-                max_turns=max(1, (config or {}).get('recursion_limit', 100)),
+                max_turns=max(1, (config or {}).get('recursion_limit', AGENT_RECURSION_LIMIT)),
             )
         except ClaudeTurnLimit as exc:
             from langgraph.errors import GraphRecursionError

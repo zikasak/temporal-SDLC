@@ -26,6 +26,7 @@ from app.temporal.tracing import trace_activity
 from app.tools import architecture as architecture_tools
 from app.tools import questions as question_tools
 from app.tools import repository as repository_tools
+from app.llm.limits import AGENT_RECURSION_LIMIT
 from app.tracing import langchain_config
 
 
@@ -53,7 +54,7 @@ async def architecture_turn(state: ArchitectureState) -> dict[str, Any]:
             reply = await interview(
                 graph, turn_messages(state, may_skip,
                                      repository_tools.GUIDANCE if repository else ""),
-                langchain_config(recursion_limit=120, run_name='draft-architecture-with-tools'),
+                langchain_config(recursion_limit=AGENT_RECURSION_LIMIT, run_name='draft-architecture-with-tools'),
                 lambda: bool(asked.questions) or bool(ctx.skip_reason))
     except GraphRecursionError:
         activity.logger.warning("The architecture turn hit the recursion limit")
