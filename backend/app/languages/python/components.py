@@ -20,7 +20,11 @@ PATH = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_./-]{0,200}")
 INSTRUCTIONS = """Component contract (Python). It lives in /workspace/routing/components/,
 which already holds the repository's published contract (its contracts/components/), if
 there is one. Keep every published file: you may add stubs and add statements to a
-published stub, but never change or remove one of its statements.
+published stub, but never change or remove one of its statements. A statement is the
+whole top-level statement: a published import line may not gain a name (add
+`from typing import Final` as a statement of its own), and a published class or
+function may not gain a member or a word of its docstring (state new behaviour in the
+docstrings of the symbols you add).
 - {runtime}: {{"source_root": "…", "requirements": ["…"]}}. `source_root` is the
   directory of the repository, relative to it, from which the service's modules are
   imported (`.` for the repository itself); `requirements` lists the repository's pip
@@ -54,7 +58,8 @@ published stub, but never change or remove one of its statements.
   PYTHONPATH=repository/<source_root> MYPYPATH=components python -m mypy.stubtest
   --ignore-missing-stub <every stubbed module>. It must report no error but, for each
   symbol a seam lists in `added` or `added_elsewhere`, that it is not present at
-  runtime."""
+  runtime. Then run python {tools}/make_stub.py --check from /workspace/routing: it must
+  report that the published stubs are kept, else restore what it names."""
 
 
 def _module(path: Path) -> str:
@@ -124,7 +129,9 @@ def _read_stub(module: str, source: str) -> set[str]:
 
 
 def _statements(source: str) -> list[str]:
-    return [ast.dump(statement) for statement in ast.parse(source).body]
+    # As source, so the host can name the statement that changed; make_stub.py --check
+    # compares the same way.
+    return [ast.unparse(statement) for statement in ast.parse(source).body]
 
 
 def _relative(value: object, repository: Path, what: str, *, directory: bool) -> str:

@@ -29,6 +29,8 @@ CHECK_SECONDS = 420
 CONSTRAINTS = ('--network=none', '--cap-drop=ALL', '--security-opt=no-new-privileges',
                '--pids-limit=256', '--memory=4g', '--cpus=2', '--user', '10001:10001')
 MESSAGE_CHARS = 4000
+# How much of a published statement that was changed the error names.
+STATEMENT_CHARS = 200
 
 
 def _files(root: Path) -> dict[str, Path]:
@@ -93,9 +95,15 @@ def read_components(contract: ComponentContract, output: Path, repository: Path,
             if path not in stubs:
                 raise RuntimeError(f'The published stub {path} was removed')
             kept = contract.statements(stubs[path].read_text())
-            if any(statement not in kept for statement in contract.statements(file.read_text())):
+            lost = next((statement for statement in contract.statements(file.read_text())
+                         if statement not in kept), None)
+            if lost is not None:
+                first = (lost.strip().splitlines() or [''])[0]
+                if len(first) > STATEMENT_CHARS:
+                    first = first[:STATEMENT_CHARS - 1] + '…'
                 raise RuntimeError(f'A statement of the published stub {path} was changed or '
-                                   'removed; a published stub may only gain statements')
+                                   f'removed ({first}); a published stub may only gain '
+                                   'statements')
     target.mkdir(parents=True)
     for path in [RUNTIME_FILE, *stubs]:
         (target / path).parent.mkdir(parents=True, exist_ok=True)

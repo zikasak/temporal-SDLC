@@ -13,6 +13,13 @@ a placeholder docstring, which has to be replaced with the behaviour it states. 
 only adds statements to a stub; it never changes one, and it refuses to add a member to a
 class of the published stub, which may not change.
 
+    python /workspace/tools/make_stub.py --check
+
+checks instead that every statement of the published stubs (repository/contracts/components)
+is still in components/ exactly as published, as the host checks the contract: an import
+line or a docstring of a published statement is part of it. It exits 1 naming each one
+that was changed or removed.
+
 Options: --repository (default repository), --components (default components),
 --source-root (default the `source_root` of components/runtime.json, else `.`).
 """
@@ -325,6 +332,34 @@ def _published_names(published: Path) -> set[str]:
             for name in _bound(statement)}
 
 
+def _statements(source: str) -> list[str]:
+    """A stub's top-level statements as the host compares them (`statements` of
+    app.languages.python.components)."""
+    return [ast.unparse(statement) for statement in ast.parse(source).body]
+
+
+def check_published(repository: Path, components: Path) -> list[str]:
+    """What the stubs in `components` changed or removed of the published ones."""
+    root = repository / PUBLISHED
+    problems: list[str] = []
+    for file in sorted(root.rglob('*.pyi')) if root.is_dir() else []:
+        relative = file.relative_to(root).as_posix()
+        stub = components / relative
+        if not stub.is_file():
+            problems.append(f'{relative}: the published stub was removed')
+            continue
+        try:
+            kept = set(_statements(stub.read_text(encoding='utf-8')))
+        except SyntaxError as exc:
+            problems.append(f'{relative}: not valid Python: {exc}')
+            continue
+        problems += [f'{relative}: the published statement `{statement.splitlines()[0]}` '
+                     'was changed or removed'
+                     for statement in _statements(file.read_text(encoding='utf-8'))
+                     if statement not in kept]
+    return problems
+
+
 def make_stub(module: str, symbols: list[str], repository: Path, components: Path,
               source_root: str) -> Path:
     """Write or extend the module's stub with the symbols; returns the stub's path."""
@@ -411,12 +446,28 @@ def _extend_class(text: str, name: str, members: set[str], stubber: Stubber,
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or '').split('\n\n')[0])
-    parser.add_argument('module')
-    parser.add_argument('symbols', nargs='+')
+    parser.add_argument('module', nargs='?')
+    parser.add_argument('symbols', nargs='*')
+    parser.add_argument('--check', action='store_true',
+                        help='check the published stubs are kept, and write nothing')
     parser.add_argument('--repository', default='repository', type=Path)
     parser.add_argument('--components', default='components', type=Path)
     parser.add_argument('--source-root')
     arguments = parser.parse_args()
+    if arguments.check:
+        problems = check_published(arguments.repository, arguments.components)
+        for problem in problems:
+            print(f'make_stub: {problem}', file=sys.stderr)
+        if problems:
+            print('make_stub: restore each published statement exactly as it was. Add an '
+                  'import as a statement of its own (`from typing import Final`), never by '
+                  'editing a published one, and state new behaviour in the docstrings of the '
+                  'symbols you add, not in a published docstring.', file=sys.stderr)
+            return 1
+        print('The published stubs are kept.')
+        return 0
+    if not arguments.module or not arguments.symbols:
+        parser.error('a module and at least one symbol are required, or --check')
     source_root = arguments.source_root
     if source_root is None:
         try:

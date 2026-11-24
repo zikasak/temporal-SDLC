@@ -313,3 +313,37 @@ def test_a_symbol_the_code_lacks_is_left_to_the_agent(tmp_path):
     _write(tmp_path / 'repository', {'app/rooms.py': SOURCE})
     result = _make_stub(tmp_path, 'app.rooms', 'Rooms.reopen')
     assert result.returncode == 1 and 'hand-write' in result.stderr
+
+
+def test_a_changed_published_statement_is_named_to_the_agent_and_by_the_host(tmp_path):
+    from app.routing.components import read_components
+    runtime = '{"source_root": ".", "requirements": ["requirements.txt"]}'
+    published = ('from typing import Any\n\n\n'
+                 'async def publish(session_id: str) -> Any:\n'
+                 '    """Push the branch."""\n    ...\n')
+    _write(tmp_path, {'repository/requirements.txt': '',
+                      'repository/contracts/components/runtime.json': runtime,
+                      'repository/contracts/components/app/activities.pyi': published,
+                      'components/runtime.json': runtime})
+    stub = tmp_path / 'components/app/activities.pyi'
+    stub.parent.mkdir(parents=True)
+
+    def read() -> None:
+        read_components(COMPONENT_CONTRACT, tmp_path / 'components', tmp_path / 'repository',
+                        tmp_path / 'repository/contracts/components',
+                        tmp_path / f'target-{len(list(tmp_path.glob("target-*")))}')
+
+    # The import gains a name and the published docstring a sentence: both are changes.
+    stub.write_text(published.replace('import Any', 'import Any, Final')
+                    .replace('branch.', 'branch, with a written message.')
+                    + '\n\nSUBJECT: Final = "Change"\n')
+    result = _make_stub(tmp_path, '--check')
+    assert result.returncode == 1
+    assert '`from typing import Any`' in result.stderr
+    assert '`async def publish(session_id: str) -> Any:`' in result.stderr
+    with pytest.raises(RuntimeError, match=r'\(from typing import Any\)'):
+        read()
+    # The same names added as statements of their own keep the published stub.
+    stub.write_text(published + '\nfrom typing import Final\n\nSUBJECT: Final = "Change"\n')
+    assert _make_stub(tmp_path, '--check').returncode == 0
+    read()
