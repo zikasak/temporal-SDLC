@@ -174,6 +174,10 @@ class ComponentContract:
     # may hold the source of a dotted module. None where the language cannot tell, so that
     # the host checks of a seam leave it to the review agent.
     source_paths: Callable[[str, dict], tuple[str, ...]] | None = None
+    # The types of the code a stub stands `Any` for, as (module, stub source, published
+    # stub source or None, repository, normalized runtime) -> descriptions, checked in
+    # what the stub adds to the published one only. None where the language cannot tell.
+    erased_types: Callable[[str, str, str | None, Path, dict], list[str]] | None = None
 
 
 @dataclass(frozen=True)

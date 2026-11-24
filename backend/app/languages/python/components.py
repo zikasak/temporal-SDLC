@@ -49,7 +49,12 @@ docstrings of the symbols you add).
   <symbol>… (symbols as `Name` or `Class.member`; run it again to add symbols, and stub
   a collaborator's module before the modules whose signatures name its types). It
   writes the exact signatures, decorators, `__init__` and the types they mention, and
-  only adds to a stub. Then replace every placeholder docstring it wrote with the
+  only adds to a stub. A type another module of the repository defines is stubbed in
+  that module's stub too, with its fields and public properties but no docstring: give
+  it one where they do not say what a test needs to build or read one (such as the
+  directory a path property points at). The host rejects a stub that stands `Any` for a
+  type of the code; make_stub.py names any it could not stub, to hand-write in the stub
+  of its module. Then replace every placeholder docstring it wrote with the
   behaviour, using edit_file; the contract is rejected while one is left. Hand-write
   only the symbols a seam lists in `added` or `added_elsewhere`, which the code does
   not have yet.
@@ -134,6 +139,99 @@ def _statements(source: str) -> list[str]:
     return [ast.unparse(statement) for statement in ast.parse(source).body]
 
 
+def _type(node: ast.expr | None) -> ast.expr | None:
+    """An annotation, with a string one (a forward reference) parsed."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        try:
+            return ast.parse(node.value, mode="eval").body
+        except SyntaxError:
+            return None
+    return node
+
+
+def _mentions_any(node: ast.expr) -> bool:
+    for item in ast.walk(node):
+        if (isinstance(item, ast.Name) and item.id == "Any"
+                or isinstance(item, ast.Attribute) and item.attr == "Any"):
+            return True
+        if (isinstance(item, ast.Constant) and isinstance(item.value, str)
+                and item is not node):
+            inner = _type(item)
+            if inner is not None and _mentions_any(inner):
+                return True
+    return False
+
+
+def _typed(body: list[ast.stmt], scope: str = "") -> dict[str, list[ast.stmt]]:
+    """The functions, methods and annotated names of a module or class body, by dotted
+    name: every definition, as a property's setter or an overload repeats the name."""
+    found: dict[str, list[ast.stmt]] = {}
+    for statement in body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            found.setdefault(scope + statement.name, []).append(statement)
+        elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+            found.setdefault(scope + statement.target.id, []).append(statement)
+        elif isinstance(statement, ast.ClassDef):
+            for name, items in _typed(statement.body, f"{scope}{statement.name}.").items():
+                found.setdefault(name, []).extend(items)
+    return found
+
+
+def _annotations(node: ast.stmt) -> dict[str, ast.expr | None]:
+    if isinstance(node, ast.AnnAssign):
+        return {"": node.annotation}
+    assert isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    arguments = node.args
+    return {**{f"argument {item.arg}": item.annotation
+               for item in [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs,
+                            *filter(None, [arguments.vararg, arguments.kwarg])]},
+            "result": node.returns}
+
+
+def _erased(stub: ast.stmt, code: ast.stmt) -> list[str]:
+    """Where the stub's annotation is `Any` and the code's is a type without `Any`."""
+    if type(stub) is not type(code) and not (
+            isinstance(stub, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and isinstance(code, (ast.FunctionDef, ast.AsyncFunctionDef))):
+        return []
+    declared = _annotations(code)
+    erased = []
+    for label, annotation in _annotations(stub).items():
+        actual = _type(declared.get(label))
+        if (annotation is not None and actual is not None and _mentions_any(annotation)
+                and not _mentions_any(actual)):
+            erased.append(f"{label} {ast.unparse(actual)}".strip())
+    return erased
+
+
+def _erased_types(module: str, source: str, published: str | None, repository: Path,
+                  runtime: dict) -> list[str]:
+    """The types of the code a stub stands `Any` for, in the statements it adds to the
+    published stub (`published`): a test author cannot build a value of a type the stub
+    does not show. make_stub.py writes `Any` only where it cannot stub the type itself."""
+    code_path = next((repository / path for path in _source_paths(module, runtime)
+                      if (repository / path).is_file()), None)
+    if code_path is None:
+        return []
+    try:
+        code = _typed(ast.parse(code_path.read_text(encoding="utf-8")).body)
+    except (SyntaxError, ValueError, UnicodeDecodeError):
+        return []
+    kept = set(_statements(published)) if published is not None else set()
+    erased: list[str] = []
+    for statement in ast.parse(source).body:
+        if ast.unparse(statement) in kept:
+            continue
+        for name, stubs in _typed([statement]).items():
+            candidates = code.get(name, [])
+            for stub in stubs:
+                found = [_erased(stub, item) for item in candidates]
+                # Erased only when it is so against every definition of the name.
+                if found and all(found):
+                    erased += [f"{name} ({item})" for item in found[-1]]
+    return erased
+
+
 def _relative(value: object, repository: Path, what: str, *, directory: bool) -> str:
     if not isinstance(value, str) or not PATH.fullmatch(value):
         raise ValueError(f"{what} is not a relative path")
@@ -187,4 +285,5 @@ COMPONENT_CONTRACT = ComponentContract(
     stub_suffix=".pyi", module=_module, read_stub=_read_stub, statements=_statements,
     read_runtime=_read_runtime, conformance=Path(__file__).parent / "component_contract",
     build_args=_build_args, source_paths=_source_paths, tools=(MAKE_STUB,),
+    erased_types=_erased_types,
 )

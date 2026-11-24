@@ -86,6 +86,18 @@ def read_components(contract: ComponentContract, output: Path, repository: Path,
         if module in modules:
             raise RuntimeError(f'The module {module} has two stubs')
         modules[module] = symbols
+        if contract.erased_types is not None:
+            kept = published / path
+            erased = contract.erased_types(
+                module, file.read_text(), kept.read_text() if kept.is_file() else None,
+                repository, runtime)
+            if erased:
+                raise RuntimeError(
+                    f'The stub {path} stands Any for types of the code: '
+                    f'{"; ".join(erased)[:MESSAGE_CHARS]}. A test author cannot build a '
+                    'value of a type the contract does not show: stub each in the stub of '
+                    'the module that defines it (make_stub.py does so itself; remove the '
+                    'statement and generate it again)')
     for path, file in _files(published).items():
         if path == RUNTIME_FILE:
             if _runtime(contract, file, repository) != runtime:

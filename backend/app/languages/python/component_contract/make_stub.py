@@ -7,8 +7,10 @@ tree (the code is never imported). Run from /workspace/routing:
 A symbol is a top-level name of the module (`close_room`, `RoomWorkflow`, `NAME`) or a
 member of one of its classes (`RoomWorkflow.close`). A class comes with its decorators,
 bases and `__init__`; the types and module constants the signatures name come along as
-signatures too, names imported from other code as the same imports, and a name the stub
-cannot import (code of the repository with no stub yet) as `Any`. Every named symbol gets
+signatures too, and names imported from other code as the same imports. A type another
+module of the repository defines is stubbed in that module's stub too (its fields and
+signatures, without a docstring), so the stub imports it; only a name the code does not
+define anywhere the tool can read stays `Any`. Every named symbol gets
 a placeholder docstring, which has to be replaced with the behaviour it states. The tool
 only adds statements to a stub; it never changes one, and it refuses to add a member to a
 class of the published stub, which may not change.
@@ -74,6 +76,13 @@ def _bound(statement: ast.stmt) -> list[str]:
     return []
 
 
+def _public_property(statement: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    return not statement.name.startswith('_') and any(
+        isinstance(item, ast.Name) and item.id in ('property', 'cached_property')
+        or isinstance(item, ast.Attribute) and item.attr == 'cached_property'
+        for item in statement.decorator_list)
+
+
 def _type_checking(statement: ast.stmt) -> TypeGuard[ast.If]:
     test = statement.test if isinstance(statement, ast.If) else None
     return (isinstance(test, ast.Name) and test.id == 'TYPE_CHECKING'
@@ -115,8 +124,8 @@ class Source:
 
 
 class Stubber:
-    def __init__(self, source: Source, components: Path):
-        self.source, self.components = source, components
+    def __init__(self, source: Source, components: Path, run: 'Run'):
+        self.source, self.components, self.run = source, components, run
         # Top-level name -> members wanted of it (None: the symbol itself only).
         self.wanted: dict[str, set[str] | None] = {}
         self.named: set[str] = set()
@@ -154,7 +163,8 @@ class Stubber:
                     return False
                 if self._repository_module(module):
                     names = self._stub_names(module)
-                    if names is None or alias.name not in names:
+                    if ((names is None or alias.name not in names)
+                            and not self.follow(module, alias.name)):
                         self.unresolved.add(name)
                         return False
                 text = f'from {module} import {alias.name}' + (
@@ -170,6 +180,53 @@ class Stubber:
             return True
         self.unresolved.add(name)
         return False
+
+    def resolve_attribute(self, chain: list[str]) -> bool:
+        """Make `a.b.T` available, where `a` names a module of the repository (`import
+        app.store`, `import app.store as a`, `from app import store`): the type is stubbed
+        in its module's stub, which the stub imports as the code does."""
+        root = chain[0]
+        if root not in self.source.imports or len(chain) < 2:
+            return self.resolve(root)
+        statement, alias = self.source.imports[root]
+        if isinstance(statement, ast.ImportFrom):
+            parent = self.source.absolute(statement)
+            if parent == '__future__':
+                return False
+            # `from app import store` (as a): a.T is app.store.T.
+            module = '.'.join(filter(None, [parent, alias.name, *chain[1:-1]]))
+            text = f'from {parent} import {alias.name}'
+        elif alias.asname:
+            # `import app.store as a`: a.T is app.store.T.
+            module = '.'.join([alias.name, *chain[1:-1]])
+            text = f'import {alias.name}'
+        else:
+            # `import app.store`: app.store.T.
+            module = '.'.join(chain[:-1])
+            text = f'import {alias.name}'
+        text += f' as {alias.asname}' if alias.asname else ''
+        if not self._repository_module(module):
+            return self.resolve(root)
+        names = self._stub_names(module)
+        if (names is None or chain[-1] not in names) and not self.follow(module, chain[-1]):
+            self.unresolved.add('.'.join(chain))
+            return False
+        self.imports.setdefault(root, text)
+        return True
+
+    def follow(self, module: str, symbol: str) -> bool:
+        """Stub `symbol`, which another module of the repository defines, in that module's
+        stub, so this stub can import it rather than stand `Any` for it."""
+        active = self.run.active.get(module)
+        if active is not None:
+            # A module whose stub this run is writing: it gains the symbol too.
+            return active.resolve(symbol)
+        try:
+            self.run.stub(module, [symbol], named=False)
+        except (StubError, SyntaxError, OSError, UnicodeDecodeError):
+            return False
+        names = self._stub_names(module)
+        return names is not None and symbol in names
 
     @overload
     def types(self, node: ast.expr) -> ast.expr: ...
@@ -196,11 +253,14 @@ class Stubber:
                 return item if stubber.resolve(item.id) else stubber._any()
 
             def visit_Attribute(self, item: ast.Attribute) -> ast.expr:
-                root = item
+                root: ast.expr = item
+                chain: list[str] = []
                 while isinstance(root, ast.Attribute):
+                    chain.insert(0, root.attr)
                     root = root.value
                 if isinstance(root, ast.Name):
-                    return item if stubber.resolve(root.id) else stubber._any()
+                    return (item if stubber.resolve_attribute([root.id, *chain])
+                            else stubber._any())
                 return cast(ast.expr, self.generic_visit(item))
 
             def visit_Subscript(self, item: ast.Subscript) -> ast.expr:
@@ -281,9 +341,11 @@ class Stubber:
         target = cast(ast.Name | ast.Attribute | ast.Subscript, copy.deepcopy(node.targets[0]))
         return ast.AnnAssign(target, self._any(), None, simple=1)
 
-    def member(self, statement: ast.stmt, members: set[str]) -> list[ast.stmt]:
+    def member(self, statement: ast.stmt, members: set[str],
+               properties: bool = False) -> list[ast.stmt]:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if statement.name == '__init__' or statement.name in members:
+            if (statement.name == '__init__' or statement.name in members
+                    or properties and _public_property(statement)):
                 return [self.function(statement, statement.name in members)]
         elif isinstance(statement, ast.ClassDef):
             if statement.name in members:
@@ -304,8 +366,10 @@ class Stubber:
                             'does not have yet')
         body: list[ast.stmt] = (
             [ast.Expr(ast.Constant(PLACEHOLDER))] if documented else [])
+        # A type no member is named of, such as one a signature names, comes with its
+        # public properties: what a test reads of a value it builds.
         for statement in node.body:
-            body += self.member(statement, members)
+            body += self.member(statement, members, properties=not members)
         return ast.ClassDef(
             name=node.name, bases=[self.types(base) for base in node.bases],
             keywords=copy.deepcopy(node.keywords), decorator_list=self._decorators(node),
@@ -360,60 +424,102 @@ def check_published(repository: Path, components: Path) -> list[str]:
     return problems
 
 
+class Run:
+    """One run of the tool: the stubs it writes, the named module's and those of the
+    modules whose types its signatures name."""
+
+    def __init__(self, repository: Path, components: Path, source_root: str):
+        self.repository, self.components = repository, components
+        self.root = repository / source_root
+        # The modules whose stub is being written, with what writes it.
+        self.active: dict[str, Stubber] = {}
+        # `module.Name` of each type stubbed because a signature names it.
+        self.followed: list[str] = []
+        self.unresolved: set[str] = set()
+
+    def stub(self, module: str, symbols: list[str], named: bool = True) -> Path:
+        """Write or extend the module's stub with the symbols; returns the stub's path.
+        Symbols not `named` are types another stub names: they get no docstring, and one
+        the module only imports is stubbed as that import."""
+        source = Source(self.root, module)
+        stubber = Stubber(source, self.components, self)
+        for symbol in symbols:
+            name, _, member = symbol.partition('.')
+            if name not in source.definitions:
+                if not named and name in source.imports:
+                    if not stubber.resolve(name):
+                        raise StubError(f'{module}.{name} cannot be stubbed')
+                    continue
+                raise StubError(f'{module} has no top-level {name}; hand-write a symbol the '
+                                'code does not have yet')
+            if member and not isinstance(source.definitions[name][-1], ast.ClassDef):
+                raise StubError(f'{module}.{name} is not a class')
+            wanted = stubber.wanted.get(name) or set()
+            stubber.wanted[name] = wanted | ({member} if member else set())
+            if named:
+                stubber.named.add(member and f'{name}.{member}' or name)
+        stub = next((path for path in (_stub_path(self.components, module, package)
+                                       for package in (source.package, not source.package))
+                     if path.is_file()), _stub_path(self.components, module, source.package))
+        existing = stub.read_text(encoding='utf-8') if stub.is_file() else ''
+        present = {name for statement in ast.parse(existing).body
+                   for name in _bound(statement)}
+        published = _published_names(
+            self.repository / PUBLISHED / stub.relative_to(self.components))
+        # Members named for a class are documented as the class itself is not.
+        for name, members in list(stubber.wanted.items()):
+            if members and named:
+                stubber.named.discard(name)
+                stubber.named.update(f'{name}.{member}' for member in members)
+        statements: list[ast.stmt] = []
+        done: set[str] = set()
+        text = existing
+        self.active[module] = stubber
+        try:
+            # Stubbing a symbol can want more of this module, also from a stub of another
+            # module that names one of its types.
+            while len(done) < len(stubber.wanted):
+                for name, members in list(stubber.wanted.items()):
+                    if name in done:
+                        continue
+                    done.add(name)
+                    if name in present:
+                        if members:
+                            text = _extend_class(text, name, members, stubber, published,
+                                                 module)
+                        continue
+                    statements += stubber.top(name, members)
+        finally:
+            del self.active[module]
+        imports = [line for name, line in sorted(stubber.imports.items())
+                   if name not in present and name not in stubber.wanted]
+        added = '\n'.join([*imports, *(ast.unparse(ast.fix_missing_locations(item))
+                                       for item in statements)])
+        if added:
+            text = (text.rstrip('\n') + '\n\n' if text.strip() else '') + added + '\n'
+        ast.parse(text)
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_text(text, encoding='utf-8')
+        if not named:
+            self.followed += [f'{module}.{name}' for name in symbols]
+        self.unresolved |= stubber.unresolved
+        return stub
+
+
 def make_stub(module: str, symbols: list[str], repository: Path, components: Path,
               source_root: str) -> Path:
-    """Write or extend the module's stub with the symbols; returns the stub's path."""
-    source = Source(repository / source_root, module)
-    stubber = Stubber(source, components)
-    for symbol in symbols:
-        name, _, member = symbol.partition('.')
-        if name not in source.definitions:
-            raise StubError(f'{module} has no top-level {name}; hand-write a symbol the '
-                            'code does not have yet')
-        if member and not isinstance(source.definitions[name][-1], ast.ClassDef):
-            raise StubError(f'{module}.{name} is not a class')
-        wanted = stubber.wanted.get(name) or set()
-        stubber.wanted[name] = wanted | ({member} if member else set())
-        stubber.named.add(member and f'{name}.{member}' or name)
-    stub = next((path for path in (_stub_path(components, module, package)
-                                   for package in (source.package, not source.package))
-                 if path.is_file()), _stub_path(components, module, source.package))
-    existing = stub.read_text(encoding='utf-8') if stub.is_file() else ''
-    present = {name for statement in ast.parse(existing).body for name in _bound(statement)}
-    published = _published_names(repository / PUBLISHED / stub.relative_to(components))
-    # Members named for a class are documented as the class itself is not.
-    for name, members in list(stubber.wanted.items()):
-        if members:
-            stubber.named.discard(name)
-            stubber.named.update(f'{name}.{member}' for member in members)
-    statements: list[ast.stmt] = []
-    insertions: list[tuple[str, set[str]]] = []
-    done: set[str] = set()
-    while len(done) < len(stubber.wanted):
-        for name, members in list(stubber.wanted.items()):
-            if name in done:
-                continue
-            done.add(name)
-            if name in present:
-                if members:
-                    insertions.append((name, members))
-                continue
-            statements += stubber.top(name, members)
-    text = existing
-    for name, members in insertions:
-        text = _extend_class(text, name, members, stubber, published, module)
-    imports = [line for name, line in sorted(stubber.imports.items())
-               if name not in present and name not in stubber.wanted]
-    added = '\n'.join([*imports, *(ast.unparse(ast.fix_missing_locations(item))
-                                   for item in statements)])
-    if added:
-        text = (text.rstrip('\n') + '\n\n' if text.strip() else '') + added + '\n'
-    ast.parse(text)
-    stub.parent.mkdir(parents=True, exist_ok=True)
-    stub.write_text(text, encoding='utf-8')
-    if stubber.unresolved:
-        print(f'Stubbed as Any (no stub to import them from): '
-              f'{", ".join(sorted(stubber.unresolved))}', file=sys.stderr)
+    """Write or extend the module's stub with the symbols, and the stubs of the types
+    their signatures name; returns the stub's path."""
+    run = Run(repository, components, source_root)
+    stub = run.stub(module, symbols)
+    if run.followed:
+        print(f'Also stubbed the types the signatures name, in their own modules\' stubs: '
+              f'{", ".join(run.followed)}')
+    if run.unresolved:
+        print(f'Stubbed as Any (the code defines them nowhere make_stub can read): '
+              f'{", ".join(sorted(run.unresolved))}; the host rejects a type of the code '
+              'stubbed as Any, so hand-write those types in the stub of their module',
+              file=sys.stderr)
     return stub
 
 

@@ -265,13 +265,15 @@ def test_a_generated_stub_has_the_codes_signatures_and_is_a_valid_contract(tmp_p
                                      'app/store.py': 'class Store: ...\n'})
     result = _make_stub(tmp_path, 'app.rooms', 'Rooms.close', 'Rooms.state', 'count', 'QUEUE')
     assert result.returncode == 0, result.stderr
-    # A type of the repository with no stub to import it from.
-    assert 'Store' in result.stderr
     text = (tmp_path / 'components/app/rooms.pyi').read_text()
     stub = {node.name: node for node in ast.walk(ast.parse(text))
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
     assert ast.unparse(stub['close'].args) == 'self, room: Room, reason: str | None=None'
-    assert ast.unparse(stub['__init__'].args) == 'self, store: Any, limit: int=...'
+    # A type another module of the repository defines is stubbed there and imported.
+    assert ast.unparse(stub['__init__'].args) == 'self, store: Store, limit: int=...'
+    assert 'from app.store import Store' in text
+    assert 'Store' in COMPONENT_CONTRACT.read_stub(
+        'app.store', (tmp_path / 'components/app/store.pyi').read_text())
     assert [ast.unparse(item) for item in stub['state'].decorator_list] == ['property']
     # The dataclass a signature names comes with the fields its __init__ is built from.
     assert 'class Room' in text and 'name: str' in text and "QUEUE: Final = 'rooms'" in text
@@ -280,6 +282,72 @@ def test_a_generated_stub_has_the_codes_signatures_and_is_a_valid_contract(tmp_p
         COMPONENT_CONTRACT.read_stub('app.rooms', text)
     assert {'Rooms.close', 'Rooms.state', 'Rooms.__init__', 'count', 'Room', 'State',
             'QUEUE'} <= COMPONENT_CONTRACT.read_stub('app.rooms', _described(text))
+
+
+def test_types_of_other_modules_are_stubbed_where_they_are_defined(tmp_path):
+    _write(tmp_path / 'repository', {
+        'app/__init__.py': '',
+        'app/publish.py': ('import app.layout as layout\n'
+                           'from app.models import Contract\n\n\n'
+                           'async def publish(workspace: layout.Workspace, '
+                           'contract: Contract) -> None:\n    pass\n'),
+        # A re-export, and a type whose module names a type of the first one back.
+        'app/models.py': 'from app.contract import Contract\n',
+        'app/contract.py': ('from typing import TypedDict\n'
+                            'from app.layout import Workspace\n\n\n'
+                            'class Contract(TypedDict):\n    language: str\n'
+                            '    workspace: Workspace\n'),
+        'app/layout.py': ('from dataclasses import dataclass\nfrom pathlib import Path\n\n\n'
+                          '@dataclass(frozen=True)\nclass Workspace:\n    root: Path\n\n'
+                          '    @property\n    def checkout(self) -> Path:\n'
+                          '        return self.root / "repository"\n\n'
+                          '    def _hidden(self) -> int:\n        return 1\n'),
+    })
+    result = _make_stub(tmp_path, 'app.publish', 'publish')
+    assert result.returncode == 0, result.stderr
+    assert 'Any' not in (tmp_path / 'components/app/publish.pyi').read_text()
+    layout = COMPONENT_CONTRACT.read_stub(
+        'app.layout', (tmp_path / 'components/app/layout.pyi').read_text())
+    # A test builds the type from its fields and reads its public properties.
+    assert {'Workspace', 'Workspace.root', 'Workspace.checkout'} <= layout
+    assert 'Workspace._hidden' not in layout
+    assert 'from app.contract import Contract' in (
+        tmp_path / 'components/app/models.pyi').read_text()
+    assert {'Contract', 'Contract.workspace'} <= COMPONENT_CONTRACT.read_stub(
+        'app.contract', (tmp_path / 'components/app/contract.pyi').read_text())
+
+
+def test_the_host_rejects_a_new_stub_statement_that_erases_a_type_of_the_code(tmp_path):
+    from app.routing.components import read_components
+    runtime = '{"source_root": ".", "requirements": ["requirements.txt"]}'
+    code = ('from app.layout import Workspace\n\n\n'
+            'async def publish(workspace: Workspace, kind: str) -> dict:\n    pass\n\n\n'
+            'async def close(workspace: Workspace) -> None:\n    pass\n')
+    published = ('from typing import Any\n\n\n'
+                 'async def close(workspace: Any) -> None:\n'
+                 '    """Close it."""\n    ...\n')
+    _write(tmp_path, {'repository/requirements.txt': '',
+                      'repository/app/activities.py': code,
+                      'repository/contracts/components/runtime.json': runtime,
+                      'repository/contracts/components/app/activities.pyi': published,
+                      'components/runtime.json': runtime})
+    stub = tmp_path / 'components/app/activities.pyi'
+    targets = itertools.count()
+
+    def read() -> None:
+        read_components(COMPONENT_CONTRACT, tmp_path / 'components', tmp_path / 'repository',
+                        tmp_path / 'repository/contracts/components',
+                        tmp_path / f'target-{next(targets)}')
+
+    added = ('\n\nasync def publish(workspace: {}, kind: str) -> dict:\n'
+             '    """Push it."""\n    ...\n')
+    stub.parent.mkdir(parents=True)
+    stub.write_text(published + added.format('Any'))
+    with pytest.raises(RuntimeError, match=r'publish \(argument workspace Workspace\)'):
+        read()
+    # The published statement keeps its Any: only what the stub adds is checked.
+    stub.write_text('from app.layout import Workspace\n' + published + added.format('Workspace'))
+    read()
 
 
 def test_a_published_stub_is_only_extended(tmp_path):
