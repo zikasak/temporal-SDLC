@@ -6,11 +6,13 @@ Usage: literals.py ALLOWLIST MODULE...
 """
 import ast
 import importlib
+import os
 import sys
 import typing
 from pathlib import Path
 
-STUBS = Path("/components")
+# The image sets MYPYPATH=/components; a check outside it names the stubs the same way.
+STUBS = Path(os.environ.get("MYPYPATH") or "/components")
 
 
 def _literal(node: ast.expr | None) -> list | None:

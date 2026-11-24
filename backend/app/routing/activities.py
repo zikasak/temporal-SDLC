@@ -31,7 +31,9 @@ from app.routing.browser import (
     OPERATIONS_FILE, absent_elements, check_page_conformance, check_page_routes,
     operations_list, read_document, read_page_contract,
 )
-from app.routing.components import check_conformance, check_seams, read_components
+from app.routing.components import (
+    check_conformance, check_published, check_seams, read_components,
+)
 from app.routing.models import (
     ROUTES as ALL_ROUTES, ROUTING_ERROR, PageContractError, added_seams, read_routes,
 )
@@ -289,6 +291,30 @@ async def publish_components(language: Language, session_dir: Path, output: Path
     return [part.key for part, _ in routed]
 
 
+async def check_published_contracts(language: Language, session_dir: Path,
+                                    parts: list[ComponentPart], work: Path,
+                                    artifact_dir: Path) -> None:
+    """Check the component contract each part publishes against the code the delivery
+    started from, before the agent extends it: the agent's own check, and the check of the
+    contract it writes, cannot pass while a published stub no longer matches the code.
+    Raises RuntimeError naming the part's published contract otherwise."""
+    checkout = session_dir / CHECKOUT_DIR
+    repository: Path | None = None
+    for part in parts:
+        contract = part.contract
+        published = checkout / part.published_dir()
+        if part.browser or contract is None or not published.is_dir():
+            continue
+        if repository is None:
+            repository = await run_sync(record_baseline, language, session_dir)
+        check = work / 'published-checks' / part.name
+        await run_sync(check.mkdir, parents=True)
+        log_dir = (artifact_dir if part.is_service
+                   else artifact_dir / PARTS_DIR / part.name) / 'published'
+        await check_published(contract, published, part.published_dir().as_posix(),
+                              repository, check, log_dir)
+
+
 async def run_routing(session_id: str, context: dict[str, Any]) -> dict[str, Any]:
     """The routes, or `questions` the agent asked: then it is paused, and the same call
     with ANSWERS_KEY in the context continues it."""
@@ -317,6 +343,15 @@ async def run_routing(session_id: str, context: dict[str, Any]) -> dict[str, Any
             await run_sync(workspace.mkdir)
             await run_sync(prepare_routing, language, session_dir, context, workspace,
                            parts)
+            try:
+                async with docker_agents.keep_activity_alive(
+                        'Checking the published component contract'):
+                    await check_published_contracts(language, session_dir, parts, work,
+                                                    artifact_dir)
+            except RuntimeError as exc:
+                # The repository's own contract: routing again cannot help until it changes.
+                raise ApplicationError(str(exc), type=ROUTING_ERROR,
+                                       non_retryable=True) from exc
         async with docker_agents.keep_activity_alive('Routing the acceptance criteria'):
             output = work / 'output'
             try:

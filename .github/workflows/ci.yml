@@ -22,6 +22,11 @@ jobs:
       - name: Component tests
         working-directory: component-tests
         run: PYTHONPATH=../backend python -m pytest -q
+      - name: Component contract matches the code
+        # The mypy version of the platform's conformance check (app.languages.python.components.MYPY).
+        run: |
+          pip install mypy==1.18.2
+          bash backend/tools/check_component_contract.sh
 
   frontend:
     runs-on: ubuntu-latest

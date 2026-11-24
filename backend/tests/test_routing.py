@@ -458,6 +458,46 @@ async def test_a_seam_the_change_adds_first_is_routed_with_its_stubs_unchecked_u
     assert runs == []
 
 
+@pytest.mark.parametrize('conforms', [True, False])
+async def test_the_published_contract_is_checked_against_the_code_before_the_agent_extends_it(
+        python_session, monkeypatch, conforms):
+    for path, text in VALID.items():
+        file = python_session / 'repository/contracts/components' / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(text)
+    runs: list = []
+    fake_component_docker(monkeypatch, VALID, runs, conforms=conforms)
+    agent_ran = []
+    fake = docker_agents.docker
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'cp':
+            agent_ran.append(args)
+        return await fake(*args, **kwargs)
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    routing = ActivityEnvironment().run(activities.route_requirements, 'session',
+                                        PYTHON_CONTEXT)
+    if conforms:
+        assert (await routing)['routes']['FR-3']['route'] == 'component'
+        assert agent_ran
+        # Then the contract the agent wrote is checked as before.
+        assert len(runs) == 4
+    else:
+        with pytest.raises(ApplicationError) as raised:
+            await routing
+        # Said to be the repository's contract, which no routing again can mend.
+        assert raised.value.type == ROUTING_ERROR and raised.value.non_retryable
+        assert 'publishes in contracts/components/ no longer matches its code' in str(
+            raised.value)
+        assert 'Rooms.close' in str(raised.value)
+        assert not agent_ran
+        assert len(runs) == 2
+    build, run = runs[:2]
+    assert 'components/service/rooms.pyi' in build['files']
+    assert run['run'][-1] == 'service.rooms'
+
+
 @pytest.mark.parametrize('added, error', [
     (['Rooms.reopened'], 'does not define: Rooms.reopened'),
     ('Rooms.merged', 'names the symbols it adds other than as a list'),
@@ -725,3 +765,23 @@ def test_the_router_is_told_of_the_other_parts_only_when_the_repository_has_them
     (tmp_path / 'parts/frontend/components/src').mkdir(parents=True)
     (tmp_path / 'parts/frontend/components/src/github.d.ts').write_text(GITHUB_STUB)
     agent.validate_completion(tmp_path)
+
+
+def test_a_mismatch_names_the_differing_symbols_first_and_what_a_stub_lacks_before_the_rest():
+    from app.routing.components import describe_differences
+    output = '\n'.join([
+        'app.models.State.__init__ is inconsistent, stub parameter "queue" differs from '
+        'runtime parameter "parts"',
+        'app.models.State.__init__ is inconsistent, stub does not have parameter "pending"',
+        "app.models.State.__match_args__ variable differs from runtime type tuple["
+        + ', '.join(f"Literal['field_{n}']" for n in range(200)) + ']',
+        'app.workflows.Flow.finalize is inconsistent, stub does not have parameter "force"',
+    ])
+    message = describe_differences(output)
+    assert message.startswith('2 symbol(s) differ: app.models.State.__init__, '
+                              'app.workflows.Flow.finalize. ')
+    # A lacking parameter shifts the later ones, which then only look renamed.
+    assert message.index('does not have parameter "pending"') < message.index('differs from')
+    assert '__match_args__' not in message
+    # Output of no known format is kept, its end when too long.
+    assert describe_differences('x' * 5000 + 'the end').endswith('the end')

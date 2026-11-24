@@ -42,10 +42,11 @@ class RequirementsWorkflow:
         or, for a 'bugfix' or 'docs' task, its delivery ended cancelled."""
         ...
 
-    async def finalize(self) -> None:
+    async def finalize(self, force: bool = False) -> None:
         """Update: write the requirements document; rejected unless the session is
         'interviewing' with a `kind`, recorded requirements and an assistant message
-        last."""
+        last. For a task, its requirements review clears first, unless `force` continues
+        despite it."""
         ...
 
     def get_state(self) -> RequirementsState:

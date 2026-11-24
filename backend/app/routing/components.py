@@ -144,6 +144,36 @@ def _context(contract: ComponentContract, repository: Path, components: Path,
     shutil.copytree(components, context / 'components')
 
 
+# One difference as stubtest (and the literal alias check) reports it: the symbol first.
+_DIFFERENCE = re.compile(r'^([A-Za-z_][\w.]*) (is inconsistent|is not present|variable differs'
+                         r'|is not a )')
+DIFFERENCE_CHARS = 300
+
+
+def describe_differences(output: str) -> str:
+    """What a failed check says, led by the symbols that differ: each named once, and the
+    differences that name what one side lacks first, since a parameter a stub lacks makes
+    every later one look renamed. `__match_args__` of a class whose `__init__` differs says
+    the same again, so it is left out. Output in no known format is kept as it is, its end
+    when too long."""
+    found: dict[str, list[str]] = {}
+    for line in output.splitlines():
+        line = line.strip()
+        if match := _DIFFERENCE.match(line):
+            found.setdefault(match.group(1), []).append(line)
+    if not found:
+        return output[-MESSAGE_CHARS:]
+    symbols = [symbol for symbol in found
+               if not (symbol.endswith('.__match_args__')
+                       and f'{symbol.removesuffix(".__match_args__")}.__init__' in found)]
+    lines = sorted((line for symbol in symbols for line in found[symbol]),
+                   key=lambda line: 'does not have' not in line and 'not present' not in line)
+    message = (f'{len(symbols)} symbol(s) differ: {", ".join(symbols)}. '
+               + ' | '.join(line if len(line) <= DIFFERENCE_CHARS
+                            else line[:DIFFERENCE_CHARS - 1] + '…' for line in lines))
+    return message if len(message) <= MESSAGE_CHARS else message[:MESSAGE_CHARS - 1] + '…'
+
+
 async def check_conformance(contract: ComponentContract, repository: Path, components: Path,
                             modules: list[str], work: Path, log_dir: Path) -> None:
     """Check, without a network, that the stubs in `components` still describe the code
@@ -170,7 +200,7 @@ async def check_conformance(contract: ComponentContract, repository: Path, compo
                                    timeout=CHECK_SECONDS, log_path=log_dir / 'conformance.log')
     except RuntimeError as exc:
         raise RuntimeError('The component contract does not match the code: '
-                           f'{str(exc).removeprefix("Docker run failed: ")[-MESSAGE_CHARS:]}'
+                           f'{describe_differences(str(exc).removeprefix("Docker run failed: "))}'
                            ) from exc
     finally:
         try:
@@ -178,3 +208,27 @@ async def check_conformance(contract: ComponentContract, repository: Path, compo
         except Exception:
             logger.warning('Could not remove the conformance image %s', image)
     logger.info('Component contract conforms (modules=%s)', sorted(modules))
+
+
+async def check_published(contract: ComponentContract, published: Path, where: str,
+                          repository: Path, work: Path, log_dir: Path) -> None:
+    """Check the contract the repository publishes (`published`, at `where` in it) against `repository`, the
+    code the delivery started from, before a routing extends it: a stub the code no longer
+    matches would otherwise be found only once the whole contract is checked, after a
+    seam is added. Nothing is checked when nothing is published. Raises RuntimeError
+    saying the published contract is out of date otherwise."""
+    files = await run_sync(_files, published)
+    if RUNTIME_FILE not in files or not any(path.endswith(contract.stub_suffix)
+                                            for path in files):
+        return
+    clean = work / 'published'
+    try:
+        read = await run_sync(read_components, contract, published, repository, published,
+                              clean)
+        await check_conformance(contract, repository, clean, list(read['modules']), work,
+                                log_dir)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f'The component contract the repository publishes in {where}/ no longer '
+            'matches its code, so the routing cannot extend it. Bring those stubs up to date '
+            f'with the code in the repository and start the delivery again. {exc}') from exc
