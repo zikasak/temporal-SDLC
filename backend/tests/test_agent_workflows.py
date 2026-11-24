@@ -15,7 +15,8 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from app import docker_agents
-from app.agent_workflows import contracts, runtime
+from app.agent_workflows import runtime
+from app.settings.models import AgentSettings, ModelSettings, SETTINGS_FILENAME
 from app.agent_workflows.host import StageInputs, StageSpec, copy_regular_files, run_stage
 from app.api_design.models import ApiModel
 from app.api_design.openapi import render_openapi
@@ -34,7 +35,6 @@ def scripted_model(monkeypatch):
     monkeypatch.setenv('OPENAI_API_KEY', 'test-key')
     monkeypatch.setenv('OPENAI_BASE_URL', 'https://provider.example/v1')
     monkeypatch.delenv('TEST_AGENT_MAX_TURNS', raising=False)
-    monkeypatch.delenv('AGENT_CONTEXT_TOKENS', raising=False)
 
     def install(responses):
         class Model:
@@ -61,7 +61,6 @@ def scripted_model(monkeypatch):
 
 @pytest.fixture
 def profile(tmp_path):
-    from app.settings.models import ModelSettings, SETTINGS_FILENAME
     (tmp_path / SETTINGS_FILENAME).write_text(ModelSettings(model='test-model').model_dump_json())
     root = tmp_path / 'service'
     root.mkdir()
@@ -238,9 +237,15 @@ def assert_calls_and_results_correlate(messages):
     assert not pending
 
 
-async def test_stale_history_becomes_a_checkpoint_within_the_context_budget(
-        profile, scripted_model, monkeypatch, capsys):
-    monkeypatch.setenv('AGENT_CONTEXT_TOKENS', '6000')
+def compact_at(profile, tokens):
+    """Save the compaction threshold the agent's settings snapshot holds."""
+    (profile.root.parent / SETTINGS_FILENAME).write_text(
+        ModelSettings(model='test-model', compaction_tokens=tokens).model_dump_json())
+
+
+async def test_stale_history_becomes_a_checkpoint_at_the_compaction_threshold(
+        profile, scripted_model, capsys):
+    compact_at(profile, 4500)
     source = 'class Body {}\n' * 430
     model = scripted_model([
         write('Orders.java', source),
@@ -290,9 +295,8 @@ async def test_stale_history_becomes_a_checkpoint_within_the_context_budget(
     assert capsys.readouterr().out.count('Compacted 2 messages into a checkpoint') == 2
 
 
-async def test_working_notes_survive_compaction_word_for_word(profile, scripted_model,
-                                                             monkeypatch):
-    monkeypatch.setenv('AGENT_CONTEXT_TOKENS', '6000')
+async def test_working_notes_survive_compaction_word_for_word(profile, scripted_model):
+    compact_at(profile, 4500)
     source = 'class Body {}\n' * 430
     verdict = 'service/orders.py:10-40 sound; refunds miss the 409 the contract requires'
     model = scripted_model([
@@ -314,12 +318,12 @@ async def test_working_notes_survive_compaction_word_for_word(profile, scripted_
     assert checkpoint.endswith('Remaining: Dockerfile')
 
 
-@pytest.mark.parametrize('budget,compacted', [('64000', True), ('0', False)])
-async def test_compaction_follows_provider_reported_usage(profile, scripted_model, monkeypatch,
-                                                    budget, compacted):
-    monkeypatch.setenv('AGENT_CONTEXT_TOKENS', budget)
+@pytest.mark.parametrize('threshold,compacted', [(48000, True), (0, False)])
+async def test_compaction_follows_provider_reported_usage(profile, scripted_model,
+                                                          threshold, compacted):
+    compact_at(profile, threshold)
     usage = {'input_tokens': 60000, 'output_tokens': 20, 'total_tokens': 60020}
-    # By size alone this history is well inside the budget; the provider's count decides.
+    # By size alone this history is well below the threshold; the provider's count decides.
     model = scripted_model([
         write('first.txt', 'x' * 60000),
         AIMessage(content='', usage_metadata=usage, tool_calls=write('Dockerfile').tool_calls),
@@ -361,8 +365,7 @@ def test_contract_files_are_read_and_searched_but_never_written(tmp_path):
     partial(implementation.prepare_inputs, get_language('java')),
     partial(test_generation.prepare_inputs, get_language('java')),
 ])
-def test_large_contracts_are_indexed_and_supplied_whole_on_demand(tmp_path, monkeypatch,
-                                                                  prepare_inputs):
+def test_large_contracts_are_indexed_and_supplied_whole_on_demand(tmp_path, prepare_inputs):
     (tmp_path / 'server').mkdir()
     requirements: list[Requirement] = [
         {'id': f'FR-{number}', 'category': 'functional', 'title': f'Rule {number}',
@@ -382,8 +385,8 @@ def test_large_contracts_are_indexed_and_supplied_whole_on_demand(tmp_path, monk
                'requirements_document': render_requirements_markdown(
                    requirements, 'Orders are never deleted.')}
 
-    def prepared(workspace):
-        inputs = prepare_inputs(tmp_path, context)
+    def prepared(workspace, **settings):
+        inputs = prepare_inputs(tmp_path, context, **settings)
         workspace.mkdir()
         inputs.populate(workspace)
         return inputs.context
@@ -392,8 +395,7 @@ def test_large_contracts_are_indexed_and_supplied_whole_on_demand(tmp_path, monk
     assert embedded['requirements'] == requirements
     assert not (tmp_path / 'embedded/contracts').exists()
 
-    monkeypatch.setattr(contracts, 'CONTRACT_EMBED_CHARS', 2000)
-    index = prepared(tmp_path / 'on-demand')
+    index = prepared(tmp_path / 'on-demand', embed_chars=2000)
     supplied = tmp_path / 'on-demand/contracts'
     assert len(json.dumps(index)) < len(json.dumps(embedded)) / 3
     # Nothing is lost: the index names everything and the files hold all of it.
@@ -605,7 +607,7 @@ async def test_paused_stage_keeps_its_workspace_until_a_new_container_continues(
     questions = ASK['args']['questions']
     populated = []
 
-    def prepare_inputs(session_dir, context):
+    def prepare_inputs(session_dir, context, *, embed_chars):
         def populate(workspace):
             populated.append(workspace)
             (workspace / 'notes').mkdir()
@@ -667,8 +669,17 @@ async def test_new_stage_uses_its_own_toolchain_workspace_and_artifact_names(tmp
     dockerfile = image_context / 'Dockerfile'
     dockerfile.write_text('FROM python:3.12-slim')
     agent_builds = []
+    limits = []
 
-    def prepare_inputs(session_dir, context):
+    async def agent_settings():
+        return AgentSettings(contract_embed_chars=60000)
+
+    monkeypatch.setattr('app.agent_workflows.host.get_agent_settings', agent_settings)
+
+    def prepare_inputs(session_dir, context, *, embed_chars):
+        # Read afresh from the saved settings for each run.
+        limits.append(embed_chars)
+
         def populate(workspace):
             project = workspace / 'notes'
             project.mkdir()
@@ -707,6 +718,7 @@ async def test_new_stage_uses_its_own_toolchain_workspace_and_artifact_names(tmp
     monkeypatch.setattr(docker_agents, 'docker', docker)
     result = await ActivityEnvironment().run(run_stage, stage, 'session', {}, tmp_path)
     build, = agent_builds
+    assert limits == [60000]
     assert build[-1] == str(image_context)
     assert build[build.index('-f') + 1] == str(dockerfile)
     assert build[build.index('--build-arg') + 1] == 'TOOLCHAIN=python'

@@ -74,7 +74,7 @@ async def test_docker_preserves_redacted_bounded_diagnostics_and_reaps_process(
 
 def test_short_settings_named_like_secrets_do_not_corrupt_output(monkeypatch):
     state = '{"Running":true,"Pid":146000,"ExitCode":0}'
-    env = {'AGENT_CONTEXT_TOKENS': '46000', 'AUTH_TOKEN_TTL_HOURS': '12',
+    env = {'SUMMARY_MAX_TOKENS': '46000', 'AUTH_TOKEN_TTL_HOURS': '12',
            'PRIVATE_TOKEN': 'hidden-provider-token'}
     assert docker_agents.redact_output(state, env) == state
     assert docker_agents.redact_output('hidden-provider-token', env) == '[redacted]'

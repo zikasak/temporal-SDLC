@@ -1,25 +1,45 @@
 """Application-wide settings read afresh from PostgreSQL for each model run."""
+import logging
+import os
+
 from psycopg.types.json import Jsonb
 
 from app.db import connect
 from app.settings import endpoint as endpoint_storage
 from app.settings.endpoint import OpenAIEndpoint
 from app.settings.models import (
-    ModelSettings, WORKFLOW_LABELS, WorkflowSettings, WorkflowType, default_model_settings,
+    AgentSettings, ModelSettings, WORKFLOW_LABELS, WorkflowSettings, WorkflowType, default_model_settings,
 )
 
 # Workflow types added after others, by the type whose stored settings they start with.
 INITIAL_SOURCES: dict[str, str] = {'requirements_review': 'requirements'}
 # Marks a save that leaves the OpenAI endpoint as it is.
 UNCHANGED = object()
+# Environment settings that moved to the Settings page, with where they are set now.
+MOVED_TO_SETTINGS = {
+    'AGENT_CONTEXT_TOKENS': 'the compaction threshold of each workflow type',
+    'CONTRACT_EMBED_CHARS': 'the contract embedding limit',
+}
+logger = logging.getLogger(__name__)
 
 
 async def ensure_schema() -> None:
+    for name, setting in MOVED_TO_SETTINGS.items():
+        if os.getenv(name):
+            logger.warning('%s is no longer read; set %s on the Settings page instead',
+                           name, setting)
     async with await connect() as conn:
         await conn.execute('CREATE SCHEMA IF NOT EXISTS app')
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS app.workflow_settings (
                 workflow_type text PRIMARY KEY,
+                settings jsonb NOT NULL
+            )
+        ''')
+        # A single row: the settings shared by the agents of every workflow type.
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS app.agent_settings (
+                id boolean PRIMARY KEY DEFAULT true CHECK (id),
                 settings jsonb NOT NULL
             )
         ''')
@@ -64,13 +84,27 @@ async def get_workflow_settings(workflow_type: WorkflowType) -> ModelSettings:
     return ModelSettings.model_validate(row['settings'])
 
 
+async def get_agent_settings() -> AgentSettings:
+    """The saved agent settings, or their defaults while none are saved."""
+    async with await connect() as conn:
+        row = await (await conn.execute(
+            'SELECT settings FROM app.agent_settings')).fetchone()
+    return AgentSettings.model_validate(row['settings']) if row else AgentSettings()
+
+
 async def save_settings(settings: WorkflowSettings, endpoint: object = UNCHANGED,
-                        encrypted_api_key: bytes | None = None) -> WorkflowSettings:
-    """Save the workflow settings and, unless `endpoint` is UNCHANGED, replace (an
-    OpenAIEndpoint) or remove (None) the OpenAI endpoint, all in one transaction: a failed
-    save never leaves a partially updated page."""
+                        encrypted_api_key: bytes | None = None,
+                        agent: AgentSettings | None = None) -> WorkflowSettings:
+    """Save the workflow settings, the agent settings unless `agent` is None and, unless
+    `endpoint` is UNCHANGED, replace (an OpenAIEndpoint) or remove (None) the OpenAI
+    endpoint, all in one transaction: a failed save never leaves a partially updated page."""
     async with await connect() as conn:
         async with conn.transaction():
+            if agent is not None:
+                await conn.execute('''
+                    INSERT INTO app.agent_settings (id, settings) VALUES (true, %s)
+                    ON CONFLICT (id) DO UPDATE SET settings = EXCLUDED.settings
+                ''', (Jsonb(agent.model_dump()),))
             for workflow_type, model in sorted(settings.workflows.items()):
                 await conn.execute('''
                     INSERT INTO app.workflow_settings (workflow_type, settings) VALUES (%s, %s)

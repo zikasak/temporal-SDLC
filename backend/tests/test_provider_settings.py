@@ -33,13 +33,16 @@ async def client():
         yield client
 
 
-async def test_openai_catalog_uses_configured_endpoint_without_guessing_effort(
+async def test_openai_catalog_uses_configured_endpoint_without_guessing_effort_or_windows(
         client, monkeypatch, saved_endpoint):
     requests = []
 
     def serve(request):
         requests.append(request)
-        return httpx.Response(200, json={'data': [{'id': 'custom/model'}, {'id': 'reasoning-model'}]})
+        # OpenAI's own entries report no context window; OpenRouter and vLLM add theirs.
+        return httpx.Response(200, json={'data': [
+            {'id': 'custom/model', 'context_length': 131072}, {'id': 'reasoning-model'},
+            {'id': 'served-model', 'max_model_len': 32768}]})
 
     real_client = httpx.AsyncClient
     monkeypatch.setattr(providers.httpx, 'AsyncClient', lambda **kwargs: real_client(
@@ -50,8 +53,9 @@ async def test_openai_catalog_uses_configured_endpoint_without_guessing_effort(
     response = await client.get('/settings/providers')
     assert response.status_code == 200
     models = response.json()['openai']['models']
-    assert [(item['id'], item['thinking_levels']) for item in models] == [
-        ('custom/model', ['default']), ('reasoning-model', ['default'])]
+    assert [(item['id'], item['thinking_levels'], item['context_window']) for item in models] == [
+        ('custom/model', ['default'], 131072), ('reasoning-model', ['default'], None),
+        ('served-model', ['default'], 32768)]
     assert len(requests) == 1
     assert str(requests[0].url) == 'https://configured-provider.test/v1/models'
     assert requests[0].headers['Authorization'] == 'Bearer test-key'
@@ -82,7 +86,7 @@ async def test_google_catalog_follows_pages_and_excludes_embedding_models(
         requests.append(request)
         if request.url.params.get('pageToken') == 'next':
             return httpx.Response(200, json={'models': [
-                {'name': 'models/custom-chat', 'displayName': 'Chat',
+                {'name': 'models/custom-chat', 'displayName': 'Chat', 'inputTokenLimit': 1048576,
                  'supportedGenerationMethods': ['generateContent']}]})
         return httpx.Response(200, json={'models': [
             {'name': 'models/embedding', 'supportedGenerationMethods': ['embedContent']}],
@@ -97,7 +101,8 @@ async def test_google_catalog_follows_pages_and_excludes_embedding_models(
     response = await client.get('/settings/providers')
     assert response.status_code == 200
     assert response.json()['openai']['models'] == [
-        {'id': 'custom-chat', 'label': 'Chat', 'thinking_levels': ['default']}]
+        {'id': 'custom-chat', 'label': 'Chat', 'thinking_levels': ['default'],
+         'context_window': 1048576}]
     assert len(requests) == 2
     assert all(request.headers['x-goog-api-key'] == 'google-test-key' for request in requests)
 
@@ -119,7 +124,8 @@ for line in sys.stdin:
     kind = command['type']
     if kind == 'get_available_models':
         data = {'models': [{'provider': 'custom', 'id': 'fast', 'name': 'Fast'},
-                           {'provider': 'custom', 'id': 'smart', 'name': 'Smart'}]}
+                           {'provider': 'custom', 'id': 'smart', 'name': 'Smart',
+                            'contextWindow': 200000, 'maxTokens': 64000}]}
     elif kind == 'set_model':
         assert command['provider'] == 'custom'
         selected = command['modelId']
@@ -136,8 +142,10 @@ for line in sys.stdin:
     monkeypatch.setattr(providers, 'PROVIDERS', {'pi': ('Pi', providers._pi_models)})
     response = await client.get('/settings/providers')
     assert response.status_code == 200
-    assert [(item['id'], item['thinking_levels']) for item in response.json()['pi']['models']] == [
-        ('custom/fast', ['default', 'off']), ('custom/smart', ['default', 'low', 'high', 'max'])]
+    assert [(item['id'], item['thinking_levels'], item['context_window'])
+            for item in response.json()['pi']['models']] == [
+        ('custom/fast', ['default', 'off'], None),
+        ('custom/smart', ['default', 'low', 'high', 'max'], 200000)]
     assert [json.loads(line)['type'] for line in log.read_text().splitlines()] == [
         'get_available_models', 'set_model', 'get_available_thinking_levels',
         'set_model', 'get_available_thinking_levels']

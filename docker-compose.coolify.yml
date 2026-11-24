@@ -39,8 +39,6 @@ x-app: &app
     # Also used by the interactive Pi login in the API container's terminal.
     PI_CODING_AGENT_DIR: /pi/agent
     PI_CREDENTIALS_SHARED: "true"
-    AGENT_CONTEXT_TOKENS: ${AGENT_CONTEXT_TOKENS:-64000}
-    CONTRACT_EMBED_CHARS: ${CONTRACT_EMBED_CHARS:-32000}
     # Per-stage agent tool-turn budgets, forwarded into agent containers; blank keeps
     # each stage's built-in default (implementation 200, others 80).
     IMPLEMENTATION_MAX_TURNS: ${IMPLEMENTATION_MAX_TURNS:-}

@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 container_logger = logging.getLogger('app.containers')
 # Forwarded by name; LOG_LEVEL sets the agent's own logging, which forward_logs re-logs.
 # The *_MAX_TURNS budgets are read inside the container by each stage's AgentProfile.
-AGENT_SETTINGS = ('AGENT_CONTEXT_TOKENS', 'LOG_LEVEL', 'IMPLEMENTATION_MAX_TURNS',
+AGENT_SETTINGS = ('LOG_LEVEL', 'IMPLEMENTATION_MAX_TURNS',
                   'TEST_GENERATION_MAX_TURNS', 'REVIEW_MAX_TURNS', 'DIAGNOSIS_MAX_TURNS',
                   'DOCUMENTATION_MAX_TURNS', 'ROUTING_MAX_TURNS')
 CONTAINER_LINE_CHARS = 4000
@@ -188,7 +188,7 @@ def redact_output(output: str, env: Mapping[str, str] | None = None) -> str:
     """Redact known host/provider secrets before returning, saving or logging output.
 
     Values shorter than MIN_SECRET_LENGTH are left alone: settings such as
-    AGENT_CONTEXT_TOKENS=46000 match the names but are no secrets, and replacing them
+    AUTH_TOKEN_TTL_HOURS=12 match the names but are no secrets, and replacing them
     would corrupt ordinary output, such as a PID in `docker inspect` JSON."""
     return _redact(output, _secret_values(env))
 

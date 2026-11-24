@@ -1243,6 +1243,22 @@
     "title": "Remove the OpenAI endpoint"
   },
   {
+    "category": "functional",
+    "id": "FR-183",
+    "priority": "must",
+    "title": "Context compaction configurable in Settings",
+    "description": "Each LLM workflow type's settings include compaction_tokens: the number of tokens in use at which the coding agents of Pi and the openai adapter compact their history into a checkpoint, set on the Settings page next to the model (default 48000; 0 never compacts; otherwise at least 4000, 422 below). The Settings page shows the selected model's context window when its provider reports one (Pi, the Google endpoint, and OpenAI-compatible endpoints that report context_length or max_model_len), and PUT /settings answers 422 for a threshold above it. Claude compacts its own context, so its threshold is neither checked nor used.",
+    "rationale": "User: migrate the AGENT_CONTEXT_TOKENS environment setting to the UI; the setting decides when compaction happens."
+  },
+  {
+    "category": "functional",
+    "id": "FR-184",
+    "priority": "must",
+    "title": "Contract embedding limit configurable in Settings",
+    "description": "GET /settings returns, and PUT /settings optionally sets, agent.contract_embed_chars, shared by every workflow type and set on the Settings page: contracts whose embedded form is longer reach coding agents as an index plus read-only files instead of whole (default 32000; 1000 to 10000000 characters, 422 otherwise). A PUT without agent leaves it unchanged; it is saved in the same transaction as the workflow settings.",
+    "rationale": "User: migrate the CONTRACT_EMBED_CHARS environment setting to the UI."
+  },
+  {
     "category": "non_functional",
     "description": "The OpenAI API key is stored encrypted and is never part of any response; GET returns only whether a key is set, and saving the endpoint with an empty API key field keeps the stored key unchanged.",
     "id": "NFR-8",

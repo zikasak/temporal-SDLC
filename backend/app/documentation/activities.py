@@ -11,6 +11,7 @@ from temporalio.exceptions import ApplicationError
 
 from app.asyncio_utils import run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
+from app.settings.models import DEFAULT_CONTRACT_EMBED_CHARS
 from app.agent_workflows.host import (
     StageInputs, StageSpec, WorkTarget, copy_regular_files, run_stage, session_language,
     write_language,
@@ -52,7 +53,8 @@ def changed_files(language: Language, checkout: Path, written: Path) -> list[str
                   if before.get(name) != after.get(name))
 
 
-def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any]) -> StageInputs:
+def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any], *,
+                   embed_chars: int = DEFAULT_CONTRACT_EMBED_CHARS) -> StageInputs:
     checkout = session_dir / CHECKOUT_DIR
     if not context.get('repository') or not checkout.is_dir():
         raise ApplicationError('The repository checkout is unavailable', non_retryable=True)
@@ -60,7 +62,7 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
         raise ApplicationError('The documentation task has no brief', non_retryable=True)
 
     context = without_repeated_tables(context)
-    index, files = on_demand_contracts(context, len(json.dumps(context))) or (context, {})
+    index, files = on_demand_contracts(context, len(json.dumps(context)), embed_chars) or (context, {})
 
     def populate(workspace: Path) -> None:
         copy_documentation(language, checkout, workspace / WORKSPACE)

@@ -18,6 +18,8 @@ from temporalio.exceptions import ApplicationError
 from app import config, docker_agents
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
+from app.settings.models import DEFAULT_CONTRACT_EMBED_CHARS
+from app.settings.storage import get_agent_settings
 from app.agent_workflows.host import (
     ANSWERS_KEY, RESUME_KEY, limited_result, copy_regular_files, paused_result, session_language, write_language,
 )
@@ -322,7 +324,7 @@ def _seam_verdict(language: Language, session_dir: Path, context: dict[str, Any]
 
 def plan_review(language: Language, session_dir: Path, context: dict[str, Any],
                 workspace: Path, part: int = 0, *, record: list[dict[str, Any]] | None = None,
-                round_id: str = '') -> PreparedReview:
+                round_id: str = '', embed_chars: int = DEFAULT_CONTRACT_EMBED_CHARS) -> PreparedReview:
     """The trees under review, the changes of the given part and the contracts; nothing
     else. By default the verified delivery is reviewed; a stage review (SCOPE_KEY in the
     context) reviews the seam a change added first, or its regression tests before the
@@ -376,7 +378,7 @@ def plan_review(language: Language, session_dir: Path, context: dict[str, Any],
 
     changes = by_side(own)
     others = [path for path in reviewable if path not in own]
-    index, files = on_demand_contracts(contracts, len(json.dumps(contracts))) or (contracts, {})
+    index, files = on_demand_contracts(contracts, len(json.dumps(contracts)), embed_chars) or (contracts, {})
     write_language(workspace, language, label=language.label)
     if files:
         write_contracts(workspace, files)
@@ -549,7 +551,8 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
             previous = context.get(PREVIOUS_KEY) or []
             prepared = await run_sync(
                 partial(plan_review, record=await run_sync(settled.read_record, artifact_dir),
-                        round_id=_round_id()),
+                        round_id=_round_id(),
+                        embed_chars=(await get_agent_settings()).contract_embed_chars),
                 language, session_dir, context, workspace, part)
             if prepared.decided is not None:
                 # A host check decided the round: no agent runs, and no other part.

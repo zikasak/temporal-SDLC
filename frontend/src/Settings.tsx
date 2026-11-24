@@ -2,9 +2,14 @@ import { useEffect, useState, type FormEvent } from "react";
 import { errorMessage, failure, readBody } from "./api";
 
 type Adapter = "pi" | "openai" | "claude";
-type ModelSettings = { adapter: Adapter; model: string; thinking_level: string };
+// compaction_tokens: tokens in use at which the coding loops of Pi and the openai adapter
+// compact their history; 0 never compacts. Claude compacts its own context.
+type ModelSettings = { adapter: Adapter; model: string; thinking_level: string; compaction_tokens: number };
 type Workflows = Record<string, ModelSettings>;
-type ModelOption = { id: string; label: string; thinking_levels: string[] };
+// context_window is null when the provider does not report it.
+type ModelOption = { id: string; label: string; thinking_levels: string[]; context_window: number | null };
+// Shared by the agents of every workflow type.
+type AgentSettings = { contract_embed_chars: number };
 type ProviderOptions = { label: string; models: ModelOption[]; error: string | null; hint: string | null };
 // The openai adapter is listed only while an OpenAI endpoint is set up.
 type Providers = Partial<Record<Adapter, ProviderOptions>>;
@@ -12,6 +17,7 @@ type Providers = Partial<Record<Adapter, ProviderOptions>>;
 type OpenAIEndpointView = { base_url?: string | null; display_name: string | null; api_key_set?: boolean };
 type SettingsResponse = {
   workflows: Workflows;
+  agent: AgentSettings;
   workflow_labels: Record<string, string>;
   providers: Providers;
   openai_endpoint: OpenAIEndpointView;
@@ -19,6 +25,14 @@ type SettingsResponse = {
 
 const adapters: Adapter[] = ["pi", "openai", "claude"];
 const adapterLabels: Record<Adapter, string> = { pi: "Pi", openai: "OpenAI", claude: "Claude" };
+// The backend's bounds (app/settings/models.py).
+const MIN_COMPACTION_TOKENS = 4000;
+const DEFAULT_COMPACTION_TOKENS = 48000;
+const MIN_CONTRACT_EMBED_CHARS = 1000;
+const MAX_CONTRACT_EMBED_CHARS = 10_000_000;
+// Share of a newly chosen model's window to compact at when the current threshold exceeds it.
+const SUGGESTED_COMPACTION_SHARE = 0.75;
+const numbers = new Intl.NumberFormat();
 
 function providerResponse(value: unknown): Providers {
   const providers = value as Providers | null;
@@ -31,7 +45,8 @@ function providerResponse(value: unknown): Providers {
       Array.isArray(provider.models) && provider.models.every((model) =>
         model && typeof model.id === "string" && typeof model.label === "string" &&
         Array.isArray(model.thinking_levels) && model.thinking_levels.includes("default") &&
-        model.thinking_levels.every((level) => typeof level === "string"));
+        model.thinking_levels.every((level) => typeof level === "string") &&
+        (model.context_window === null || Number.isInteger(model.context_window)));
   })) throw new Error("The backend returned invalid provider options.");
   return providers;
 }
@@ -44,6 +59,26 @@ function validSelection(providers: Providers, item: ModelSettings) {
   const provider = providers[item.adapter];
   return !!provider && !provider.error &&
     !!selectedModel(providers, item)?.thinking_levels.includes(item.thinking_level);
+}
+
+/** Why the compaction threshold cannot be saved, or "" when it can. */
+function compactionProblem(providers: Providers, item: ModelSettings) {
+  const tokens = item.compaction_tokens;
+  if (!Number.isInteger(tokens) || tokens < 0) return "Enter a whole number of tokens.";
+  if (tokens > 0 && tokens < MIN_COMPACTION_TOKENS) {
+    return `Compact at ${numbers.format(MIN_COMPACTION_TOKENS)} tokens or more, or enter 0 to never compact.`;
+  }
+  // Claude compacts its own context: its threshold is unused, so no window bounds it.
+  if (item.adapter === "claude") return "";
+  const window = selectedModel(providers, item)?.context_window;
+  if (window && tokens > window) {
+    return `Compact within the model's context window of ${numbers.format(window)} tokens.`;
+  }
+  return "";
+}
+
+function validEmbedChars(value: number) {
+  return Number.isInteger(value) && value >= MIN_CONTRACT_EMBED_CHARS && value <= MAX_CONTRACT_EMBED_CHARS;
 }
 
 function endpointResponse(value: unknown): OpenAIEndpointView {
@@ -62,6 +97,9 @@ function settingsResponse(value: unknown): SettingsResponse {
   const data = value as SettingsResponse;
   providerResponse(data.providers);
   endpointResponse(data.openai_endpoint);
+  if (!data.agent || !Number.isInteger(data.agent.contract_embed_chars)) {
+    throw new Error("The backend returned invalid agent settings.");
+  }
   if (!data.workflows || !data.workflow_labels ||
       Object.keys(data.workflows).length !== Object.keys(data.workflow_labels).length ||
       !Object.entries(data.workflows).length ||
@@ -69,7 +107,8 @@ function settingsResponse(value: unknown): SettingsResponse {
         typeof data.workflow_labels[key] === "string" && item &&
         adapters.includes(item.adapter) &&
         typeof item.model === "string" &&
-        typeof item.thinking_level === "string")) {
+        typeof item.thinking_level === "string" &&
+        Number.isInteger(item.compaction_tokens))) {
     throw new Error("The backend returned invalid workflow settings.");
   }
   return data;
@@ -78,6 +117,7 @@ function settingsResponse(value: unknown): SettingsResponse {
 export default function Settings() {
   const [data, setData] = useState<SettingsResponse | null>(null);
   const [draft, setDraft] = useState<Workflows>({});
+  const [agentDraft, setAgentDraft] = useState<AgentSettings>({ contract_embed_chars: 0 });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -88,8 +128,11 @@ export default function Settings() {
   // workflow form stays locked until it ends rather than have its save overwritten.
   const [endpointBusy, setEndpointBusy] = useState(false);
   const locked = saving || refreshing || endpointBusy;
-  const dirty = data !== null && JSON.stringify(draft) !== JSON.stringify(data.workflows);
-  const valid = data !== null && Object.values(draft).every((item) => validSelection(data.providers, item));
+  const dirty = data !== null && (JSON.stringify(draft) !== JSON.stringify(data.workflows) ||
+    agentDraft.contract_embed_chars !== data.agent.contract_embed_chars);
+  const valid = data !== null && validEmbedChars(agentDraft.contract_embed_chars) &&
+    Object.values(draft).every((item) =>
+      validSelection(data.providers, item) && !compactionProblem(data.providers, item));
 
   useEffect(() => {
     const controller = new AbortController();
@@ -104,6 +147,7 @@ export default function Settings() {
         if (!controller.signal.aborted) {
           setData(settings);
           setDraft(settings.workflows);
+          setAgentDraft(settings.agent);
         }
       } catch (caught) {
         if (!controller.signal.aborted) setError(failure(caught, "Could not load settings."));
@@ -131,6 +175,15 @@ export default function Settings() {
         }
         if (!selectedModel(data.providers, next)?.thinking_levels.includes(next.thinking_level)) {
           next.thinking_level = "default";
+        }
+        // Claude hides the field, so an unsavable value there would block saving unseen.
+        if (patch.adapter === "claude" && compactionProblem(data.providers, next)) {
+          next.compaction_tokens = DEFAULT_COMPACTION_TOKENS;
+        }
+        // A newly chosen model with a smaller window gets a threshold that fits it.
+        const window = selectedModel(data.providers, next)?.context_window;
+        if ((patch.adapter || patch.model) && window && next.compaction_tokens > window) {
+          next.compaction_tokens = Math.floor(window * SUGGESTED_COMPACTION_SHARE);
         }
       }
       return { ...current, [workflow]: next };
@@ -166,13 +219,14 @@ export default function Settings() {
     try {
       const response = await fetch("/api/settings", {
         method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workflows }),
+        body: JSON.stringify({ workflows, agent: agentDraft }),
       });
       const body = await readBody(response);
       if (!response.ok) throw new Error(errorMessage(body, response.status));
       const saved = settingsResponse({ ...data, ...(body as object) });
       setData(saved);
       setDraft(saved.workflows);
+      setAgentDraft(saved.agent);
       setNotice("Settings saved. New model runs will use these values.");
     } catch (caught) {
       setError(failure(caught, "Could not save settings. Your edits are still here; try again."));
@@ -185,7 +239,7 @@ export default function Settings() {
     <main className="page-shell">
       <header className="page-heading">
         <h1>Settings</h1>
-        <p className="page-intro">Choose the adapter, model, and thinking level for each workflow.</p>
+        <p className="page-intro">Choose the adapter, model, thinking level, and context compaction for each workflow.</p>
       </header>
       {loading ? <p role="status">Loading settings…</p> : !data ? (
         <div className="settings-load-error">
@@ -204,7 +258,7 @@ export default function Settings() {
             <p className="connector-error" role="alert" key={adapter}>{provider.error}</p>
           ))}
           <div className="settings-column-labels" aria-hidden="true">
-            <span>Workflow</span><span>Adapter</span><span>Model</span><span>Thinking level</span>
+            <span>Workflow</span><span>Adapter</span><span>Model</span><span>Thinking level</span><span>Compact at (tokens)</span>
           </div>
           {Object.entries(data.workflow_labels).map(([key, label]) => {
             const item = draft[key];
@@ -215,6 +269,9 @@ export default function Settings() {
             const model = selectedModel(data.providers, item);
             const levels = model?.thinking_levels ?? [];
             const selectionValid = validSelection(data.providers, item);
+            const compaction = compactionProblem(data.providers, item);
+            const describedBy = [!selectionValid && `${key}-selection-error`, compaction && `${key}-compaction-error`]
+              .filter(Boolean).join(" ") || undefined;
             return (
               <fieldset className="settings-row" key={key} disabled={locked}>
                 <legend>{label}</legend>
@@ -249,6 +306,23 @@ export default function Settings() {
                       ))}
                     </select>
                   </label>
+                  <label htmlFor={`${key}-compaction`}><span className="settings-field-label">Compact at (tokens)</span>
+                    {item.adapter === "claude" ? (
+                      <input id={`${key}-compaction`} aria-label={`${label} compaction threshold`} type="text"
+                        value="Claude manages" disabled readOnly />
+                    ) : (
+                      <input id={`${key}-compaction`} aria-label={`${label} compaction threshold`} type="number"
+                        inputMode="numeric" min={0} step={1} max={model?.context_window ?? undefined}
+                        value={Number.isNaN(item.compaction_tokens) ? "" : item.compaction_tokens}
+                        aria-invalid={!!compaction} aria-describedby={describedBy}
+                        onChange={(event) => update(key, { compaction_tokens: event.target.valueAsNumber })} />
+                    )}
+                    {item.adapter !== "claude" && <span className="settings-field-hint">
+                      {item.compaction_tokens === 0 ? "Never compacts" : model?.context_window
+                        ? `Window: ${numbers.format(model.context_window)}` : "Window not reported"}
+                    </span>}
+                  </label>
+                  {compaction && <p id={`${key}-compaction-error`} className="settings-selection-error connector-error">{compaction}</p>}
                   {!selectionValid && <p id={`${key}-selection-error`} className="settings-selection-error connector-error">
                     {!provider ? "The OpenAI endpoint is not set up, so this choice fails until it is. Choose another adapter, or have the administrator set up the endpoint." :
                       provider.error ? "Refresh provider options or choose another adapter to verify this selection." :
@@ -260,6 +334,25 @@ export default function Settings() {
             );
           })}
           <p className="settings-hint">Models and thinking levels come from the selected provider. Model default leaves reasoning unchanged. Workflows without model calls have no model settings.</p>
+          <p className="settings-hint">Coding agents of Pi and the openai adapter summarize their oldest work into a checkpoint once their context reaches the compaction threshold, and keep the most recent third verbatim. Choose a value below the model's context window that leaves room for its reply; 0 never compacts. Claude compacts its own context.</p>
+          <div className="settings-heading">
+            <h2>Agent inputs</h2>
+            <p>Shared by every workflow.</p>
+          </div>
+          <div className="settings-agent-fields">
+            <label htmlFor="contract-embed-chars">Embed contracts up to (characters)</label>
+            <input id="contract-embed-chars" type="number" inputMode="numeric" disabled={locked}
+              min={MIN_CONTRACT_EMBED_CHARS} max={MAX_CONTRACT_EMBED_CHARS} step={1}
+              value={Number.isNaN(agentDraft.contract_embed_chars) ? "" : agentDraft.contract_embed_chars}
+              aria-invalid={!validEmbedChars(agentDraft.contract_embed_chars)}
+              aria-describedby="contract-embed-chars-help"
+              onChange={(event) => { setAgentDraft({ contract_embed_chars: event.target.valueAsNumber }); setNotice(""); }} />
+            <p id="contract-embed-chars-help" className="field-hint">
+              {validEmbedChars(agentDraft.contract_embed_chars)
+                ? "Longer contracts reach coding agents as an index and read-only files they search, instead of whole in every model call."
+                : `Enter a whole number from ${numbers.format(MIN_CONTRACT_EMBED_CHARS)} to ${numbers.format(MAX_CONTRACT_EMBED_CHARS)}.`}
+            </p>
+          </div>
           {Object.entries(data.providers).map(([adapter, provider]) => provider.hint &&
             Object.values(draft).some((item) => item.adapter === adapter) && (
               <p key={adapter} className="settings-hint">{provider.label}: {provider.hint}</p>
@@ -268,10 +361,10 @@ export default function Settings() {
             <div className="repository-actions">
               <button className="submit-button" type="submit" disabled={!dirty || !valid || locked}>{saving ? "Saving…" : "Save settings"}</button>
               <button className="workflows-refresh" type="button" disabled={!dirty || locked} onClick={() => {
-                setDraft(data.workflows); setError(""); setNotice("");
+                setDraft(data.workflows); setAgentDraft(data.agent); setError(""); setNotice("");
               }}>Discard changes</button>
             </div>
-            <span className="field-hint" role="status">{saving ? "Saving settings…" : endpointBusy ? "Saving the OpenAI endpoint…" : refreshing ? "Refreshing provider options…" : !valid ? "Resolve unavailable selections before saving" : dirty ? "Unsaved changes" : "All changes saved"}</span>
+            <span className="field-hint" role="status">{saving ? "Saving settings…" : endpointBusy ? "Saving the OpenAI endpoint…" : refreshing ? "Refreshing provider options…" : !valid ? "Resolve the marked fields before saving" : dirty ? "Unsaved changes" : "All changes saved"}</span>
           </div>
           {error && <p className="connector-error" role="alert">{error}</p>}
           <p className="connector-notice" role="status">{notice}</p>

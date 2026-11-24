@@ -294,16 +294,20 @@ exactly edit workspace files, and execute shell commands. Long command output is
 under `.agent-output/` in the workspace and returned as its diagnostic lines and tail;
 that directory is never published.
 
-For OpenAI and Pi, the application loop keeps its context inside `AGENT_CONTEXT_TOKENS`
-(default 64000; set it to the model's context window, `0` disables). Usage reported by the provider is used when
-available, otherwise a character-based estimate. Past 75% of the budget, the oldest
+For OpenAI and Pi, the application loop compacts its context once it reaches the
+workflow type's compaction threshold (`compaction_tokens` in Settings, default 48000;
+`0` never compacts). Saving a threshold above the context window the provider reports
+for the model is rejected. Pi reports the windows of its models, an OpenAI-compatible
+endpoint only when it adds OpenRouter's `context_length` or vLLM's `max_model_len`, and
+the Google endpoint its `inputTokenLimit`. Usage reported by the provider is used when
+available, otherwise a character-based estimate. Past the threshold, the oldest
 complete assistant/tool-result batches are replaced by one checkpoint message: the files
 written or edited so far, plus decisions, completed and remaining work and unresolved
 errors summarized by an extra `compact-history` model call. The system prompt, the
-supplied contracts and the most recent batches (about 25% of the budget, always at
-least the latest) are kept verbatim; current code is re-read from disk. The setting is
-forwarded from the worker's environment to coding containers. Claude uses native
-compaction instead; `AGENT_CONTEXT_TOKENS` does not alter its context window.
+supplied contracts and the most recent batches (about a third of the threshold, always
+at least the latest) are kept verbatim; current code is re-read from disk. The threshold
+reaches coding containers in their model settings snapshot. Claude uses native
+compaction instead, and its threshold is not used.
 
 The OpenAI and Pi loop reports the remaining turn budget during its last ten turns,
 asking the agent to finish its required files. History compaction does not reset the
@@ -345,7 +349,8 @@ Every review trace carries `review_scope` (`review`, `seam` or `regression`) and
   reviewer as `static_findings` (never a matched secret), and it judges each one; a tool
   that fails is left out.
 
-Contracts whose embedded form exceeds `CONTRACT_EMBED_CHARS` (default 60000 characters)
+Contracts whose embedded form exceeds the contract embedding limit of Settings
+(`agent.contract_embed_chars`, default 32000 characters)
 are supplied on demand instead. `/workspace/input.json` then holds an index of every
 requirement (ID, category, priority, title), endpoint (operation, summary, requirement
 IDs) and schema name, and the complete documents are written to `/workspace/contracts/`

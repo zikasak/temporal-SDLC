@@ -23,6 +23,9 @@ class ModelOption(BaseModel):
     id: str
     label: str
     thinking_levels: list[str] = Field(default_factory=lambda: ['default'])
+    # The model's context window in tokens, as its provider reports it; None when the
+    # provider does not report one.
+    context_window: int | None = None
 
 
 class ProviderOptions(BaseModel):
@@ -34,6 +37,19 @@ class ProviderOptions(BaseModel):
 
 class ProviderDiscoveryError(RuntimeError):
     """An actionable, credential-free discovery error safe to show in settings."""
+
+
+# Fields that OpenAI-compatible servers add to their /models entries for the context
+# window: OpenRouter's, then vLLM's. OpenAI's own /models reports none.
+CONTEXT_WINDOW_FIELDS = ('context_length', 'max_model_len')
+
+
+def _window(item: dict, *fields: str) -> int | None:
+    for field in fields:
+        value = item.get(field)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return None
 
 
 async def _openai_models(endpoint: OpenAIEndpoint) -> list[ModelOption]:
@@ -50,7 +66,8 @@ async def _openai_models(endpoint: OpenAIEndpoint) -> list[ModelOption]:
                 response.raise_for_status()
                 body = response.json()
                 models.extend(ModelOption(id=item['name'].removeprefix('models/'),
-                                          label=item.get('displayName') or item['name'])
+                                          label=item.get('displayName') or item['name'],
+                                          context_window=_window(item, 'inputTokenLimit'))
                               for item in body['models']
                               if 'generateContent' in item.get('supportedGenerationMethods', []))
                 if not body.get('nextPageToken'):
@@ -58,7 +75,9 @@ async def _openai_models(endpoint: OpenAIEndpoint) -> list[ModelOption]:
                 params = {'pageToken': body['nextPageToken']}
         response = await client.get(models_url(base_url), headers=authorization(api_key))
         response.raise_for_status()
-        return [ModelOption(id=item['id'], label=item['id']) for item in response.json()['data']]
+        return [ModelOption(id=item['id'], label=item['id'],
+                            context_window=_window(item, *CONTEXT_WINDOW_FIELDS))
+                for item in response.json()['data']]
 
 
 async def _claude_models() -> list[ModelOption]:
@@ -127,7 +146,8 @@ async def _pi_models() -> list[ModelOption]:
             levels = (await command('get_available_thinking_levels'))['levels']
             models.append(ModelOption(id=f'{item["provider"]}/{item["id"]}',
                                       label=f'{item["name"]} ({item["provider"]})',
-                                      thinking_levels=list(dict.fromkeys(['default', *levels]))))
+                                      thinking_levels=list(dict.fromkeys(['default', *levels])),
+                                      context_window=_window(item, 'contextWindow')))
         if not models:
             raise ProviderDiscoveryError(
                 'Pi has no selectable models. Sign in to Pi as the API user and check '

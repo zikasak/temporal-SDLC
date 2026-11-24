@@ -18,6 +18,7 @@ from temporalio.exceptions import ApplicationError
 from app import docker_agents
 from app.asyncio_utils import async_context, run_sync
 from app.languages import Language, UnsupportedLanguage, get_language
+from app.settings.storage import get_agent_settings
 from app.tracing import trace_operation
 from app.temporal.tracing import activity_metadata
 
@@ -50,7 +51,9 @@ class StageSpec:
     # published as files only.
     image_label: str | None
     image_build: docker_agents.AgentImageBuild
-    prepare_inputs: Callable[[Path, dict[str, Any]], StageInputs]
+    # Called with the session directory and the context, and with the keyword
+    # embed_chars: the longest contracts it embeds whole (AgentSettings.contract_embed_chars).
+    prepare_inputs: Callable[..., StageInputs]
     sanitize_output: Callable[[Path, Path], None]
     validate_output: Callable[[Path], None]
     # Reads, from the agent's raw output, a result that takes the place of the stage's
@@ -279,7 +282,8 @@ async def _run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
     # A repair, or any run continuing the stage's published output, finds it again after
     # this worker lost it.
     await restore_stage_output(stage, session_dir, context)
-    inputs = await run_sync(stage.prepare_inputs, session_dir, context)
+    inputs = await run_sync(stage.prepare_inputs, session_dir, context,
+                            embed_chars=(await get_agent_settings()).contract_embed_chars)
     artifact_dir = session_dir / stage.artifact_subdir
     await run_sync(artifact_dir.mkdir, parents=True, exist_ok=True)
     paused = artifact_dir / docker_agents.PAUSED_DIR

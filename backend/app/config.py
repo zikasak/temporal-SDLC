@@ -73,9 +73,6 @@ S3_BUCKET = os.getenv("S3_BUCKET", "").strip()
 S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "").strip()
 S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "").strip()
 
-# Contracts larger than this are supplied to coding agents as an index plus read-only
-# files instead of being embedded whole in every model invocation.
-CONTRACT_EMBED_CHARS = int(os.getenv("CONTRACT_EMBED_CHARS", "32000"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 

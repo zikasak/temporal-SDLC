@@ -11,6 +11,7 @@ from temporalio.exceptions import ApplicationError
 
 from app.asyncio_utils import run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
+from app.settings.models import DEFAULT_CONTRACT_EMBED_CHARS
 from app.agent_workflows.host import (
     StageInputs, StageSpec, WorkTarget, copy_regular_files, restore_stage_output, run_stage,
     session_language, write_language,
@@ -51,7 +52,8 @@ def copy_test_suite(suite: TestSuite, source: Path, target: Path) -> None:
         shutil.copyfile(suite.template / name, target / name)
 
 
-def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any]) -> StageInputs:
+def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any], *,
+                   embed_chars: int = DEFAULT_CONTRACT_EMBED_CHARS) -> StageInputs:
     suite = language.test_suite
     # No codegen, implementation, image, log or arbitrary extra context is supplied.
     api_design = context['api_design']
@@ -95,7 +97,8 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
 
     openapi = render_openapi(api_design)
     index, files = on_demand_contracts({**contracts, 'api_design': api_design},
-                                       len(json.dumps(contracts)) + len(openapi)) or (contracts, {})
+                                       len(json.dumps(contracts)) + len(openapi),
+                                       embed_chars) or (contracts, {})
 
     def populate(workspace: Path) -> None:
         shutil.copytree(suite.template, workspace / 'tests')

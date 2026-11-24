@@ -17,6 +17,12 @@ WORKFLOW_LABELS: dict[str, str] = {
     'routing': 'Routing',
 }
 SETTINGS_FILENAME = 'llm-settings.json'
+# Where the coding loops of Pi and the openai adapter compact their history when nothing
+# else is saved: 75% of the 64000 tokens they used to assume as the context window.
+DEFAULT_COMPACTION_TOKENS = 48000
+# Fewer tokens leave no room for the system prompt, the contracts and a recent batch.
+MIN_COMPACTION_TOKENS = 4000
+DEFAULT_CONTRACT_EMBED_CHARS = 32000
 
 
 class ModelSettings(BaseModel):
@@ -26,6 +32,9 @@ class ModelSettings(BaseModel):
     model: str = Field(default='ddalcu/Qwen3.8-27B-MLX-Serve-4bit', min_length=1,
                        max_length=300)
     thinking_level: str = Field(default='default', min_length=1, max_length=100)
+    # Tokens in use at which a coding loop of Pi or the openai adapter compacts its
+    # history into a checkpoint; 0 never compacts. Claude compacts its own context.
+    compaction_tokens: int = Field(default=DEFAULT_COMPACTION_TOKENS, ge=0)
 
     @field_validator('model')
     @classmethod
@@ -33,6 +42,24 @@ class ModelSettings(BaseModel):
         if any(ord(char) < 32 or ord(char) == 127 for char in value):
             raise ValueError('Model must not contain control characters')
         return value
+
+    @field_validator('compaction_tokens')
+    @classmethod
+    def valid_compaction(cls, value: int) -> int:
+        if 0 < value < MIN_COMPACTION_TOKENS:
+            raise ValueError(f'Compaction must start at {MIN_COMPACTION_TOKENS} tokens or '
+                             'more, or be 0 to never compact')
+        return value
+
+
+class AgentSettings(BaseModel):
+    """Settings shared by the agents of every workflow type."""
+    model_config = ConfigDict(extra='forbid')
+
+    # Contracts whose embedded form is longer reach coding agents as an index plus
+    # read-only files they query, instead of whole in every model invocation.
+    contract_embed_chars: int = Field(default=DEFAULT_CONTRACT_EMBED_CHARS, ge=1000,
+                                      le=10_000_000)
 
 
 def default_model_settings(openai_ready: bool) -> ModelSettings:

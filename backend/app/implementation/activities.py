@@ -13,6 +13,7 @@ from temporalio.exceptions import ApplicationError
 from app import docker_agents
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
+from app.settings.models import DEFAULT_CONTRACT_EMBED_CHARS
 from app.agent_workflows.host import (
     StageInputs, StageSpec, WorkTarget, build_image, copy_regular_files, run_stage,
     session_language, write_language,
@@ -102,7 +103,8 @@ def copy_project(language: Language, source: Path, target: Path) -> None:
     copy_service(language, source, target, unit_tests=True)
 
 
-def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any]) -> StageInputs:
+def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any], *,
+                   embed_chars: int = DEFAULT_CONTRACT_EMBED_CHARS) -> StageInputs:
     # The author of a session with a repository works in its checkout.
     checkout = session_dir / CHECKOUT_DIR if context.get('repository') else None
     if checkout and not checkout.is_dir():
@@ -135,7 +137,7 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
     if parts:
         context = {**context, 'repository_parts': parts}
     context = without_repeated_tables(context)
-    index, files = on_demand_contracts(context, len(json.dumps(context))) or (context, {})
+    index, files = on_demand_contracts(context, len(json.dumps(context)), embed_chars) or (context, {})
     contract_paths = language.implementation.contract_paths
     # A change with criteria routed to seams of the code keeps their stubs' signatures,
     # in each part with such criteria.

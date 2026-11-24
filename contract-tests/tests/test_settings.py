@@ -42,6 +42,10 @@ def test_settings_view_lists_the_requirements_review_next_to_every_other_type(ad
         assert settings["adapter"] in ADAPTERS, name
         assert isinstance(settings["model"], str) and settings["model"], name
         assert isinstance(settings["thinking_level"], str) and settings["thinking_level"], name
+        assert isinstance(settings["compaction_tokens"], int), name
+        assert settings["compaction_tokens"] == 0 or settings["compaction_tokens"] >= 4000, name
+    assert isinstance(body["agent"]["contract_embed_chars"], int)
+    assert 1000 <= body["agent"]["contract_embed_chars"] <= 10_000_000
     assert set(body["workflow_labels"]) >= WORKFLOW_TYPES
     assert body["workflow_labels"]["requirements_review"] == "Requirements review"
     assert all(label for label in body["workflow_labels"].values())
@@ -74,8 +78,12 @@ def test_saving_settings_rejects_an_unknown_workflow_type(admin):
     {"thinking_level": ""},
     {"thinking_level": "t" * 101},
     {"thinking_level": None},
+    {"compaction_tokens": -1},
+    {"compaction_tokens": 3999},
+    {"compaction_tokens": "many"},
 ), ids=("unknown-adapter", "null-adapter", "empty-model", "model-301", "control-character",
-        "empty-thinking-level", "thinking-level-101", "null-thinking-level"))
+        "empty-thinking-level", "thinking-level-101", "null-thinking-level",
+        "negative-compaction", "compaction-below-4000", "compaction-not-a-number"))
 def test_saving_settings_validates_the_requirements_review_entry(admin, change):
     body = full_body()
     body["workflows"]["requirements_review"] = {**model_settings(), **change}
@@ -92,6 +100,18 @@ def test_saving_settings_needs_a_workflows_object(admin, body):
     assert response.json()["detail"]
 
 
+@pytest.mark.parametrize("agent", (
+    {"contract_embed_chars": 999},
+    {"contract_embed_chars": 10_000_001},
+    {"contract_embed_chars": None},
+    {"unknown": 1},
+), ids=("embed-999", "embed-over-10000000", "null-embed", "unknown-field"))
+def test_saving_settings_validates_the_agent_settings(admin, agent):
+    response = admin.put("/settings", json={**full_body(), "agent": agent})
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]
+
+
 def test_rejected_settings_are_not_stored(admin):
     before = admin.get("/settings")
     rejected = admin.put("/settings", json=body_without("requirements_review"))
@@ -100,3 +120,4 @@ def test_rejected_settings_are_not_stored(admin):
     assert after.status_code == before.status_code
     if before.status_code == 200:
         assert after.json()["workflows"] == before.json()["workflows"]
+        assert after.json()["agent"] == before.json()["agent"]

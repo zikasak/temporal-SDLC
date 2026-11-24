@@ -275,6 +275,14 @@ def saved_model_settings(monkeypatch):
         return settings[workflow_type]
 
     monkeypatch.setattr(docker_agents, 'get_workflow_settings', load)
+    # The agent settings saved in Settings: their defaults unless a test saves others.
+    from app.settings import storage
+    from app.settings.models import AgentSettings
+
+    async def agent_settings():
+        return AgentSettings()
+
+    replace_everywhere(monkeypatch, storage.get_agent_settings, agent_settings)
     # The OpenAI endpoint saved in Settings, which the stand-in model uses; its absence
     # is tested on its own.
     from app.settings.endpoint import OpenAIEndpoint

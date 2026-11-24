@@ -19,7 +19,7 @@ from app.llm.pi import ChatPi
 from app.settings import endpoint as endpoints
 from app.settings import storage
 from app.settings import providers
-from app.settings.models import ModelSettings, WORKFLOW_LABELS, WorkflowSettings
+from app.settings.models import AgentSettings, ModelSettings, WORKFLOW_LABELS, WorkflowSettings
 
 ADMIN_ID, OTHER_ID = 1, 2
 SAVED_KEY = 'saved-endpoint-key'
@@ -78,14 +78,21 @@ async def database(monkeypatch, endpoint_table):
             table.setdefault(workflow_type, ModelSettings().model_dump())
 
     async def get_settings():
-        return WorkflowSettings(workflows=copy.deepcopy(table))
+        return WorkflowSettings(workflows=copy.deepcopy(
+            {key: value for key, value in table.items() if key in WORKFLOW_LABELS}))
 
     async def get_workflow_settings(workflow_type):
         if workflow_type not in table:
             raise ValueError(f'Missing settings for workflow: {workflow_type}')
         return ModelSettings.model_validate(table[workflow_type])
 
-    async def save_settings(settings, endpoint=storage.UNCHANGED, encrypted_api_key=None):
+    async def get_agent_settings():
+        return AgentSettings.model_validate(table.get('agent', {}))
+
+    async def save_settings(settings, endpoint=storage.UNCHANGED, encrypted_api_key=None,
+                            agent=None):
+        if agent is not None:
+            table['agent'] = agent.model_dump()
         table.update({workflow_type: saved.model_dump()
                       for workflow_type, saved in settings.workflows.items()})
         if endpoint is not storage.UNCHANGED:
@@ -94,7 +101,8 @@ async def database(monkeypatch, endpoint_table):
                 encrypted_api_key=encrypted_api_key)
         return settings
 
-    for function in (ensure_schema, get_settings, get_workflow_settings, save_settings):
+    for function in (ensure_schema, get_settings, get_workflow_settings, get_agent_settings,
+                     save_settings):
         monkeypatch.setattr(storage, function.__name__, function)
     monkeypatch.setattr(model, 'get_workflow_settings', get_workflow_settings)
     await ensure_schema()
@@ -168,6 +176,7 @@ async def test_invalid_settings_never_partially_overwrite_saved_choices(database
         {'model': 'unknown-model'},
         {'adapter': 'claude', 'model': 'haiku', 'thinking_level': 'high'},
         {'adapter': 'claude', 'model': 'opus', 'thinking_level': 'max'},
+        {'compaction_tokens': -1}, {'compaction_tokens': 3999},
     ):
         workflows = copy.deepcopy(original)
         workflows['requirements']['model'] = 'saved-chat-model'
@@ -176,6 +185,49 @@ async def test_invalid_settings_never_partially_overwrite_saved_choices(database
         assert (await client.get('/settings')).json()['workflows'] == original
     for workflows in ({}, {**original, 'unknown_workflow': original['chat']}):
         assert (await client.put('/settings', json={'workflows': workflows})).status_code == 422
+
+
+async def test_compaction_starts_within_the_model_window_and_agent_settings_are_shared(
+        database, client, provider_catalog):
+    provider_catalog['pi'][0].context_window = 200000
+    # Saved before the threshold existed: it compacts where the old default did.
+    del database['review']['compaction_tokens']
+    initial = (await client.get('/settings')).json()
+    assert initial['workflows']['review']['compaction_tokens'] == 48000
+    assert initial['providers']['pi']['models'][0]['context_window'] == 200000
+    assert initial['workflows']['chat']['compaction_tokens'] == 48000
+    assert initial['agent'] == {'contract_embed_chars': 32000}
+    workflows = copy.deepcopy(initial['workflows'])
+    workflows['chat'] = {'adapter': 'pi', 'model': 'openai/saved-pi-model',
+                         'thinking_level': 'default', 'compaction_tokens': 200001}
+    response = await client.put('/settings', json={'workflows': workflows,
+                                                   'agent': {'contract_embed_chars': 60000}})
+    assert response.status_code == 422
+    assert 'context window of 200000 tokens' in response.json()['detail']
+    assert (await client.get('/settings')).json()['agent'] == initial['agent']
+
+    workflows['chat']['compaction_tokens'] = 150000
+    # Claude compacts its own context, so its threshold is not held to a window.
+    workflows['review'] = {'adapter': 'claude', 'model': 'opus', 'thinking_level': 'high',
+                           'compaction_tokens': 10_000_000}
+    response = await client.put('/settings', json={'workflows': workflows,
+                                                   'agent': {'contract_embed_chars': 60000}})
+    assert response.status_code == 200
+    assert response.json()['agent'] == {'contract_embed_chars': 60000}
+    assert (await storage.get_workflow_settings('chat')).compaction_tokens == 150000
+
+    # Without agent settings in the body, the saved ones stay.
+    workflows['chat']['compaction_tokens'] = 0
+    response = await client.put('/settings', json={'workflows': workflows})
+    assert response.status_code == 200
+    saved = (await client.get('/settings')).json()
+    assert saved['agent'] == {'contract_embed_chars': 60000}
+    assert saved['workflows']['chat']['compaction_tokens'] == 0
+    for agent in ({'contract_embed_chars': 999}, {'contract_embed_chars': 10_000_001},
+                  {'unknown': 1}):
+        assert (await client.put('/settings', json={'workflows': workflows,
+                                                    'agent': agent})).status_code == 422
+    assert (await client.get('/settings')).json()['agent'] == {'contract_embed_chars': 60000}
 
 
 async def test_catalog_changes_and_provider_failure_never_overwrite_settings(

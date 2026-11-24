@@ -16,6 +16,8 @@ from temporalio.exceptions import ApplicationError
 from app import docker_agents
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
+from app.settings.models import DEFAULT_CONTRACT_EMBED_CHARS
+from app.settings.storage import get_agent_settings
 from app.agent_workflows.host import (
     ANSWERS_KEY, RESUME_KEY, limited_result, copy_file, copy_regular_files, paused_result, session_language, write_language,
 )
@@ -95,7 +97,8 @@ def describe_parts(parts: list[ComponentPart]) -> list[dict[str, Any]]:
 
 
 def prepare_routing(language: Language, session_dir: Path, context: dict[str, Any],
-                    workspace: Path, parts: list[ComponentPart]) -> None:
+                    workspace: Path, parts: list[ComponentPart], *,
+                    embed_chars: int = DEFAULT_CONTRACT_EMBED_CHARS) -> None:
     """The repository as the delivery checked it out, without its Git data or build
     output, the contracts with the brief, and the published component contract of each
     part with its language's instructions and tools."""
@@ -110,7 +113,7 @@ def prepare_routing(language: Language, session_dir: Path, context: dict[str, An
                        include=lambda relative: _repository_file(language, parts, relative))
     contracts = without_repeated_tables(
         {key: value for key, value in context.items() if key not in ('language', 'repository')})
-    index, files = on_demand_contracts(contracts, len(json.dumps(contracts))) or (contracts, {})
+    index, files = on_demand_contracts(contracts, len(json.dumps(contracts)), embed_chars) or (contracts, {})
     others = [part for part in parts if not part.is_service]
     if others:
         index = {**index, 'parts': describe_parts(parts)}
@@ -342,7 +345,7 @@ async def run_routing(session_id: str, context: dict[str, Any]) -> dict[str, Any
         else:
             await run_sync(workspace.mkdir)
             await run_sync(prepare_routing, language, session_dir, context, workspace,
-                           parts)
+                           parts, embed_chars=(await get_agent_settings()).contract_embed_chars)
             try:
                 async with docker_agents.keep_activity_alive(
                         'Checking the published component contract'):

@@ -133,7 +133,10 @@ def copy_template(suite: ComponentSuite, target: Path) -> None:
 
 
 def prepare_inputs(language: Language, parts: list[ComponentPart], suite: ComponentSuite,
-                   session_dir: Path, context: dict[str, Any]) -> StageInputs:
+                   session_dir: Path, context: dict[str, Any], *,
+                   embed_chars: int = 0) -> StageInputs:
+    # Its inputs are the parts' component contracts, which are never supplied on
+    # demand, so `embed_chars` does not apply.
     contracts_of = [(part, _contract(session_dir, part)) for part in parts]
     # No source, image or log, and not the HTTP contract: the brief, the criteria this
     # suite proves with their seams, and the stubs of those seams.

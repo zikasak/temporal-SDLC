@@ -90,12 +90,9 @@ LINE_CHARS = 300
 OUTPUT_DIR = '.agent-output'
 # Never listed or searched, besides the build directories of the project's language.
 SKIPPED_DIRS = {OUTPUT_DIR, '.git'}
-# Size of the model's context window in tokens; 0 disables history compaction.
-CONTEXT_TOKENS_ENV = 'AGENT_CONTEXT_TOKENS'
-DEFAULT_CONTEXT_TOKENS = 64000
-# Compacting at this share of the window leaves room for the reply and estimate error.
-COMPACT_AT = 0.75
-KEEP_RECENT = 0.25
+# Share of the compaction threshold (ModelSettings.compaction_tokens) that compaction
+# keeps verbatim as the most recent batches.
+KEEP_RECENT = 1 / 3
 # Code and JSON run near three characters a token; used when the provider reports no usage.
 TOKEN_CHARS = 3
 CLIP_CHARS = 4000
@@ -587,7 +584,7 @@ async def _run_agent(profile: AgentProfile) -> str:
                               base_url=os.getenv('OPENAI_BASE_URL', ''))
     if settings.adapter == 'claude':
         return await _run_claude(profile, provider)
-    return await _run_with_provider(profile, provider)
+    return await _run_with_provider(profile, provider, settings.compaction_tokens)
 
 
 async def _run_claude(profile: AgentProfile, provider) -> str:
@@ -696,7 +693,9 @@ async def _run_claude(profile: AgentProfile, provider) -> str:
         raise RuntimeError(profile.exhaustion_message) from exc
 
 
-async def _run_with_provider(profile: AgentProfile, provider) -> str:
+async def _run_with_provider(profile: AgentProfile, provider, compaction_tokens: int) -> str:
+    """Run the application's tool loop, compacting its history into a checkpoint once
+    `compaction_tokens` are in use; 0 never compacts."""
     working: list[str] = []
     tools = [*(await run_sync(workspace_tools, profile.root, profile.contracts, profile.build_dirs)),
              ask_user_tool(), *([note_tool(working)] if profile.working_notes else [])]
@@ -718,7 +717,6 @@ async def _run_with_provider(profile: AgentProfile, provider) -> str:
     # The instructions and authoritative inputs are never compacted.
     head = [SystemMessage(content=profile.prompt + ASK_GUIDANCE + TURN_BUDGET.format(turns=turns)),
             *(HumanMessage(content=text) for text in profile.initial_messages)]
-    budget = int(os.getenv(CONTEXT_TOKENS_ENV, str(DEFAULT_CONTEXT_TOKENS)))
     schemas = len(json.dumps([convert_to_openai_tool(item) for item in tools])) // TOKEN_CHARS
     fixed = schemas + sum(_tokens(message) for message in head)
     # `measured` tokens cover everything sent before history[counted:], which is estimated.
@@ -802,8 +800,8 @@ async def _run_with_provider(profile: AgentProfile, provider) -> str:
         if remaining == 1:
             break
         used = measured + sum(_tokens(message) for message in history[counted:])
-        start = _recent_start(history, budget * KEEP_RECENT)
-        if not budget or used <= budget * COMPACT_AT or not start:
+        start = _recent_start(history, compaction_tokens * KEEP_RECENT)
+        if not compaction_tokens or used <= compaction_tokens or not start:
             continue
         request = [SystemMessage(content=(profile.checkpoint_prompt or CHECKPOINT_PROMPT)
                                  + CLIP_NOTICE), HumanMessage(content=(

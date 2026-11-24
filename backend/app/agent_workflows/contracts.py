@@ -5,7 +5,6 @@ from typing import Any
 
 from app.api_design.openapi import DOCUMENT_FILENAME as OPENAPI_FILENAME
 from app.api_design.openapi import endpoint_key, render_openapi
-from app.config import CONTRACT_EMBED_CHARS
 
 # Beside the agent's project, never inside it: the repository's own copy is written
 # from the task when it is published, never from a workspace.
@@ -28,15 +27,15 @@ GUIDE = ('The contracts are too large to include here. This index lists every re
          'full definition with read_contract. Never rely on a title or summary alone.')
 
 
-def on_demand_contracts(context: dict[str, Any], embedded_chars: int,
+def on_demand_contracts(context: dict[str, Any], embedded_chars: int, limit: int,
                         ) -> tuple[dict[str, Any], dict[str, str]] | None:
     """The index to show the model and the contract files to supply beside it.
 
-    None while the contracts are small enough to embed whole, which costs no extra
-    reads. `context` holds the stage's requirements and the structured API design.
+    None while the contracts are small enough to embed whole (`limit` characters,
+    AgentSettings.contract_embed_chars), which costs no extra reads. `context` holds the stage's requirements and the structured API design.
     """
     api = context.get('api_design')
-    if embedded_chars <= CONTRACT_EMBED_CHARS or not api:
+    if embedded_chars <= limit or not api:
         return None
     requirements = context.get('requirements') or []
     files = {

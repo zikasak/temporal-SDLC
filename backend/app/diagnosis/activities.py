@@ -16,6 +16,8 @@ from temporalio.exceptions import ApplicationError
 from app import docker_agents
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.contracts import on_demand_contracts, write_contracts
+from app.settings.models import DEFAULT_CONTRACT_EMBED_CHARS
+from app.settings.storage import get_agent_settings
 from app.agent_workflows.host import (
     ANSWERS_KEY, RESUME_KEY, limited_result, copy_regular_files, paused_result, session_language, write_language,
 )
@@ -67,7 +69,7 @@ def _summary(run: dict[str, Any], status: bool) -> dict[str, Any]:
 
 
 def prepare_review(language: Language, session_dir: Path, context: dict[str, Any],
-                   workspace: Path) -> None:
+                   workspace: Path, *, embed_chars: int = DEFAULT_CONTRACT_EMBED_CHARS) -> None:
     """Both published source trees, the failed run and the contracts; nothing else. A
     change with component tests (`component_verification` in the context) also gets
     those tests, the stubs they were written from and their run; then either run may be
@@ -85,7 +87,7 @@ def prepare_review(language: Language, session_dir: Path, context: dict[str, Any
         raise ApplicationError('Failed verification artifacts are unavailable', non_retryable=True)
     contracts = without_repeated_tables(
         {key: value for key, value in context.items() if key not in RUN_KEYS})
-    index, files = on_demand_contracts(contracts, len(json.dumps(contracts))) or (contracts, {})
+    index, files = on_demand_contracts(contracts, len(json.dumps(contracts)), embed_chars) or (contracts, {})
     review = workspace / 'review'
     copy_service(language, service, review / 'service')
     runs: dict[str, Any] = {}
@@ -222,7 +224,8 @@ async def run_diagnosis(session_id: str, context: dict[str, Any]) -> dict[str, A
                            answers or None)
         else:
             await run_sync(workspace.mkdir)
-            await run_sync(prepare_review, language, session_dir, context, workspace)
+            await run_sync(prepare_review, language, session_dir, context, workspace,
+                           embed_chars=(await get_agent_settings()).contract_embed_chars)
         async with docker_agents.keep_activity_alive('Diagnosing failed verification'):
             output = work / 'output'
             try:

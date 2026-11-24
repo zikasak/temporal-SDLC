@@ -114,7 +114,7 @@ async def test_agent_stopped_by_limits_saves_where_it_was_and_goes_on_there(
 
 
 def _stage(tmp_path, populated, work=None):
-    def prepare_inputs(session_dir, context):
+    def prepare_inputs(session_dir, context, *, embed_chars):
         def populate(workspace):
             populated.append(workspace)
             (workspace / 'notes').mkdir()

@@ -3929,13 +3929,15 @@ paths:
     get:
       operationId: getSettings
       summary: Get the model settings
-      description: 'The adapter, model and thinking level of every LLM workflow type,
-        including the requirements_review entry used by the requirements reviewer
-        of tasks and onboardings, with labels and the selectable models of each provider,
-        and the openai_endpoint section shaped by role: base URL, display name and
-        whether an API key is set for the administrator, only the display name for
-        anyone else. The openai adapter is offered in providers only while an endpoint
-        base URL is saved. 503 when a saved key cannot be read without a valid SETTINGS_ENCRYPTION_KEY.'
+      description: 'The adapter, model, thinking level and compaction threshold of
+        every LLM workflow type, including the requirements_review entry used by the
+        requirements reviewer of tasks and onboardings, the agent settings, with labels
+        and the selectable models of each provider and their context windows where
+        reported, and the openai_endpoint section shaped by role: base URL, display
+        name and whether an API key is set for the administrator, only the display
+        name for anyone else. The openai adapter is offered in providers only while
+        an endpoint base URL is saved. 503 when a saved key cannot be read without
+        a valid SETTINGS_ENCRYPTION_KEY.'
       tags:
       - settings
       responses:
@@ -3963,6 +3965,8 @@ paths:
       - FR-177
       - FR-178
       - FR-179
+      - FR-183
+      - FR-184
       - NFR-8
     put:
       operationId: putSettings
@@ -3970,9 +3974,12 @@ paths:
       description: 'Replaces the settings of every LLM workflow type; the body must
         include requirements_review too (422 otherwise). 422 when a selected model
         or thinking level is no longer offered, including openai while no endpoint
-        is saved. The optional openai_endpoint section is administrator only: 403
-        for any other user whose body contains it (also when null), while a body without
-        it saves their workflow settings and leaves the endpoint unchanged. openai_endpoint.base_url
+        is saved. 422 when a compaction_tokens of a workflow type that is not claude
+        exceeds the context window its provider reports for the selected model. The
+        optional agent section replaces the agent settings; without it they stay unchanged.
+        The optional openai_endpoint section is administrator only: 403 for any other
+        user whose body contains it (also when null), while a body without it saves
+        their workflow settings and leaves the endpoint unchanged. openai_endpoint.base_url
         must be an http or https URL of at most 2048 characters and display_name at
         most 100 characters after trimming (422 otherwise). Saving the endpoint with
         a changed base URL or API key first sends GET {base URL}/models with the new
@@ -4042,6 +4049,8 @@ paths:
       - FR-178
       - FR-180
       - FR-182
+      - FR-183
+      - FR-184
       - NFR-8
       - TR-7
   /workflows:
@@ -5922,7 +5931,8 @@ components:
       - questions_open
     ModelSettings:
       type: object
-      description: The adapter, model and thinking level of one LLM workflow type.
+      description: The adapter, model, thinking level and compaction threshold of
+        one LLM workflow type.
       properties:
         adapter:
           type: string
@@ -5936,6 +5946,14 @@ components:
         thinking_level:
           type: string
           description: 1 to 100 characters; one the model offers.
+        compaction_tokens:
+          type: integer
+          description: 'Tokens in use at which the coding agents of Pi and the openai
+            adapter compact their history into a checkpoint: 0 never compacts, otherwise
+            at least 4000 and, when the provider reports the model''s context window,
+            at most that window (422 otherwise). Defaults to 48000 when omitted; always
+            present in responses. Not checked or used for claude, which compacts its
+            own context.'
       required:
       - adapter
       - model
@@ -5953,6 +5971,17 @@ components:
             routing; 422 otherwise.'
       required:
       - workflows
+    AgentSettings:
+      type: object
+      description: The settings shared by the agents of every workflow type.
+      properties:
+        contract_embed_chars:
+          type: integer
+          description: 1000 to 10000000 (422 otherwise); default 32000. Contracts
+            whose embedded form is longer reach coding agents as an index plus read-only
+            files instead of whole.
+      required:
+      - contract_embed_chars
     SettingsView:
       type: object
       description: The stored settings with the labels and the selectable models.
@@ -5962,22 +5991,28 @@ components:
           description: ModelSettings by workflow type, including requirements_review.
             A workflow type with no saved adapter defaults to pi while no OpenAI endpoint
             is saved.
+        agent:
+          $ref: '#/components/schemas/AgentSettings'
+          description: The saved agent settings, or their defaults while none are
+            saved.
         workflow_labels:
           type: object
           description: 'Display label by workflow type, such as requirements_review:
             Requirements review.'
         providers:
           type: object
-          description: 'By adapter: label, models (id, label, thinking_levels), error
-            and hint. The openai adapter is listed only while an OpenAI endpoint base
-            URL is saved, with the endpoint''s display name as its label when one
-            is set.'
+          description: 'By adapter: label, models (id, label, thinking_levels and
+            context_window: the context window in tokens, null when the provider does
+            not report it), error and hint. The openai adapter is listed only while
+            an OpenAI endpoint base URL is saved, with the endpoint''s display name
+            as its label when one is set.'
         openai_endpoint:
           $ref: '#/components/schemas/OpenAIEndpointView'
           description: 'The OpenAI endpoint: base URL, display name and api_key_set
             for the administrator; only the display name for any other user.'
       required:
       - workflows
+      - agent
       - workflow_labels
       - providers
       - openai_endpoint
@@ -6030,7 +6065,8 @@ components:
     SettingsUpdate:
       type: object
       description: 'The body of PUT /settings: the model settings of every LLM workflow
-        type and, optionally, the OpenAI endpoint. Everything is saved in one transaction.'
+        type and, optionally, the agent settings and the OpenAI endpoint. Everything
+        is saved in one transaction.'
       properties:
         workflows:
           type: object
@@ -6044,6 +6080,10 @@ components:
             saves it; null removes it (base URL, API key and display name), which
             answers 409 naming the workflow types whose saved adapter is openai and
             clears nothing, and is a successful no-op when no endpoint is saved.
+        agent:
+          $ref: '#/components/schemas/AgentSettings'
+          description: Absent leaves the saved agent settings unchanged; an object
+            replaces them.
       required:
       - workflows
     OpenAIEndpointRemovalConflict:

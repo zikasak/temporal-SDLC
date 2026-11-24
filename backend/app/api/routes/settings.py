@@ -11,7 +11,7 @@ from app.auth import storage as auth_storage
 from app.settings import endpoint as endpoints
 from app.settings import storage
 from app.settings.endpoint import EndpointError, OpenAIEndpoint, OpenAIEndpointInput
-from app.settings.models import WORKFLOW_LABELS, Adapter, WorkflowSettings
+from app.settings.models import WORKFLOW_LABELS, Adapter, AgentSettings, WorkflowSettings
 from app.settings.providers import ProviderOptions, get_provider_options
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,8 @@ class SettingsUpdate(WorkflowSettings):
     model_config = ConfigDict(extra='forbid')
 
     openai_endpoint: OpenAIEndpointInput | None = None
+    # Absent leaves the saved agent settings unchanged.
+    agent: AgentSettings | None = None
 
 
 class _Conflict(Exception):
@@ -44,9 +46,11 @@ async def _is_admin(user: dict) -> bool:
     return user['id'] == await auth_storage.first_user_id()
 
 
-def _view(settings: WorkflowSettings, providers: dict[str, ProviderOptions],
+def _view(settings: WorkflowSettings, agent: AgentSettings,
+          providers: dict[str, ProviderOptions],
           stored: endpoints.StoredEndpoint | None, admin: bool) -> dict[str, Any]:
-    return {**settings.model_dump(), 'workflow_labels': WORKFLOW_LABELS,
+    return {**settings.model_dump(), 'agent': agent.model_dump(),
+            'workflow_labels': WORKFLOW_LABELS,
             'providers': {adapter: options.model_dump() for adapter, options in providers.items()},
             'openai_endpoint': endpoints.view(stored, admin=admin)}
 
@@ -81,8 +85,9 @@ async def read_settings(user: dict = Depends(require_user)):
         admin = await _is_admin(user)
         stored = await endpoints.get_stored_endpoint()
         settings = await storage.get_settings()
+        agent = await storage.get_agent_settings()
         _, providers = await _stored_providers(stored)
-        return _view(settings, providers, stored, admin)
+        return _view(settings, agent, providers, stored, admin)
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -178,16 +183,23 @@ async def update_settings(body: Any = Body(...), user: dict = Depends(require_us
                 raise HTTPException(status_code=422, detail=(
                     f'{WORKFLOW_LABELS[workflow]}: the selected model and thinking level '
                     'are no longer available. Refresh provider options and choose again.'))
+            # Claude compacts its own context; the others must compact within the window.
+            if (item.adapter != 'claude' and model.context_window
+                    and item.compaction_tokens > model.context_window):
+                raise HTTPException(status_code=422, detail=(
+                    f'{WORKFLOW_LABELS[workflow]}: compaction must start within the '
+                    f'model\'s context window of {model.context_window} tokens.'))
+        agent = update.agent or await storage.get_agent_settings()
         if changes_endpoint:
-            await storage.save_settings(settings, endpoint, encrypted)
+            await storage.save_settings(settings, endpoint, encrypted, update.agent)
             stored = await endpoints.get_stored_endpoint()
             if update.openai_endpoint is None:
                 logger.info('Removed the OpenAI endpoint')
             else:
                 logger.info('Saved the OpenAI endpoint')
         else:
-            await storage.save_settings(settings)
-        return _view(settings, providers, stored, admin)
+            await storage.save_settings(settings, agent=update.agent)
+        return _view(settings, agent, providers, stored, admin)
     except _Conflict as exc:
         return JSONResponse(status_code=409, content=exc.body)
     except Exception as exc:
