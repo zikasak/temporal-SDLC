@@ -53,7 +53,7 @@ async def architecture_turn(state: ArchitectureState) -> dict[str, Any]:
             reply = await interview(
                 graph, turn_messages(state, may_skip,
                                      repository_tools.GUIDANCE if repository else ""),
-                langchain_config(recursion_limit=40, run_name='draft-architecture-with-tools'),
+                langchain_config(recursion_limit=120, run_name='draft-architecture-with-tools'),
                 lambda: bool(asked.questions) or bool(ctx.skip_reason))
     except GraphRecursionError:
         activity.logger.warning("The architecture turn hit the recursion limit")

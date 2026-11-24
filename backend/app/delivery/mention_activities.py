@@ -85,7 +85,7 @@ async def classify(session_id: str, body: str) -> str:
             result = await graph.ainvoke(
                 {'messages': [HumanMessage(content=(
                     f'{CLASSIFY_PROMPT}\n\nThe comment, in full:\n{body}'))]},
-                config=langchain_config(recursion_limit=4, run_name='classify-mention'),
+                config=langchain_config(recursion_limit=10, run_name='classify-mention'),
             )
     except ValueError as exc:
         raise ApplicationError(str(exc), non_retryable=True) from exc
@@ -153,7 +153,7 @@ async def _answer(session_id: str, body: str, context: dict[str, Any],
                            else 'The code of the last pushed commit is not available.')
                         + f'\n\nThe comment, in full:\n{body}')),
                 ]},
-                config=langchain_config(recursion_limit=30, run_name='answer-mention'),
+                config=langchain_config(recursion_limit=100, run_name='answer-mention'),
             )
     except ValueError as exc:
         raise ApplicationError(str(exc), non_retryable=True) from exc

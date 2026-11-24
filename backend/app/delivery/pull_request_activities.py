@@ -98,7 +98,7 @@ async def write_pull_request_text(session_id: str, publication: dict[str, Any],
         async with native_session(model):
             result = await graph.ainvoke(
                 {'messages': [HumanMessage(content='\n\n'.join(part for part in parts if part))]},
-                config=langchain_config(recursion_limit=4, run_name='write-pull-request-text'),
+                config=langchain_config(recursion_limit=10, run_name='write-pull-request-text'),
             )
     except ValueError as exc:
         # The provider's own message may carry credentials; it is only logged.

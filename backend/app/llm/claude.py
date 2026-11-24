@@ -94,7 +94,7 @@ class ChatClaude(Runnable):
         return asyncio.run(self.ainvoke(input, config, **kwargs))
 
     async def ainvoke(self, input, config=None, *, tools=(), until=None,
-                      max_turns=20, **kwargs) -> AIMessage:
+                      max_turns=100, **kwargs) -> AIMessage:
         messages = [HumanMessage(input)] if isinstance(input, str) else list(input)
         if not any(not isinstance(message, SystemMessage) for message in messages):
             raise ValueError('Claude needs at least one non-system message')
@@ -374,7 +374,7 @@ class ClaudeGraph:
         try:
             reply = await self.model.ainvoke(
                 state['messages'], tools=self.tools, until=self.until,
-                max_turns=max(1, (config or {}).get('recursion_limit', 20)),
+                max_turns=max(1, (config or {}).get('recursion_limit', 100)),
             )
         except ClaudeTurnLimit as exc:
             from langgraph.errors import GraphRecursionError

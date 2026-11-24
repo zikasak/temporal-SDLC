@@ -43,7 +43,7 @@ class AgentProfile:
     validate_completion: Callable[[Path], None]
     completion_message: str
     exhaustion_message: str
-    default_max_turns: int = 80
+    default_max_turns: int = 200
     # Read-only contract files supplied instead of embedding large contracts in full.
     contracts: Path | None = None
     # Directory names holding the language's build output and installed dependencies.

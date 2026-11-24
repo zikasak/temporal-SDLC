@@ -61,7 +61,7 @@ async def name_task_flow(task: str, requirements: list[dict[str, Any]]) -> str:
         async with native_session(model):
             result = await graph.ainvoke(
                 {"messages": [HumanMessage(content=f"{PROMPT}\n\n{source}")]},
-                config=langchain_config(recursion_limit=4, run_name="name-task-flow"),
+                config=langchain_config(recursion_limit=10, run_name="name-task-flow"),
             )
         return clean_name(final_reply(result["messages"]))
     except ValueError as exc:

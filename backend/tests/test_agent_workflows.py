@@ -99,7 +99,7 @@ async def test_agent_pauses_for_answers_and_resumes_where_it_stopped(tmp_path, p
     system, inputs, call, answered, written = model.requests[0]
     # The resumed run is told the turns left of the budget, not the whole budget again.
     assert system.content == (profile.prompt + runtime.ASK_GUIDANCE
-                              + runtime.TURN_BUDGET.format(turns=79))
+                              + runtime.TURN_BUDGET.format(turns=profile.default_max_turns - 1))
     # The results follow the order of the calls.
     assert [item['id'] for item in call.tool_calls] == ['ask', 'orders']
     assert written.tool_call_id == 'orders'
@@ -273,7 +273,7 @@ async def test_stale_history_becomes_a_checkpoint_within_the_context_budget(
             (later[-1], 'Orders.java, Stock.java, Payments.java', 'Dockerfile')]:
         system, inputs, checkpoint, *recent = request
         assert isinstance(system, SystemMessage) and system.content == (
-            profile.prompt + runtime.ASK_GUIDANCE + runtime.TURN_BUDGET.format(turns=80))
+            profile.prompt + runtime.ASK_GUIDANCE + runtime.TURN_BUDGET.format(turns=profile.default_max_turns))
         assert isinstance(inputs, HumanMessage) and inputs.content == 'requirements'
         assert isinstance(checkpoint, HumanMessage)
         assert f'Files written or edited so far: {files}\n' in checkpoint.content

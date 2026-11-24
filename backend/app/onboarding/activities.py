@@ -123,7 +123,7 @@ async def onboarding_turn(state: OnboardingState) -> dict[str, Any]:
         async with native_session(model, _conversation("onboarding")):
             reply = await interview(
                 graph, turn_messages(state, repository_tools.GUIDANCE),
-                langchain_config(recursion_limit=80 if not state.drafted else 40,
+                langchain_config(recursion_limit=200 if not state.drafted else 120,
                                  run_name='onboarding-with-tools'),
                 lambda: bool(asked.questions))
     except GraphRecursionError:
@@ -188,7 +188,7 @@ async def revise_onboarding_architecture(
             result = await graph.ainvoke(
                 {"messages": [SystemMessage(content=guidance),
                               HumanMessage(content=f"The comment, in full:\n{instructions}")]},
-                config=langchain_config(recursion_limit=60,
+                config=langchain_config(recursion_limit=150,
                                         run_name='revise-onboarding-architecture'))
         summary = final_reply(result["messages"])
     except GraphRecursionError:
@@ -236,7 +236,7 @@ async def _architecture_turn(state: OnboardingState, root: Path,
         async with native_session(model, _conversation("onboarding-architecture")):
             reply = await interview(
                 graph, turn_messages(state, repository_tools.GUIDANCE, contract=contract),
-                langchain_config(recursion_limit=60 if not state.drafted else 40,
+                langchain_config(recursion_limit=150 if not state.drafted else 120,
                                  run_name='onboarding-architecture-with-tools'),
                 lambda: bool(asked.questions))
     except GraphRecursionError:

@@ -188,7 +188,7 @@ async def review_requirements(round_input: ReviewRoundInput) -> ReviewRoundResul
             async with native_session(model):
                 result = await graph.ainvoke(
                     {"messages": [HumanMessage(content=prompt)]},
-                    config=langchain_config(recursion_limit=4,
+                    config=langchain_config(recursion_limit=10,
                                             run_name="review-requirements"),
                 )
         except Exception as exc:  # noqa: BLE001 - retried by Temporal

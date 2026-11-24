@@ -96,7 +96,7 @@ async def test_agent_stopped_by_limits_saves_where_it_was_and_goes_on_there(
         await runtime.run_agent(profile)
     assert stopped.value.code == limits.PROVIDER_LIMIT_EXIT
     state = json.loads((tmp_path / runtime.STATE_FILENAME).read_text())
-    assert state['pending'] is None and state['turns'] == 79
+    assert state['pending'] is None and state['turns'] == profile.default_max_turns - 1
     assert json.loads((tmp_path / limits.LIMIT_FILENAME).read_text()) == {
         'retry_after': 7200.0, 'message': 'Rate limit reached, try again in 2h'}
     # A new container goes on from the saved history, without answers.
