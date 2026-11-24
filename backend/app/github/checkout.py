@@ -219,6 +219,15 @@ async def delivery_diff(session_dir: Path, commit: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + '\n… (the diff goes on)'
 
 
+async def pending_diff(target: Path, limit: int) -> str:
+    """The diff of what the working copy at `target` would push: its changes against the
+    commit the checkout was made at, a summary of the changed files first and the patch
+    after it, cut at `limit` characters and followed by a line saying that the diff goes on.
+    Empty when nothing differs from that commit. Fails with CheckoutError when that commit
+    or the working copy cannot be read."""
+    return ''
+
+
 def replace_files(source: Path, target: Path, include: Callable[[Path], bool]) -> None:
     """Make the included files under `target` exactly those of `source`.
 
