@@ -24,6 +24,7 @@ from app.agent_workflows.host import (
     ANSWERS_KEY, RESUME_KEY, limited_result, copy_regular_files, paused_result, session_language, write_language,
 )
 from app.config import GENERATED_CODE_DIR
+from app.delivery.workspace import SessionWorkspace
 from app.github.checkout import (
     CHECKOUT_DIR, COMPONENT_SNAPSHOT, COMPONENT_TESTS_DIR, SNAPSHOT_DIR,
 )
@@ -39,7 +40,6 @@ from app.review.models import (
     BASELINE_KEY, SCOPE_KEY, SCOPE_TARGETS, SUMMARY_CHARS, REVIEW_INSTRUCTIONS_CHARS, ReviewFinding,
     same_finding,
 )
-from app.verification.models import COMPONENT_TESTS_ARTIFACT
 from app.temporal.tracing import activity_metadata
 from app.tracing import trace_operation
 
@@ -176,7 +176,7 @@ def _routed(language: Language, session_dir: Path) -> list[Any]:
 def _contract_changes(language: Language, session_dir: Path, review: Path) -> dict[str, str]:
     """The delivery's contract tests, against the repository's as recorded, or the
     language's template when it had none."""
-    suite = session_dir / 'tests/suite'
+    suite = SessionWorkspace(session_dir).suite
     if not suite.is_dir():
         raise _unavailable()
     snapshot = session_dir / SNAPSHOT_DIR / 'suite'
@@ -188,7 +188,7 @@ def _contract_changes(language: Language, session_dir: Path, review: Path) -> di
 def _component_changes(language: Language, session_dir: Path, review: Path,
                        routed: list[Any]) -> dict[str, str]:
     """The delivery's component tests, against the repository's as recorded."""
-    tests = session_dir / COMPONENT_TESTS_ARTIFACT / 'suite'
+    tests = SessionWorkspace(session_dir).component_tests
     if not tests.is_dir():
         raise _unavailable()
     component_tests = component_suite(language, routed)
@@ -222,7 +222,7 @@ def _delivery_changes(language: Language, session_dir: Path, context: dict[str, 
     may change; it has contract tests of its own only when `contract_tests` says so."""
     component = bool(context.get('component_routes'))
     contract = not component or bool(context.get('contract_tests'))
-    service = session_dir / 'implementation/service'
+    service = SessionWorkspace(session_dir).service
     if not service.is_dir():
         raise _unavailable()
     service_before = record_baseline(language, session_dir)

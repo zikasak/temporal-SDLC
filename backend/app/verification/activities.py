@@ -22,6 +22,7 @@ from temporalio.exceptions import ApplicationError
 
 from app import docker_agents
 from app.asyncio_utils import async_context, run_sync
+from app.delivery.workspace import SessionWorkspace
 from app.agent_workflows.host import build_image, publish_manifest, session_language
 from app.github import work_refs
 from app.github.checkout import (
@@ -539,8 +540,8 @@ async def build_component_runner(session_id: str, language: str) -> dict[str, st
     stack = session_language(language)
     session_dir = GENERATED_CODE_DIR / session_id
     parts, _ = await run_sync(delivery_suite, stack, session_dir)
-    service = session_dir / 'implementation' / 'service'
-    tests = session_dir / COMPONENT_TESTS_ARTIFACT / 'suite'
+    workspace = SessionWorkspace(session_dir)
+    service, tests = workspace.service, workspace.component_tests
     for path, what in ((service, 'changed code'), (tests, 'component tests'),
                        *((part.routed_contract(session_dir), 'component contract')
                          for part in parts)):

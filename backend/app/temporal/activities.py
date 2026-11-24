@@ -38,6 +38,7 @@ from app.documents import (
     read_document_text,
 )
 from app.delivery.pull_request import PullRequestText
+from app.delivery.workspace import SessionWorkspace
 from app.delivery.pull_request import describe as pull_request_description
 from app.github import checkout as repository_checkout
 from app.github import client as github_client
@@ -62,7 +63,6 @@ from app.requirements.prompt import document_messages, interview_messages
 from app.review.models import COMMIT_FINDINGS, ReviewFinding, commit_findings
 from app.languages.composite import suite_members
 from app.routing.parts import component_suite, read_routed_parts
-from app.verification.models import COMPONENT_TESTS_ARTIFACT
 from app.tools import ToolContext, build_tools
 from app.tools import api_design as api_design_tools
 from app.tools import questions as question_tools
@@ -218,12 +218,18 @@ async def _checkout(session_id: str, repository: RepositorySelection,
     return result
 
 
-async def _publish(session_id: str, repository: RepositorySelection, subject: str,
+def _workspace(session_id: str) -> SessionWorkspace:
+    """The session's workspace on this worker."""
+    return SessionWorkspace.of(GENERATED_CODE_DIR, session_id)
+
+
+async def _publish(workspace: SessionWorkspace, session_id: str,
+                   repository: RepositorySelection, subject: str,
                    update: Callable[[], None], verified: bool = True,
                    note: str = UNVERIFIED_NOTE, branch: str | None = None,
                    details: str = "") -> RepositoryPublication:
-    """Apply `update` to the session's checkout, commit it to a new branch and push it."""
-    target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
+    """Apply `update` to the workspace's checkout, commit it to a new branch and push it."""
+    target = workspace.checkout
     token, connection = await _github_token()
     bot = f"{connection['app_slug']}[bot]"
     try:
@@ -253,6 +259,16 @@ async def publish_repository(
     kind: str | None = None, findings: list[ReviewFinding] | None = None,
     components: dict[str, Any] | None = None,
 ) -> RepositoryPublication:
+    """Activity: `publish_repository_from` the session's workspace on this worker."""
+    return await publish_repository_from(_workspace(session_id), session_id, repository,
+                                         contract, kind, findings, components)
+
+
+async def publish_repository_from(
+    workspace: SessionWorkspace, session_id: str, repository: RepositorySelection,
+    contract: RepositoryContract, kind: str | None = None,
+    findings: list[ReviewFinding] | None = None, components: dict[str, Any] | None = None,
+) -> RepositoryPublication:
     """Commit the verified service, its contract tests and the contract they were built
     from to a new branch and push it. With open review `findings` the tests pass but the
     code review was not satisfied: the commit is marked as unverified and lists them.
@@ -263,13 +279,14 @@ async def publish_repository(
     read from the routing, replace `P/component-tests/` and `contracts/parts/P/components/`.
     Its contract tests replace the
     repository's only when an author of the change wrote them (`contract_tests`); otherwise
-    the repository's suite, which the change was verified to keep passing, stays."""
+    the repository's suite, which the change was verified to keep passing, stays.
+
+    Reads the workspace's checkout, service, contract tests and, with `components`, its
+    component tests; the contract written is `contract`."""
     registered = session_language(contract['language'])
-    target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
-    service = target.parent / 'implementation/service'
+    target, service, suite = workspace.checkout, workspace.service, workspace.suite
     # The unit tests too, when the service's author maintained them.
     service_files = await run_sync(published_files, registered, service)
-    suite = target.parent / 'tests/suite'
     contract_tests = components is None or bool(components.get('contract_tests'))
     sources = [target, service, *([suite] if contract_tests else [])]
     # Each part with routes: its component tests, where the suite has them and where the
@@ -277,9 +294,9 @@ async def publish_repository(
     # publishes them.
     pushed: list[tuple[Path, Path, frozenset[Path], Path, Path]] = []
     if components is not None:
-        tests = target.parent / COMPONENT_TESTS_ARTIFACT / 'suite'
+        tests = workspace.component_tests
         try:
-            parts = await run_sync(read_routed_parts, registered, target.parent)
+            parts = await run_sync(read_routed_parts, registered, workspace.root)
             components_suite = component_suite(registered, parts)
         except ValueError as exc:
             raise ApplicationError(f"The component tests cannot be pushed: {exc}",
@@ -289,7 +306,7 @@ async def publish_repository(
             part = by_name[member.name]
             pushed.append((tests / member.directory, target / part.tests_dir(),
                            frozenset(Path(item) for item in member.suite.published),
-                           part.routed_contract(target.parent), target / part.published_dir()))
+                           part.routed_contract(workspace.root), target / part.published_dir()))
         sources += [tests, *(stubs for *_, stubs, _ in pushed)]
     if not await run_sync(all, (item.is_dir() for item in sources)):
         raise ApplicationError("The verified sources or the repository checkout are unavailable.",
@@ -314,10 +331,11 @@ async def publish_repository(
     subject = COMMIT_SUBJECTS.get(kind or '', COMMIT_SUBJECT)
     details = COMPONENTS_NOTE if components is not None else ""
     if not findings:
-        result = await _publish(session_id, repository, subject, update, details=details)
+        result = await _publish(workspace, session_id, repository, subject, update,
+                                details=details)
         return {**result, 'findings': [], 'findings_count': 0}
     result = await _publish(
-        session_id, repository, f"{subject} (unverified)", update, verified=False,
+        workspace, session_id, repository, f"{subject} (unverified)", update, verified=False,
         note=f"{FINDINGS_NOTE}\n\n{commit_findings(findings)}", details=details)
     return {**result, 'findings': cast(list[dict[str, Any]], findings[:COMMIT_FINDINGS]),
             'findings_count': len(findings)}
@@ -329,14 +347,25 @@ async def publish_onboarding(
     session_id: str, repository: RepositorySelection, contract: RepositoryContract,
     findings: list[ReviewFinding] | None = None, code_changed: bool = False,
 ) -> RepositoryPublication:
+    """Activity: `publish_onboarding_from` the session's workspace on this worker."""
+    return await publish_onboarding_from(_workspace(session_id), session_id, repository,
+                                         contract, findings, code_changed)
+
+
+async def publish_onboarding_from(
+    workspace: SessionWorkspace, session_id: str, repository: RepositorySelection,
+    contract: RepositoryContract, findings: list[ReviewFinding] | None = None,
+    code_changed: bool = False,
+) -> RepositoryPublication:
     """Commit an onboarding's verified result to its own new branch and push it: the
     contract drafted from the existing code, the contract tests that replace the
     repository's, the root Dockerfile and, where the user confirmed bugs, the existing
-    code as it was fixed. Open review `findings` mark the commit as unverified."""
+    code as it was fixed. Open review `findings` mark the commit as unverified.
+
+    Reads the workspace's checkout, service and contract tests; the contract written is
+    `contract`."""
     service_files = partial(is_service_file, session_language(contract['language']))
-    target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
-    service = target.parent / 'implementation/service'
-    suite = target.parent / 'tests/suite'
+    target, service, suite = workspace.checkout, workspace.service, workspace.suite
     if not await run_sync(all, (item.is_dir() for item in (target, service, suite))):
         raise ApplicationError("The verified sources or the repository checkout are unavailable.",
                                non_retryable=True)
@@ -350,11 +379,11 @@ async def publish_onboarding(
     branch = onboarding_branch(repository['branch'], session_id)
     details = CODE_CHANGED_NOTE if code_changed else ""
     if not findings:
-        result = await _publish(session_id, repository, ONBOARDING_SUBJECT, update,
-                                branch=branch, details=details)
+        result = await _publish(workspace, session_id, repository, ONBOARDING_SUBJECT,
+                                update, branch=branch, details=details)
         return {**result, 'findings': [], 'findings_count': 0}
     result = await _publish(
-        session_id, repository, f"{ONBOARDING_SUBJECT} (unverified)", update, verified=False,
+        workspace, session_id, repository, f"{ONBOARDING_SUBJECT} (unverified)", update, verified=False,
         note=f"{FINDINGS_NOTE}\n\n{commit_findings(findings)}", branch=branch, details=details)
     return {**result, 'findings': cast(list[dict[str, Any]], findings[:COMMIT_FINDINGS]),
             'findings_count': len(findings)}
@@ -369,14 +398,15 @@ async def publish_onboarding_architecture(
 ) -> RepositoryPublication:
     """Commit the architecture an onboarding drafted to its own new branch and push it:
     contracts/architecture.md and contracts/architecture.json, and nothing else."""
-    target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
+    workspace = _workspace(session_id)
+    target = workspace.checkout
     if not await run_sync(target.is_dir):
         raise ApplicationError("The repository checkout is unavailable.", non_retryable=True)
     if not architecture:
         raise ApplicationError("The onboarding has no architecture to push.",
                                non_retryable=True)
     result = await _publish(
-        session_id, repository, ARCHITECTURE_SUBJECT,
+        workspace, session_id, repository, ARCHITECTURE_SUBJECT,
         lambda: write_architecture(target, architecture, structure),
         branch=onboarding_branch(repository['branch'], session_id))
     return {**result, 'findings': [], 'findings_count': 0}
@@ -387,17 +417,27 @@ async def publish_onboarding_architecture(
 async def publish_documentation(
     session_id: str, repository: RepositorySelection, language: str, verified: bool,
 ) -> RepositoryPublication:
+    """Activity: `publish_documentation_from` the session's workspace on this worker."""
+    return await publish_documentation_from(_workspace(session_id), session_id, repository,
+                                            language, verified)
+
+
+async def publish_documentation_from(
+    workspace: SessionWorkspace, session_id: str, repository: RepositorySelection,
+    language: str, verified: bool,
+) -> RepositoryPublication:
     """Commit the documentation its author changed to a new branch and push it. Nothing
     else of the repository changes: not the service, its tests or its contract. Without
-    `verified` the commit and the publication say that nothing checked the change."""
+    `verified` the commit and the publication say that nothing checked the change.
+
+    Reads the workspace's checkout and the documentation its author wrote."""
     documentation_files = partial(is_documentation_file, session_language(language))
-    target = repository_checkout.checkout_path(GENERATED_CODE_DIR, session_id)
-    written = target.parent / 'documentation/files'
+    target, written = workspace.checkout, workspace.documentation
     if not await run_sync(all, (item.is_dir() for item in (target, written))):
         raise ApplicationError("The documentation or the repository checkout is unavailable.",
                                non_retryable=True)
     return await _publish(
-        session_id, repository,
+        workspace, session_id, repository,
         DOCUMENTATION_SUBJECT if verified else f"{DOCUMENTATION_SUBJECT} (unverified)",
         lambda: repository_checkout.replace_files(written, target, documentation_files),
         verified)

@@ -20,6 +20,7 @@ from app.agent_workflows.host import (
 )
 from app.agent_workflows.parts import repository_parts
 from app.config import GENERATED_CODE_DIR
+from app.delivery.workspace import SessionWorkspace
 from app.docker_agents import default_agent_image
 from app.github.checkout import (
     BROWSER_TESTS_DIR, CHECKOUT_DIR, COMPONENT_TESTS_DIR, CONTRACTS_DIR, TESTS_DIR,
@@ -119,7 +120,7 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
     # and a change whose seam was added first from the code with that seam; a correction
     # of the seam itself, after its review, from the seam as it was added.
     source = (session_dir / SEAM_DIR / 'service' if repair and context.get('seam')
-              else session_dir / 'implementation/service' if repair
+              else SessionWorkspace(session_dir).service if repair
               else session_dir / SEAM_DIR / 'service' if change and context.get('seam_prepared')
               else checkout if change else session_dir / 'server')
     # A change has a checkout: one without was refused above.
@@ -350,11 +351,11 @@ async def implement_service(session_id: str, context: dict[str, Any]) -> dict[st
         return await prepare_seam(language, session_id, context)
     if not context.get('onboarding'):
         return await run_stage(stage(language), session_id, context, GENERATED_CODE_DIR)
-    session_dir = GENERATED_CODE_DIR / session_id
-    checkout = session_dir / CHECKOUT_DIR
+    workspace = SessionWorkspace(GENERATED_CODE_DIR / session_id)
+    checkout = workspace.checkout
     spec = stage(language)
     if not code_change_allowed(context):
-        source = (session_dir / 'implementation/service' if context.get('repair')
+        source = (workspace.service if context.get('repair')
                   else checkout)
         spec = dataclasses.replace(
             spec, sanitize_output=lambda output, clean: keep_existing_code(

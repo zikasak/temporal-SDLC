@@ -32,6 +32,7 @@ from app import docker_agents
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.host import session_language
 from app.config import GENERATED_CODE_DIR
+from app.delivery.workspace import SessionWorkspace
 from app.github.checkout import CHECKOUT_DIR, COMPONENT_TESTS_DIR, TESTS_DIR, replace_files
 from app.implementation.activities import published_files
 from app.llm.limits import PROVIDER_LIMIT_ERROR, is_limit_error, retry_after
@@ -353,13 +354,14 @@ def assemble_repository(language: Any, session_dir: Path, target: Path) -> None:
     """The repository as the delivery would push it, without Git metadata: the checkout,
     with the implementation author's published tree and the contract tests' author's suite
     put in place as publication puts them."""
-    checkout = session_dir / CHECKOUT_DIR
+    workspace = SessionWorkspace(session_dir)
+    checkout = workspace.checkout
     shutil.copytree(checkout, target, symlinks=False,
                     ignore=lambda directory, names: ['.git'] if Path(directory) == checkout else [])
-    service = session_dir / 'implementation/service'
+    service = workspace.service
     if service.is_dir():
         replace_files(service, target, published_files(language, service))
-    suite = session_dir / 'tests/suite'
+    suite = workspace.suite
     if suite.is_dir():
         replace_files(suite, target / TESTS_DIR, lambda relative: True)
 
