@@ -650,6 +650,17 @@ flowchart LR
    placeholder docstring that the agent replaces with the behaviour; the host rejects a
    stub that still holds it. The tool only appends to a stub and refuses to add a member
    to a published class. Symbols a seam lists in `added` are hand-written.
+   Since the test author can fake only what the stubs declare, `make_stub.py` also follows
+   the code of each documented function it stubs (and `--check` of every one the
+   published stubs do not hold), through the helpers of its own module and the methods of
+   its class it calls, and names the collaborators it reaches that no stub declares:
+   functions of the repository, classes with behaviour that it builds, and constants
+   computed at import from the environment or the repository's code (such as a
+   `GENERATED_CODE_DIR`). A name the module imports counts as declared only in that
+   module's stub, where a test replaces it; `make_stub.py <module> <name>` stubs it there
+   as a re-export. `--check` fails until each one is stubbed or named in the docstring
+   of the symbol that reaches it as left to run, so the author no longer finds out from
+   a test it cannot write.
    In Java (`app/languages/java/components.py`) a stub is the source of one stubbed type at
    its path (`com/example/flows/FlowWorkflow.java`), whose fully qualified name is the
    seam's `module`, and its symbols are named from the type's simple name

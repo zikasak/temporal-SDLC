@@ -377,6 +377,63 @@ def test_a_published_stub_is_only_extended(tmp_path):
         'app.rooms', _described(text))
 
 
+def test_collaborators_a_stubbed_function_reaches_must_be_stubbed_or_named(tmp_path):
+    _write(tmp_path / 'repository', {
+        'app/__init__.py': '',
+        'app/config.py': ('import os\nfrom pathlib import Path\n\n'
+                          'DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))\nLIMIT = 10\n'),
+        'app/checkout.py': ('class CheckoutError(Exception):\n    pass\n\n\n'
+                            'async def diff(path, limit: int) -> str:\n    return ""\n'),
+        'app/text.py': 'def parse(reply: str) -> str:\n    return reply\n',
+        'app/model.py': 'async def get_model(role: str) -> object:\n    return object()\n',
+        'app/describe.py': (
+            'import logging\n'
+            'from app import checkout as repository_checkout\n'
+            'from app.config import DATA_DIR, LIMIT\n'
+            'from app.model import get_model\n'
+            'from app.text import parse\n\n'
+            'logger = logging.getLogger(__name__)\n\n\n'
+            'def _bounded(text: str) -> str:\n    return text[:LIMIT]\n\n\n'
+            'async def describe(session_id: str) -> str:\n'
+            '    try:\n'
+            '        diff = await repository_checkout.diff(DATA_DIR / session_id, LIMIT)\n'
+            '    except repository_checkout.CheckoutError:\n'
+            '        logger.warning("no diff")\n        raise\n'
+            '    model = await _reply(diff)\n'
+            '    return parse(_bounded(str(model)))\n\n\n'
+            'async def _reply(diff: str) -> object:\n'
+            '    return await get_model("review")\n'),
+    })
+    result = _make_stub(tmp_path, 'app.describe', 'describe')
+    assert result.returncode == 0, result.stderr
+    # Through the helper it calls too; not the logger, the literal limit or the exception.
+    reached = result.stderr.split(' reaches ')[1].split(', which')[0].split(', ')
+    assert sorted(reached) == ['app.checkout.diff', 'app.describe.DATA_DIR',
+                               'app.describe.get_model', 'app.describe.parse']
+    stub = tmp_path / 'components/app/describe.pyi'
+    stub.write_text(_described(stub.read_text()))
+    check = _make_stub(tmp_path, '--check')
+    assert check.returncode == 1 and 'app.describe.DATA_DIR' in check.stderr
+    # Names the module imports are stubbed in it, where a test replaces them.
+    for module, name in [('app.describe', 'DATA_DIR'), ('app.describe', 'get_model'),
+                         ('app.checkout', 'diff')]:
+        assert _make_stub(tmp_path, module, name).returncode == 0
+    text = stub.read_text()
+    assert 'from app.config import DATA_DIR as DATA_DIR' in text
+    assert 'from app.model import get_model as get_model' in text
+    assert 'get_model' in COMPONENT_CONTRACT.read_stub(
+        'app.model', (tmp_path / 'components/app/model.pyi').read_text())
+    for path in (tmp_path / 'components').rglob('*.pyi'):
+        path.write_text(_described(path.read_text()))
+    check = _make_stub(tmp_path, '--check')
+    assert check.returncode == 1 and 'reaches app.describe.parse,' in check.stderr
+    # A helper that only computes is left to run, as the docstring says.
+    stub.write_text(stub.read_text().replace(
+        'Does what the brief says.', 'Does what the brief says; parse runs as it is.', 1))
+    check = _make_stub(tmp_path, '--check')
+    assert check.returncode == 0, check.stderr
+
+
 def test_a_symbol_the_code_lacks_is_left_to_the_agent(tmp_path):
     _write(tmp_path / 'repository', {'app/rooms.py': SOURCE})
     result = _make_stub(tmp_path, 'app.rooms', 'Rooms.reopen')

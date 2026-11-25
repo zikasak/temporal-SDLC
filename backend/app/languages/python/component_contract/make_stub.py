@@ -19,8 +19,15 @@ class of the published stub, which may not change.
 
 checks instead that every statement of the published stubs (repository/contracts/components)
 is still in components/ exactly as published, as the host checks the contract: an import
-line or a docstring of a published statement is part of it. It exits 1 naming each one
-that was changed or removed.
+line or a docstring of a published statement is part of it. It also follows the code of
+each documented function of the stubs that the published stubs do not hold, and names the
+collaborators it reaches that no stub declares: functions of the repository, classes with
+behaviour it builds, and constants computed at import from the environment or the
+repository's code (a name the code imports is declared in the stub of its own module, where
+a test replaces it). A collaborator the function's docstring names is taken as left to
+run as it is. It exits 1 naming each statement that was changed or removed and each
+collaborator left out. Stubbing a symbol reports its collaborators the same way, and a
+symbol the module imports by name is stubbed as its re-export.
 
 Options: --repository (default repository), --components (default components),
 --source-root (default the `source_root` of components/runtime.json, else `.`).
@@ -30,6 +37,7 @@ import ast
 import builtins
 import copy
 import json
+import re
 import sys
 from pathlib import Path
 from typing import TypeGuard, cast, overload
@@ -402,6 +410,290 @@ def _statements(source: str) -> list[str]:
     return [ast.unparse(statement) for statement in ast.parse(source).body]
 
 
+# -- collaborators the stubs leave out ------------------------------------------------------
+
+def _stub_module(components: Path, stub: Path) -> str:
+    parts = list(stub.relative_to(components).with_suffix('').parts)
+    if parts and parts[-1] == '__init__':
+        parts.pop()
+    return '.'.join(parts)
+
+
+def _documented(body: list[ast.stmt], scope: str = '',
+                ) -> list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]]:
+    """The functions and methods of a stub that carry a docstring: the seam's symbols, as
+    make_stub documents only those (a type a signature names comes without one)."""
+    found: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]] = []
+    for statement in body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if ast.get_docstring(statement):
+                found.append((scope + statement.name, statement))
+        elif isinstance(statement, ast.ClassDef):
+            found += _documented(statement.body, f'{scope}{statement.name}.')
+    return found
+
+
+def _qualified(body: list[ast.stmt], scope: str = '') -> set[str]:
+    names: set[str] = set()
+    for statement in body:
+        for name in _bound(statement):
+            names.add(scope + name)
+        if isinstance(statement, ast.ClassDef):
+            names |= _qualified(statement.body, f'{scope}{statement.name}.')
+    return names
+
+
+class Reach:
+    """What the code of a stubbed function reaches outside itself that a test could only
+    fake if a stub declared it: functions and computed constants of the repository's
+    modules, and its classes the code builds. The function's own module's helpers it calls
+    are followed rather than named, as are the methods of its own class it calls on
+    `self`; anything from outside the repository (the standard library, packages) is
+    not a collaborator a stub could declare and is left out."""
+
+    def __init__(self, root: Path, components: Path):
+        self.root, self.components = root, components
+        self.sources: dict[str, Source | None] = {}
+
+    def source(self, module: str) -> Source | None:
+        if module not in self.sources:
+            try:
+                self.sources[module] = Source(self.root, module)
+            except (StubError, SyntaxError, OSError, UnicodeDecodeError):
+                self.sources[module] = None
+        return self.sources[module]
+
+    def declared(self, module: str) -> set[str]:
+        for package in (False, True):
+            path = _stub_path(self.components, module, package)
+            if path.is_file():
+                try:
+                    return _qualified(ast.parse(path.read_text(encoding='utf-8')).body)
+                except SyntaxError:
+                    return set()
+        return set()
+
+    def _definition(self, source: Source, qualified: str,
+                    ) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        name, _, member = qualified.partition('.')
+        found = source.definitions.get(name, [])
+        node = found[-1] if found else None
+        if member:
+            if not isinstance(node, ast.ClassDef):
+                return None
+            node = next((item for item in node.body
+                         if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                         and item.name == member), None)
+        return node if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
+
+    def of(self, module: str, qualified: str) -> list[str]:
+        """The collaborators `module.qualified` reaches that no stub declares, as
+        `module.name`; nothing for a symbol the code does not have yet."""
+        source = self.source(module)
+        if source is None or self._definition(source, qualified) is None:
+            return []
+        found: list[str] = []
+        self._walk(source, qualified, set(), found)
+        return found
+
+    def _walk(self, source: Source, qualified: str, seen: set[str], found: list[str]) -> None:
+        if qualified in seen:
+            return
+        seen.add(qualified)
+        node = self._definition(source, qualified)
+        if node is None:
+            return
+        klass = qualified.rpartition('.')[0]
+        arguments = node.args
+        parameters = [item.arg for item in [*arguments.posonlyargs, *arguments.args,
+                                             *arguments.kwonlyargs,
+                                             *filter(None, [arguments.vararg,
+                                                            arguments.kwarg])]]
+        this = parameters[0] if klass and parameters else None
+        local = set(parameters)
+        skipped: set[int] = set()
+        called: set[int] = set()
+        for statement in node.body:
+            for item in ast.walk(statement):
+                if isinstance(item, ast.Name) and not isinstance(item.ctx, ast.Load):
+                    local.add(item.id)
+                elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                       ast.ClassDef)):
+                    local.add(item.name)
+                elif isinstance(item, (ast.Global, ast.Nonlocal)):
+                    local.difference_update(item.names)
+                elif isinstance(item, ast.ExceptHandler) and item.type is not None:
+                    # An exception it catches is a type, not something it calls.
+                    skipped.update(id(part) for part in ast.walk(item.type))
+                elif isinstance(item, (ast.AnnAssign, ast.arg)) and item.annotation:
+                    skipped.update(id(part) for part in ast.walk(item.annotation))
+                elif isinstance(item, ast.Call):
+                    called.add(id(item.func))
+        declared = self.declared(source.module)
+        walker = self
+
+        class Visitor(ast.NodeVisitor):
+            def visit_Name(self, item: ast.Name) -> None:
+                if id(item) not in skipped and item.id not in local:
+                    walker._name(source, item.id, id(item) in called, declared, seen,
+                                 found)
+
+            def visit_Attribute(self, item: ast.Attribute) -> None:
+                chain: list[str] = []
+                root: ast.expr = item
+                while isinstance(root, ast.Attribute):
+                    chain.insert(0, root.attr)
+                    root = root.value
+                if id(item) in skipped or not isinstance(root, ast.Name):
+                    self.generic_visit(item)
+                elif this is not None and root.id == this:
+                    method = f'{klass}.{chain[0]}'
+                    if method not in declared:
+                        walker._walk(source, method, seen, found)
+                elif root.id in local:
+                    pass
+                elif not walker._attribute(source, root.id, chain, id(item) in called,
+                                           found):
+                    self.visit(root)
+
+        for statement in node.body:
+            Visitor().visit(statement)
+
+    def _add(self, found: list[str], name: str) -> None:
+        if name not in found:
+            found.append(name)
+
+    def _name(self, source: Source, name: str, called: bool, declared: set[str],
+              seen: set[str], found: list[str]) -> None:
+        if name in declared:
+            return
+        definitions = source.definitions.get(name)
+        if definitions:
+            node = definitions[-1]
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and called:
+                # A helper of its own module runs as part of it.
+                self._walk(source, name, seen, found)
+            elif self._collaborator(source, node, called):
+                self._add(found, f'{source.module}.{name}')
+            return
+        if name not in source.imports:
+            return
+        statement, alias = source.imports[name]
+        if not isinstance(statement, ast.ImportFrom):
+            return
+        module = source.absolute(statement)
+        defined = self.source(module)
+        if defined is None:
+            return
+        nodes = defined.definitions.get(alias.name)
+        if nodes and self._collaborator(defined, nodes[-1], called):
+            # The code looks the name up in its own module, where a test replaces it.
+            self._add(found, f'{source.module}.{name}')
+
+    def _attribute(self, source: Source, root: str, chain: list[str], called: bool,
+                   found: list[str]) -> bool:
+        """Name `root.chain…` when `root` is a module of the repository the code imports
+        and the attribute is a collaborator of it; false when `root` is no such module."""
+        if root not in source.imports:
+            return False
+        statement, alias = source.imports[root]
+        if isinstance(statement, ast.ImportFrom):
+            base = [*filter(None, [source.absolute(statement)]), alias.name]
+            rest = chain
+        elif alias.asname:
+            base, rest = alias.name.split('.'), chain
+        else:
+            base, rest = [root], chain
+        for cut in range(len(rest) - 1, -1, -1):
+            module = '.'.join([*base, *rest[:cut]])
+            defined = self.source(module)
+            if defined is None:
+                continue
+            name = rest[cut]
+            if name in self.declared(module):
+                return True
+            nodes = defined.definitions.get(name)
+            if nodes and self._collaborator(defined, nodes[-1],
+                                            called and cut == len(rest) - 1):
+                self._add(found, f'{module}.{name}')
+            return True
+        return False
+
+    def _collaborator(self, source: Source, node: ast.stmt, called: bool) -> bool:
+        """Whether a test would need to fake `node` of `source`: a function, a class with
+        behaviour of its own that the code builds (not a record, a typed dict or an
+        exception), or a constant computed at import from the environment or the
+        repository's code (such as a directory read from a variable)."""
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return True
+        if isinstance(node, ast.ClassDef):
+            return called and any(
+                isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and not item.name.startswith('__') and not _public_property(item)
+                for item in node.body)
+        value = node.value if isinstance(node, (ast.Assign, ast.AnnAssign)) else None
+        for item in ast.walk(value) if value is not None else []:
+            if (isinstance(item, ast.Name) and item.id in ('getenv', 'environ')
+                    or isinstance(item, ast.Attribute) and item.attr in ('getenv', 'environ')):
+                return True
+            if isinstance(item, ast.Call):
+                root = item.func
+                while isinstance(root, ast.Attribute):
+                    root = root.value
+                if isinstance(root, ast.Name) and self._repository_name(source, root.id):
+                    return True
+        return False
+
+    def _repository_name(self, source: Source, name: str) -> bool:
+        if name in source.definitions:
+            return True
+        if name not in source.imports:
+            return False
+        statement, alias = source.imports[name]
+        module = (source.absolute(statement) if isinstance(statement, ast.ImportFrom)
+                  else alias.name)
+        return _module_path(self.root, module) is not None
+
+
+def unstubbed(repository: Path, components: Path, source_root: str,
+              only: set[tuple[str, str]] | None = None) -> list[str]:
+    """For each documented function of the stubs in `components` that the published stubs
+    do not hold (or each of `only`, as (module, qualified name)), the collaborators its
+    code reaches that no stub declares and its docstring does not name."""
+    reach = Reach(repository / source_root, components)
+    problems: list[str] = []
+    for stub in sorted(components.rglob('*.pyi')) if components.is_dir() else []:
+        module = _stub_module(components, stub)
+        try:
+            tree = ast.parse(stub.read_text(encoding='utf-8'))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        published = repository / PUBLISHED / stub.relative_to(components)
+        kept = (_qualified(ast.parse(published.read_text(encoding='utf-8')).body)
+                if published.is_file() else set())
+        for qualified, node in _documented(tree.body):
+            if qualified in kept or only is not None and (module, qualified) not in only:
+                continue
+            docstring = ast.get_docstring(node) or ''
+            missing = [name for name in reach.of(module, qualified)
+                       if not re.search(rf'\b{re.escape(name.rpartition(".")[2])}\b',
+                                        docstring)]
+            if missing:
+                problems.append(f'{module}.{qualified} reaches {", ".join(missing)}, which '
+                                'no stub declares')
+    return problems
+
+
+UNSTUBBED_ADVICE = (
+    'A test can fake only what a stub declares, so the test author declines a criterion '
+    'whose behaviour passes through any of these. Stub each one the behaviour reaches: '
+    'functions with make_stub.py in their own module, and a constant computed at import '
+    '(such as a directory read from the environment) in the stub of the module that '
+    'uses it, so a test can replace it there. One a test can leave to run as it is, such '
+    'as a helper that only computes, is named in the docstring of the symbol that reaches '
+    'it, saying so.')
+
+
 def check_published(repository: Path, components: Path) -> list[str]:
     """What the stubs in `components` changed or removed of the published ones."""
     root = repository / PUBLISHED
@@ -449,6 +741,16 @@ class Run:
                 if not named and name in source.imports:
                     if not stubber.resolve(name):
                         raise StubError(f'{module}.{name} cannot be stubbed')
+                    continue
+                if name in source.imports and not member:
+                    # A collaborator the module imports by name, which a test replaces
+                    # here, where the code looks it up: re-exported, with its signature
+                    # stubbed where it is defined.
+                    if not stubber.resolve(name):
+                        raise StubError(f'{module}.{name} cannot be stubbed')
+                    line = stubber.imports[name]
+                    if line.startswith('from ') and ' as ' not in line:
+                        stubber.imports[name] = f'{line} as {name}'
                     continue
                 raise StubError(f'{module} has no top-level {name}; hand-write a symbol the '
                                 'code does not have yet')
@@ -520,6 +822,10 @@ def make_stub(module: str, symbols: list[str], repository: Path, components: Pat
               f'{", ".join(sorted(run.unresolved))}; the host rejects a type of the code '
               'stubbed as Any, so hand-write those types in the stub of their module',
               file=sys.stderr)
+    problems = unstubbed(repository, components, source_root,
+                         {(module, symbol) for symbol in symbols})
+    if problems:
+        print('\n'.join(problems) + '\n' + UNSTUBBED_ADVICE, file=sys.stderr)
     return stub
 
 
@@ -560,6 +866,13 @@ def main() -> int:
     parser.add_argument('--components', default='components', type=Path)
     parser.add_argument('--source-root')
     arguments = parser.parse_args()
+    source_root = arguments.source_root
+    if source_root is None:
+        try:
+            source_root = json.loads(
+                (arguments.components / 'runtime.json').read_text())['source_root']
+        except (OSError, ValueError, KeyError, TypeError):
+            source_root = '.'
     if arguments.check:
         problems = check_published(arguments.repository, arguments.components)
         for problem in problems:
@@ -569,18 +882,18 @@ def main() -> int:
                   'import as a statement of its own (`from typing import Final`), never by '
                   'editing a published one, and state new behaviour in the docstrings of the '
                   'symbols you add, not in a published docstring.', file=sys.stderr)
+        missing = unstubbed(arguments.repository, arguments.components, source_root)
+        for problem in missing:
+            print(f'make_stub: {problem}', file=sys.stderr)
+        if missing:
+            print(f'make_stub: {UNSTUBBED_ADVICE}', file=sys.stderr)
+        if problems or missing:
             return 1
-        print('The published stubs are kept.')
+        print('The published stubs are kept, and every collaborator the stubbed symbols '
+              'reach is declared or named.')
         return 0
     if not arguments.module or not arguments.symbols:
         parser.error('a module and at least one symbol are required, or --check')
-    source_root = arguments.source_root
-    if source_root is None:
-        try:
-            source_root = json.loads(
-                (arguments.components / 'runtime.json').read_text())['source_root']
-        except (OSError, ValueError, KeyError, TypeError):
-            source_root = '.'
     try:
         stub = make_stub(arguments.module, arguments.symbols, arguments.repository,
                          arguments.components, source_root)
