@@ -1,38 +1,52 @@
-"""The one-shot LLM calls of the worker run the Claude CLI with a 5-minute prompt cache.
+"""The one-shot LLM calls on the worker run the Claude CLI with a 5-minute prompt cache.
 
-The calls go through the native Claude adapter. A test makes the saved settings of the role
-name the adapter 'claude', replaces the Claude SDK client (the process the service would
-start) with a fake that records the ClaudeAgentOptions it is given, runs the call and reads
-the environment the CLI would get: it must hold FORCE_PROMPT_CACHING_5M=1.
+Seams: app.agent_workflows.host._work_message, app.delivery.pull_request_activities
+.write_pull_request_text, app.delivery.mention_activities (classify, answer,
+classify_mention, answer_mention), app.tasks.activities.name_task_flow and
+app.verification.checks.analyze_checks_failure.
+
+The role's saved settings (the adapter 'claude') and the Claude SDK client are the only
+collaborators faked; the test reads the ClaudeAgentOptions.env the client is given.
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable
+import inspect
+from typing import Any, Awaitable, Callable
 
 import pytest
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
-from temporalio.testing import ActivityEnvironment
+
+import claude_agent_sdk
+from claude_agent_sdk import ClaudeAgentOptions
 
 from app.settings.models import ModelSettings
 
-SETTING = "FORCE_PROMPT_CACHING_5M"
+VARIABLE = "FORCE_PROMPT_CACHING_5M"
+LOGINS = ["api_key", "subscription"]
 
 
-class FakeClaudeClient:
-    """Stands for claude_agent_sdk.ClaudeSDKClient: starts no CLI, records the options it is
-    given and answers every query with `reply`."""
+def _build(cls: type, **values: Any) -> Any:
+    """Build an SDK message, passing only the fields this SDK version knows."""
+    parameters = inspect.signature(cls).parameters
+    kwargs = {name: value for name, value in values.items() if name in parameters}
+    for name, parameter in parameters.items():
+        if name not in kwargs and parameter.default is inspect.Parameter.empty \
+                and parameter.kind in (parameter.POSITIONAL_OR_KEYWORD, parameter.KEYWORD_ONLY):
+            kwargs[name] = None
+    return cls(**kwargs)
 
-    instances: list["FakeClaudeClient"] = []
-    reply: str = ""
 
-    def __init__(self, options: Any = None, *args: Any, **kwargs: Any) -> None:
+class FakeClaudeSDKClient:
+    """Stands in for app.llm.claude.ClaudeSDKClient: records its options, answers at once."""
+
+    instances: list["FakeClaudeSDKClient"] = []
+    reply = "ok"
+
+    def __init__(self, options: ClaudeAgentOptions | None = None, transport: Any = None) -> None:
         self.options = options
         self.prompts: list[Any] = []
-        FakeClaudeClient.instances.append(self)
+        FakeClaudeSDKClient.instances.append(self)
 
-    async def __aenter__(self) -> "FakeClaudeClient":
+    async def __aenter__(self) -> "FakeClaudeSDKClient":
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
@@ -47,226 +61,142 @@ class FakeClaudeClient:
     async def interrupt(self) -> None:
         return None
 
-    async def set_model(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-    async def query(self, prompt: Any = "", *args: Any, **kwargs: Any) -> None:
+    async def query(self, prompt: Any, *args: Any, **kwargs: Any) -> None:
         self.prompts.append(prompt)
 
-    async def receive_messages(self) -> AsyncIterator[Any]:
-        yield AssistantMessage(content=[TextBlock(text=self.reply)], model="claude-sonnet-4-5")
-        yield ResultMessage(
-            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False, num_turns=1,
-            session_id="s", result=self.reply,
-        )
+    async def receive_response(self) -> Any:
+        block = _build(claude_agent_sdk.TextBlock, text=self.reply)
+        yield _build(claude_agent_sdk.AssistantMessage, content=[block], model="claude-test")
+        yield _build(
+            claude_agent_sdk.ResultMessage, subtype="success", duration_ms=1, duration_api_ms=1,
+            is_error=False, num_turns=1, session_id="s", total_cost_usd=0.0, usage={},
+            result=self.reply)
 
-    def receive_response(self) -> AsyncIterator[Any]:
-        return self.receive_messages()
-
-
-def app_modules_with(name: str) -> list[Any]:
-    return [m for key, m in list(sys.modules.items())
-            if key.startswith("app.") and m is not None and hasattr(m, name)]
+    async def receive_messages(self) -> Any:
+        async for message in self.receive_response():
+            yield message
 
 
-@pytest.fixture(params=["api_key", "subscription"])
-def claude(
-    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> type[FakeClaudeClient]:
-    """Saved settings that choose the claude adapter, the fake client, and a Claude login
-    by API key or by subscription."""
-    import importlib
-
-    import app.llm.claude as claude_module
-    # Import every module of the seams first, so each name the settings are imported by
-    # is replaced below.
-    for name in ("app.llm.model", "app.settings.storage", "app.agent_workflows.host",
-                 "app.delivery.pull_request_activities", "app.delivery.mention_activities",
-                 "app.tasks.activities", "app.verification.checks"):
-        importlib.import_module(name)
+@pytest.fixture(params=LOGINS)
+def claude(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> type[FakeClaudeSDKClient]:
+    """Saved settings name the claude adapter; the SDK client is replaced; one login each."""
+    settings = ModelSettings(
+        adapter="claude", model="claude-sonnet-4-5", thinking_level="medium", compaction_tokens=0)
 
     async def get_workflow_settings(workflow_type: str) -> ModelSettings:
-        return ModelSettings(
-            adapter="claude", model="claude-sonnet-4-5", thinking_level="medium",
-            compaction_tokens=48000,
-        )
+        return settings
 
-    async def get_openai_endpoint() -> None:
-        return None
+    import app.llm.model
+    import app.settings.storage
+    monkeypatch.setattr(app.settings.storage, "get_workflow_settings", get_workflow_settings)
+    monkeypatch.setattr(app.llm.model, "get_workflow_settings", get_workflow_settings)
 
-    for module in app_modules_with("get_workflow_settings"):
-        monkeypatch.setattr(module, "get_workflow_settings", get_workflow_settings)
-    for module in app_modules_with("get_openai_endpoint"):
-        monkeypatch.setattr(module, "get_openai_endpoint", get_openai_endpoint)
-    monkeypatch.setattr(claude_module, "ClaudeSDKClient", FakeClaudeClient)
-    # The calls create a working directory per session under GENERATED_CODE_DIR: keep it in
-    # a temporary directory so the call reaches the client and leaves nothing behind.
-    generated = tmp_path / "generated"
-    generated.mkdir()
-    for module in app_modules_with("GENERATED_CODE_DIR"):
-        monkeypatch.setattr(module, "GENERATED_CODE_DIR", generated)
+    import app.llm.claude
+    monkeypatch.setattr(app.llm.claude, "ClaudeSDKClient", FakeClaudeSDKClient)
 
-    for variable in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", SETTING):
-        monkeypatch.delenv(variable, raising=False)
+    for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
     if request.param == "api_key":
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-api-key-not-a-secret")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-api-key")
     else:
-        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-subscription-token-not-a-secret")
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-subscription-token")
 
-    FakeClaudeClient.instances = []
-    FakeClaudeClient.reply = ""
-    CALL_ERRORS.clear()
-    return FakeClaudeClient
-
-
-CALL_ERRORS: list[BaseException] = []
+    FakeClaudeSDKClient.instances = []
+    FakeClaudeSDKClient.reply = "ok"
+    return FakeClaudeSDKClient
 
 
-async def run_call(call: Callable[[], Awaitable[Any]]) -> None:
-    """Run the one-shot call. What it returns is not what a test observes (an unusable reply
-    makes these calls fall back), so a failure it raises on the fake's reply is not either:
-    the options its CLI was started with are. The error is kept to be reported when no CLI
-    was started."""
+async def _run(call: Callable[[], Awaitable[Any]]) -> str:
+    """Run the one-shot call; its result does not matter here, only the CLI it started.
+    A failure of the call itself shows in the assertion below as the missing client."""
     try:
         await call()
     except Exception as error:  # noqa: BLE001
-        CALL_ERRORS.append(error)
+        return f"{type(error).__name__}: {error}"
+    return ""
 
 
-def assert_five_minute_cache(claude: type[FakeClaudeClient], what: str) -> None:
-    assert claude.instances, (
-        f"{what} started no Claude CLI through the claude adapter"
-        + (f" (the call raised {CALL_ERRORS[-1]!r})" if CALL_ERRORS else "")
-    )
-    for client in claude.instances:
-        options = client.options
-        assert options is not None, f"{what} started the Claude CLI without options"
-        env = dict(options.env or {})
-        assert env.get(SETTING) == "1", (
-            f"{what}: the Claude CLI environment has {SETTING}={env.get(SETTING)!r}, expected '1'"
-        )
+def _assert_five_minute_cache(client: type[FakeClaudeSDKClient], what: str, failure: str) -> None:
+    assert client.instances, f"{what} started no Claude CLI client (call failed with: {failure!r})"
+    for instance in client.instances:
+        assert instance.options is not None, f"{what}: the Claude client got no options"
+        env = dict(instance.options.env or {})
+        assert env.get(VARIABLE) == "1", (
+            f"{what}: the Claude CLI environment lacks {VARIABLE}=1 "
+            f"(has {sorted(env)}), so its cache writes use the 1-hour TTL")
 
 
-class TestCommitMessageCache:
-    async def test_commit_message_call_forces_five_minute_cache(
-        self, claude: type[FakeClaudeClient],
-    ) -> None:
+class TestOneShotCallsUseFiveMinuteCache:
+    async def test_commit_message_call(self, claude: type[FakeClaudeSDKClient]) -> None:
         # requirement: FR-192, FR-193
         from app.agent_workflows.host import _work_message
 
-        claude.reply = "Add the widget endpoint"
-        await run_call(lambda: _work_message(
-            "implementation", "implementation", "completed",
-            "diff --git a/app.py b/app.py\n+def widgets():\n+    return []\n"))
-        assert_five_minute_cache(claude, "the commit-message call")
+        diff = "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-a\n+b\n"
+        failure = await _run(lambda: _work_message("implementation", "implementation", "passed", diff))
+        _assert_five_minute_cache(claude, "the commit-message call", failure)
 
-
-class TestPullRequestTextCache:
-    async def test_pull_request_text_call_forces_five_minute_cache(
-        self, claude: type[FakeClaudeClient], monkeypatch: pytest.MonkeyPatch,
+    async def test_pull_request_text_call(
+        self, claude: type[FakeClaudeSDKClient], monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # requirement: FR-194, FR-195
-        from app.delivery.pull_request_activities import write_pull_request_text
+        # requirement: FR-194
+        import app.delivery.pull_request_activities as module
+        import app.github.checkout as checkout
 
-        class Diff(str):
-            """A diff that works whether the code awaits it or uses it as it is."""
+        async def token() -> tuple[str, dict[str, Any]]:
+            return "test-token", {}
 
-            def __await__(self) -> Any:
-                async def value() -> str:
-                    return str(self)
-                return value().__await__()
+        async def delivery_diff(*args: Any, **kwargs: Any) -> str:
+            return "diff --git a/app.py b/app.py\n+new line\n"
 
-        diff = Diff("diff --git a/app.py b/app.py\n+def widgets():\n+    return []\n")
+        def sync_delivery_diff(*args: Any, **kwargs: Any) -> str:
+            return "diff --git a/app.py b/app.py\n+new line\n"
 
-        def delivery_diff(*args: Any, **kwargs: Any) -> Diff:
-            return diff
+        monkeypatch.setattr(module, "_github_token", token)
+        diff_fake = delivery_diff if inspect.iscoroutinefunction(
+            getattr(checkout, "delivery_diff", None)) else sync_delivery_diff
+        monkeypatch.setattr(checkout, "delivery_diff", diff_fake, raising=False)
+        monkeypatch.setattr(module, "delivery_diff", diff_fake, raising=False)
+        claude.reply = '{"title": "Add retries", "summary": "Adds retries to the client."}'
 
-        import app.github.checkout  # noqa: F401
-        for module in app_modules_with("delivery_diff"):
-            monkeypatch.setattr(module, "delivery_diff", delivery_diff)
-
-        claude.reply = '{"title": "Add the widget endpoint", "summary": "Adds GET /widgets."}'
         publication = {
-            "branch": "delivery/sess-1", "commit": "0123456789abcdef0123456789abcdef01234567",
-            "url": "https://github.com/acme/widgets/tree/delivery/sess-1",
-            "ignored": [], "ignored_count": 0, "verified": True,
+            "commit": "0123456789abcdef0123456789abcdef01234567", "branch": "feature/x",
+            "unverified": False,
         }
-        change = {
-            "kind": "api_change", "task": "Serve widgets",
-            "requirements": [{"id": "R1", "title": "Widgets", "description": "Serve widgets"}],
-        }
-        await run_call(lambda: ActivityEnvironment().run(
-            write_pull_request_text, "sess-1", publication, change))
-        assert_five_minute_cache(claude, "the pull request text call")
+        change = {"task": "Add retries", "requirements": []}
+        failure = await _run(lambda: module.write_pull_request_text("session-1", publication, change))
+        _assert_five_minute_cache(claude, "the pull request text call", failure)
 
-
-class TestMentionCache:
-    async def test_classify_call_forces_five_minute_cache(
-        self, claude: type[FakeClaudeClient],
+    @pytest.mark.parametrize("name", ["classify", "classify_mention"])
+    async def test_mention_classification_call(
+        self, claude: type[FakeClaudeSDKClient], name: str,
     ) -> None:
-        # requirement: FR-194, FR-195
-        from app.delivery.mention_activities import classify
+        # requirement: FR-195
+        import app.delivery.mention_activities as module
 
-        claude.reply = "fix"
-        await run_call(lambda: classify("sess-1", "@flows-app please fix the typo in the README"))
-        assert_five_minute_cache(claude, "the mention classification call")
+        function = getattr(module, name)
+        failure = await _run(lambda: function("session-1", "@app please fix the typo"))
+        _assert_five_minute_cache(claude, f"{name}", failure)
 
-    async def test_classify_activity_forces_five_minute_cache(
-        self, claude: type[FakeClaudeClient],
-    ) -> None:
-        # requirement: FR-194, FR-195
-        from app.delivery.mention_activities import classify_mention
+    @pytest.mark.parametrize("name", ["answer", "answer_mention"])
+    async def test_mention_answer_call(self, claude: type[FakeClaudeSDKClient], name: str) -> None:
+        # requirement: FR-195
+        import app.delivery.mention_activities as module
 
-        claude.reply = "clarification"
-        await run_call(lambda: ActivityEnvironment().run(
-            classify_mention, "sess-1", "@flows-app why does the endpoint return a list?"))
-        assert_five_minute_cache(claude, "the classify-mention activity")
+        function = getattr(module, name)
+        failure = await _run(lambda: function("session-1", "@app why was this changed?", {}))
+        _assert_five_minute_cache(claude, f"{name}", failure)
 
-    async def test_answer_call_forces_five_minute_cache(
-        self, claude: type[FakeClaudeClient],
-    ) -> None:
-        # requirement: FR-194, FR-195
-        from app.delivery.mention_activities import answer
-
-        claude.reply = "The endpoint returns a list because the requirement says so."
-        await run_call(lambda: answer(
-            "sess-1", "@flows-app why does the endpoint return a list?", {}))
-        assert_five_minute_cache(claude, "the mention answer call")
-
-    async def test_answer_activity_forces_five_minute_cache(
-        self, claude: type[FakeClaudeClient],
-    ) -> None:
-        # requirement: FR-194, FR-195
-        from app.delivery.mention_activities import answer_mention
-
-        claude.reply = "The endpoint returns a list because the requirement says so."
-        await run_call(lambda: ActivityEnvironment().run(
-            answer_mention, "sess-1", "@flows-app why does the endpoint return a list?", {}))
-        assert_five_minute_cache(claude, "the answer-mention activity")
-
-
-class TestTaskFlowNamingCache:
-    async def test_task_flow_naming_call_forces_five_minute_cache(
-        self, claude: type[FakeClaudeClient],
-    ) -> None:
-        # requirement: FR-194, FR-195
+    async def test_task_flow_naming_call(self, claude: type[FakeClaudeSDKClient]) -> None:
+        # requirement: FR-195
         from app.tasks.activities import name_task_flow
 
-        claude.reply = "Widget service"
-        await run_call(lambda: ActivityEnvironment().run(
-            name_task_flow, "Build a service that serves widgets", []))
-        assert_five_minute_cache(claude, "the task flow naming call")
+        failure = await _run(lambda: name_task_flow("Add retries to the HTTP client", []))
+        _assert_five_minute_cache(claude, "the task flow naming call", failure)
 
-
-class TestVerificationDiagnosisCache:
-    async def test_failure_diagnosis_call_forces_five_minute_cache(
-        self, claude: type[FakeClaudeClient],
-    ) -> None:
+    async def test_verification_failure_diagnosis_call(self, claude: type[FakeClaudeSDKClient]) -> None:
         # requirement: FR-195, FR-196
         from app.verification.checks import analyze_checks_failure
 
-        claude.reply = '{"side": "implementation", "summary": "GET /widgets returns 500"}'
-        await run_call(lambda: ActivityEnvironment().run(
-            analyze_checks_failure, "sess-1",
-            "FAILED test_widgets.py::test_list - assert 500 == 200\n"))
-        assert_five_minute_cache(claude, "the verification failure diagnosis call")
+        failure = await _run(lambda: analyze_checks_failure(
+            "session-1", "FAILED test_login - AssertionError: expected 200, got 500"))
+        _assert_five_minute_cache(claude, "the verification failure diagnosis call", failure)
