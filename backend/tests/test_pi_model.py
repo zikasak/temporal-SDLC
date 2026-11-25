@@ -15,7 +15,7 @@ from app import docker_agents
 from app.agent_workflows import runtime
 from app.implementation.agent import validate_completion
 from app.llm.factory import create_adapter
-from app.llm.pi import ChatPi
+from app.llm.pi import CODEMODE_GUIDANCE, ChatPi
 from app.settings.models import ModelSettings
 
 needs_pi = pytest.mark.skipif(shutil.which('pi') is None, reason='the Pi CLI is not installed')
@@ -83,9 +83,11 @@ async def test_authoring_keeps_native_history_through_many_tool_turns(pi_http, t
     assert (root / 'Dockerfile').read_text() == 'FROM scratch'
     assert len(requests) == 5
     assert_appended(requests)
-    # The stage's prompt as it is, and the endpoint's key; the flow's tools and codemode only.
+    # The stage's prompt, steered to codemode, and the endpoint's key; the flow's tools and
+    # codemode only.
     assert requests[0]['messages'][0] == {
-        'role': 'system', 'content': 'Implement the supplied contract' + runtime.ASK_GUIDANCE}
+        'role': 'system',
+        'content': 'Implement the supplied contract' + runtime.ASK_GUIDANCE + CODEMODE_GUIDANCE}
     assert requests[0]['authorization'] == 'Bearer local-test-key'
     assert {item['function']['name'] for item in requests[0]['tools']} == {
         'mcp__flow__' + name for name in ('read_file', 'write_file', 'edit_file', 'list_files',

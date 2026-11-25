@@ -76,6 +76,29 @@ PI_FLAGS = ('--mode', 'rpc', '--no-extensions', '--extension', str(EXTENSION),
             '--no-approve')
 # Pi's built-in tool that runs a script calling the flow's tools.
 CODEMODE_TOOL = 'codemode'
+# The flow's prompt replaces Pi's, which would tell the model how to use codemode: models
+# left without it call one tool per turn, each a whole model request.
+CODEMODE_GUIDANCE = '''
+
+## Batch tool calls with codemode
+
+Every tool call you make costs a whole model turn. When you need several tool calls that \
+do not depend on each other's results (reading several files, running several searches, \
+listing directories), make them in one `codemode` call instead of one at a time. Call a \
+tool directly only for a single call, or when its result decides what to do next.
+
+The `codemode` input is raw JavaScript (no JSON, no code fence), run as the body of an \
+async function. Each tool is `await tools.<tool name>({...arguments})`, for example \
+`tools.mcp__flow__read_file({path: "a.py"})`, and resolves to its result: a list of `{type, \
+text}` blocks in `result.content`, with `result.isError` set when the tool failed. Return or `console.log` only what you need: nothing else reaches \
+you. For example:
+
+const paths = ["app/main.py", "app/models.py"];
+const results = await Promise.allSettled(
+  paths.map(path => tools.mcp__flow__read_file({path})));
+return results.map((r, i) => `== ${paths[i]}\\n` + (r.status === "fulfilled"
+  ? r.value.content.map(c => c.text).join("\\n") : String(r.reason))).join("\\n\\n");
+'''
 # Seconds Pi waits for one tool call: above the longest shell command
 # (app.agent_workflows.runtime.SHELL_MAX_TIMEOUT, 900 seconds).
 MCP_TOOL_TIMEOUT = 960
@@ -611,10 +634,11 @@ class ChatPi(Runnable):
         system_dir = Path(await stack.enter_async_context(
             async_context(tempfile.TemporaryDirectory, prefix='pi-system-')))
         system_file = system_dir / 'system-prompt.md'
-        await run_sync(system_file.write_text,
-                       '\n\n'.join(message.text for message in messages
-                                    if isinstance(message, SystemMessage)),
-                       encoding='utf-8')
+        system_prompt = '\n\n'.join(message.text for message in messages
+                                    if isinstance(message, SystemMessage))
+        if tools:
+            system_prompt += CODEMODE_GUIDANCE
+        await run_sync(system_file.write_text, system_prompt, encoding='utf-8')
         config['systemPrompt'] = str(system_file)
         environment[CONFIG_ENV] = json.dumps(config)
         process = await asyncio.create_subprocess_exec(
