@@ -11,6 +11,7 @@ collaborators faked; the test reads the ClaudeAgentOptions.env the client is giv
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import pytest
@@ -136,14 +137,13 @@ class TestOneShotCallsUseFiveMinuteCache:
         _assert_five_minute_cache(claude, "the commit-message call", failure)
 
     async def test_pull_request_text_call(
-        self, claude: type[FakeClaudeSDKClient], monkeypatch: pytest.MonkeyPatch,
+        self, claude: type[FakeClaudeSDKClient], monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     ) -> None:
         # requirement: FR-194
         import app.delivery.pull_request_activities as module
         import app.github.checkout as checkout
 
-        async def token() -> tuple[str, dict[str, Any]]:
-            return "test-token", {}
+        monkeypatch.setattr(module, "GENERATED_CODE_DIR", tmp_path)
 
         async def delivery_diff(*args: Any, **kwargs: Any) -> str:
             return "diff --git a/app.py b/app.py\n+new line\n"
@@ -151,7 +151,6 @@ class TestOneShotCallsUseFiveMinuteCache:
         def sync_delivery_diff(*args: Any, **kwargs: Any) -> str:
             return "diff --git a/app.py b/app.py\n+new line\n"
 
-        monkeypatch.setattr(module, "_github_token", token)
         diff_fake = delivery_diff if inspect.iscoroutinefunction(
             getattr(checkout, "delivery_diff", None)) else sync_delivery_diff
         monkeypatch.setattr(checkout, "delivery_diff", diff_fake, raising=False)
@@ -178,10 +177,15 @@ class TestOneShotCallsUseFiveMinuteCache:
         _assert_five_minute_cache(claude, f"{name}", failure)
 
     @pytest.mark.parametrize("name", ["answer", "answer_mention"])
-    async def test_mention_answer_call(self, claude: type[FakeClaudeSDKClient], name: str) -> None:
+    async def test_mention_answer_call(
+        self, claude: type[FakeClaudeSDKClient], name: str,
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
         # requirement: FR-195
         import app.delivery.mention_activities as module
 
+        # the call creates its per-session working directory under GENERATED_CODE_DIR
+        monkeypatch.setattr(module, "GENERATED_CODE_DIR", tmp_path)
         function = getattr(module, name)
         failure = await _run(lambda: function("session-1", "@app why was this changed?", {}))
         _assert_five_minute_cache(claude, f"{name}", failure)
