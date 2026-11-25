@@ -23,6 +23,7 @@ with workflow.unsafe.imports_passed_through():
     from app.delivery.models import TASK_IDLE_TIMEOUT, DeliveryState, TaskSpec, delivery_id
     from app.github.models import RepositorySelection
     from app.temporal.closing import end_cancelled
+    from app.temporal.deadline import CHAT_ANSWER_HEARTBEAT, CHAT_ANSWER_TIMEOUT
     from app.temporal.execution_fields import execution_fields, task_fields
     from app.requirements.document import render_requirements_markdown
     from app.requirements.models import (
@@ -217,8 +218,9 @@ class LLMRequestWorkflow:
             # The request this one answers, whose saved provider conversation it continues.
             args=[messages, session_id, repository,
                   workflow.memo_value("parent_request_id", "", type_hint=str)],
-            start_to_close_timeout=timedelta(minutes=6),
-            schedule_to_close_timeout=timedelta(minutes=7),
+            start_to_close_timeout=CHAT_ANSWER_TIMEOUT,
+            schedule_to_close_timeout=CHAT_ANSWER_TIMEOUT + timedelta(minutes=1),
+            heartbeat_timeout=CHAT_ANSWER_HEARTBEAT,
             retry_policy=RetryPolicy(maximum_attempts=1),
         )
 

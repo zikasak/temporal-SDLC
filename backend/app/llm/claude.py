@@ -72,6 +72,9 @@ class ChatClaude(Runnable):
     # completed: what a saved conversation records.
     _history: list[BaseMessage] = field(default_factory=list, init=False, repr=False)
     _completed: bool = field(default=False, init=False, repr=False)
+    # Notices for the model (see app.llm.graph.get_message_graph), shown after the next
+    # tool result: Claude's loop takes no messages between its own requests.
+    _notices: list[str] = field(default_factory=list, init=False, repr=False)
 
     @asynccontextmanager
     async def async_session(self):
@@ -95,16 +98,22 @@ class ChatClaude(Runnable):
         return asyncio.run(self.ainvoke(input, config, **kwargs))
 
     async def ainvoke(self, input, config=None, *, tools=(), until=None,
-                      max_turns=AGENT_RECURSION_LIMIT, **kwargs) -> AIMessage:
+                      max_turns=AGENT_RECURSION_LIMIT, after_model_request=None,
+                      **kwargs) -> AIMessage:
         messages = [HumanMessage(input)] if isinstance(input, str) else list(input)
         if not any(not isinstance(message, SystemMessage) for message in messages):
             raise ValueError('Claude needs at least one non-system message')
         if self._stack is None:
             async with self.async_session():
-                return await self._turn(messages, tools, until, max_turns)
-        return await self._turn(messages, tools, until, max_turns)
+                return await self._turn(messages, tools, until, max_turns,
+                                        after_model_request)
+        return await self._turn(messages, tools, until, max_turns, after_model_request)
 
-    async def _turn(self, messages, tools, until, max_turns):
+    def _take_notices(self) -> list[str]:
+        notices, self._notices = self._notices, []
+        return notices
+
+    async def _turn(self, messages, tools, until, max_turns, after_model_request=None):
         async def stop_after_tools(data: HookInput, tool_use_id: str | None,
                                    context: HookContext) -> HookJSONOutput:
             if until is not None and until():
@@ -177,7 +186,9 @@ class ChatClaude(Runnable):
                 system_prompt={'type': 'file', 'path': str(system_file)},
                 **thinking, max_turns=max_turns, tools=[], skills=[], setting_sources=[],
                 strict_mcp_config=True, verbatim_prompts=True,
-                mcp_servers=({TOOL_SERVER: flow_server(tools, until=until)} if tools else {}),
+                mcp_servers=({TOOL_SERVER: flow_server(tools, until=until,
+                                                       notices=self._take_notices)}
+                             if tools else {}),
                 allowed_tools=[TOOL_PREFIX + item.name for item in tools],
                 hooks=({'PostToolUse': [HookMatcher(matcher=TOOL_PREFIX + '.*',
                                                   hooks=[stop_after_tools])]}
@@ -219,6 +230,9 @@ class ChatClaude(Runnable):
                     if isinstance(event, AssistantMessage) and event.parent_tool_use_id is None:
                         if event.message_id != message_id:
                             blocks = []
+                            if after_model_request is not None and (
+                                    notice := after_model_request()):
+                                self._notices.append(notice)
                         blocks.extend(event.content)
                         message_id = event.message_id
                         model_name = event.model
@@ -368,13 +382,15 @@ def _continuation(added: list[BaseMessage]) -> str:
 class ClaudeGraph:
     """The flow's invocation interface, with the SDK owning all model/tool turns."""
 
-    def __init__(self, model: ChatClaude, tools, until):
+    def __init__(self, model: ChatClaude, tools, until, after_model_request=None):
         self.model, self.tools, self.until = model, tools, until
+        self.after_model_request = after_model_request
 
     async def ainvoke(self, state, config=None):
         try:
             reply = await self.model.ainvoke(
                 state['messages'], tools=self.tools, until=self.until,
+                after_model_request=self.after_model_request,
                 max_turns=max(1, (config or {}).get('recursion_limit', AGENT_RECURSION_LIMIT)),
             )
         except ClaudeTurnLimit as exc:

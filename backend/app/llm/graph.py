@@ -170,20 +170,30 @@ class _ConversationGraph:
 
 
 def get_message_graph(tools: list[BaseTool], until: Callable[[], bool] | None = None,
-                      *, model: Runnable) -> Any:
+                      *, model: Runnable,
+                      after_model_request: Callable[[], str | None] | None = None) -> Any:
     """The model ↔ tool loop. `until` ends it after a round of tool calls, such as the
-    one that asked the user something; the model then gets no further turn."""
+    one that asked the user something; the model then gets no further turn.
+    `after_model_request` runs after each model request; a notice it returns is shown to
+    the model before its next request, as a user message here and, with Claude, after
+    the next tool result."""
     from app.llm.claude import ChatClaude, ClaudeGraph
 
     if isinstance(model, ChatClaude):
-        return ClaudeGraph(model, tools, until)
+        return ClaudeGraph(model, tools, until, after_model_request)
     graph = StateGraph(MessagesState)
     bound_model = cast(_BindsTools, model).bind_tools(tools)
+    pending: list[str] = []
 
     async def call_model(state: MessagesState):
-        return {"messages": [await bound_model.ainvoke(
-            state["messages"], config={"run_name": "decide-next-action"},
-        )]}
+        notices = [HumanMessage(content=text) for text in pending]
+        pending.clear()
+        reply = await bound_model.ainvoke(
+            [*state["messages"], *notices], config={"run_name": "decide-next-action"},
+        )
+        if after_model_request is not None and (notice := after_model_request()):
+            pending.append(notice)
+        return {"messages": [*notices, reply]}
 
     graph.add_node("call_model", call_model)
     graph.add_node("tools", ToolNode(tools, awrap_tool_call=_log_tool_call))

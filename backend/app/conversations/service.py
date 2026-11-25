@@ -26,6 +26,7 @@ from app.documents import (
 from app.github.models import RepositorySelection
 from app.github.errors import GitHubError
 from app.temporal.client import connect_temporal
+from app.temporal.deadline import CHAT_ANSWER_TIMEOUT
 from app.temporal.registry import register
 from app.temporal.sessions import InvalidForkPoint, fork_messages
 
@@ -166,8 +167,9 @@ async def _start(
         args=[messages, parse_document_id, session_id, repository],
         id=request_id,
         task_queue=TASK_QUEUE,
-        # A session's first message may also have to clone its repository.
-        run_timeout=timedelta(minutes=18 if repository else 8),
+        # The answer, after parsing an attachment (up to 3 minutes); a session's first
+        # message may also have to clone its repository (up to 10 minutes).
+        run_timeout=CHAT_ANSWER_TIMEOUT + timedelta(minutes=15 if repository else 5),
         memo={"messages": messages, "parent_request_id": parent_request_id or "",
               "session_id": session_id, "repository": repository},
     )

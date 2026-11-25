@@ -54,6 +54,7 @@ from app.llm.graph import get_message_graph, interview, native_session
 from app.llm.saved_conversations import ConversationRef
 from app.llm.model import get_model
 from app.llm.prompt import INLINE_DOCUMENT_CHARS, MAX_REMEMBERED_CHARS, model_messages
+from app.temporal.deadline import model_request_pacer
 from app.temporal.registry import register
 from app.temporal.tracing import trace_activity
 from app.llm.limits import AGENT_RECURSION_LIMIT
@@ -586,7 +587,7 @@ async def send_llm_message(
         model = await get_model('chat')
         graph = get_message_graph(
             [*build_tools(ToolContext(session_id, document_ids)), *repository_files],
-            model=model)
+            model=model, after_model_request=model_request_pacer())
         async with native_session(
                 model, _conversation("chat", session_id, parent_request_id or None)):
             result = await graph.ainvoke(

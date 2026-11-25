@@ -10,7 +10,15 @@ TOOL_SERVER = 'flow'
 TOOL_PREFIX = f'mcp__{TOOL_SERVER}__'
 
 
-def flow_server(tools: Sequence[BaseTool], *, until: Callable[[], bool] | None = None):
+def flow_server(tools: Sequence[BaseTool], *, until: Callable[[], bool] | None = None,
+                notices: Callable[[], list[str]] | None = None):
+    """`notices` gives what the model should read next (each taken once); it follows the
+    next tool result."""
+
+    def with_notices(text: str) -> str:
+        taken = notices() if notices is not None else []
+        return '\n\n'.join([text, *taken])
+
     def expose(item):
         schema = convert_to_openai_tool(item)['function']
 
@@ -24,10 +32,10 @@ def flow_server(tools: Sequence[BaseTool], *, until: Callable[[], bool] | None =
                 # also export LangChain callbacks for this same tool execution.
                 result = await item.ainvoke(arguments, config={'callbacks': []})
                 text = result if isinstance(result, str) else json.dumps(result, default=str)
-                return {'content': [{'type': 'text', 'text': text}]}
+                return {'content': [{'type': 'text', 'text': with_notices(text)}]}
             except Exception as exc:
-                return {'content': [{'type': 'text',
-                                     'text': f'Tool failed: {type(exc).__name__}: {exc}'}],
+                return {'content': [{'type': 'text', 'text': with_notices(
+                                         f'Tool failed: {type(exc).__name__}: {exc}')}],
                         'is_error': True}
 
         return execute

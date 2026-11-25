@@ -37,3 +37,31 @@ async def test_flow_tool_errors_reach_the_mcp_client(tmp_path, failure):
                 assert isinstance(error.content[0], TextContent)
                 assert ('paused' if paused else 'FileNotFoundError') in error.content[0].text
             tasks.cancel_scope.cancel()
+
+
+async def test_a_notice_for_claude_follows_the_next_tool_result_once():
+    notices = ['Time is nearly up.']
+
+    @tool
+    async def look() -> str:
+        """Look around."""
+        return 'nothing here'
+
+    def take():
+        taken = notices[:]
+        notices.clear()
+        return taken
+
+    server = flow_server([look], notices=take)['instance']
+    async with create_client_server_memory_streams() as (client_streams, server_streams):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(server.run, *server_streams, server.create_initialization_options())
+            async with ClientSession(*client_streams) as client:
+                await client.initialize()
+                first = await client.call_tool('look', {})
+                second = await client.call_tool('look', {})
+                assert isinstance(first.content[0], TextContent)
+                assert isinstance(second.content[0], TextContent)
+                assert first.content[0].text == 'nothing here\n\nTime is nearly up.'
+                assert second.content[0].text == 'nothing here'
+            tasks.cancel_scope.cancel()
