@@ -812,7 +812,6 @@ export default function Requirements() {
                     documentation={session.kind === "docs"}
                     disabled={submitting || deliveryPending(session.delivery)}
                     onRetry={(stage) => void retryGeneration(stage)}
-                    answering={submitting} onAnswer={answerAgent}
                     onFindings={decideFindings}
                     onRephrase={session.messages.length > 0
                       ? (draft) => void forkSession(session.messages.length - 1, draft)

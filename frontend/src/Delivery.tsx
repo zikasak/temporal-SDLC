@@ -1209,7 +1209,7 @@ function DocumentationResults({ progress, retrying, disabled, onRetry }: {
   );
 }
 
-export function DeliveryResults({ progress, kind = null, documentation = false, onboarding = false, retrying, disabled, onRetry, answering, onAnswer, onFindings, onRephrase }: {
+export function DeliveryResults({ progress, kind = null, documentation = false, onboarding = false, retrying, disabled, onRetry, onFindings, onRephrase }: {
   progress: DeliveryProgress;
   // The kind of task the session delivers, when it records one.
   kind?: TaskKind | null;
