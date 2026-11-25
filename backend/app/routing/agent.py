@@ -2,6 +2,7 @@
 test and changes no code."""
 import asyncio
 import json
+from collections.abc import Iterable
 from pathlib import Path
 
 from app.asyncio_utils import run_sync
@@ -219,6 +220,61 @@ def prompt(language: dict) -> str:
                              if browser else '')))
 
 
+# What a module written in path form may end with: a stub's or a source file's suffix.
+MODULE_SUFFIXES = ('.pyi', '.py', '.d.ts', '.tsx', '.ts', '.java')
+# How many stubbed modules a message to the agent lists.
+LISTED_MODULES = 60
+
+
+def module_key(name: str) -> str:
+    """`name`, a module in dotted or path form ('app.docker_agents', 'app/docker_agents'
+    or 'app/docker_agents.py'), in the dotted form two names of one module share."""
+    key = name.strip().replace('\\', '/')
+    while key.startswith('./'):
+        key = key[2:]
+    key = key.strip('/')
+    for suffix in MODULE_SUFFIXES:
+        if key.endswith(suffix) and len(key) > len(suffix):
+            key = key[:-len(suffix)]
+            break
+    key = key.replace('/', '.')
+    if key.endswith('.__init__'):
+        key = key[:-len('.__init__')]
+    return key
+
+
+def match_module(name: str, modules: Iterable[str]) -> str | None:
+    """The stubbed module of `modules` that `name` names: itself when stubbed under that
+    name, else the only one it names in another form (a path for a dotted name), or None
+    when there is none or more than one."""
+    modules = list(modules)
+    if name in modules:
+        return name
+    key = module_key(name)
+    found = [module for module in modules if module_key(module) == key]
+    return found[0] if len(found) == 1 else None
+
+
+def _stubbed_modules(components: Path) -> list[str]:
+    """The modules the stubs under `components` describe, as their contracts name them."""
+    modules: set[str] = set()
+    if not components.is_dir():
+        return []
+    for file in components.rglob('*'):
+        if not file.is_file() or file.is_symlink():
+            continue
+        path = file.relative_to(components).as_posix()
+        if path.endswith('.d.ts'):
+            modules.add(path.removesuffix('.d.ts'))
+        elif path.endswith('.pyi') or path.endswith('.java'):
+            parts = path.rsplit('.', 1)[0].split('/')
+            if parts[-1] == '__init__':
+                parts.pop()
+            if parts:
+                modules.add('.'.join(parts))
+    return sorted(modules)
+
+
 def validate_completion(root: Path) -> None:
     try:
         routes = json.loads((root / ROUTES).read_text())
@@ -226,6 +282,8 @@ def validate_completion(root: Path) -> None:
         raise RuntimeError('Agent finished without a readable routes.json') from exc
     if not isinstance(routes, dict) or not isinstance(routes.get('routes'), list):
         raise RuntimeError('routes.json does not hold a list of routes')
+    # The seam modules no stub matches, by the contract they were looked up in.
+    unmatched: dict[Path, list[str]] = {}
     for item in routes['routes']:
         if isinstance(item, dict) and item.get('route') == 'browser':
             page = item.get('page')
@@ -248,6 +306,31 @@ def validate_completion(root: Path) -> None:
                    for file in (root / components).rglob('*')):
             raise RuntimeError(f'A requirement is routed to a seam, but {components}/ holds '
                                'no stub')
+        modules = _stubbed_modules(root / components)
+        requirement = str(item.get('requirement_id') or item.get('id') or '?')[:40]
+        named = [seam.get('module')]
+        elsewhere = seam.get('added_elsewhere')
+        if isinstance(elsewhere, dict):
+            named += list(elsewhere)
+        for module in named:
+            if isinstance(module, str) and module.strip() and match_module(
+                    module.strip(), modules) is None:
+                unmatched.setdefault(components, []).append(
+                    f'{module.strip()[:200]} (seam of {requirement})')
+    if unmatched:
+        problems = []
+        for components, names in unmatched.items():
+            stubbed = _stubbed_modules(root / components)
+            listed = ', '.join(stubbed[:LISTED_MODULES]) + (
+                ', …' if len(stubbed) > LISTED_MODULES else '')
+            problems.append(f'{"; ".join(names)} name(s) a module the component contract '
+                            f'in {components}/ has no stub of; it stubs the modules: '
+                            f'{listed or "none"}')
+        raise RuntimeError(
+            'Some seams name a module that matches no stub, or more than one: '
+            + '. '.join(problems) + '. Name each seam module (and each module of its '
+            'added_elsewhere) as its stub\'s module, as listed, or write the missing stub '
+            'at that module\'s path.')
 
 
 async def main() -> None:

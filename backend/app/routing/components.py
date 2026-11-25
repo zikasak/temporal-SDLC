@@ -12,6 +12,7 @@ from app.agent_workflows.host import copy_file, copy_regular_files
 from app.asyncio_utils import run_sync
 from app.github.checkout import COMPONENTS_DIR, CONTRACTS_DIR
 from app.languages import RUNTIME_FILE, ComponentContract
+from app.routing.agent import match_module
 
 logger = logging.getLogger(__name__)
 
@@ -125,11 +126,28 @@ def read_components(contract: ComponentContract, output: Path, repository: Path,
 
 def check_seams(routes: dict[str, dict[str, Any]], modules: dict[str, set[str]]) -> None:
     """Every symbol a `component` route names, or adds to another module, is stubbed in
-    the module it names."""
+    the module it names. A module written in path form ('app/docker_agents' or
+    'app/docker_agents.py') that names exactly one stubbed module is rewritten in the
+    route, in place, to that module's name."""
     for requirement, route in routes.items():
         seam = route.get('seam')
         if route['route'] != 'component' or seam is None:
             continue
+        matched = match_module(seam['module'], modules)
+        if matched is not None and matched != seam['module']:
+            logger.info('The seam of requirement %s names the module %s as %s', requirement,
+                        matched, seam['module'])
+            seam['module'] = matched
+        elsewhere = seam.get('added_elsewhere')
+        if elsewhere:
+            renamed: dict[str, list[str]] = {}
+            for module, symbols in elsewhere.items():
+                named = match_module(module, modules) or module
+                kept = renamed.setdefault(named, [])
+                kept += [symbol for symbol in symbols if symbol not in kept]
+            if list(renamed) != list(elsewhere):
+                elsewhere.clear()
+                elsewhere.update(renamed)
         if seam['module'] not in modules:
             raise RuntimeError(f'The seam of requirement {requirement} names a module the '
                                f'component contract has no stub of: {seam["module"]}')
