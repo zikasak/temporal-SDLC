@@ -19,6 +19,9 @@ ANSWER_TIMEOUT = timedelta(days=7)
 # Signals by which the delivery that started a stage learns of its open questions.
 ASKED_SIGNAL = 'agent_asked'
 ANSWERED_SIGNAL = 'agent_answered'
+# Since this patch the answered signal carries the questions and the answers, which the
+# delivery tells its later agents; before, it carried the stage's workflow ID alone.
+ANSWERS_TO_DELIVERY_PATCH = 'answers-to-delivery'
 # Signal by which it learns that the stage waits for its model provider's limits, with
 # the time it goes on (null once it went on).
 WAITING_SIGNAL = 'agent_waiting'
@@ -145,7 +148,8 @@ class AgentWorkflow:
                 result = await execute_agent_activity(activity_fn, session_id,
                                                       {**context, RESUME_KEY: True})
                 continue
-            self._questions, self._answers = result['questions'], None
+            asked = result['questions']
+            self._questions, self._answers = asked, None
             workflow.logger.info('%s agent asked %d questions', self.STAGE,
                                  len(self._questions))
             await self._tell_delivery(ASKED_SIGNAL, {
@@ -159,7 +163,11 @@ class AgentWorkflow:
                 await self._tell_delivery(ANSWERED_SIGNAL, workflow.info().workflow_id)
                 raise ApplicationError("The agent's questions were not answered in time.",
                                        non_retryable=True)
-            await self._tell_delivery(ANSWERED_SIGNAL, workflow.info().workflow_id)
+            answered: Any = workflow.info().workflow_id
+            if workflow.patched(ANSWERS_TO_DELIVERY_PATCH):
+                answered = {'workflow_id': answered, 'stage': self.STAGE,
+                            'questions': asked, 'answers': self._answers}
+            await self._tell_delivery(ANSWERED_SIGNAL, answered)
             result = await execute_agent_activity(activity_fn, session_id,
                                                   {**context, ANSWERS_KEY: self._answers})
         return result

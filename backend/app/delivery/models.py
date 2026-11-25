@@ -24,6 +24,8 @@ from app.verification.models import TestFailure, VerificationResult, Verificatio
 RetryStage = Literal['server', 'tests', 'documentation', 'repository', 'review']
 RETRY_STAGES = ('server', 'tests', 'documentation', 'repository', 'review')
 NAMED_TESTS = 5
+# How many answered rounds of agent questions a delivery keeps for its later agents.
+MAX_AGENT_ANSWERS = 20
 # How long a finished delivery waits for the user's next decision, such as a retry, and
 # its sessions with it. Only a closed workflow falls to the namespace's retention.
 TASK_IDLE_TIMEOUT = timedelta(days=14)
@@ -121,6 +123,17 @@ class AgentQuestions(TypedDict):
     # Which agent asked: implementation, tests, documentation or diagnosis.
     stage: str
     questions: list[Question]
+
+
+class AnsweredQuestions(TypedDict):
+    """Questions a coding agent asked with ask_user, with the user's answers: decisions
+    of the user's about the task that its later agents, the review included, hold to
+    beside the requirements."""
+
+    # Which agent asked: implementation, tests, documentation or diagnosis.
+    stage: str
+    questions: list[Question]
+    answers: list[str]
 
 
 class ProviderWait(TypedDict):
@@ -702,6 +715,11 @@ class DeliveryState:
     # row, the failure before the first round included (app.delivery.rounds): whether
     # another round is worth it is decided from it.
     ci_history: list[RoundOutcome] = field(default_factory=list)
+    # The questions the delivery's agents asked the user, with the answers, in the order
+    # they were answered: later agents and the code review are told them, so that what
+    # the user decided is not taken for a departure from the requirements. Retries keep
+    # them, the most recent MAX_AGENT_ANSWERS only.
+    agent_answers: list[AnsweredQuestions] = field(default_factory=list)
 
 
 def mention_key(item: Any) -> tuple[str | None, int]:

@@ -112,6 +112,10 @@ class Stages(FlowBase):
             # The seam was added first: the fix starts from the code with it, and the
             # component tests are built with that code.
             context['seam_prepared'] = True
+        if self.state.agent_answers:
+            # What the user answered the delivery's agents decides the task beside the
+            # requirements: the later agents and the review hold to it.
+            context['user_answers'] = [dict(item) for item in self.state.agent_answers]
         return context
 
     def _stage_context(self, repair: dict[str, Any] | None) -> dict[str, Any]:

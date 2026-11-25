@@ -26,6 +26,21 @@ DESCRIPTION = (
 )
 
 
+# Context key of the questions the delivery's agents asked the user, with the answers.
+USER_ANSWERS_KEY = 'user_answers'
+# What a later agent is told of them.
+USER_ANSWERS_PROMPT = """
+Agents of this delivery asked the user questions with ask_user. The `user_answers` entry
+of the input lists them, each with the `stage` of the agent that asked, its `questions`
+and the user's `answers` in the same order. These answers are the user's decisions about
+this task and stand beside the requirements: where an answer asks for, allows or settles
+something the requirements do not state, such as a change to another part of the code,
+hold to it. Never treat what an answer asked for as a departure from the requirements or
+as unrequested scope, and never ask to revert it; where a requirement and a later answer
+disagree, the answer is the more recent decision.
+"""
+
+
 class Question(TypedDict):
     question: str
     options: list[str]

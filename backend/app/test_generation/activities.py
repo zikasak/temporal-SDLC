@@ -23,6 +23,7 @@ from app.docker_agents import default_agent_image
 from app.github.checkout import SNAPSHOT_DIR
 from app.languages import ComponentSuite, Language, TestSuite
 from app.languages.composite import suite_members
+from app.llm.questions import USER_ANSWERS_KEY
 from app.requirements.document import without_repeated_tables
 from app.routing.models import UNOBSERVABLE_FILE, read_routes
 
@@ -67,6 +68,9 @@ def prepare_inputs(language: Language, session_dir: Path, context: dict[str, Any
         **({'brief': context['brief']} if context.get('brief') else {}),
         **({'routes': context['routes']} if context.get('routes') else {}),
         **({'architecture': context['architecture']} if context.get('architecture') else {}),
+        # What the user answered the delivery's agents, which the tests hold to too.
+        **({USER_ANSWERS_KEY: context[USER_ANSWERS_KEY]}
+           if context.get(USER_ANSWERS_KEY) else {}),
     })
     repair = context.get('repair')
     previous = session_dir / 'tests/suite'

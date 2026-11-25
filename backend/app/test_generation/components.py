@@ -35,6 +35,7 @@ from app.languages import (
     RUNTIME_FILE, TOOLS_DIR, BrowserSuite, ComponentSuite, Language, TestReports,
 )
 from app.languages.composite import BROWSER_SUFFIX, CompositeSuite, SuiteMember, suite_members
+from app.llm.questions import USER_ANSWERS_KEY
 from app.requirements.document import without_repeated_tables
 from app.review.activities import record_baseline
 from app.routing.browser import OPERATIONS_FILE, PAGES_FILE, VIEWPORTS_FILE
@@ -147,6 +148,9 @@ def prepare_inputs(language: Language, parts: list[ComponentPart], suite: Compon
         'requirements': context.get('requirements', []),
         'requirements_document': context.get('requirements_document', ''),
         **({'architecture': context['architecture']} if context.get('architecture') else {}),
+        # What the user answered the delivery's agents, which the tests hold to too.
+        **({USER_ANSWERS_KEY: context[USER_ANSWERS_KEY]}
+           if context.get(USER_ANSWERS_KEY) else {}),
         **({'repository': context['repository']} if context.get('repository') else {}),
         # The parts the suite has a project for, when it is not the service's alone.
         **({'parts': [part.describe() for part in parts]}

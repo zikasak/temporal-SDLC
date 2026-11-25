@@ -6,6 +6,7 @@ from pathlib import Path
 
 from app.asyncio_utils import run_sync
 from app.agent_workflows.runtime import AgentProfile, configure_container_logging, run_agent
+from app.llm.questions import USER_ANSWERS_KEY, USER_ANSWERS_PROMPT
 
 # Written instead of tests when a criterion of the brief cannot be observed over HTTP.
 UNOBSERVABLE = 'unobservable.json'
@@ -505,7 +506,8 @@ async def main() -> None:
     inputs = json.loads(context)
     language = json.loads(await run_sync(LANGUAGE.read_text))
     await run_agent(AgentProfile(
-        root=ROOT, prompt=prompt(inputs, language),
+        root=ROOT, prompt=(prompt(inputs, language)
+                           + (USER_ANSWERS_PROMPT if inputs.get(USER_ANSWERS_KEY) else '')),
         initial_messages=[context,
                           *(['OpenAPI contract:\n' + (await run_sync(OPENAPI.read_text))]
                             if await run_sync(OPENAPI.is_file) else [])],

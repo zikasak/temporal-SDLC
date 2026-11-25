@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app.asyncio_utils import run_sync
 from app.agent_workflows.runtime import AgentProfile, configure_container_logging, run_agent
+from app.llm.questions import USER_ANSWERS_KEY, USER_ANSWERS_PROMPT
 
 ROOT = Path('/workspace/service')
 # Present only when the contracts were too large to embed in input.json.
@@ -378,7 +379,8 @@ async def main() -> None:
     language = json.loads(await run_sync(LANGUAGE.read_text))
     await run_agent(AgentProfile(
         root=ROOT, prompt=(base_prompt(inputs, language['instructions'])
-                           + unit_tests_prompt(inputs) + repair_prompt(inputs)),
+                           + unit_tests_prompt(inputs) + repair_prompt(inputs)
+                           + (USER_ANSWERS_PROMPT if inputs.get(USER_ANSWERS_KEY) else '')),
         initial_messages=[context],
         max_turns_env='IMPLEMENTATION_MAX_TURNS',
         validate_completion=validate_completion,

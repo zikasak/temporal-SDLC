@@ -24,7 +24,7 @@ with workflow.unsafe.imports_passed_through():
         CODEGEN_TASK_QUEUE, DOCUMENTATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
     )
     from app.delivery.models import (
-        DELIVERY_CLOSING, TASK_IDLE_TIMEOUT, AgentQuestions, ProviderWait,
+        DELIVERY_CLOSING, MAX_AGENT_ANSWERS, TASK_IDLE_TIMEOUT, AgentQuestions, ProviderWait,
         DeliveryProgress, DeliveryState, mention_key, open_review_findings,
     )
     from app.review.models import review_request
@@ -269,7 +269,17 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, MergeCon
             *([waiting] if waiting.get('until') else [])]
 
     @workflow.signal
-    def agent_answered(self, workflow_id: str) -> None:
+    def agent_answered(self, answered: Any) -> None:
+        """A stage's agent was answered, or its questions timed out: by the stage's
+        workflow ID alone, or with the questions and the user's answers, which the later
+        agents of the delivery are told."""
+        if isinstance(answered, dict):
+            workflow_id = answered['workflow_id']
+            self.state.agent_answers = [*self.state.agent_answers, {
+                'stage': answered['stage'], 'questions': answered['questions'],
+                'answers': answered['answers']}][-MAX_AGENT_ANSWERS:]
+        else:
+            workflow_id = answered
         self.progress.agent_questions = [item for item in self.progress.agent_questions
                                          if item['workflow_id'] != workflow_id]
 

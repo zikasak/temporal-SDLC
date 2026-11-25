@@ -6,6 +6,7 @@ from pathlib import Path
 
 from app.asyncio_utils import run_sync
 from app.agent_workflows.runtime import AgentProfile, configure_container_logging, run_agent
+from app.llm.questions import USER_ANSWERS_KEY, USER_ANSWERS_PROMPT
 
 ROOT = Path('/workspace/review')
 # Present only when the contracts were too large to embed in input.json.
@@ -350,6 +351,8 @@ def prompt(inputs: dict, label: str) -> str:
     scope = inputs.get('review_scope')
     part = PART_PROMPT if inputs.get('review_part') else ''
     previous = PREVIOUS_PROMPT if inputs.get('previous_findings') else ''
+    # Every scope is judged against the user's answers as well as the requirements.
+    previous = (USER_ANSWERS_PROMPT if inputs.get(USER_ANSWERS_KEY) else '') + previous
     settled = SETTLED_PROMPT if inputs.get('settled_changes') else ''
     if scope == 'seam':
         work = WORK_PROMPT.format(readonly='service/ or contracts/',

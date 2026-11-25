@@ -250,6 +250,19 @@ def test_the_delivery_review_prompt_is_as_it_was(tmp_path):
     assert agent.BUGFIX_PROMPT not in prompt
 
 
+@pytest.mark.parametrize('scope', [None, 'seam', 'regression'])
+def test_every_review_holds_to_the_users_answers(scope):
+    from app.llm.questions import USER_ANSWERS_PROMPT
+    from app.review import agent
+
+    inputs = {'brief': {'requirements': []}, **({'review_scope': scope} if scope else {})}
+    assert USER_ANSWERS_PROMPT not in agent.prompt(inputs, 'Java')
+    answered = [{'stage': 'tests', 'questions': [{'question': 'Change routing too?',
+                                                  'options': ['Yes', 'No']}],
+                 'answers': ['Yes']}]
+    assert USER_ANSWERS_PROMPT in agent.prompt({**inputs, 'user_answers': answered}, 'Java')
+
+
 def test_a_bugfix_review_asks_only_for_tests_that_can_fail_without_the_fix():
     from app.review import agent
 

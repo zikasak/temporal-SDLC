@@ -1887,6 +1887,11 @@ async def test_agent_questions_wait_for_the_users_answers(env, worker):
     first, resumed = worker.implementation_contexts
     assert "answers" not in first and resumed["answers"] == ["A managed Postgres"]
     assert all("answers" not in context for context in worker.test_contexts)
+    # The review, run after the answer, judges the change by it as well as by the
+    # requirements: what the user decided is not unrequested scope.
+    review, = worker.reviewed
+    assert review["user_answers"] == [{"stage": "implementation", "questions": [question],
+                                       "answers": ["A managed Postgres"]}]
     with pytest.raises(sessions.SessionBusy, match="no longer open"):
         await delivery_service.answer(session_id, asked["workflow_id"], ["MySQL"])
 
