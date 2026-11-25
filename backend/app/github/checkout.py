@@ -47,6 +47,8 @@ GITHUB_URL = 'https://github.com/'
 GIT_TIMEOUT = 540
 OUTPUT_CHARS = 1500
 LISTED_IGNORED = 20
+# How much of what conflicting remote commits changed a fix round is shown.
+CONFLICT_CHARS = 30000
 
 
 class CheckoutError(RuntimeError):
@@ -219,6 +221,81 @@ async def delivery_diff(session_dir: Path, commit: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + '\n… (the diff goes on)'
 
 
+class PushConflict(CheckoutError):
+    """The remote branch has commits that conflict with the sources: `commit` is the
+    remote branch's tip, `files` the conflicting paths in the repository and `changes`
+    what those commits changed in them, as a diff from where the histories parted."""
+
+    def __init__(self, message: str, branch: str, commit: str, files: list[str],
+                 changes: str):
+        super().__init__(message)
+        self.branch = branch
+        self.commit = commit
+        self.files = files
+        self.changes = changes
+
+
+def _author(author: tuple[str, str]) -> list[str]:
+    return ['-c', f'user.name={author[0]}', '-c', f'user.email={author[1]}']
+
+
+async def _merge_remote(target: Path, token: str, branch: str, author: tuple[str, str],
+                        resolved: str | None) -> None:
+    """Merge the commits of the remote `branch` the working copy does not have into it.
+
+    When the remote tip is `resolved`, commits whose changes the sources were already
+    made to take in, the conflicting files are taken as the sources have them. Otherwise
+    a conflict raises PushConflict, and anything else that stops the merge CheckoutError,
+    with the working copy as it was."""
+    # The shallow clone lacks the history a merge base is found in.
+    shallow = await _git('rev-parse', '--is-shallow-repository', cwd=target) == 'true'
+    await _git('fetch', '--quiet', '--no-tags', *(['--unshallow'] if shallow else []),
+               'origin', f'refs/heads/{branch}', cwd=target, token=token)
+    remote = await _git('rev-parse', 'FETCH_HEAD', cwd=target)
+    try:
+        await _git(*_author(author), 'merge', '--quiet', '--no-edit', '--no-verify', '-m',
+                   f'Merge the commits pushed to {branch} meanwhile', 'FETCH_HEAD',
+                   cwd=target)
+        return
+    except CheckoutError as exc:
+        failure = exc
+    conflicts = [path for path in (await _git(
+        'diff', '--name-only', '-z', '--diff-filter=U', cwd=target)).split('\0') if path]
+    if conflicts and resolved == remote:
+        for path in conflicts:
+            try:
+                await _git('cat-file', '-e', f'HEAD:{path}', cwd=target)
+            except CheckoutError:
+                await _git('rm', '--quiet', '--', path, cwd=target)
+            else:
+                await _git('checkout', 'HEAD', '--', path, cwd=target)
+        await _git(*_author(author), 'commit', '--quiet', '--no-edit', '--no-verify',
+                   cwd=target)
+        return
+    changes = ''
+    if conflicts:
+        base = await _git('merge-base', 'HEAD', 'FETCH_HEAD', cwd=target)
+        changes = await _git('diff', '--no-color', '--no-ext-diff', base, 'FETCH_HEAD',
+                             '--', *conflicts, cwd=target)
+    try:
+        await _git('merge', '--abort', cwd=target)
+    except CheckoutError:
+        pass  # Nothing was merged, such as with unrelated histories.
+    if not conflicts:
+        raise CheckoutError(
+            f'The branch {branch} on GitHub has commits this session did not push, and they '
+            f'cannot be merged: {str(failure)[-500:]}. Delete that branch on GitHub, then '
+            'retry the push.') from failure
+    named = ', '.join(conflicts[:LISTED_IGNORED]) + (
+        f' and {len(conflicts) - LISTED_IGNORED} more files'
+        if len(conflicts) > LISTED_IGNORED else '')
+    raise PushConflict(
+        f'The branch {branch} on GitHub has commits this session did not push, and they '
+        f'conflict with the sources in {named}.', branch, remote, conflicts,
+        changes if len(changes) <= CONFLICT_CHARS
+        else changes[:CONFLICT_CHARS] + '\n… (the diff goes on)') from failure
+
+
 def replace_files(source: Path, target: Path, include: Callable[[Path], bool]) -> None:
     """Make the included files under `target` exactly those of `source`.
 
@@ -245,10 +322,15 @@ def replace_files(source: Path, target: Path, include: Callable[[Path], bool]) -
 
 
 async def push(target: Path, repository: RepositorySelection, token: str, *, branch: str,
-               message: str, author: tuple[str, str],
-               verified: bool = True) -> RepositoryPublication:
-    """Commit the working copy to `branch` and push it. Never forces: a remote branch
-    of that name with other history is an error. Safe to repeat after a failure.
+               message: str, author: tuple[str, str], verified: bool = True,
+               resolved: str | None = None) -> RepositoryPublication:
+    """Commit the working copy to `branch` and push it. Safe to repeat after a failure.
+
+    Never forces: when the remote branch has commits the working copy does not, such as
+    a merge of the base branch made on GitHub or an earlier push of the session from a
+    working copy since cloned again, they are merged in and the merge is pushed. Commits
+    that conflict with the sources raise PushConflict and leave the remote branch as it
+    is, unless the remote tip is `resolved` (see _merge_remote).
 
     The repository's .gitignore is respected, so build output left by the authors stays
     out of the branch. The working copy started as a fresh clone, so whatever is ignored
@@ -266,8 +348,16 @@ async def push(target: Path, repository: RepositorySelection, token: str, *, bra
     if await _git('status', '--porcelain', cwd=target):
         await _git('-c', f'user.name={author[0]}', '-c', f'user.email={author[1]}',
                    'commit', '--quiet', '--no-verify', '-m', message, cwd=target)
+    try:
+        await _git('push', '--quiet', 'origin', f'HEAD:refs/heads/{branch}', cwd=target,
+                   token=token)
+    except CheckoutError as exc:
+        if '[rejected]' not in str(exc):
+            raise
+        await _merge_remote(target, token, branch, author, resolved)
+        await _git('push', '--quiet', 'origin', f'HEAD:refs/heads/{branch}', cwd=target,
+                   token=token)
     commit = await _git('rev-parse', 'HEAD', cwd=target)
-    await _git('push', '--quiet', 'origin', f'HEAD:refs/heads/{branch}', cwd=target, token=token)
     return {'branch': branch, 'commit': commit,
             'url': f'{repository["html_url"]}/tree/{branch}', 'verified': verified,
             'ignored': ignored[:LISTED_IGNORED], 'ignored_count': len(ignored)}

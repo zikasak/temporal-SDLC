@@ -10,6 +10,7 @@ from app.delivery.flow.baseline import Baseline
 from app.delivery.flow.change import Change
 from app.delivery.flow.ci import CiWatch
 from app.delivery.flow.mention_rounds import MentionRounds
+from app.delivery.flow.merge_conflicts import MergeConflicts
 from app.delivery.flow.publication import Publication
 from app.delivery.flow.review import ReviewRounds
 from app.delivery.flow.stages import RESTORE_KEPT_PATCH, Stages, restore_finding
@@ -44,8 +45,9 @@ def _same_mention(first: tuple[str | None, int | None],
 
 
 @workflow.defn
-class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, Baseline,
-                       Verification, ReviewRounds, Publication, FlowFlags, PendingStage):
+class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, MergeConflicts,
+                       Change, Baseline, Verification, ReviewRounds, Publication, FlowFlags,
+                       PendingStage):
     """Turns a specified task into verified, published sources: code generation, the
     parallel service and test authors, verification with its repair loop, and the push.
     A bugfix generates no code and goes red to green instead: regression tests, proof
@@ -100,6 +102,10 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
         self._handed_over = not state.record_only
         # The failed CI this run fixes on its own, if it is such a round.
         self._ci_round: dict[str, Any] | None = state.ci_fix
+        # The conflicting remote commits this run takes in on its own, if it is such a
+        # round, and those this run's push met, which a round takes in next.
+        self._merge_round: dict[str, Any] | None = state.merge_fix
+        self._push_conflict: dict[str, Any] | None = None
         self._init_flags()
         self._init_pending()
 
@@ -132,10 +138,14 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, Change, 
             elif await self._mention_started():
                 await self._deliver()
                 await self._mention_finished()
+            if self._merge_round is not None:
+                await self._merge_fix_finished()
         workflow.deprecate_patch('delivery-waits')
         self.state.waiting = True
         # A fix request that arrived while this run worked starts its round now.
         self._start_queued()
+        # Then a round of remote commits this run's push conflicted with.
+        await self._start_merge_fix()
         if workflow.patched(PULL_REQUEST_CLOSES_PATCH):
             if not await self._wait_for_pull_request():
                 await self._close_flags()

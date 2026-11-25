@@ -46,7 +46,8 @@ from app.github import service as github_service
 from app.github import storage as github_storage
 from app.github.errors import GitHubError
 from app.github.models import (
-    PullRequest, RepositoryCheckout, RepositoryPublication, RepositorySelection,
+    PUSH_CONFLICT, PullRequest, RepositoryCheckout, RepositoryPublication,
+    RepositorySelection,
 )
 from app.implementation.activities import is_service_file, published_files
 from app.onboarding.models import onboarding_branch
@@ -229,8 +230,12 @@ async def _publish(workspace: SessionWorkspace, session_id: str,
                    repository: RepositorySelection, subject: str,
                    update: Callable[[], None], verified: bool = True,
                    note: str = UNVERIFIED_NOTE, branch: str | None = None,
-                   details: str = "") -> RepositoryPublication:
-    """Apply `update` to the workspace's checkout, commit it to a new branch and push it."""
+                   details: str = "", resolved: str | None = None) -> RepositoryPublication:
+    """Apply `update` to the workspace's checkout, commit it to a new branch and push it.
+    Remote commits that conflict with it fail the push with a non-retryable
+    PUSH_CONFLICT error whose details are the remote tip, the conflicting files and what
+    those commits changed in them; `resolved` is a remote tip whose changes the sources
+    were made to take in, so its conflicts are settled as the sources have them."""
     target = workspace.checkout
     token, connection = await _github_token()
     bot = f"{connection['app_slug']}[bot]"
@@ -244,8 +249,14 @@ async def _publish(workspace: SessionWorkspace, session_id: str,
                      + (f"\n\n{details}" if details else "")
                      + ("" if verified else f"\n\n{note}")),
             author=(bot, f"{connection['bot_user_id']}+{bot}@users.noreply.github.com"),
-            verified=verified,
+            verified=verified, resolved=resolved,
         )
+    except repository_checkout.PushConflict as exc:
+        activity.logger.warning("Could not push %s: %s", repository["full_name"], exc)
+        raise ApplicationError(
+            str(exc), {"commit": exc.commit, "branch": exc.branch, "files": exc.files,
+             "changes": exc.changes},
+            type=PUSH_CONFLICT, non_retryable=True) from exc
     except (repository_checkout.CheckoutError, GitHubError) as exc:
         activity.logger.warning("Could not push %s: %s", repository["full_name"], exc)
         raise ApplicationError(str(exc)) from exc
@@ -259,17 +270,18 @@ async def _publish(workspace: SessionWorkspace, session_id: str,
 async def publish_repository(
     session_id: str, repository: RepositorySelection, contract: RepositoryContract,
     kind: str | None = None, findings: list[ReviewFinding] | None = None,
-    components: dict[str, Any] | None = None,
+    components: dict[str, Any] | None = None, resolved: str | None = None,
 ) -> RepositoryPublication:
     """Activity: `publish_repository_from` the session's workspace on this worker."""
     return await publish_repository_from(_workspace(session_id), session_id, repository,
-                                         contract, kind, findings, components)
+                                         contract, kind, findings, components, resolved)
 
 
 async def publish_repository_from(
     workspace: SessionWorkspace, session_id: str, repository: RepositorySelection,
     contract: RepositoryContract, kind: str | None = None,
     findings: list[ReviewFinding] | None = None, components: dict[str, Any] | None = None,
+    resolved: str | None = None,
 ) -> RepositoryPublication:
     """Commit the verified service, its contract tests and the contract they were built
     from to a new branch and push it. With open review `findings` the tests pass but the
@@ -334,11 +346,12 @@ async def publish_repository_from(
     details = COMPONENTS_NOTE if components is not None else ""
     if not findings:
         result = await _publish(workspace, session_id, repository, subject, update,
-                                details=details)
+                                details=details, resolved=resolved)
         return {**result, 'findings': [], 'findings_count': 0}
     result = await _publish(
         workspace, session_id, repository, f"{subject} (unverified)", update, verified=False,
-        note=f"{FINDINGS_NOTE}\n\n{commit_findings(findings)}", details=details)
+        note=f"{FINDINGS_NOTE}\n\n{commit_findings(findings)}", details=details,
+        resolved=resolved)
     return {**result, 'findings': cast(list[dict[str, Any]], findings[:COMMIT_FINDINGS]),
             'findings_count': len(findings)}
 
@@ -348,16 +361,17 @@ async def publish_repository_from(
 async def publish_onboarding(
     session_id: str, repository: RepositorySelection, contract: RepositoryContract,
     findings: list[ReviewFinding] | None = None, code_changed: bool = False,
+    resolved: str | None = None,
 ) -> RepositoryPublication:
     """Activity: `publish_onboarding_from` the session's workspace on this worker."""
     return await publish_onboarding_from(_workspace(session_id), session_id, repository,
-                                         contract, findings, code_changed)
+                                         contract, findings, code_changed, resolved)
 
 
 async def publish_onboarding_from(
     workspace: SessionWorkspace, session_id: str, repository: RepositorySelection,
     contract: RepositoryContract, findings: list[ReviewFinding] | None = None,
-    code_changed: bool = False,
+    code_changed: bool = False, resolved: str | None = None,
 ) -> RepositoryPublication:
     """Commit an onboarding's verified result to its own new branch and push it: the
     contract drafted from the existing code, the contract tests that replace the
@@ -382,11 +396,12 @@ async def publish_onboarding_from(
     details = CODE_CHANGED_NOTE if code_changed else ""
     if not findings:
         result = await _publish(workspace, session_id, repository, ONBOARDING_SUBJECT,
-                                update, branch=branch, details=details)
+                                update, branch=branch, details=details, resolved=resolved)
         return {**result, 'findings': [], 'findings_count': 0}
     result = await _publish(
         workspace, session_id, repository, f"{ONBOARDING_SUBJECT} (unverified)", update, verified=False,
-        note=f"{FINDINGS_NOTE}\n\n{commit_findings(findings)}", branch=branch, details=details)
+        note=f"{FINDINGS_NOTE}\n\n{commit_findings(findings)}", branch=branch, details=details,
+        resolved=resolved)
     return {**result, 'findings': cast(list[dict[str, Any]], findings[:COMMIT_FINDINGS]),
             'findings_count': len(findings)}
 
@@ -418,15 +433,16 @@ async def publish_onboarding_architecture(
 @trace_activity('publish-documentation', feature='repository', input_parameter='repository')
 async def publish_documentation(
     session_id: str, repository: RepositorySelection, language: str, verified: bool,
+    resolved: str | None = None,
 ) -> RepositoryPublication:
     """Activity: `publish_documentation_from` the session's workspace on this worker."""
     return await publish_documentation_from(_workspace(session_id), session_id, repository,
-                                            language, verified)
+                                            language, verified, resolved)
 
 
 async def publish_documentation_from(
     workspace: SessionWorkspace, session_id: str, repository: RepositorySelection,
-    language: str, verified: bool,
+    language: str, verified: bool, resolved: str | None = None,
 ) -> RepositoryPublication:
     """Commit the documentation its author changed to a new branch and push it. Nothing
     else of the repository changes: not the service, its tests or its contract. Without
@@ -442,7 +458,7 @@ async def publish_documentation_from(
         workspace, session_id, repository,
         DOCUMENTATION_SUBJECT if verified else f"{DOCUMENTATION_SUBJECT} (unverified)",
         lambda: repository_checkout.replace_files(written, target, documentation_files),
-        verified)
+        verified, resolved=resolved)
 
 
 @activity.defn

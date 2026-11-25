@@ -363,7 +363,8 @@ class ReviewRounds(FlowBase):
         # A fix request in the pull request, or of failed CI, comes with the open findings
         # only while the delivery has some.
         findings = (open_review_findings(self.progress)
-                    if (self.state.mention is None and self.state.ci_fix is None)
+                    if (self.state.mention is None and self.state.ci_fix is None
+                        and self.state.merge_fix is None)
                     or self.progress.open_findings else [])
         number = len(self.progress.reviews) + 1
         instructions = self.state.instructions

@@ -17,6 +17,7 @@ from app.config import (
     TEST_GENERATION_TASK_QUEUE, VERIFICATION_TASK_QUEUE,
 )
 from app.delivery.models import DeliveryProgress, DeliveryState, delivery_id
+from app.github.models import PUSH_CONFLICT
 from app.routing.models import ROUTING_ERROR, SEAM_ERROR
 from app.diagnosis.workflows import DiagnosisWorkflow
 from app.documentation.workflows import DocumentationWorkflow
@@ -148,6 +149,11 @@ class FakeStages:
         self.pull_request_changes: list[dict[str, Any]] = []
         self.published_kind: str | None = None
         self.fail_publication = False
+        # Successive pushes of the repository whose branch has conflicting commits, each
+        # the remote tip as the push error gives it, or None for a push that goes
+        # through; the last one repeats. Each push's `resolved` tip is recorded.
+        self.push_conflicts: list[str | None] = [None]
+        self.resolved: list[str | None] = []
         self.fail_documentation = False
         # Each push of documentation alone, and whether it was pushed as verified.
         self.published_documentation: list[tuple[str, str, bool]] = []
@@ -238,9 +244,19 @@ class FakeStages:
     async def publish_repository(self, session_id: str, repository: dict[str, Any],
                                  contract: dict[str, Any], kind: str | None,
                                  findings: list[dict[str, Any]] | None = None,
-                                 components: dict[str, Any] | None = None) -> dict[str, Any]:
+                                 components: dict[str, Any] | None = None,
+                                 resolved: str | None = None) -> dict[str, Any]:
         if self.fail_publication:
             raise ApplicationError("remote: Permission denied", non_retryable=True)
+        self.resolved.append(resolved)
+        conflict = self.push_conflicts[min(len(self.resolved), len(self.push_conflicts)) - 1]
+        if conflict is not None and conflict != resolved:
+            raise ApplicationError(
+                "The branch generated/abc on GitHub has commits this session did not push, "
+                "and they conflict with the sources in src/Rooms.java.",
+                {"commit": conflict, "branch": "generated/abc", "files": ["src/Rooms.java"],
+                 "changes": "+their rooms change"},
+                type=PUSH_CONFLICT, non_retryable=True)
         self.published.append((session_id, repository["full_name"]))
         self.contract = contract
         self.published_kind = kind

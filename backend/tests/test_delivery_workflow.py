@@ -2123,6 +2123,49 @@ async def test_a_ci_fix_that_does_not_pass_verification_pushes_nothing_and_says_
     assert state.ci_fix is None and state.instructions is None and len(worker.ci_reads) == 1
 
 
+THEIRS = "3" * 40
+MOVED = "4" * 40
+
+
+async def test_commits_that_conflict_with_the_push_are_taken_in_by_a_round_of_its_own(
+        env, worker, repository_selection):
+    worker.push_conflicts = [THEIRS, None]
+    session_id = await ci_delivery(env, worker, repository_selection)
+    state = await delivery_until(env, session_id, lambda state: (
+        state.waiting and len(worker.published) == 1), 'the merge was never pushed')
+    # The round's authors were told what the conflicting commits changed, and its result
+    # was verified, reviewed and pushed as the merge of those commits.
+    instructions = [repair['review']['instructions'] for _, repair in worker.repairs]
+    assert instructions and all(
+        THEIRS in item and '- src/Rooms.java' in item and '+their rooms change' in item
+        for item in instructions)
+    assert worker.resolved == [None, THEIRS]
+    progress = state.progress
+    assert progress.publication_status == 'completed' and progress.publication_error is None
+    assert progress.pull_request_status == 'completed'
+    assert state.merge_fix is None and state.instructions is None
+    # No pull request was open to comment on when the round started.
+    assert worker.comments == [
+        'Automatic fix round 1 took the conflicting commits in and pushed the merge to '
+        f'`generated/abc` at commit `{PUSHED[:12]}`.']
+
+
+async def test_commits_that_keep_conflicting_stop_the_rounds_and_say_what_to_do(
+        env, worker, repository_selection):
+    # The branch moves on again after each round.
+    worker.push_conflicts = [THEIRS, MOVED, "5" * 40]
+    session_id = await ci_delivery(env, worker, repository_selection)
+    state = await delivery_until(env, session_id, lambda state: (
+        state.waiting and len(worker.resolved) == 3), 'the rounds never ended')
+    assert worker.resolved == [None, THEIRS, MOVED] and not worker.published
+    assert state.progress.publication_status == 'error'
+    assert state.progress.publication_error.endswith(
+        'After 2 automatic fix rounds in a row no further one starts on its own. Delete '
+        'that branch on GitHub, or revert the conflicting commits on it, then retry the '
+        'push.')
+    assert state.merge_fix is None and state.instructions is None
+
+
 async def test_ci_the_app_may_not_read_is_reported_in_the_progress(
         env, worker, repository_selection):
     worker.ci_results = [ApplicationError(CHECKS_DENIED, type=CHECKS_UNAVAILABLE,

@@ -8,6 +8,7 @@ from temporalio.exceptions import ActivityError, ApplicationError
 from app.delivery.flow.stages import COMPONENT_REPAIRS_PATCH
 
 from app.delivery.flow.base import FlowBase
+from app.delivery.flow.merge_conflicts import push_conflict
 
 with workflow.unsafe.imports_passed_through():
     from app.delivery.contract import RepositoryContract, with_requirements
@@ -62,7 +63,8 @@ class Publication(FlowBase):
             skip = True
         if skip:
             if ((self.progress.open_findings or self.state.mention is not None
-                 or self.state.ci_fix is not None) and self.progress.publication):
+                 or self.state.ci_fix is not None or self.state.merge_fix is not None)
+                    and self.progress.publication):
                 # A run started by the user's instructions that did not pass leaves the
                 # earlier unverified push on the branch, and the flag raised. So does a
                 # fix round a pull request comment asked for, with the earlier push, and
@@ -109,6 +111,12 @@ class Publication(FlowBase):
                     # With its component tests and contract; its contract tests are
                     # pushed only when an author of the change wrote them.
                     args.append({'contract_tests': bool(self.progress.tests)})
+        if self.state.merge_fix is not None:
+            # A merge fix round's sources took in the remote commits it was started for:
+            # their conflicts are settled as the sources have them.
+            if push is publish_repository and len(args) == 3:
+                args.append(None)
+            args.append(self.state.merge_fix['commit'])
         try:
             self.progress.publication = await workflow.execute_activity(
                 push,
@@ -121,7 +129,8 @@ class Publication(FlowBase):
             reason = str(getattr(exc.cause, 'message', '') or '')[-500:]
             self.progress.publication_error = (
                 f'The {"documentation" if documentation else "verified sources"} could not be '
-                'pushed to the repository.' + (f' {reason}' if reason else ''))
+                'pushed to the repository.' + (f' {reason}' if reason else '')
+                + self._merge_conflicted(push_conflict(exc)))
             self.progress.publication_status = 'error'
             # Nothing new was pushed, so no pull request step runs for it.
             self.progress.pull_request_status = 'skipped'
@@ -183,7 +192,8 @@ class Publication(FlowBase):
             reason = str(getattr(exc.cause, 'message', '') or '')[-500:]
             self.progress.publication_error = (
                 'The architecture could not be pushed to the repository.'
-                + (f' {reason}' if reason else ''))
+                + (f' {reason}' if reason else '')
+                + self._merge_conflicted(push_conflict(exc)))
             self.progress.publication_status = 'error'
             self.progress.pull_request_status = 'skipped'
             return

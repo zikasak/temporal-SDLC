@@ -2,6 +2,11 @@
 
 from typing import Any, Literal, NotRequired, TypedDict
 
+# The type of the error of a push that remote commits on its branch conflict with; its
+# details are {'commit': the remote tip, 'branch': the pushed branch, 'files': the
+# conflicting paths, 'changes': what those commits changed in them}.
+PUSH_CONFLICT = "PushConflict"
+
 
 class RepositorySelection(TypedDict):
     provider: Literal["github"]

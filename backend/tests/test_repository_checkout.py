@@ -14,6 +14,7 @@ from app.delivery.contract import (
     ContractError, RepositoryContract, read_contract, write_contract,
 )
 from app.github import checkout, storage
+from app.github.models import PUSH_CONFLICT
 from app.temporal import activities
 
 TOKEN = "ghs_SECRET_SENTINEL"
@@ -321,26 +322,95 @@ def test_a_repository_without_a_usable_contract_is_reported_as_unsupported(tmp_p
         read_contract(tmp_path)
 
 
-async def test_a_diverged_remote_branch_is_reported_not_overwritten(tmp_path, remote, repository_selection):
-    environment = ActivityEnvironment()
-    await environment.run(activities.checkout_repository, SESSION, repository_selection)
+async def _diverge(tmp_path, remote, repository_selection, theirs):
+    """A checked-out session with generated sources, and a remote branch of its name
+    that another clone pushed `theirs` to."""
+    await ActivityEnvironment().run(activities.checkout_repository, SESSION,
+                                    repository_selection)
     session = tmp_path / "generated" / SESSION
     for name in ("implementation/service/Dockerfile", "tests/suite/pom.xml"):
         (session / name).parent.mkdir(parents=True, exist_ok=True)
         (session / name).write_text("generated")
     other = tmp_path / "other"
     git("clone", "--quiet", str(remote), str(other), cwd=tmp_path)
-    (other / "theirs").write_text("someone else's work")
+    for name, text in theirs.items():
+        (other / name).parent.mkdir(parents=True, exist_ok=True)
+        (other / name).write_text(text)
     git("add", "--all", cwd=other)
     git("commit", "--quiet", "-m", "Theirs", cwd=other)
     git("push", "--quiet", "origin", "HEAD:refs/heads/" + BRANCH, cwd=other)
-    theirs = git("rev-parse", BRANCH, cwd=remote)
+    return git("rev-parse", BRANCH, cwd=remote)
 
-    with pytest.raises(ApplicationError, match="git push failed") as raised:
-        await environment.run(activities.publish_repository, SESSION, repository_selection,
-                              CONTRACT)
+
+async def test_a_diverged_remote_branch_is_merged_not_overwritten(tmp_path, remote, repository_selection):
+    theirs = await _diverge(tmp_path, remote, repository_selection,
+                            {"theirs": "someone else's work"})
+
+    published = await ActivityEnvironment().run(
+        activities.publish_repository, SESSION, repository_selection, CONTRACT)
+    assert published["commit"] == git("rev-parse", BRANCH, cwd=remote)
+    assert theirs in git("rev-list", "--parents", "-n", "1", BRANCH, cwd=remote).split()
+    assert git("show", f"{BRANCH}:theirs", cwd=remote) == "someone else's work"
+    assert git("show", f"{BRANCH}:Dockerfile", cwd=remote) == "generated"
+
+
+async def test_a_conflicting_remote_branch_is_reported_not_overwritten(tmp_path, remote, repository_selection):
+    theirs = await _diverge(tmp_path, remote, repository_selection,
+                            {"Dockerfile": "theirs", "theirs.txt": "their file"})
+
+    with pytest.raises(ApplicationError, match="conflict with the sources in Dockerfile") as raised:
+        await ActivityEnvironment().run(activities.publish_repository, SESSION,
+                                        repository_selection, CONTRACT)
     assert TOKEN not in str(raised.value)
+    assert raised.value.type == PUSH_CONFLICT and raised.value.non_retryable
+    details = raised.value.details[0]
+    assert (details["commit"], details["branch"], details["files"]) == (theirs, BRANCH, ["Dockerfile"])
+    assert "+theirs" in details["changes"] and "their file" not in details["changes"]
     assert git("rev-parse", BRANCH, cwd=remote) == theirs
+
+    # Once the branch is deleted, a retried push goes through.
+    git("branch", "--quiet", "-D", BRANCH, cwd=remote)
+    published = await ActivityEnvironment().run(
+        activities.publish_repository, SESSION, repository_selection, CONTRACT)
+    assert git("show", f"{published['commit']}:Dockerfile", cwd=remote) == "generated"
+
+
+async def test_a_push_resolving_the_conflicting_commits_merges_them_as_the_sources_have_them(tmp_path, remote, repository_selection):
+    theirs = await _diverge(tmp_path, remote, repository_selection,
+                            {"Dockerfile": "theirs", "theirs.txt": "their file"})
+    with pytest.raises(ApplicationError) as raised:
+        await ActivityEnvironment().run(activities.publish_repository, SESSION,
+                                        repository_selection, CONTRACT)
+    # The fix round took their change in.
+    (tmp_path / "generated" / SESSION / "implementation/service/Dockerfile").write_text(
+        "generated and theirs")
+
+    published = await ActivityEnvironment().run(
+        activities.publish_repository, SESSION, repository_selection, CONTRACT, None, None,
+        None, raised.value.details[0]["commit"])
+    assert published["commit"] == git("rev-parse", BRANCH, cwd=remote)
+    assert theirs in git("rev-list", "--parents", "-n", "1", BRANCH, cwd=remote).split()
+    assert git("show", f"{BRANCH}:Dockerfile", cwd=remote) == "generated and theirs"
+    assert git("show", f"{BRANCH}:theirs.txt", cwd=remote) == "their file"
+
+
+async def test_a_resolution_of_other_commits_does_not_settle_new_conflicts(tmp_path, remote, repository_selection):
+    await _diverge(tmp_path, remote, repository_selection, {"Dockerfile": "theirs"})
+    with pytest.raises(ApplicationError) as raised:
+        await ActivityEnvironment().run(activities.publish_repository, SESSION,
+                                        repository_selection, CONTRACT)
+    other = tmp_path / "other"
+    (other / "Dockerfile").write_text("theirs, changed again")
+    git("commit", "--quiet", "-am", "Again", cwd=other)
+    git("push", "--quiet", "origin", "HEAD:refs/heads/" + BRANCH, cwd=other)
+    again = git("rev-parse", BRANCH, cwd=remote)
+
+    with pytest.raises(ApplicationError) as repeated:
+        await ActivityEnvironment().run(
+            activities.publish_repository, SESSION, repository_selection, CONTRACT, None, None,
+            None, raised.value.details[0]["commit"])
+    assert repeated.value.details[0]["commit"] == again
+    assert git("rev-parse", BRANCH, cwd=remote) == again
 
 
 async def test_a_session_checks_its_branch_out_again_at_its_latest_commit(tmp_path, remote, repository_selection):

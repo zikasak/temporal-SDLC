@@ -690,6 +690,12 @@ class DeliveryState:
     # Set for the delivery stage of a task flow created before the task was specified: it
     # waits for its task flow to start it.
     pending: bool = False
+    # The remote commits a push conflicted with that this run's automatic fix round takes
+    # into the sources, its instructions saying what they changed: {'commit': the remote
+    # branch's tip, 'files': the conflicting paths, 'round': its number in a row}. Its
+    # push merges that tip with the conflicting files as the sources have them. Cleared
+    # when the round ends.
+    merge_fix: dict[str, Any] | None = None
     # How many automatic CI fix rounds ran in a row, up to MAX_CI_FIX_ROUNDS.
     ci_fixes: int = 0
     # What the CI left failing on each pushed commit of the automatic fix rounds in a
@@ -753,6 +759,10 @@ def interrupted(state: DeliveryState) -> DeliveryState:
         # A stopped automatic CI fix is not retried as such: the user retries the stage,
         # or mentions the app with what to fix.
         state.ci_fix = None
+        state.instructions = None
+    if state.merge_fix is not None:
+        # So is a stopped merge fix: retrying the push starts one again.
+        state.merge_fix = None
         state.instructions = None
     if state.mention is not None:
         if state.spec.kind == 'docs' and state.instructions:
