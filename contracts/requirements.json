@@ -1313,5 +1313,45 @@
     "priority": "must",
     "rationale": "User chose: no API change; only the web client changes.",
     "title": "Web client change only"
+  },
+  {
+    "category": "functional",
+    "description": "Today, when a stage's work is saved to its work branch, the LLM call that writes the commit message (_work_message in backend/app/agent_workflows/host.py) runs on the worker through the native Claude adapter without FORCE_PROMPT_CACHING_5M, so its prompt is written to the provider's cache with a 1-hour TTL, which costs more than a 5-minute cache write.",
+    "id": "FR-192",
+    "priority": "must",
+    "rationale": "User: the commit-message call runs with cache TTL 1h; no need to overpay. Code: only agent containers get FORCE_PROMPT_CACHING_5M=1 (docker_agents.py).",
+    "title": "Problem: commit-message call cached for 1 hour"
+  },
+  {
+    "category": "functional",
+    "description": "The LLM call that writes a work commit's message requests a 5-minute prompt cache TTL and never a 1-hour one, whatever the Claude login (API key or subscription).",
+    "id": "FR-193",
+    "priority": "must",
+    "rationale": "User: set it to 5 minutes.",
+    "title": "Commit-message call uses a 5-minute cache TTL"
+  },
+  {
+    "category": "functional",
+    "description": "The LLM calls that write a pull request's title and description, classify a pull request mention, answer a pull request mention, name a task flow and diagnose a verification failure also request a 5-minute prompt cache TTL and never a 1-hour one, whatever the Claude login (API key or subscription).",
+    "id": "FR-194",
+    "priority": "must",
+    "rationale": "User chose to apply the 5-minute TTL to the other one-shot calls too, including task flow naming, failure diagnosis and mention answers.",
+    "title": "Other one-shot calls also use a 5-minute cache TTL"
+  },
+  {
+    "category": "functional",
+    "description": "A test shows that when each of the commit-message, pull request title and description, mention classification, mention answer, task flow naming and verification failure diagnosis calls runs with the claude adapter, the Claude CLI it starts has FORCE_PROMPT_CACHING_5M=1 in its environment.",
+    "id": "FR-195",
+    "priority": "must",
+    "rationale": "User's acceptance criterion.",
+    "title": "Acceptance: the Claude CLI gets FORCE_PROMPT_CACHING_5M=1"
+  },
+  {
+    "category": "functional",
+    "description": "After the fix, the Langfuse traces of the commit-message, pull request title and description, mention classification, mention answer, task flow naming and verification failure diagnosis calls report cache-write tokens only as input_cache_creation_5m, with no input_cache_creation_1h tokens, including under a Claude subscription login.",
+    "id": "FR-196",
+    "priority": "must",
+    "rationale": "User's acceptance criterion.",
+    "title": "Acceptance: traces show only 5-minute cache writes"
   }
 ]

@@ -1,0 +1,3 @@
+from langfuse._client.constants import ObservationTypeLiteralNoEvent
+def trace_activity(name: str, *, feature: str, as_type: ObservationTypeLiteralNoEvent='span', input_parameter: str | None=None):
+    ...

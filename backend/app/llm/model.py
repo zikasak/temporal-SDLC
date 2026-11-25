@@ -18,6 +18,19 @@ def missing_endpoint_message(workflow_type: str, model: str) -> str:
             f'for the {label} stage there, then try again.')
 
 
+def one_shot(model: Runnable) -> Runnable:
+    """`model` set up for a short one-shot call, such as a commit message or a pull
+    request's text: a Claude model writes its prompt cache with a 5-minute TTL only,
+    whatever the login, since such a call gains nothing from a longer cache."""
+    try:
+        from app.llm.claude import ChatClaude
+    except ImportError:  # without the Claude SDK no model is a ChatClaude
+        return model
+    if isinstance(model, ChatClaude):
+        model.prompt_cache_5m = True
+    return model
+
+
 async def get_model(workflow_type: WorkflowType) -> Runnable:
     settings = await get_workflow_settings(workflow_type)
     api_key = base_url = ''
