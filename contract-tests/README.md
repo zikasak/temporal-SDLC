@@ -195,6 +195,17 @@ architecture workflow's parent is not a `requirements-session-*` ID.
 superseded `requirements-session-` prefix. It only applies when the listing returns architecture
 items, so it needs a service with Temporal.
 
+## Agent questions and requirement lookup (FR-185 to FR-191, NFR-9, TR-8)
+
+These requirements change the web client only; TR-8 says the API, including `agent_questions`
+and the endpoint that answers them, stays unchanged. The popup, left-column form and layout
+rules are not observable over HTTP. `lookup_requirements` (FR-119, FR-120, FR-191) and
+`agent_questions` appear only in responses of existing sessions, which need GitHub, Temporal
+and an LLM, so they are not tested. `tests/test_agent_answers.py` covers the answering endpoint
+`POST .../delivery/answers` of requirements, API design and onboarding sessions: sign-in, the
+`AgentAnswersInput` body (`workflow_id` string, `answers` list of strings; 422 otherwise,
+assumed to be checked before the session lookup like other input) and 404 for unknown sessions.
+
 ## Requirements review, settings and the `origin` filter
 
 - `tests/test_requirements_review.py` (FR-144 to FR-147, FR-153, FR-157, FR-158, FR-168, FR-169):
