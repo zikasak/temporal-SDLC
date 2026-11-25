@@ -59,6 +59,33 @@ class AgentProfile:
     # last request without tools writes it from the notes, the checkpoint and the latest
     # history, as this prompt asks. The reply becomes the file's content.
     wrap_up_prompt: str | None = None
+    # How many times a RuntimeError of validate_completion is sent back to the running
+    # agent as feedback, while turns remain, so it can correct its output; 0 ends the run
+    # on the first failure.
+    completion_feedback: int = 0
+    # Checks the output once no feedback is left, in place of validate_completion; the
+    # host's own checks then judge what it accepts. None keeps validate_completion.
+    final_validation: Callable[[Path], None] | None = None
+
+
+COMPLETION_FEEDBACK = """[System] Your output does not pass the completion check yet:
+{problem}
+Correct it with the tools, then finish again."""
+
+
+async def _completion_problem(profile: AgentProfile, feedback_left: bool) -> str | None:
+    """The message of validate_completion's failure to send back to the agent, or None
+    when the output is accepted. Without feedback left, the final validation decides."""
+    try:
+        await run_sync(profile.validate_completion, profile.root)
+    except RuntimeError as exc:
+        if feedback_left and profile.completion_feedback > 0:
+            return str(exc)
+        if profile.final_validation is None:
+            raise
+        await run_sync(profile.final_validation, profile.root)
+        print(f'Accepted despite the completion check: {exc}', flush=True)
+    return None
 
 
 def _max_turns(profile: AgentProfile) -> int:
@@ -672,10 +699,12 @@ async def _run_native(profile: AgentProfile, provider, agent: str,
     else:
         messages = [*head, *(HumanMessage(text) for text in profile.initial_messages)]
     nudges = state.get('nudges', 0) if state else 0
+    feedback = state.get('feedback', 0) if state else 0
     # The native session holds the conversation, also of a turn that is stopped part-way.
     resumable.append(lambda: {
         # Turns are counted as each session ends: one stopped mid-way may count again.
         'adapter': agent, 'turns': max(1, turns - provider.turns_used), 'nudges': nudges,
+        'feedback': feedback,
         'session_id': getattr(provider, 'resumable_session', None) or provider.session_id})
     try:
         while True:
@@ -698,7 +727,7 @@ async def _run_native(profile: AgentProfile, provider, agent: str,
                 turns -= provider.turns_used
                 await run_sync(_stop_for_limit, directory, {
                     'adapter': agent, 'session_id': provider.session_id,
-                    'turns': turns, 'nudges': nudges}, ProviderLimit(exc))
+                    'turns': turns, 'nudges': nudges, 'feedback': feedback}, ProviderLimit(exc))
                 return LIMITED
             turns -= provider.turns_used
             if pending:
@@ -711,6 +740,7 @@ async def _run_native(profile: AgentProfile, provider, agent: str,
                         'pending': pending,
                         'turns': turns,
                         'nudges': nudges,
+                        'feedback': feedback,
                     },
                 )
                 await run_sync(answers_file.unlink, missing_ok=True)
@@ -722,7 +752,18 @@ async def _run_native(profile: AgentProfile, provider, agent: str,
                 provider.resume = provider.session_id
                 messages = [*head, HumanMessage(DIRECT_QUESTION_NOTICE)]
                 continue
-            await run_sync(profile.validate_completion, profile.root)
+            problem = await _completion_problem(
+                profile, feedback < profile.completion_feedback and turns > 0)
+            if problem is not None:
+                feedback += 1
+                if profile.completion_file:
+                    await run_sync((profile.root / profile.completion_file).unlink,
+                                   missing_ok=True)
+                provider.resume = provider.session_id
+                messages = [*head, HumanMessage(COMPLETION_FEEDBACK.format(problem=problem))]
+                print(f'Sent the completion check\'s failure back to the agent: {problem}',
+                      flush=True)
+                continue
             await run_sync(state_file.unlink, missing_ok=True)
             await run_sync(answers_file.unlink, missing_ok=True)
             print(profile.completion_message, flush=True)
@@ -746,12 +787,13 @@ async def _run_with_provider(profile: AgentProfile, provider, compaction_tokens:
     notes = ''
     changed: dict[str, None] = {}
     turns = _max_turns(profile)
-    nudges = 0
+    nudges = feedback = 0
     resumed = await run_sync(_resume, profile.root.parent)
     if resumed:
         checkpoint, history, notes = resumed['checkpoint'], resumed['history'], resumed['notes']
         changed = dict.fromkeys(resumed['changed'])
         turns, nudges = resumed['turns'], resumed['nudges']
+        feedback = resumed.get('feedback', 0)
         working += resumed.get('working', [])
         print('Resumed where the run stopped', flush=True)
     # The instructions and authoritative inputs are never compacted.
@@ -772,7 +814,7 @@ async def _run_with_provider(profile: AgentProfile, provider, compaction_tokens:
         stable.update({
             'history': messages_to_dict(history), 'checkpoint': messages_to_dict(checkpoint),
             'notes': notes, 'changed': list(changed), 'working': list(working),
-            'turns': turns - turn, 'nudges': nudges})
+            'turns': turns - turn, 'nudges': nudges, 'feedback': feedback})
         remaining = turns - turn
         notice = []
         if remaining <= FINISHING_TURNS:
@@ -803,7 +845,14 @@ async def _run_with_provider(profile: AgentProfile, provider, compaction_tokens:
                 nudges += 1
                 history.append(HumanMessage(content=DIRECT_QUESTION_NOTICE))
                 continue
-            await run_sync(profile.validate_completion, profile.root)
+            problem = await _completion_problem(
+                profile, feedback < profile.completion_feedback and remaining > 1)
+            if problem is not None:
+                feedback += 1
+                history.append(HumanMessage(content=COMPLETION_FEEDBACK.format(problem=problem)))
+                print(f'Sent the completion check\'s failure back to the agent: {problem}',
+                      flush=True)
+                continue
             print(profile.completion_message, flush=True)
             return DONE
         asked = None
@@ -837,13 +886,20 @@ async def _run_with_provider(profile: AgentProfile, provider, compaction_tokens:
                 'pending': asked, 'history': messages_to_dict(history),
                 'checkpoint': messages_to_dict(checkpoint), 'notes': notes,
                 'changed': list(changed), 'working': working, 'turns': turns - turn - 1,
-                'nudges': nudges})
+                'nudges': nudges, 'feedback': feedback})
             print(f'Paused for answers to {len(asked["questions"])} questions', flush=True)
             return PAUSED
         if await run_sync(_completion_written, profile):
-            await run_sync(profile.validate_completion, profile.root)
-            print(profile.completion_message, flush=True)
-            return DONE
+            problem = await _completion_problem(
+                profile, feedback < profile.completion_feedback and remaining > 1)
+            if problem is None:
+                print(profile.completion_message, flush=True)
+                return DONE
+            feedback += 1
+            await run_sync((profile.root / profile.completion_file).unlink, missing_ok=True)
+            history.append(HumanMessage(content=COMPLETION_FEEDBACK.format(problem=problem)))
+            print(f'Sent the completion check\'s failure back to the agent: {problem}',
+                  flush=True)
         # There is no following turn to benefit from another compaction request.
         if remaining == 1:
             break

@@ -224,6 +224,8 @@ def prompt(language: dict) -> str:
 MODULE_SUFFIXES = ('.pyi', '.py', '.d.ts', '.tsx', '.ts', '.java')
 # How many stubbed modules a message to the agent lists.
 LISTED_MODULES = 60
+# How many times a failed check of the routing is sent back to the running agent.
+COMPLETION_FEEDBACK = 5
 
 
 def module_key(name: str) -> str:
@@ -286,6 +288,20 @@ def _stubbed_modules(components: Path) -> list[str]:
 
 
 def validate_completion(root: Path) -> None:
+    """Check the routing the agent wrote under `root` while it still runs: a RuntimeError
+    is sent back to it, including one for each seam module (or module of its
+    added_elsewhere) that matches no stub or more than one."""
+    _check_routing(root, seam_modules=True)
+
+
+def validate_final(root: Path) -> None:
+    """The check of the routing once no feedback is left: everything validate_completion
+    checks but the seam modules, which check_seams on the host then rejects with its own
+    message when they still match no stub."""
+    _check_routing(root, seam_modules=False)
+
+
+def _check_routing(root: Path, seam_modules: bool) -> None:
     try:
         routes = json.loads((root / ROUTES).read_text())
     except (OSError, ValueError) as exc:
@@ -327,7 +343,7 @@ def validate_completion(root: Path) -> None:
                     module.strip(), modules) is None:
                 unmatched.setdefault(components, []).append(
                     f'{module.strip()[:200]} (seam of {requirement})')
-    if unmatched:
+    if unmatched and seam_modules:
         problems = []
         for components, names in unmatched.items():
             stubbed = _stubbed_modules(root / components)
@@ -350,6 +366,7 @@ async def main() -> None:
         root=ROOT, prompt=prompt(language),
         initial_messages=[context],
         max_turns_env='ROUTING_MAX_TURNS', validate_completion=validate_completion,
+        completion_feedback=COMPLETION_FEEDBACK, final_validation=validate_final,
         completion_message='Routing completed',
         exhaustion_message='Routing exceeded the tool-turn limit',
         contracts=CONTRACTS if await run_sync(CONTRACTS.is_dir) else None,

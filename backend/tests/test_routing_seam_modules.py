@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app.routing.agent import match_module, validate_completion
+from app.routing.agent import match_module, validate_completion, validate_final
 from app.routing.components import check_seams
 
 MODULES = {'app.docker_agents': {'run_agent', 'docker'}, 'app.routing.agent': {'ROUTES'}}
@@ -75,3 +75,8 @@ def test_agent_is_told_of_unmatched_modules(tmp_path: Path, seam: dict) -> None:
         validate_completion(_workspace(tmp_path, seam))
     assert 'app/missing' in str(error.value)
     assert 'app.docker_agents' in str(error.value)
+
+
+def test_final_check_leaves_unmatched_modules_to_check_seams(tmp_path: Path) -> None:
+    # The host's check_seams then fails with its own message.
+    validate_final(_workspace(tmp_path, {'module': 'app/missing', 'symbols': ['x']}))
