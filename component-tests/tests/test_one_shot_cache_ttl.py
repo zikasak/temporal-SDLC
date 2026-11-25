@@ -8,6 +8,7 @@ the environment the CLI would get: it must hold FORCE_PROMPT_CACHING_5M=1.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 import pytest
@@ -69,7 +70,9 @@ def app_modules_with(name: str) -> list[Any]:
 
 
 @pytest.fixture(params=["api_key", "subscription"])
-def claude(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> type[FakeClaudeClient]:
+def claude(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> type[FakeClaudeClient]:
     """Saved settings that choose the claude adapter, the fake client, and a Claude login
     by API key or by subscription."""
     import importlib
@@ -96,6 +99,12 @@ def claude(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> t
     for module in app_modules_with("get_openai_endpoint"):
         monkeypatch.setattr(module, "get_openai_endpoint", get_openai_endpoint)
     monkeypatch.setattr(claude_module, "ClaudeSDKClient", FakeClaudeClient)
+    # The calls create a working directory per session under GENERATED_CODE_DIR: keep it in
+    # a temporary directory so the call reaches the client and leaves nothing behind.
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    for module in app_modules_with("GENERATED_CODE_DIR"):
+        monkeypatch.setattr(module, "GENERATED_CODE_DIR", generated)
 
     for variable in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", SETTING):
         monkeypatch.delenv(variable, raising=False)
@@ -106,21 +115,29 @@ def claude(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> t
 
     FakeClaudeClient.instances = []
     FakeClaudeClient.reply = ""
+    CALL_ERRORS.clear()
     return FakeClaudeClient
+
+
+CALL_ERRORS: list[BaseException] = []
 
 
 async def run_call(call: Callable[[], Awaitable[Any]]) -> None:
     """Run the one-shot call. What it returns is not what a test observes (an unusable reply
     makes these calls fall back), so a failure it raises on the fake's reply is not either:
-    the options its CLI was started with are."""
+    the options its CLI was started with are. The error is kept to be reported when no CLI
+    was started."""
     try:
         await call()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as error:  # noqa: BLE001
+        CALL_ERRORS.append(error)
 
 
 def assert_five_minute_cache(claude: type[FakeClaudeClient], what: str) -> None:
-    assert claude.instances, f"{what} started no Claude CLI through the claude adapter"
+    assert claude.instances, (
+        f"{what} started no Claude CLI through the claude adapter"
+        + (f" (the call raised {CALL_ERRORS[-1]!r})" if CALL_ERRORS else "")
+    )
     for client in claude.instances:
         options = client.options
         assert options is not None, f"{what} started the Claude CLI without options"
