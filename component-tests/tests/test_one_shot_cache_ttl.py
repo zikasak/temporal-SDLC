@@ -13,6 +13,7 @@ API-key login as under a subscription login.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 import pytest
@@ -187,6 +188,21 @@ class TestPullRequestText:
         assert_five_minute_cache(claude, "pull request title and description")
 
 
+@pytest.fixture
+def generated_code_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The generated-code directory (app.config.GENERATED_CODE_DIR, where answering a mention
+    makes a working directory for the session) is a writable temporary directory. The value is
+    bound when each module is imported, so every module holding it is patched."""
+    import app.config as config
+
+    directory = tmp_path / "generated"
+    directory.mkdir()
+    for module in (config, mention_activities, pull_request_activities):
+        if hasattr(module, "GENERATED_CODE_DIR"):
+            monkeypatch.setattr(module, "GENERATED_CODE_DIR", directory)
+    return directory
+
+
 class TestMentions:
     async def test_classify_requests_the_five_minute_cache(
         self, claude: type[FakeClaudeSDKClient],
@@ -207,7 +223,7 @@ class TestMentions:
         assert_five_minute_cache(claude, "mention classification activity")
 
     async def test_answer_requests_the_five_minute_cache(
-        self, claude: type[FakeClaudeSDKClient],
+        self, claude: type[FakeClaudeSDKClient], generated_code_dir: Path,
     ) -> None:
         # requirement: FR-194, FR-195
         claude.reply = "The endpoint returns 404 because no widget exists yet."
@@ -218,7 +234,7 @@ class TestMentions:
         assert_five_minute_cache(claude, "mention answer")
 
     async def test_answer_activity_requests_the_five_minute_cache(
-        self, claude: type[FakeClaudeSDKClient],
+        self, claude: type[FakeClaudeSDKClient], generated_code_dir: Path,
     ) -> None:
         # requirement: FR-194, FR-195
         claude.reply = "Because no widget exists yet."
