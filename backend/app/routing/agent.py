@@ -2,6 +2,7 @@
 test and changes no code."""
 import asyncio
 import json
+from collections.abc import Iterable
 from pathlib import Path
 
 from app.asyncio_utils import run_sync
@@ -219,13 +220,96 @@ def prompt(language: dict) -> str:
                              if browser else '')))
 
 
+# What a module written in path form may end with: a stub's or a source file's suffix.
+MODULE_SUFFIXES = ('.pyi', '.py', '.d.ts', '.tsx', '.ts', '.java')
+# How many stubbed modules a message to the agent lists.
+LISTED_MODULES = 60
+# How many times a failed check of the routing is sent back to the running agent.
+COMPLETION_FEEDBACK = 5
+
+
+def module_key(name: str) -> str:
+    """`name`, a module in dotted or path form ('app.docker_agents', 'app/docker_agents'
+    or 'app/docker_agents.py'), in the dotted form two names of one module share. Only a
+    name in path form (one holding a '/') loses a file suffix or a trailing `__init__`;
+    a dotted name is kept as it is, so app.languages.java stays app.languages.java."""
+    key = name.strip().replace('\\', '/')
+    if '/' not in key:
+        return key
+    while key.startswith('./'):
+        key = key[2:]
+    key = key.strip('/')
+    for suffix in MODULE_SUFFIXES:
+        if key.endswith(suffix) and len(key) > len(suffix):
+            key = key[:-len(suffix)]
+            break
+    key = key.replace('/', '.')
+    if key.endswith('.__init__'):
+        key = key[:-len('.__init__')]
+    return key
+
+
+def _stub_key(module: str) -> str:
+    """A stubbed module's own name in dotted form: a dotted name as it is, a TypeScript
+    part's module path (stored without its file suffix) with its '/' turned into '.'."""
+    return module.strip().replace('/', '.')
+
+
+def match_module(name: str, modules: Iterable[str]) -> str | None:
+    """The stubbed module of `modules` that `name` names: itself when stubbed under that
+    name, else the only one it names in another form (a path for a dotted name), or None
+    when there is none or more than one."""
+    modules = list(modules)
+    if name in modules:
+        return name
+    key = module_key(name)
+    found = [module for module in modules if _stub_key(module) == key]
+    return found[0] if len(found) == 1 else None
+
+
+def _stubbed_modules(components: Path) -> list[str]:
+    """The modules the stubs under `components` describe, as their contracts name them."""
+    modules: set[str] = set()
+    if not components.is_dir():
+        return []
+    for file in components.rglob('*'):
+        if not file.is_file() or file.is_symlink():
+            continue
+        path = file.relative_to(components).as_posix()
+        if path.endswith('.d.ts'):
+            modules.add(path.removesuffix('.d.ts'))
+        elif path.endswith('.pyi') or path.endswith('.java'):
+            parts = path.rsplit('.', 1)[0].split('/')
+            if parts[-1] == '__init__':
+                parts.pop()
+            if parts:
+                modules.add('.'.join(parts))
+    return sorted(modules)
+
+
 def validate_completion(root: Path) -> None:
+    """Check the routing the agent wrote under `root` while it still runs: a RuntimeError
+    is sent back to it, including one for each seam module (or module of its
+    added_elsewhere) that matches no stub or more than one."""
+    _check_routing(root, seam_modules=True)
+
+
+def validate_final(root: Path) -> None:
+    """The check of the routing once no feedback is left: everything validate_completion
+    checks but the seam modules, which check_seams on the host then rejects with its own
+    message when they still match no stub."""
+    _check_routing(root, seam_modules=False)
+
+
+def _check_routing(root: Path, seam_modules: bool) -> None:
     try:
         routes = json.loads((root / ROUTES).read_text())
     except (OSError, ValueError) as exc:
         raise RuntimeError('Agent finished without a readable routes.json') from exc
     if not isinstance(routes, dict) or not isinstance(routes.get('routes'), list):
         raise RuntimeError('routes.json does not hold a list of routes')
+    # The seam modules no stub matches, by the contract they were looked up in.
+    unmatched: dict[Path, list[str]] = {}
     for item in routes['routes']:
         if isinstance(item, dict) and item.get('route') == 'browser':
             page = item.get('page')
@@ -248,6 +332,31 @@ def validate_completion(root: Path) -> None:
                    for file in (root / components).rglob('*')):
             raise RuntimeError(f'A requirement is routed to a seam, but {components}/ holds '
                                'no stub')
+        modules = _stubbed_modules(root / components)
+        requirement = str(item.get('requirement_id') or item.get('id') or '?')[:40]
+        named = [seam.get('module')]
+        elsewhere = seam.get('added_elsewhere')
+        if isinstance(elsewhere, dict):
+            named += list(elsewhere)
+        for module in named:
+            if isinstance(module, str) and module.strip() and match_module(
+                    module.strip(), modules) is None:
+                unmatched.setdefault(components, []).append(
+                    f'{module.strip()[:200]} (seam of {requirement})')
+    if unmatched and seam_modules:
+        problems = []
+        for components, names in unmatched.items():
+            stubbed = _stubbed_modules(root / components)
+            listed = ', '.join(stubbed[:LISTED_MODULES]) + (
+                ', …' if len(stubbed) > LISTED_MODULES else '')
+            problems.append(f'{"; ".join(names)} name(s) a module the component contract '
+                            f'in {components}/ has no stub of; it stubs the modules: '
+                            f'{listed or "none"}')
+        raise RuntimeError(
+            'Some seams name a module that matches no stub, or more than one: '
+            + '. '.join(problems) + '. Name each seam module (and each module of its '
+            'added_elsewhere) as its stub\'s module, as listed, or write the missing stub '
+            'at that module\'s path.')
 
 
 async def main() -> None:
@@ -257,6 +366,7 @@ async def main() -> None:
         root=ROOT, prompt=prompt(language),
         initial_messages=[context],
         max_turns_env='ROUTING_MAX_TURNS', validate_completion=validate_completion,
+        completion_feedback=COMPLETION_FEEDBACK, final_validation=validate_final,
         completion_message='Routing completed',
         exhaustion_message='Routing exceeded the tool-turn limit',
         contracts=CONTRACTS if await run_sync(CONTRACTS.is_dir) else None,
