@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { errorMessage, failure, readBody } from "./api";
 import {
-  DeliveryResults, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress,
+  AgentQuestionsPanel, DeliveryResults, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress,
   type DeliveryProgress, type GenerationStage,
 } from "./Delivery";
 import ForkButton from "./ForkButton";
@@ -553,6 +553,8 @@ export default function Requirements() {
             <h2 id="interview-title">{session ? "Your answer" : "New session"}</h2>
           </div>
 
+          <AgentQuestionsPanel progress={session?.delivery} answering={submitting} onAnswer={answerAgent} />
+
           {session && asked.length > 0 ? (
             <div className="message-form">
               <QuestionForm key={session.messages.length} questions={asked}
@@ -795,7 +797,6 @@ export default function Requirements() {
                     documentation={session.kind === "docs"}
                     disabled={submitting || deliveryPending(session.delivery)}
                     onRetry={(stage) => void retryGeneration(stage)}
-                    answering={submitting} onAnswer={answerAgent}
                     onFindings={decideFindings} />
                 )}
               </section>

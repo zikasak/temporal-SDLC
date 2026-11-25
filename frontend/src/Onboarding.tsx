@@ -3,7 +3,7 @@ import { errorMessage, failure, isObject, readBody } from "./api";
 import { ApiModelSection, isApiModel, type ApiModel } from "./ApiModel";
 import { ArchitectureSection, architectureStructure, type ArchitectureStructure } from "./Architecture";
 import {
-  DeliveryResults, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress,
+  AgentQuestionsPanel, DeliveryResults, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress,
   type DeliveryProgress, type GenerationStage,
 } from "./Delivery";
 import ForkButton from "./ForkButton";
@@ -480,6 +480,8 @@ export default function Onboarding() {
             <h2 id="onboarding-title">{session ? "Your review" : "New onboarding"}</h2>
           </div>
 
+          <AgentQuestionsPanel progress={session?.delivery} answering={submitting} onAnswer={answerAgent} />
+
           {session?.status === "awaiting_confirmation" ? (
             <div className="message-form contract-decision" role="group" aria-label="Existing contract">
               <p className="connector-error" role="alert">
@@ -707,7 +709,6 @@ export default function Onboarding() {
                   <DeliveryResults progress={session.delivery} onboarding retrying={retryingGeneration}
                     disabled={submitting || deliveryPending(session.delivery)}
                     onRetry={(stage) => void retryGeneration(stage)}
-                    answering={submitting} onAnswer={answerAgent}
                     onFindings={decideFindings} />
                 ) : <p role="status">Starting the delivery…</p>}
               </section>

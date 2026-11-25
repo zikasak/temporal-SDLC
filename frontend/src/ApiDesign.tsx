@@ -6,7 +6,7 @@ import ForkButton from "./ForkButton";
 import { AskedQuestions, QuestionForm, questionList, type Question } from "./Questions";
 import { RepositorySummary } from "./RepositoryPicker";
 import {
-  DeliveryResults, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress, taskKind,
+  AgentQuestionsPanel, DeliveryResults, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress, taskKind,
   type DeliveryProgress, type GenerationStage, type TaskKind,
 } from "./Delivery";
 import {
@@ -413,6 +413,8 @@ export default function ApiDesign() {
             <h2 id="design-title">{session ? "Your answer" : "Open a session"}</h2>
           </div>
 
+          <AgentQuestionsPanel progress={session} answering={submitting} onAnswer={answerAgent} />
+
           {session && asked.length > 0 ? (
             <div className="message-form">
               <QuestionForm key={session.messages.length} questions={asked}
@@ -620,7 +622,6 @@ export default function ApiDesign() {
                 <DeliveryResults progress={session} kind={session.kind} retrying={retryingGeneration}
                   disabled={submitting || pipelinePending(session)}
                   onRetry={(stage) => void retryGeneration(stage)}
-                  answering={submitting} onAnswer={answerAgent}
                     onFindings={decideFindings} />
               </section>
             )}

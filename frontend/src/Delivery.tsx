@@ -491,18 +491,20 @@ const agentLabels: Record<string, string> = {
   routing: "The router of the acceptance criteria",
 };
 
-/** Open questions of the coding agents; each waits, paused, for its own answers. */
-function AgentQuestionsPanel({ progress, answering, onAnswer }: {
-  progress: DeliveryProgress;
+/** Open questions of the coding agents, shown in the left column of a flow's panel where
+ * the interviewer's questions are; each agent waits, paused, for its own answers. Their
+ * requirement IDs are explained by the page's lookup requirements, those of the session
+ * the delivery belongs to. */
+export function AgentQuestionsPanel({ progress, answering, onAnswer }: {
+  progress: DeliveryProgress | null | undefined;
   answering: boolean;
   onAnswer: (workflowId: string, answers: string[]) => Promise<boolean>;
 }) {
-  if (progress.agent_questions.length === 0) return null;
+  if (!progress || progress.agent_questions.length === 0) return null;
   return (
-    <section className="verification-results agent-questions" aria-labelledby="agent-questions-title">
-      <h3 id="agent-questions-title">Questions for you</h3>
-      {progress.agent_questions.map((item) => <div key={item.workflow_id}>
-        <p role="status">
+    <section className="message-form agent-questions" aria-label="Questions from the coding agents">
+      {progress.agent_questions.map((item) => <div className="agent-question-group" key={item.workflow_id}>
+        <p className="agent-question-intro" role="status">
           {agentLabels[item.stage] ?? "An agent"} is paused until you answer. Only it sees your answers.
         </p>
         <QuestionForm questions={item.questions} disabled={answering} submitting={answering}
@@ -1077,7 +1079,7 @@ function DocumentationResults({ progress, retrying, disabled, onRetry }: {
   );
 }
 
-export function DeliveryResults({ progress, kind = null, documentation = false, onboarding = false, retrying, disabled, onRetry, answering, onAnswer, onFindings }: {
+export function DeliveryResults({ progress, kind = null, documentation = false, onboarding = false, retrying, disabled, onRetry, onFindings }: {
   progress: DeliveryProgress;
   // The kind of task the session delivers, when it records one.
   kind?: TaskKind | null;
@@ -1089,16 +1091,11 @@ export function DeliveryResults({ progress, kind = null, documentation = false, 
   retrying: GenerationStage | null;
   disabled: boolean;
   onRetry: (stage: GenerationStage) => void;
-  // Whether answers to an agent are being sent.
-  answering: boolean;
-  onAnswer: (workflowId: string, answers: string[]) => Promise<boolean>;
   // The user's decision about open review findings: instructions, or null to accept them.
   onFindings: (instructions: string | null) => Promise<boolean>;
 }) {
-  const questions = <>
-    <AgentQuestionsPanel progress={progress} answering={answering} onAnswer={onAnswer} />
-    <ProviderWaitsPanel progress={progress} />
-  </>;
+  // The agents' open questions are shown in the panel's left column (AgentQuestionsPanel).
+  const questions = <ProviderWaitsPanel progress={progress} />;
   if (documentation) {
     return <>
       {questions}

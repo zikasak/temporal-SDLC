@@ -1682,6 +1682,33 @@ h2 {
   }
 }
 
+/* The coding agents' open questions, in the left column above the interviewer's. Kept at
+   their full height so that every question, option and send button can be scrolled to. */
+.agent-questions {
+  flex-shrink: 0;
+  gap: 24px;
+  max-width: 100%;
+}
+
+.agent-question-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.agent-question-intro {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.88rem;
+  font-weight: 650;
+}
+
 /* Questions asked with ask_user: options to pick from, or an answer of the user's own. */
 .question-form {
   display: flex;
