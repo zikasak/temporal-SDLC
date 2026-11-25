@@ -102,12 +102,32 @@ async def test_routing_reads_the_repository_and_returns_one_route_per_criterion(
     ({'routes': [ROUTES['routes'][0], {**ROUTES['routes'][1], 'route': 'component'}]},
      'names no seam module'),
     ({'routes': [ROUTES['routes'][0], {**ROUTES['routes'][1], 'reason': ' '}]}, 'no reason'),
+    ({'routes': [ROUTES['routes'][0], {**ROUTES['routes'][1], 'covered_by': ['FR-9']}]},
+     'other than other requirements of the brief'),
+    ({'routes': [ROUTES['routes'][0], {**ROUTES['routes'][1], 'covered_by': ['FR-3']}]},
+     'other than other requirements of the brief'),
+    ({'routes': [{**ROUTES['routes'][1], 'requirement_id': 'FR-2'},
+                 {**ROUTES['routes'][1], 'covered_by': ['FR-2']}]},
+     'no suite observes either: FR-2'),
 ])
 async def test_an_unusable_routing_routes_nothing(session, monkeypatch, routes, error):
     fake_docker(monkeypatch, routes, {})
     with pytest.raises(ApplicationError, match=error):
         await ActivityEnvironment().run(activities.route_requirements, 'session', CONTEXT)
     assert not (session / 'routing/routes.json').exists()
+
+
+async def test_an_unobservable_criterion_comes_with_what_the_routing_proposes_instead(
+        session, monkeypatch):
+    routes = {'routes': [
+        ROUTES['routes'][0],
+        {**ROUTES['routes'][1], 'suggestion': ' Closing\n a flow  signals it. ',
+         'covered_by': ['FR-2', 'FR-2']}]}
+    fake_docker(monkeypatch, routes, {})
+    result = await ActivityEnvironment().run(activities.route_requirements, 'session', CONTEXT)
+    assert result['routes']['FR-3'] == {
+        'route': 'unobservable', 'reason': 'Needs a merged pull request.',
+        'suggestion': 'Closing a flow signals it.', 'covered_by': ['FR-2']}
 
 
 async def test_routing_needs_the_checkout_and_a_brief(session, monkeypatch):
@@ -149,6 +169,11 @@ def test_unobservable_criteria_are_named_with_their_reasons():
     assert 'FR-2: R2.; FR-3: R3.' in (error or '') and 'FR-6: R6.; 2 more' in (error or '')
     assert 'FR-7' not in (error or '')
     assert judge_routes({'FR-1': routes['FR-1']}) == ('routed', None)
+    routes['FR-2']['suggestion'] = 'The client is called with the trace.'
+    routes['FR-3']['covered_by'] = ['FR-1']
+    error = judge_routes(routes)[1] or ''
+    assert 'FR-2: R2. Proposed instead: "The client is called with the trace."; ' in error
+    assert 'FR-3: R3. FR-1 already proves what can be observed of it, so it can be removed;' in error
 
 
 def test_criteria_declined_at_a_seam_are_offered_a_new_routing():
