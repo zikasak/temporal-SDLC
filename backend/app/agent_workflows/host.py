@@ -174,13 +174,14 @@ async def _work_message(role: str, stage: str, status: str, diff: str) -> str | 
     time. Never waits for a provider's limits: the fallback message is used instead."""
     from langchain_core.messages import HumanMessage
     from app.llm.graph import native_session
-    from app.llm.model import get_model
+    from app.llm.model import get_model, one_shot
     from app.settings.models import WorkflowType
     try:
         # A role without settings of its own, which raises, writes with the review's.
         model = await get_model(cast(WorkflowType, role))
     except Exception:
         model = await get_model('review')
+    model = one_shot(model)
     async with asyncio.timeout(WORK_MESSAGE_SECONDS):
         async with native_session(model):
             reply = await model.ainvoke([HumanMessage(content=WORK_MESSAGE_PROMPT.format(

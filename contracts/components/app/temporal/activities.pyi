@@ -28,3 +28,6 @@ async def pull_request_state(full_name: str, number: int) -> dict[str, Any]:
     repository `full_name` ('owner/name') on GitHub, as {'state': 'open' or 'closed',
     'merged': bool}. Run by a waiting delivery every PULL_REQUEST_CHECK_INTERVAL."""
     ...
+
+async def _github_token() -> tuple[str, dict[str, Any]]:
+    ...

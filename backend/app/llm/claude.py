@@ -39,6 +39,8 @@ FINAL_EXPORT_ENV = 'APP_CLAUDE_FINAL_EXPORT'
 # Claude Code reports this in its User-Agent; the SDK would label every run 'sdk-py'.
 ENTRYPOINT = 'temporal-sdlc'
 MCP_TOOL_TIMEOUT_MS = 960_000
+# Makes the CLI write its prompt cache with a 5-minute TTL, never a 1-hour one.
+PROMPT_CACHING_5M_ENV = 'FORCE_PROMPT_CACHING_5M'
 
 
 @dataclass
@@ -58,6 +60,9 @@ class ChatClaude(Runnable):
     # turns to the shared storage (app.llm.saved_conversations). Without the storage, or
     # with a cwd or config_dir of its own, every session starts anew.
     conversation: 'ConversationRef | None' = None
+    # Write the prompt cache with a 5-minute TTL only (FORCE_PROMPT_CACHING_5M), whatever
+    # the Claude login: for one-shot calls that gain nothing from a 1-hour cache.
+    prompt_cache_5m: bool = False
     session_id: str | None = field(default=None, init=False)
     turns_used: int = field(default=0, init=False)
     _stack: AsyncExitStack | None = field(default=None, init=False, repr=False)
@@ -161,6 +166,8 @@ class ChatClaude(Runnable):
             # The CLI's own limit on one tool call, in milliseconds: above the longest
             # shell command (app.agent_workflows.runtime.SHELL_MAX_TIMEOUT, 900 seconds).
             env['MCP_TOOL_TIMEOUT'] = str(MCP_TOOL_TIMEOUT_MS)
+            if self.prompt_cache_5m:
+                env[PROMPT_CACHING_5M_ENV] = '1'
             if config_dir is not None:
                 await run_sync(config_dir.mkdir, parents=True, exist_ok=True, mode=0o700)
                 env['CLAUDE_CONFIG_DIR'] = str(config_dir)

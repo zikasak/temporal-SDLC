@@ -14,7 +14,7 @@ from app.config import GENERATED_CODE_DIR
 from app.delivery.pull_request import TITLE_CHARS, PullRequestText, parse_text
 from app.github import checkout as repository_checkout
 from app.llm.graph import final_reply, get_message_graph, native_session
-from app.llm.model import get_model
+from app.llm.model import get_model, one_shot
 from app.llm.limits import AGENT_RECURSION_LIMIT
 from app.tracing import langchain_config
 
@@ -94,7 +94,7 @@ async def write_pull_request_text(session_id: str, publication: dict[str, Any],
         'The delivery\'s code diff:\n' + (diff or '(empty)'),
     ]
     try:
-        model = await get_model('review')
+        model = one_shot(await get_model('review'))
         graph = get_message_graph([], model=model)
         async with native_session(model):
             result = await graph.ainvoke(

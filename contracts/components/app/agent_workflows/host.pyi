@@ -1,0 +1,3 @@
+async def _work_message(role: str, stage: str, status: str, diff: str) -> str | None:
+    """The LLM's commit message of a stage's work; None when it could not write one. The call runs through the native Claude adapter (app.llm.claude.ChatClaude, chosen when the role's saved settings, app.llm.model.get_workflow_settings, name adapter 'claude'); a test fakes the settings and app.llm.claude.ClaudeSDKClient and reads the ClaudeAgentOptions.env it is given. The CLI environment must contain FORCE_PROMPT_CACHING_5M=1, whatever the Claude login, so cache writes are 5-minute only. Helpers the function calls (get_message_graph, native_session, langchain_config, final_reply, fallback_name, is_limit_error, retry_after, parse_*) run as they are."""
+    ...
