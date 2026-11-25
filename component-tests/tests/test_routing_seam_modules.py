@@ -48,25 +48,32 @@ class TestCheckSeams:
 
     def test_dotted_module_is_left_as_is(self) -> None:
         # requirement: FR-198
-        routes = {"FR-1": component_route(STUBBED, {OTHER: ["load"]})}
+        # A dotted route is untouched while a path-form route next to it is normalized.
+        routes = {"FR-1": component_route(STUBBED, {OTHER: ["load"]}),
+                  "FR-2": component_route("app/docker_agents.py")}
         check_seams(routes, modules())
         assert routes["FR-1"]["seam"]["module"] == STUBBED
         assert list(routes["FR-1"]["seam"]["added_elsewhere"]) == [OTHER]
+        assert routes["FR-2"]["seam"]["module"] == STUBBED
 
     @pytest.mark.parametrize("written", ["app.nothing", "app/nothing", "app/nothing.py"])
     def test_module_without_stub_still_fails_with_todays_message(self, written: str) -> None:
         # requirement: FR-200
-        routes = {"FR-9": component_route(written)}
+        # FR-1 is a path form of a stubbed module and must not stop the check; FR-9 has no stub.
+        routes = {"FR-1": component_route("app/docker_agents"),
+                  "FR-9": component_route(written)}
         with pytest.raises(RuntimeError) as error:
             check_seams(routes, modules())
         assert str(error.value).startswith(
             "The seam of requirement FR-9 names a module the component contract has no stub of:")
         assert written in str(error.value)
+        assert routes["FR-1"]["seam"]["module"] == STUBBED
 
     @pytest.mark.parametrize("written", ["app.nothing", "app/nothing", "app/nothing.py"])
     def test_added_elsewhere_without_stub_still_fails(self, written: str) -> None:
         # requirement: FR-200
-        routes = {"FR-9": component_route(STUBBED, {written: ["x"]})}
+        # The seam's own module is a path form of a stub; only the added_elsewhere module has none.
+        routes = {"FR-9": component_route("app/docker_agents", {written: ["x"]})}
         with pytest.raises(RuntimeError) as error:
             check_seams(routes, modules())
         message = str(error.value)
@@ -96,14 +103,30 @@ class TestValidateCompletion:
     @pytest.mark.parametrize("written", ["app/docker_agents", "app/docker_agents.py"])
     def test_path_form_of_one_stub_is_accepted(self, tmp_path: Path, written: str) -> None:
         # requirement: FR-199
-        write_workspace(tmp_path, {"module": written, "symbols": ["run_agent"]})
-        validate_completion(tmp_path)
+        # A path form of one stub does not raise, while an unmatched module next to it does
+        # and only that one is named as written.
+        write_workspace(tmp_path, {"module": written, "symbols": ["run_agent"],
+                                   "added_elsewhere": {"app/missing": ["x"]}})
+        with pytest.raises(RuntimeError) as error:
+            validate_completion(tmp_path)
+        message = str(error.value)
+        assert "app/missing" in message
+        assert written not in message
+        assert STUBBED in message
+        assert OTHER in message
 
     def test_path_form_in_added_elsewhere_is_accepted(self, tmp_path: Path) -> None:
         # requirement: FR-199
         write_workspace(tmp_path, {"module": STUBBED, "symbols": ["run_agent"],
-                                   "added_elsewhere": {"app/settings.py": ["load"]}})
-        validate_completion(tmp_path)
+                                   "added_elsewhere": {"app/settings.py": ["load"],
+                                                       "app/missing.py": ["x"]}})
+        with pytest.raises(RuntimeError) as error:
+            validate_completion(tmp_path)
+        message = str(error.value)
+        assert "app/missing.py" in message
+        assert "app/settings.py" not in message
+        assert STUBBED in message
+        assert OTHER in message
 
     @pytest.mark.parametrize("written", ["app.missing", "app/missing", "app/missing.py"])
     def test_unmatched_module_is_sent_back_to_the_agent(self, tmp_path: Path, written: str) -> None:
