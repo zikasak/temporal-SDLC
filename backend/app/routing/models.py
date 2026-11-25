@@ -96,6 +96,11 @@ class RequirementRoute(TypedDict):
     seam: NotRequired[Seam]
     # For the `browser` route: the page it was routed to.
     page: NotRequired[Page]
+    # For an `unobservable` route of the routing: the criterion rephrased as behaviour a
+    # suite observes, and the other criteria that already prove all of it that any suite
+    # could, so it can be removed. Either is absent when the routing found none.
+    suggestion: NotRequired[str]
+    covered_by: NotRequired[list[str]]
 
 
 def read_seam(requirement: str, seam: Any, parts: tuple[str, ...] = ()) -> Seam:
@@ -338,7 +343,9 @@ def read_routes(data: Any, requirement_ids: list[str], routes: tuple[str, ...] =
         if not reason:
             raise RuntimeError(f'The route of requirement {requirement} gives no reason')
         result[requirement] = {'route': item['route'], 'reason': reason[:REASON_CHARS]}
-        if item['route'] == 'component':
+        if item['route'] == 'unobservable':
+            result[requirement].update(_rephrasing(requirement, item, requirement_ids))
+        elif item['route'] == 'component':
             result[requirement]['seam'] = read_seam(requirement, item.get('seam'), parts)
         elif item['route'] == 'browser':
             result[requirement]['page'] = read_page(requirement, item.get('page'),
@@ -346,7 +353,34 @@ def read_routes(data: Any, requirement_ids: list[str], routes: tuple[str, ...] =
     missing = [requirement for requirement in requirement_ids if requirement not in result]
     if missing:
         raise RuntimeError(f'Requirements without a route: {", ".join(missing)}')
+    for requirement, item in result.items():
+        unproved = [other for other in item.get('covered_by', [])
+                    if result[other]['route'] == 'unobservable']
+        if unproved:
+            raise RuntimeError(f'Requirement {requirement} is covered by requirements no suite '
+                               f'observes either: {", ".join(unproved)}')
     return result
+
+
+def _rephrasing(requirement: str, item: dict[str, Any], requirement_ids: list[str]
+                ) -> dict[str, Any]:
+    """An `unobservable` route's untrusted `suggestion` and `covered_by`, each optional."""
+    read: dict[str, Any] = {}
+    suggestion = item.get('suggestion')
+    if suggestion is not None and not isinstance(suggestion, str):
+        raise RuntimeError(f'The suggestion of requirement {requirement} is not a text')
+    if suggestion and ' '.join(suggestion.split()):
+        read['suggestion'] = ' '.join(suggestion.split())[:REASON_CHARS]
+    covered = item.get('covered_by')
+    if covered is None or covered == []:
+        return read
+    if (not isinstance(covered, list)
+            or not all(isinstance(other, str) and other.strip() in requirement_ids
+                       and other.strip() != requirement for other in covered)):
+        raise RuntimeError(f'Requirement {requirement} is covered by requirements other than '
+                           'other requirements of the brief')
+    read['covered_by'] = list(dict.fromkeys(other.strip() for other in covered))
+    return read
 
 
 # Words of an `unobservable` reason that say the criterion is about how a page looks or
@@ -362,6 +396,17 @@ MEASURABLE = ('Say which element, at which window sizes (such as 1280×800 by mo
               'criterion.')
 
 
+def _rephrased(item: RequirementRoute) -> str:
+    """What the routing proposed for an unobservable criterion, as the stop message says."""
+    covered = item.get('covered_by')
+    if covered:
+        return (f' {", ".join(covered)} already '
+                f'{"proves" if len(covered) == 1 else "prove"} what can be observed of it, '
+                'so it can be removed')
+    suggestion = item.get('suggestion')
+    return f' Proposed instead: "{suggestion}"' if suggestion else ''
+
+
 def judge_routes(routes: dict[str, RequirementRoute], parts: bool = False
                  ) -> tuple[RoutingStatus, str | None]:
     """Whether every criterion has a suite that can prove it, and what to tell the user
@@ -371,7 +416,7 @@ def judge_routes(routes: dict[str, RequirementRoute], parts: bool = False
                     if item['route'] == 'unobservable']
     if not unobservable:
         return 'routed', None
-    named = '; '.join(f'{requirement}: {item["reason"]}'
+    named = '; '.join(f'{requirement}: {item["reason"]}{_rephrased(item)}'
                       for requirement, item in unobservable[:NAMED_CRITERIA])
     more = len(unobservable) - NAMED_CRITERIA
     by_tests = all(item['source'] == 'tests' for _, item in unobservable)
