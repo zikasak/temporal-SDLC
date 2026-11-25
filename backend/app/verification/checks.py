@@ -549,9 +549,9 @@ async def analyze_checks_failure(session_id: str, excerpt: str,
     any other failure gives the fallback analysis."""
     from langchain_core.messages import HumanMessage
     from app.llm.graph import native_session
-    from app.llm.model import get_model
+    from app.llm.model import get_model, one_shot
     try:
-        model = await get_model('diagnosis')
+        model = one_shot(await get_model('diagnosis'))
         async with native_session(model):
             reply = await model.ainvoke([HumanMessage(content=ANALYSIS_PROMPT.format(
                 findings=findings_prompt(findings), excerpt=excerpt[:EXCERPT_CHARS]))])

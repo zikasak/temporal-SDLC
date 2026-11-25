@@ -21,7 +21,7 @@ from app.github import client as github_client
 from app.github.errors import GitHubError
 from app.github.models import PullRequestMention, RepositorySelection
 from app.llm.graph import final_reply, get_message_graph, native_session
-from app.llm.model import get_model
+from app.llm.model import get_model, one_shot
 from app.temporal.activities import _github_token
 from app.tools import repository as repository_tools
 from app.llm.limits import AGENT_RECURSION_LIMIT
@@ -80,7 +80,7 @@ async def classify(session_id: str, body: str) -> str:
     outside an activity, such as for a mention on a closed delivery's pull request, which
     starts a flow of its own only when it asks for a fix."""
     try:
-        model = await get_model('review')
+        model = one_shot(await get_model('review'))
         graph = get_message_graph([], model=model)
         async with native_session(model):
             result = await graph.ainvoke(
@@ -142,7 +142,7 @@ async def _answer(session_id: str, body: str, context: dict[str, Any],
                   tools: list[BaseTool]) -> str:
     details = _bounded(json.dumps(context, default=str, ensure_ascii=False), CONTEXT_CHARS)
     try:
-        model = await get_model('chat')
+        model = one_shot(await get_model('chat'))
         graph = get_message_graph(tools, model=model)
         async with native_session(model):
             result = await graph.ainvoke(

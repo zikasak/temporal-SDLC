@@ -8,7 +8,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from app.llm.graph import final_reply, get_message_graph, native_session
-from app.llm.model import get_model
+from app.llm.model import get_model, one_shot
 from app.tasks.models import NAME_CHARS, fallback_name
 from app.temporal.tracing import trace_activity
 from app.llm.limits import AGENT_RECURSION_LIMIT
@@ -57,7 +57,7 @@ async def name_task_flow(task: str, requirements: list[dict[str, Any]]) -> str:
         bounded = task if len(task) <= TASK_CHARS else task[:TASK_CHARS] + "…"
         source = "What needs to be done:\n" + bounded
     try:
-        model = await get_model("requirements")
+        model = one_shot(await get_model("requirements"))
         graph = get_message_graph([], model=model)
         async with native_session(model):
             result = await graph.ainvoke(
