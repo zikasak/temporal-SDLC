@@ -115,6 +115,7 @@ class TestValidateCompletion:
             validate_completion(tmp_path)
         message = str(error.value)
         assert "app/missing" in message
+        assert written not in message
         assert "FR-5" not in message
         assert STUBBED in message
         assert OTHER in message
@@ -130,6 +131,7 @@ class TestValidateCompletion:
             validate_completion(tmp_path)
         message = str(error.value)
         assert "app/missing.py" in message
+        assert "app/settings.py" not in message
         assert "FR-5" not in message
         assert STUBBED in message
         assert OTHER in message
