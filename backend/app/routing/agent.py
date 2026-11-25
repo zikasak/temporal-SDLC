@@ -44,6 +44,14 @@ suite does not have, such as an outside system the service depends on (a code ho
 model provider, a workflow engine or a queue) that is not running beside it, an event only
 such a system sends, or state the API cannot create.
 
+An outside system's own state is never observable to any suite, but the service's side of
+it often is. Read a requirement about what an outside system records or shows (a trace in
+an observability tool, a comment on a code host, a message on a queue, a call a model
+provider receives) as being about what the service sends that system, and one about what
+the service does with such a system's answer as being about the service given that answer.
+Route it by that reading, and route it `unobservable` only when even the service's side
+of it needs what no suite has.
+
 Decide from the code, not from the requirement's wording. For each requirement, find the
 endpoints that would set it up and observe it, read how the service handles them, and read
 the root Dockerfile and contract-tests/README.md to see what the running service has
@@ -59,7 +67,13 @@ names the requests that set up and observe the behaviour.{component_reason} For
 `unobservable`, `reason` says in one or two sentences, for the user who wrote the
 requirement, what the test would need that the suite does not have. Route a requirement
 `unobservable` only when you are sure: the delivery then stops and the user is asked to
-rephrase it. Only finish once routes.json is written.
+rephrase it. To spare them the guess, give such a route, when you can, a `suggestion`:
+the requirement rephrased in one or two sentences, in the brief's words, as behaviour of
+the same change that one of the routes you may choose observes, such as what the service
+sends the outside system rather than what that system records. Give it `covered_by`, a
+list of the IDs of other requirements of the brief that you did not route `unobservable`,
+when those already observe everything of it any suite could, so it can simply be removed.
+Leave out either when there is none. Only finish once routes.json is written.
 """
 
 COMPONENT_PROMPT = """
@@ -70,7 +84,10 @@ the behaviour, with everything the seam calls outside itself replaced by fakes. 
 is written by an author who never sees the code, only stubs of the seam you write. Good
 seams already have contract-shaped interfaces: a workflow's signals, updates and queries,
 which an in-process workflow test environment can drive with faked activities; a service
-class whose collaborators are passed in. A requirement is `component` when it is not
+class whose collaborators are passed in; the code's own client, adapter or exporter of an
+outside system, or the code that calls it, where a test fakes the outside system's library
+or endpoint and observes what the code sends it (a tracer given an in-memory exporter, a
+model client given a fake transport). A requirement is `component` when it is not
 `contract` and such a seam exists; name it and write its stubs. Never invent a seam that
 is not needed: a stubbed symbol must already exist with the stubbed signature, or the
 check fails, unless you list it in the seam's `added`.
