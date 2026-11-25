@@ -49,12 +49,10 @@ type PageElement = { role?: string; name?: string; testid?: string };
 type Page = { part: string; entry: string; viewports: string[]; roles: PageElement[]; added: PageElement[] };
 // `prepared`: the code has the seam the change adds first, matching its component contract.
 type SeamStatus = "not_applicable" | "waiting" | "running" | "prepared" | "error";
-// `source`: who decided the route, the routing stage or the test author. For an unobservable
-// criterion, `suggestion` rephrases it as behaviour a suite observes, and `covered_by` names
-// the other criteria that already prove all of it any suite could.
+// `source`: who decided the route, the routing stage or the test author.
 type RequirementRoute = {
   route: "contract" | "component" | "browser" | "unobservable"; reason: string; source: "routing" | "tests";
-  seam?: Seam; page?: Page; suggestion?: string; covered_by?: string[];
+  seam?: Seam; page?: Page;
 };
 // `tests` are the failing tests the diagnosis found broken: the only ones a repair may change.
 // `suite` names the tests a repair of a change with component tests corrected.
@@ -320,24 +318,7 @@ function routes(value: unknown): Record<string, RequirementRoute> | null {
     .map(([requirement, item]) => [requirement, {
       ...item as RequirementRoute, seam: seam((item as RequirementRoute).seam),
       page: page((item as RequirementRoute).page),
-      suggestion: typeof (item as { suggestion?: unknown }).suggestion === "string"
-        ? (item as RequirementRoute).suggestion || undefined : undefined,
-      covered_by: strings((item as RequirementRoute).covered_by).length > 0
-        ? strings((item as RequirementRoute).covered_by) : undefined,
     }]));
-}
-
-/** The message that rephrases the unobservable criteria as the routing proposed, for a
- * fork of the interview; null when it proposed nothing. */
-function rephrasing(routing: Record<string, RequirementRoute> | null): string | null {
-  const lines = Object.entries(routing ?? {}).filter(([, item]) => item.route === "unobservable")
-    .map(([requirement, item]) => item.covered_by?.length
-      ? `Remove ${requirement}: ${item.covered_by.join(", ")} already ${item.covered_by.length === 1 ? "proves" : "prove"} what can be observed of it.`
-      : item.suggestion ? `Replace ${requirement} with: ${item.suggestion}` : null)
-    .filter((line): line is string => line !== null);
-  return lines.length > 0
-    ? `No test can observe some acceptance criteria as they are written.\n${lines.join("\n")}`
-    : null;
 }
 
 function reviewRounds(value: unknown): ReviewRound[] {
@@ -829,16 +810,14 @@ function SuiteRuns({ contract, component, outcome, children }: {
 }
 
 /** Which suite can prove each acceptance criterion of a change, decided before its tests. */
-function Routing({ progress, retrying, disabled, onRetry, onRephrase }: {
+function Routing({ progress, retrying, disabled, onRetry }: {
   progress: DeliveryProgress;
   retrying: GenerationStage | null;
   disabled: boolean;
-  onRephrase?: (message: string) => void;
   onRetry: (stage: GenerationStage) => void;
 }) {
   const stage = progress.routing_status;
   const entries = Object.entries(progress.routing ?? {});
-  const proposal = rephrasing(progress.routing);
   return (
     <section className="verification-results" aria-labelledby="routing-title">
       <h3 id="routing-title">Routing</h3>
@@ -869,9 +848,6 @@ function Routing({ progress, retrying, disabled, onRetry, onRephrase }: {
             : item.route === "browser" ? `browser tests of part ${item.page?.part ?? ""}`
             : "cannot be observed"}</strong>
           <span>{item.reason}{item.source === "tests" ? " (found by the test author)" : ""}</span>
-          {item.covered_by && <span>
-            Already proved by {item.covered_by.join(", ")} as far as any test can: it can be removed</span>}
-          {!item.covered_by && item.suggestion && <span>Proposed instead: {item.suggestion}</span>}
           {item.seam && <span>Seam: <code>{item.seam.part ? `${item.seam.part}: ` : ""}{item.seam.module}</code>
             {item.seam.symbols.length > 0 && <> ({item.seam.symbols.map((symbol, index) =>
               <span key={symbol}>{index > 0 && ", "}<code>{symbol}</code></span>)})</>}</span>}
@@ -906,10 +882,6 @@ function Routing({ progress, retrying, disabled, onRetry, onRephrase }: {
           onClick={() => onRetry("tests")}>
           {retrying === "tests" ? "Routing the criteria again…" : "Route the criteria again"}
         </button>
-        {stage === "unobservable" && onRephrase && proposal && <button type="button"
-          className="generate-button" disabled={disabled} onClick={() => onRephrase(proposal)}>
-          Take the proposals to a fork of the interview
-        </button>}
       </div>}
     </section>
   );
@@ -1209,7 +1181,7 @@ function DocumentationResults({ progress, retrying, disabled, onRetry }: {
   );
 }
 
-export function DeliveryResults({ progress, kind = null, documentation = false, onboarding = false, retrying, disabled, onRetry, onFindings, onRephrase }: {
+export function DeliveryResults({ progress, kind = null, documentation = false, onboarding = false, retrying, disabled, onRetry, onFindings }: {
   progress: DeliveryProgress;
   // The kind of task the session delivers, when it records one.
   kind?: TaskKind | null;
@@ -1223,8 +1195,6 @@ export function DeliveryResults({ progress, kind = null, documentation = false, 
   onRetry: (stage: GenerationStage) => void;
   // The user's decision about open review findings: instructions, or null to accept them.
   onFindings: (instructions: string | null) => Promise<boolean>;
-  // Opens a fork of the interview with the message, when the session has an interview.
-  onRephrase?: (message: string) => void;
 }) {
   // The agents' open questions are shown in the panel's left column (OpenQuestionsForm).
   const questions = <ProviderWaitsPanel progress={progress} />;
@@ -1261,8 +1231,7 @@ export function DeliveryResults({ progress, kind = null, documentation = false, 
   return <>
     {questions}
     {change && progress.routing_status !== "not_applicable" &&
-      <Routing progress={progress} retrying={retrying} disabled={disabled} onRetry={onRetry}
-        onRephrase={onRephrase} />}
+      <Routing progress={progress} retrying={retrying} disabled={disabled} onRetry={onRetry} />}
     {change && <Baseline progress={progress} retrying={retrying} disabled={disabled} onRetry={onRetry} />}
     <section className="verification-results" aria-labelledby="verification-title">
       <h3 id="verification-title">Service verification</h3>

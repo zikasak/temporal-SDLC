@@ -67,13 +67,7 @@ names the requests that set up and observe the behaviour.{component_reason} For
 `unobservable`, `reason` says in one or two sentences, for the user who wrote the
 requirement, what the test would need that the suite does not have. Route a requirement
 `unobservable` only when you are sure: the delivery then stops and the user is asked to
-rephrase it. To spare them the guess, give such a route, when you can, a `suggestion`:
-the requirement rephrased in one or two sentences, in the brief's words, as behaviour of
-the same change that one of the routes you may choose observes, such as what the service
-sends the outside system rather than what that system records. Give it `covered_by`, a
-list of the IDs of other requirements of the brief that you did not route `unobservable`,
-when those already observe everything of it any suite could, so it can simply be removed.
-Leave out either when there is none. Only finish once routes.json is written.
+rephrase it. Only finish once routes.json is written.
 """
 
 COMPONENT_PROMPT = """

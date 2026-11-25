@@ -482,8 +482,7 @@ export default function Requirements() {
     }
   }
 
-  // `draft`: the message the fork's composer starts with, such as the routing's proposals.
-  async function forkSession(messageIndex: number, draft = "") {
+  async function forkSession(messageIndex: number) {
     if (!session) return;
     setSubmitting(true);
     setError("");
@@ -500,7 +499,7 @@ export default function Requirements() {
         throw new Error("The backend did not return a session ID.");
       }
       setSession(null);
-      setMessage(draft);
+      setMessage("");
       openSession(body.session_id);
     } catch (caught) {
       setError(failure(caught, "Could not fork the session."));
@@ -812,10 +811,7 @@ export default function Requirements() {
                     documentation={session.kind === "docs"}
                     disabled={submitting || deliveryPending(session.delivery)}
                     onRetry={(stage) => void retryGeneration(stage)}
-                    onFindings={decideFindings}
-                    onRephrase={session.messages.length > 0
-                      ? (draft) => void forkSession(session.messages.length - 1, draft)
-                      : undefined} />
+                    onFindings={decideFindings} />
                 )}
               </section>
             )}
