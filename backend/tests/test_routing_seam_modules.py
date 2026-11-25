@@ -44,6 +44,14 @@ def test_ambiguous_path_matches_nothing() -> None:
     assert match_module('a/b.py', ['a.b', 'a/b']) is None
 
 
+@pytest.mark.parametrize('name', ['app/languages/java', 'app/languages/java/__init__.py',
+                                  'app/languages/java.py', 'app.languages.java'])
+def test_module_named_like_a_suffix_keeps_its_last_segment(name: str) -> None:
+    modules = ['app.languages', 'app.languages.java', 'app.languages.java.suite']
+    assert match_module(name, modules) == 'app.languages.java'
+    assert match_module('app/languages', modules) == 'app.languages'
+
+
 def _workspace(tmp_path: Path, seam: dict) -> Path:
     (tmp_path / 'components' / 'app').mkdir(parents=True)
     (tmp_path / 'components' / 'app' / 'docker_agents.pyi').write_text('def run_agent(): ...\n')

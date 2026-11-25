@@ -228,8 +228,12 @@ LISTED_MODULES = 60
 
 def module_key(name: str) -> str:
     """`name`, a module in dotted or path form ('app.docker_agents', 'app/docker_agents'
-    or 'app/docker_agents.py'), in the dotted form two names of one module share."""
+    or 'app/docker_agents.py'), in the dotted form two names of one module share. Only a
+    name in path form (one holding a '/') loses a file suffix or a trailing `__init__`;
+    a dotted name is kept as it is, so app.languages.java stays app.languages.java."""
     key = name.strip().replace('\\', '/')
+    if '/' not in key:
+        return key
     while key.startswith('./'):
         key = key[2:]
     key = key.strip('/')
@@ -243,6 +247,12 @@ def module_key(name: str) -> str:
     return key
 
 
+def _stub_key(module: str) -> str:
+    """A stubbed module's own name in dotted form: a dotted name as it is, a TypeScript
+    part's module path (stored without its file suffix) with its '/' turned into '.'."""
+    return module.strip().replace('/', '.')
+
+
 def match_module(name: str, modules: Iterable[str]) -> str | None:
     """The stubbed module of `modules` that `name` names: itself when stubbed under that
     name, else the only one it names in another form (a path for a dotted name), or None
@@ -251,7 +261,7 @@ def match_module(name: str, modules: Iterable[str]) -> str | None:
     if name in modules:
         return name
     key = module_key(name)
-    found = [module for module in modules if module_key(module) == key]
+    found = [module for module in modules if _stub_key(module) == key]
     return found[0] if len(found) == 1 else None
 
 
