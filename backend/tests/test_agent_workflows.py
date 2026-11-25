@@ -724,3 +724,37 @@ async def test_new_stage_uses_its_own_toolchain_workspace_and_artifact_names(tmp
     destination = tmp_path / 'session/docs-stage/published'
     assert result['path'] == str(destination)
     assert (destination / 'index.md').read_text() == '# Published docs'
+
+
+async def test_failed_completion_check_is_sent_back_to_the_agent(profile, scripted_model):
+    checked = []
+
+    def validate(root):
+        checked.append(True)
+        if not (root / 'routes.json').is_file():
+            raise RuntimeError('Write routes.json first')
+
+    model = scripted_model([
+        AIMessage(content='Finished'),
+        AIMessage(content='', tool_calls=[
+            {'name': 'write_file', 'args': {'path': 'routes.json', 'content': '{}'},
+             'id': 'written'}]),
+        AIMessage(content='Finished'),
+    ])
+    await runtime.run_agent(replace(profile, validate_completion=validate,
+                                    completion_feedback=2))
+    assert model.requests[1][-1].content == runtime.COMPLETION_FEEDBACK.format(
+        problem='Write routes.json first')
+    assert len(checked) == 2
+
+
+async def test_final_validation_decides_once_no_feedback_is_left(profile, scripted_model):
+    final = []
+
+    def validate(root):
+        raise RuntimeError('Unmatched seam module')
+
+    model = scripted_model([AIMessage(content='Finished'), AIMessage(content='Finished')])
+    await runtime.run_agent(replace(profile, validate_completion=validate,
+                                    completion_feedback=1, final_validation=final.append))
+    assert len(model.requests) == 2 and final == [profile.root]
