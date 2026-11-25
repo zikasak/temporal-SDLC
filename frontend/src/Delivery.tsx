@@ -1,6 +1,6 @@
-import { useState, type ReactNode } from "react";
+import { useState, type FormEvent, type ReactNode } from "react";
 import { repositoryPublication, type RepositoryPublication, type RepositorySelection } from "./github";
-import { QuestionForm, questionList, type Question } from "./Questions";
+import { QuestionField, choiceAnswer, noChoice, questionList, type Choice, type Question } from "./Questions";
 import { isObject } from "./api";
 import { flowStepsLink } from "./url";
 
@@ -510,24 +510,128 @@ const agentLabels: Record<string, string> = {
   routing: "The router of the acceptance criteria",
 };
 
-/** Open questions of the coding agents; each waits, paused, for its own answers. */
-function AgentQuestionsPanel({ progress, answering, onAnswer }: {
-  progress: DeliveryProgress;
-  answering: boolean;
-  onAnswer: (workflowId: string, answers: string[]) => Promise<boolean>;
+/** The order the agent groups are shown in: by stage, whatever order the agents asked in. */
+const agentStageOrder = ["implementation", "diagnosis", "tests", "documentation"];
+
+function agentStageRank(stage: string) {
+  const rank = agentStageOrder.indexOf(stage);
+  return rank === -1 ? agentStageOrder.length : rank;
+}
+
+/** The agents' open questions ordered by stage: implementation, diagnosis, tests, then
+ * documentation; other stages follow in the order they asked. */
+export function sortedAgentQuestions(items: DeliveryProgress["agent_questions"]) {
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => agentStageRank(a.item.stage) - agentStageRank(b.item.stage) || a.index - b.index)
+    .map(({ item }) => item);
+}
+
+/** One agent's answers, sent to POST .../delivery/answers. */
+export type AgentAnswers = { workflow_id: string; answers: string[] };
+
+/** The answers of one submit of the open questions: the interviewer's (null when not
+ * answered this time) and each agent's. The page sends each group separately and returns
+ * the keys of the groups it sent ("interviewer" or the agent's workflow ID). */
+export type OpenAnswers = { interviewer: string[] | null; agents: AgentAnswers[] };
+
+const interviewerGroup = "interviewer";
+
+/** The open questions in the left column of a flow's panel, in one form: the interviewer's
+ * questions and, below them, every coding agent's group headed by the agent that asked.
+ * Each agent waits, paused, for its own answers. One submit sends every fully answered
+ * group, each on its own. Requirement IDs are explained by the page's lookup requirements,
+ * those of the session the delivery belongs to. */
+export function OpenQuestionsForm({ questions, questionsKey, questionsDisabled, progress, submitting, onSubmit }: {
+  questions: Question[];
+  /** Changes whenever the interviewer asks anew, so that old choices are dropped. */
+  questionsKey: string | number;
+  questionsDisabled: boolean;
+  progress: DeliveryProgress | null | undefined;
+  submitting: boolean;
+  onSubmit: (answers: OpenAnswers) => Promise<string[]>;
 }) {
-  if (progress.agent_questions.length === 0) return null;
+  const [choices, setChoices] = useState<Record<string, Choice[]>>({});
+  const agents = sortedAgentQuestions(progress?.agent_questions ?? []);
+  const groups = [
+    ...(questions.length > 0
+      ? [{ key: `${interviewerGroup}:${questionsKey}`, id: interviewerGroup, stage: null as string | null,
+        questions, disabled: questionsDisabled || submitting }]
+      : []),
+    ...agents.map((item) => ({
+      key: `agent:${item.workflow_id}`, id: item.workflow_id, stage: item.stage as string | null,
+      questions: item.questions, disabled: submitting,
+    })),
+  ];
+  if (groups.length === 0) return null;
+
+  const groupChoices = (key: string, count: number) =>
+    choices[key]?.length === count ? choices[key] : Array.from({ length: count }, () => noChoice);
+  const states = groups.map((group) => {
+    const answers = groupChoices(group.key, group.questions.length).map(choiceAnswer);
+    const answered = answers.filter(Boolean).length;
+    return { group, answers, complete: answered === answers.length, started: answered > 0 };
+  });
+  const enabled = states.filter((state) => !state.group.disabled);
+  const ready = enabled.some((state) => state.complete) &&
+    enabled.every((state) => state.complete || !state.started);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!ready) return;
+    const sending = enabled.filter((state) => state.complete);
+    const interviewer = sending.find((state) => state.group.stage === null);
+    const sent = await onSubmit({
+      interviewer: interviewer ? interviewer.answers : null,
+      agents: sending.filter((state) => state.group.stage !== null)
+        .map((state) => ({ workflow_id: state.group.id, answers: state.answers })),
+    });
+    if (sent.length === 0) return;
+    setChoices((current) => {
+      const next = { ...current };
+      for (const state of sending) if (sent.includes(state.group.id)) delete next[state.group.key];
+      return next;
+    });
+  }
+
   return (
-    <section className="verification-results agent-questions" aria-labelledby="agent-questions-title">
-      <h3 id="agent-questions-title">Questions for you</h3>
-      {progress.agent_questions.map((item) => <div key={item.workflow_id}>
-        <p role="status">
-          {agentLabels[item.stage] ?? "An agent"} is paused until you answer. Only it sees your answers.
+    <form className="question-form agent-questions" onSubmit={submit}
+      aria-label={agents.length > 0 ? "Open questions of the interviewer and the coding agents" : "Open questions"}>
+      {states.map(({ group }) => {
+        const current = groupChoices(group.key, group.questions.length);
+        return (
+          <div className={group.stage === null ? "question-group" : "agent-question-group"} key={group.key}>
+            {group.stage !== null && (
+              <p className="agent-question-intro" role="status">
+                {agentLabels[group.stage] ?? "An agent"} is paused until you answer. Only it sees your answers.
+              </p>
+            )}
+            {group.stage === null && agents.length > 0 && (
+              <p className="agent-question-intro">The interviewer asks:</p>
+            )}
+            {group.questions.map((item, index) => (
+              <QuestionField key={index} name={`${group.key}-question-${index}`} question={item}
+                disabled={group.disabled} value={current[index]}
+                onChange={(choice) => setChoices((old) => ({
+                  ...old,
+                  [group.key]: (old[group.key]?.length === group.questions.length
+                    ? old[group.key] : group.questions.map(() => noChoice))
+                    .map((value, position) => (position === index ? choice : value)),
+                }))} />
+            ))}
+          </div>
+        );
+      })}
+      {groups.length > 1 && (
+        <p className="field-hint">
+          Each group is sent on its own to whoever asked it; a group you leave unanswered stays open.
         </p>
-        <QuestionForm questions={item.questions} disabled={answering} submitting={answering}
-          onSubmit={(answers) => onAnswer(item.workflow_id, answers)} />
-      </div>)}
-    </section>
+      )}
+      <button className="run-button" type="submit" disabled={!ready}>
+        <span>{submitting ? "Sending" : "Send answers"}</span>
+        {submitting && <span className="spinner" aria-hidden="true" />}
+      </button>
+    </form>
   );
 }
 
@@ -1105,7 +1209,7 @@ function DocumentationResults({ progress, retrying, disabled, onRetry }: {
   );
 }
 
-export function DeliveryResults({ progress, kind = null, documentation = false, onboarding = false, retrying, disabled, onRetry, answering, onAnswer, onFindings, onRephrase }: {
+export function DeliveryResults({ progress, kind = null, documentation = false, onboarding = false, retrying, disabled, onRetry, onFindings, onRephrase }: {
   progress: DeliveryProgress;
   // The kind of task the session delivers, when it records one.
   kind?: TaskKind | null;
@@ -1117,18 +1221,13 @@ export function DeliveryResults({ progress, kind = null, documentation = false, 
   retrying: GenerationStage | null;
   disabled: boolean;
   onRetry: (stage: GenerationStage) => void;
-  // Whether answers to an agent are being sent.
-  answering: boolean;
-  onAnswer: (workflowId: string, answers: string[]) => Promise<boolean>;
   // The user's decision about open review findings: instructions, or null to accept them.
   onFindings: (instructions: string | null) => Promise<boolean>;
   // Opens a fork of the interview with the message, when the session has an interview.
   onRephrase?: (message: string) => void;
 }) {
-  const questions = <>
-    <AgentQuestionsPanel progress={progress} answering={answering} onAnswer={onAnswer} />
-    <ProviderWaitsPanel progress={progress} />
-  </>;
+  // The agents' open questions are shown in the panel's left column (OpenQuestionsForm).
+  const questions = <ProviderWaitsPanel progress={progress} />;
   if (documentation) {
     return <>
       {questions}

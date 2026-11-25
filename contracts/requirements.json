@@ -444,14 +444,6 @@
   },
   {
     "category": "functional",
-    "description": "When a coding agent considers that a failing contract test during onboarding reveals a bug in the existing code, it asks the user in the onboarding's progress, like other agent questions, and changes the code only after the user confirms; until answered, it waits.",
-    "id": "FR-63",
-    "priority": "must",
-    "rationale": "User chose: the coding agent asks in the progress and waits for the answer.",
-    "title": "Agent asks the user to confirm a bug in the existing code"
-  },
-  {
-    "category": "functional",
     "description": "Mentions of the GitHub App on a pull request opened for an onboarding (fix requests and clarifications) are handled the same way as mentions on delivery pull requests.",
     "id": "FR-64",
     "priority": "must",
@@ -780,14 +772,6 @@
   },
   {
     "category": "functional",
-    "description": "Requirement IDs are shown with their text in the requirements, architecture, API design and onboarding conversations and in the coding agents' questions in the delivery progress.",
-    "id": "FR-118",
-    "priority": "must",
-    "rationale": "User chose every LLM conversation plus coding agents' questions.",
-    "title": "Conversations where requirement IDs are explained"
-  },
-  {
-    "category": "functional",
     "description": "A mentioned ID is resolved against the requirements recorded in the session, the existing service's requirements and the requirements retired by the task, so the text of any of them is shown.",
     "id": "FR-119",
     "priority": "must",
@@ -817,14 +801,6 @@
     "priority": "must",
     "rationale": "User chose to mark unknown IDs and show \"Unknown requirement\".",
     "title": "Unknown requirement IDs"
-  },
-  {
-    "category": "functional",
-    "description": "Requirement IDs mentioned in the coding agents' questions in the delivery progress are looked up in the requirements field of the requirements session or onboarding that the delivery belongs to.",
-    "id": "FR-123",
-    "priority": "must",
-    "rationale": "User chose to use the field of the session or onboarding the delivery belongs to.",
-    "title": "Delivery progress uses its session's lookup requirements"
   },
   {
     "category": "functional",
@@ -1164,14 +1140,6 @@
   },
   {
     "category": "functional",
-    "description": "Hovering over or tapping any marked requirement ID in a flow's panel shows the whole popup, neither covered by another part of the panel nor cut off, in requirements, architecture, API design and onboarding sessions and in the coding agents' questions in the delivery progress.",
-    "id": "FR-173",
-    "priority": "must",
-    "rationale": "User's acceptance criterion.",
-    "title": "Acceptance: whole popup visible in every session type"
-  },
-  {
-    "category": "functional",
     "description": "The Settings page of the web client lets the user set the OpenAI endpoint's base URL, API key and display name, and the saved values are used for every LLM call and coding agent that uses the openai adapter.",
     "id": "FR-174",
     "priority": "must",
@@ -1244,19 +1212,19 @@
   },
   {
     "category": "functional",
+    "description": "Each LLM workflow type's settings include compaction_tokens: the number of tokens in use at which the coding agents of Pi and the openai adapter compact their history into a checkpoint, set on the Settings page next to the model (default 48000; 0 never compacts; otherwise at least 4000, 422 below). The Settings page shows the selected model's context window when its provider reports one (Pi, the Google endpoint, and OpenAI-compatible endpoints that report context_length or max_model_len), and PUT /settings answers 422 for a threshold above it. Claude compacts its own context, so its threshold is neither checked nor used.",
     "id": "FR-183",
     "priority": "must",
-    "title": "Context compaction configurable in Settings",
-    "description": "Each LLM workflow type's settings include compaction_tokens: the number of tokens in use at which the coding agents of Pi and the openai adapter compact their history into a checkpoint, set on the Settings page next to the model (default 48000; 0 never compacts; otherwise at least 4000, 422 below). The Settings page shows the selected model's context window when its provider reports one (Pi, the Google endpoint, and OpenAI-compatible endpoints that report context_length or max_model_len), and PUT /settings answers 422 for a threshold above it. Claude compacts its own context, so its threshold is neither checked nor used.",
-    "rationale": "User: migrate the AGENT_CONTEXT_TOKENS environment setting to the UI; the setting decides when compaction happens."
+    "rationale": "User: migrate the AGENT_CONTEXT_TOKENS environment setting to the UI; the setting decides when compaction happens.",
+    "title": "Context compaction configurable in Settings"
   },
   {
     "category": "functional",
+    "description": "GET /settings returns, and PUT /settings optionally sets, agent.contract_embed_chars, shared by every workflow type and set on the Settings page: contracts whose embedded form is longer reach coding agents as an index plus read-only files instead of whole (default 32000; 1000 to 10000000 characters, 422 otherwise). A PUT without agent leaves it unchanged; it is saved in the same transaction as the workflow settings.",
     "id": "FR-184",
     "priority": "must",
-    "title": "Contract embedding limit configurable in Settings",
-    "description": "GET /settings returns, and PUT /settings optionally sets, agent.contract_embed_chars, shared by every workflow type and set on the Settings page: contracts whose embedded form is longer reach coding agents as an index plus read-only files instead of whole (default 32000; 1000 to 10000000 characters, 422 otherwise). A PUT without agent leaves it unchanged; it is saved in the same transaction as the workflow settings.",
-    "rationale": "User: migrate the CONTRACT_EMBED_CHARS environment setting to the UI."
+    "rationale": "User: migrate the CONTRACT_EMBED_CHARS environment setting to the UI.",
+    "title": "Contract embedding limit configurable in Settings"
   },
   {
     "category": "non_functional",
@@ -1273,5 +1241,77 @@
     "priority": "must",
     "rationale": "User chose: the UI replaces the environment variables entirely.",
     "title": "OPENAI_BASE_URL and OPENAI_API_KEY no longer read"
+  },
+  {
+    "category": "functional",
+    "description": "In every flow panel that shows delivery progress (requirements sessions such as a bugfix, API design sessions and onboardings), the coding agents' open questions (agent_questions of the delivery progress) are shown as a question form in the left column, in the place where the interviewer's open questions are shown, with the same form for picking an option or writing an own answer.",
+    "id": "FR-185",
+    "priority": "must",
+    "rationale": "User: implementation and test workers' questions should be shown the same way as the main agent's questions; chose the left column, in every panel with delivery progress.",
+    "title": "Open agent questions in the left column"
+  },
+  {
+    "category": "functional",
+    "description": "The delivery progress section no longer shows the \"Questions for you\" block; the coding agents' open questions are shown only in the panel's left column.",
+    "id": "FR-186",
+    "priority": "must",
+    "rationale": "User chose: show them only in the left column.",
+    "title": "No agent questions block in the delivery progress"
+  },
+  {
+    "category": "functional",
+    "description": "When a coding agent considers that a failing contract test during onboarding reveals a bug in the existing code, it asks the user, like other agent questions, in the left column of the onboarding's panel, and changes the code only after the user confirms; until answered, it waits.",
+    "id": "FR-187",
+    "priority": "must",
+    "rationale": "Replaces FR-63: agent questions are now shown in the panel's left column.",
+    "title": "Agent asks the user to confirm a bug in the existing code"
+  },
+  {
+    "category": "functional",
+    "description": "Requirement IDs are shown with their text in the requirements, architecture, API design and onboarding conversations and in the coding agents' questions shown in the panel's left column.",
+    "id": "FR-188",
+    "priority": "must",
+    "rationale": "Replaces FR-118: agent questions moved from the delivery progress to the left column.",
+    "title": "Conversations where requirement IDs are explained"
+  },
+  {
+    "category": "functional",
+    "description": "Hovering over or tapping any marked requirement ID in a flow's panel shows the whole popup, neither covered by another part of the panel nor cut off, in requirements, architecture, API design and onboarding sessions and in the coding agents' questions shown in the panel's left column.",
+    "id": "FR-189",
+    "priority": "must",
+    "rationale": "Replaces FR-173: agent questions moved from the delivery progress to the left column.",
+    "title": "Acceptance: whole popup visible in every session type"
+  },
+  {
+    "category": "functional",
+    "description": "Above each coding agent's questions in the left column, a line names the agent that asked (for example \"The test agent\") and says it is paused until the user answers and that only it sees the answers.",
+    "id": "FR-190",
+    "priority": "must",
+    "rationale": "User chose to keep that line above each agent's questions.",
+    "title": "Which agent asked is shown above its questions"
+  },
+  {
+    "category": "functional",
+    "description": "Requirement IDs mentioned in the coding agents' questions shown in the panel's left column are looked up in the requirements field of the requirements session or onboarding that the delivery belongs to.",
+    "id": "FR-191",
+    "priority": "must",
+    "rationale": "Replaces FR-123: agent questions moved from the delivery progress to the left column.",
+    "title": "Agent questions use their session's lookup requirements"
+  },
+  {
+    "category": "non_functional",
+    "description": "In a desktop browser window used with a mouse and on a phone used by tap, the coding agents' question form, with every question, option and the send button, is inside the visible window when scrolled to, is not cut off, and is shown before the delivery progress section.",
+    "id": "NFR-9",
+    "priority": "must",
+    "rationale": "User's acceptance criterion for desktop and phone.",
+    "title": "Agent question form fits the window"
+  },
+  {
+    "category": "technical",
+    "description": "The change is made in the web client only; the API, including the agent_questions field of the delivery progress and the endpoint that answers agent questions, stays unchanged.",
+    "id": "TR-8",
+    "priority": "must",
+    "rationale": "User chose: no API change; only the web client changes.",
+    "title": "Web client change only"
   }
 ]

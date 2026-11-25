@@ -3,11 +3,11 @@ import { errorMessage, failure, isObject, readBody } from "./api";
 import { ApiModelSection, type ApiModel } from "./ApiModel";
 import { ArchitectureSection, architectureStructure, type ArchitectureStructure } from "./Architecture";
 import ForkButton from "./ForkButton";
-import { AskedQuestions, QuestionForm, questionList, type Question } from "./Questions";
+import { AskedQuestions, questionList, type Question } from "./Questions";
 import { RepositorySummary } from "./RepositoryPicker";
 import {
-  DeliveryResults, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress, taskKind,
-  type DeliveryProgress, type GenerationStage, type TaskKind,
+  DeliveryResults, OpenQuestionsForm, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress, taskKind,
+  type DeliveryProgress, type GenerationStage, type OpenAnswers, type TaskKind,
 } from "./Delivery";
 import {
   repositoryCheckout, repositorySelection, type RepositoryCheckout, type RepositorySelection,
@@ -236,29 +236,6 @@ export default function ApiDesign() {
     }
   }
 
-  async function answerQuestions(answers: string[]) {
-    if (!session) return false;
-    setSubmitting(true);
-    setError("");
-    try {
-      await post(`/${encodeURIComponent(session.session_id)}/answers`, { answers });
-      const content = asked.map((item, index) => `${item.question}\n→ ${answers[index]}`).join("\n\n");
-      setSession({
-        ...session,
-        status: "turn_running",
-        error: null,
-        messages: [...session.messages, { role: "user", content, questions: [] }],
-      });
-      setRefreshKey((value) => value + 1);
-      return true;
-    } catch (caught) {
-      setError(failure(caught, "Could not send the answers."));
-      return false;
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
   async function decideFindings(instructions: string | null) {
     if (!session) return false;
     setSubmitting(true);
@@ -277,22 +254,51 @@ export default function ApiDesign() {
     }
   }
 
-  async function answerAgent(workflowId: string, answers: string[]) {
-    if (!session) return false;
+  /** Sends each group of the open questions on its own: the interviewer's answers to
+   * .../answers and each agent's to .../delivery/answers, one call per agent. */
+  async function sendOpenAnswers({ interviewer, agents }: OpenAnswers) {
+    if (!session) return [];
     setSubmitting(true);
     setError("");
-    try {
-      await post(`/${encodeURIComponent(session.session_id)}/delivery/answers`,
-        { workflow_id: workflowId, answers });
-      setSession({ ...session, ...answeredProgress(session, workflowId) });
-      setRefreshKey((value) => value + 1);
-      return true;
-    } catch (caught) {
-      setError(failure(caught, "Could not send the answers."));
-      return false;
-    } finally {
-      setSubmitting(false);
+    const id = encodeURIComponent(session.session_id);
+    const sent: string[] = [];
+    const errors: string[] = [];
+    if (interviewer) {
+      try {
+        await post(`/${id}/answers`, { answers: interviewer });
+        sent.push("interviewer");
+      } catch (caught) {
+        errors.push(failure(caught, "Could not send the answers to the interviewer."));
+      }
     }
+    for (const agent of agents) {
+      try {
+        await post(`/${id}/delivery/answers`, agent);
+        sent.push(agent.workflow_id);
+      } catch (caught) {
+        errors.push(failure(caught, "Could not send the answers to the agent."));
+      }
+    }
+    let next = session;
+    if (interviewer && sent.includes("interviewer")) {
+      const content = asked.map((item, index) => `${item.question}\n→ ${interviewer[index]}`).join("\n\n");
+      next = {
+        ...next,
+        status: "turn_running",
+        error: null,
+        messages: [...next.messages, { role: "user", content, questions: [] }],
+      };
+    }
+    for (const agent of agents) {
+      if (sent.includes(agent.workflow_id)) next = { ...next, ...answeredProgress(next, agent.workflow_id) };
+    }
+    if (sent.length > 0) {
+      setSession(next);
+      setRefreshKey((value) => value + 1);
+    }
+    if (errors.length > 0) setError(errors.join(" "));
+    setSubmitting(false);
+    return sent;
   }
 
   async function retryMessage() {
@@ -413,11 +419,19 @@ export default function ApiDesign() {
             <h2 id="design-title">{session ? "Your answer" : "Open a session"}</h2>
           </div>
 
+          {!(session && asked.length > 0) && (session?.agent_questions.length ?? 0) > 0 && (
+            <div className="message-form">
+              <OpenQuestionsForm questions={[]} questionsKey={session?.messages.length ?? 0}
+                questionsDisabled progress={session} submitting={submitting}
+                onSubmit={sendOpenAnswers} />
+            </div>
+          )}
+
           {session && asked.length > 0 ? (
             <div className="message-form">
-              <QuestionForm key={session.messages.length} questions={asked}
-                disabled={!canCompose} submitting={submitting}
-                onSubmit={answerQuestions} />
+              <OpenQuestionsForm questions={asked} questionsKey={session.messages.length}
+                questionsDisabled={!canCompose} progress={session} submitting={submitting}
+                onSubmit={sendOpenAnswers} />
               <button
                 className="generate-button"
                 type="button"
@@ -620,7 +634,6 @@ export default function ApiDesign() {
                 <DeliveryResults progress={session} kind={session.kind} retrying={retryingGeneration}
                   disabled={submitting || pipelinePending(session)}
                   onRetry={(stage) => void retryGeneration(stage)}
-                  answering={submitting} onAnswer={answerAgent}
                     onFindings={decideFindings} />
               </section>
             )}
