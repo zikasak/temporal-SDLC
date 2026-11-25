@@ -26,7 +26,7 @@ export default function (pi: any) {
 		pi.registerMcpServer(config.server, {
 			url: `${config.url}/mcp`,
 			headers: { Authorization: "Bearer ${PI_FLOW_TOKEN}" },
-			// Declared to the model like built-in tools, not reached through codemode.
+			// Declared to the model like built-in tools, and callable from codemode scripts too.
 			exposure: "direct",
 			timeout: config.toolTimeout,
 		});

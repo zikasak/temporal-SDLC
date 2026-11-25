@@ -74,6 +74,8 @@ PLUGIN_PACKAGE = '@langfuse/pi-observability-plugin'
 PI_FLAGS = ('--mode', 'rpc', '--no-extensions', '--extension', str(EXTENSION),
             '--no-skills', '--no-prompt-templates', '--no-context-files', '--no-themes',
             '--no-approve')
+# Pi's built-in tool that runs a script calling the flow's tools.
+CODEMODE_TOOL = 'codemode'
 # Seconds Pi waits for one tool call: above the longest shell command
 # (app.agent_workflows.runtime.SHELL_MAX_TIMEOUT, 900 seconds).
 MCP_TOOL_TIMEOUT = 960
@@ -561,8 +563,10 @@ class ChatPi(Runnable):
                 raise ValueError(f'The Pi session {resume} is not in {config_dir}')
             command += ['--session', str(transcripts[-1])]
         # Naming the flow's tools keeps Pi's own read/bash/edit/write tools switched off,
-        # and any other MCP server's.
-        command += (['--extension', 'builtin:mcp', '--tools', TOOL_PREFIX + '*'] if tools
+        # and any other MCP server's. Codemode lets the model script several of the flow's
+        # tools in one call (in parallel, filtering their output) next to calling them.
+        command += (['--extension', 'builtin:mcp', '--extension', 'builtin:codemode',
+                     '--tools', f'{TOOL_PREFIX}*,{CODEMODE_TOOL}'] if tools
                     else ['--no-tools'])
         config: dict[str, Any] = {'server': TOOL_SERVER, 'tools': bool(tools),
                                   'toolTimeout': MCP_TOOL_TIMEOUT}

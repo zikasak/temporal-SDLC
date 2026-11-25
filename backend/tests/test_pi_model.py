@@ -83,13 +83,13 @@ async def test_authoring_keeps_native_history_through_many_tool_turns(pi_http, t
     assert (root / 'Dockerfile').read_text() == 'FROM scratch'
     assert len(requests) == 5
     assert_appended(requests)
-    # The stage's prompt as it is, and the endpoint's key; the flow's tools only.
+    # The stage's prompt as it is, and the endpoint's key; the flow's tools and codemode only.
     assert requests[0]['messages'][0] == {
         'role': 'system', 'content': 'Implement the supplied contract' + runtime.ASK_GUIDANCE}
     assert requests[0]['authorization'] == 'Bearer local-test-key'
     assert {item['function']['name'] for item in requests[0]['tools']} == {
         'mcp__flow__' + name for name in ('read_file', 'write_file', 'edit_file', 'list_files',
-                                          'search_files', 'shell', 'ask_user')}
+                                          'search_files', 'shell', 'ask_user')} | {'codemode'}
     results = tool_results(requests[-1])
     assert results['write'] == 'Written'
     assert results['missing'].startswith('Tool failed: FileNotFoundError:')
