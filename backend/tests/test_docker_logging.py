@@ -3,7 +3,6 @@ import asyncio
 import logging
 import os
 import sys
-import uuid
 
 import pytest
 
@@ -145,8 +144,6 @@ async def test_stage_turn_budgets_reach_the_agent_container(tmp_path, monkeypatc
     monkeypatch.setattr(docker_agents, 'pi_container_args', lambda settings: [])
     monkeypatch.setattr(docker_agents, 'claude_container_args', lambda settings: [])
     monkeypatch.setattr(docker_agents, 'container_trace_environment', lambda *a: {})
-    # A fixed container name: a random one could itself contain the budget's digits.
-    monkeypatch.setattr(docker_agents.uuid, 'uuid4', lambda: uuid.UUID(int=0))
     monkeypatch.setenv('IMPLEMENTATION_MAX_TURNS', '400')
     monkeypatch.delenv('REVIEW_MAX_TURNS', raising=False)
     workspace = tmp_path / 'workspace'
@@ -162,7 +159,10 @@ async def test_stage_turn_budgets_reach_the_agent_container(tmp_path, monkeypatc
     pairs = list(zip(create, create[1:]))
     assert ('-e', 'IMPLEMENTATION_MAX_TURNS') in pairs
     assert ('-e', 'REVIEW_MAX_TURNS') not in pairs
-    assert not any('400' in arg for arg in create)
+    # The value never travels as an argument; container names hold random hex, so match
+    # the value as a whole argument or an assignment rather than as any substring.
+    assert '400' not in create
+    assert not any('MAX_TURNS=' in arg or arg.endswith('=400') for arg in create)
 
 
 def test_claude_agent_containers_use_the_five_minute_prompt_cache(monkeypatch):
