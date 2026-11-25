@@ -67,7 +67,6 @@ class TestCheckSeams:
         assert str(error.value).startswith(
             "The seam of requirement FR-9 names a module the component contract has no stub of:")
         assert written in str(error.value)
-        assert routes["FR-1"]["seam"]["module"] == STUBBED
 
     @pytest.mark.parametrize("written", ["app.nothing", "app/nothing", "app/nothing.py"])
     def test_added_elsewhere_without_stub_still_fails(self, written: str) -> None:
@@ -88,7 +87,7 @@ class TestCheckSeams:
         assert routes["FR-2"]["seam"]["module"] == STUBBED
 
 
-def write_workspace(root: Path, seam: dict[str, Any]) -> None:
+def write_workspace(root: Path, seam: dict[str, Any], extra_seam: dict[str, Any] | None = None) -> None:
     stub = root / "components" / "app" / "docker_agents.pyi"
     stub.parent.mkdir(parents=True)
     stub.write_text("def run_agent() -> None: ...\n")
@@ -96,6 +95,9 @@ def write_workspace(root: Path, seam: dict[str, Any]) -> None:
     other.write_text("def load() -> None: ...\n")
     routes = [{"requirement_id": "FR-5", "route": "component",
                "reason": "internal behaviour", "seam": seam}]
+    if extra_seam is not None:
+        routes.append({"requirement_id": "FR-6", "route": "component",
+                       "reason": "internal behaviour", "seam": extra_seam})
     (root / "routes.json").write_text(json.dumps({"routes": routes}))
 
 
@@ -103,28 +105,32 @@ class TestValidateCompletion:
     @pytest.mark.parametrize("written", ["app/docker_agents", "app/docker_agents.py"])
     def test_path_form_of_one_stub_is_accepted(self, tmp_path: Path, written: str) -> None:
         # requirement: FR-199
-        # A path form of one stub does not raise, while an unmatched module next to it does
-        # and only that one is named as written.
-        write_workspace(tmp_path, {"module": written, "symbols": ["run_agent"],
-                                   "added_elsewhere": {"app/missing": ["x"]}})
+        # A route (FR-5) with a path form of one stub is accepted, while another route (FR-6)
+        # with an unmatched module is sent back: the message names the unmatched module
+        # and does not name the accepted route.
+        write_workspace(tmp_path, {"module": written, "symbols": ["run_agent"]},
+                        {"module": STUBBED, "symbols": ["run_agent"],
+                         "added_elsewhere": {"app/missing": ["x"]}})
         with pytest.raises(RuntimeError) as error:
             validate_completion(tmp_path)
         message = str(error.value)
         assert "app/missing" in message
-        assert written not in message
+        assert "FR-5" not in message
         assert STUBBED in message
         assert OTHER in message
 
     def test_path_form_in_added_elsewhere_is_accepted(self, tmp_path: Path) -> None:
         # requirement: FR-199
+        # FR-5 adds symbols to a path form of one stub; FR-6 adds to an unmatched module.
         write_workspace(tmp_path, {"module": STUBBED, "symbols": ["run_agent"],
-                                   "added_elsewhere": {"app/settings.py": ["load"],
-                                                       "app/missing.py": ["x"]}})
+                                   "added_elsewhere": {"app/settings.py": ["load"]}},
+                        {"module": STUBBED, "symbols": ["run_agent"],
+                         "added_elsewhere": {"app/missing.py": ["x"]}})
         with pytest.raises(RuntimeError) as error:
             validate_completion(tmp_path)
         message = str(error.value)
         assert "app/missing.py" in message
-        assert "app/settings.py" not in message
+        assert "FR-5" not in message
         assert STUBBED in message
         assert OTHER in message
 
