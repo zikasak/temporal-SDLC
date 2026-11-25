@@ -17,8 +17,8 @@ WORKFLOW_LABELS: dict[str, str] = {
     'routing': 'Routing',
 }
 SETTINGS_FILENAME = 'llm-settings.json'
-# Where the coding loops of Pi and the openai adapter compact their history when nothing
-# else is saved: 75% of the 64000 tokens they used to assume as the context window.
+# Where Pi compacts a conversation with the openai adapter's endpoint when nothing else is
+# saved: 75% of the 64000 tokens assumed as the context window of a model that reports none.
 DEFAULT_COMPACTION_TOKENS = 48000
 # Fewer tokens leave no room for the system prompt, the contracts and a recent batch.
 MIN_COMPACTION_TOKENS = 4000
@@ -32,8 +32,9 @@ class ModelSettings(BaseModel):
     model: str = Field(default='ddalcu/Qwen3.8-27B-MLX-Serve-4bit', min_length=1,
                        max_length=300)
     thinking_level: str = Field(default='default', min_length=1, max_length=100)
-    # Tokens in use at which a coding loop of Pi or the openai adapter compacts its
-    # history into a checkpoint; 0 never compacts. Claude compacts its own context.
+    # Tokens in use at which Pi compacts a conversation with the openai adapter's endpoint,
+    # whose model reports no context window; 0 compacts only once the endpoint refuses a
+    # context as too long. Pi's own providers and Claude compact by their models' windows.
     compaction_tokens: int = Field(default=DEFAULT_COMPACTION_TOKENS, ge=0)
 
     @field_validator('model')

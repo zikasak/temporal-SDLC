@@ -56,7 +56,7 @@ async def _openai_models(endpoint: OpenAIEndpoint) -> list[ModelOption]:
     base_url, api_key = endpoint.base_url, endpoint.api_key
     async with httpx.AsyncClient(timeout=10) as client:
         if urlparse(base_url).hostname == 'generativelanguage.googleapis.com':
-            # The factory uses the native Google SDK for this endpoint as well.
+            # Runs call this endpoint through its native API as well (app/llm/pi.py).
             models = []
             params = {}
             while True:

@@ -52,8 +52,7 @@ def scripted_model(monkeypatch):
                 return next(self.responses)
 
         model = Model()
-        from app.llm import factory
-        monkeypatch.setattr(factory, 'create_model', lambda **settings: model)
+        monkeypatch.setattr(runtime, 'create_adapter', lambda settings, **endpoint: model)
         return model
 
     return install

@@ -19,7 +19,7 @@ COPY --from=build /install /usr/local
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-    && npm install --global @earendil-works/pi-coding-agent@1.0.0 && npm cache clean --force
+    && npm install --global @earendil-works/pi-coding-agent@1.6.0 && npm cache clean --force
 WORKDIR /app
 COPY backend/app app
 RUN useradd --create-home --uid 10001 app && mkdir /data && chown app:app /data

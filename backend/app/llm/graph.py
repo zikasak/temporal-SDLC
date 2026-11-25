@@ -28,11 +28,8 @@ DIRECT_QUESTION_CORRECTION = (
     "question in it, and put each question you need answered into one ask_user call."
 )
 # A saved conversation larger than this starts anew from the application's messages, as
-# the providers outside Claude do not compact their history.
+# providers other than the native agents do not compact their history.
 MAX_RESTORED_BYTES = 400_000
-# The saved conversations of different providers stay apart: their messages carry
-# provider-specific details.
-PROVIDER_NAMES = {"ChatOpenAI": "openai", "ChatGoogleGenerativeAI": "gemini", "ChatPi": "pi"}
 
 
 class DirectQuestion(ValueError):
@@ -128,7 +125,7 @@ async def native_session(model: Runnable,
     """Keep one provider conversation across the graph's model calls when the model
     offers it, so each call only appends to the prompt the provider has cached.
     `conversation` names the application conversation this turn belongs to: its provider
-    conversation (Claude's native session, other providers' messages with their tool
+    conversation (a native agent's session, other providers' messages with their tool
     calls) is restored from the shared storage and saved again after a successful turn."""
     session = getattr(model, "async_session", None)
     if session is not None:
@@ -141,7 +138,9 @@ async def native_session(model: Runnable,
     if store is None:
         yield
         return
-    provider = PROVIDER_NAMES.get(type(model).__name__, type(model).__name__.lower())
+    # The saved conversations of different providers stay apart: their messages carry
+    # provider-specific details.
+    provider = type(model).__name__.lower()
     assert conversation is not None
     saved = _SavedConversation(store, conversation, provider)
     token = _CONVERSATION.set(saved)
@@ -175,12 +174,15 @@ def get_message_graph(tools: list[BaseTool], until: Callable[[], bool] | None = 
     """The model ↔ tool loop. `until` ends it after a round of tool calls, such as the
     one that asked the user something; the model then gets no further turn.
     `after_model_request` runs after each model request; a notice it returns is shown to
-    the model before its next request, as a user message here and, with Claude, after
-    the next tool result."""
-    from app.llm.claude import ChatClaude, ClaudeGraph
+    the model before its next request, as a user message here and with Pi, and, with
+    Claude, after the next tool result. Native agents (Claude, Pi) run the loop
+    themselves, calling the tools over MCP."""
+    from app.llm.claude import ChatClaude
+    from app.llm.native import NativeGraph
+    from app.llm.pi import ChatPi
 
-    if isinstance(model, ChatClaude):
-        return ClaudeGraph(model, tools, until, after_model_request)
+    if isinstance(model, (ChatClaude, ChatPi)):
+        return NativeGraph(model, tools, until, after_model_request)
     graph = StateGraph(MessagesState)
     bound_model = cast(_BindsTools, model).bind_tools(tools)
     pending: list[str] = []

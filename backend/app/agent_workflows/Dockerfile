@@ -8,14 +8,18 @@ COPY --from=java /opt/java/openjdk /opt/java/openjdk
 COPY --from=java /usr/share/maven /usr/share/maven
 ENV JAVA_HOME=/opt/java/openjdk
 ENV PATH="/opt/java/openjdk/bin:/usr/share/maven/bin:${PATH}"
-# Node and the Pi CLI serve the Pi adapter; its credentials are mounted at run time.
+# Node and the Pi CLI serve the pi and openai adapters; Pi's credentials are mounted at
+# run time. The Langfuse plugin traces its sessions (app/llm/pi.py).
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-    && npm install --global @earendil-works/pi-coding-agent@1.0.0 && npm cache clean --force
-RUN pip install --no-cache-dir langchain==1.4.2 langchain-openai==1.6.6 langchain-google-genai==4.4.0 langfuse==4.16.0
+    && npm install --global @earendil-works/pi-coding-agent@1.6.0 \
+        @langfuse/pi-observability-plugin@0.1.2 && npm cache clean --force
+ENV PI_LANGFUSE_PLUGIN=/usr/local/lib/node_modules/@langfuse/pi-observability-plugin
+RUN pip install --no-cache-dir langchain==1.4.2 langfuse==4.16.0
 # The Claude Agent SDK bundles the Claude Code CLI that serves the Claude adapter; its
-# credentials arrive as environment variables at run time.
+# credentials arrive as environment variables at run time. Its MCP package serves the
+# flow's tools to Pi as well.
 RUN pip install --no-cache-dir claude-agent-sdk==0.2.186
 # Static tools the host runs over a delivery before its review, without a network
 # (app/languages/static_checks.py): a secrets scanner and Python's linter.
@@ -29,7 +33,7 @@ ARG AGENT_ROLE
 ARG WORKSPACE_NAME
 COPY app/__init__.py app/asyncio_utils.py app/tracing.py /opt/app/
 COPY app/agent_workflows/__init__.py app/agent_workflows/runtime.py /opt/app/agent_workflows/
-COPY app/llm/__init__.py app/llm/factory.py app/llm/claude.py app/llm/mcp.py app/llm/claude_trace_hook.py app/llm/pi.py app/llm/pi_extension.ts app/llm/questions.py app/llm/limits.py /opt/app/llm/
+COPY app/llm/__init__.py app/llm/factory.py app/llm/native.py app/llm/native_sessions.py app/llm/saved_conversations.py app/llm/claude.py app/llm/mcp.py app/llm/claude_trace_hook.py app/llm/pi.py app/llm/pi_extension.ts app/llm/pi_trace.py app/llm/questions.py app/llm/limits.py /opt/app/llm/
 COPY app/llm/plugins/ /opt/app/llm/plugins/
 COPY app/settings/__init__.py app/settings/models.py /opt/app/settings/
 COPY app/${AGENT_ROLE}/agent.py /opt/agent.py

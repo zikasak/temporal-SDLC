@@ -66,42 +66,52 @@ def _normalize_tool_calls(value: Any) -> Any:
     return result
 
 
+def _secrets() -> tuple[str, ...]:
+    return tuple(sorted({value for key, value in os.environ.items()
+                         if value and any(part in key.upper() for part in
+                                          ('KEY', 'TOKEN', 'PASSWORD', 'SECRET'))},
+                        key=len, reverse=True))
+
+
+def _content_captured() -> bool:
+    return os.getenv('APP_TRACE_CONTENT_ENABLED', 'false').lower() == 'true'
+
+
+def mask_attribute(key: str, value: Any, secrets: tuple[str, ...],
+                   capture_content: bool) -> Any:
+    """A span attribute as the application's privacy policy exports it."""
+    if not capture_content and key in {'langfuse.observation.input',
+                                       'langfuse.observation.output',
+                                       'langfuse.trace.input', 'langfuse.trace.output'}:
+        return '[CONTENT CAPTURE DISABLED]'
+    if (not capture_content and key == 'langfuse.observation.status_message'
+            and isinstance(value, str)
+            and not re.fullmatch(r'[A-Za-z][A-Za-z0-9]*(?:Error|Cancelled)', value)):
+        return 'Operation failed (details excluded)'
+    if not isinstance(value, str):
+        return _redact(value, secrets)
+    try:
+        parsed = json.loads(value)
+    except (ValueError, TypeError):
+        return _redact(value, secrets)
+    normalized = (_normalize_tool_calls(parsed)
+                  if key in {'langfuse.observation.input', 'langfuse.observation.output'}
+                  else parsed)
+    redacted = _redact(normalized, secrets)
+    return json.dumps(redacted) if redacted != parsed else value
+
+
 def mask_otel_spans(*, params):
     """Mask the final export, including data emitted by LangChain callbacks."""
     from langfuse.types import MaskOtelSpansResult, OtelSpanPatch
 
-    secrets = tuple(sorted({value for key, value in os.environ.items()
-                            if value and any(part in key.upper() for part in
-                                             ('KEY', 'TOKEN', 'PASSWORD', 'SECRET'))},
-                           key=len, reverse=True))
-    capture_content = os.getenv('APP_TRACE_CONTENT_ENABLED', 'false').lower() == 'true'
+    secrets = _secrets()
+    capture_content = _content_captured()
     patches = {}
     for identifier, span in params.spans.items():
         replacements = {}
         for key, value in span.attributes.items():
-            if not capture_content and key in {'langfuse.observation.input',
-                                               'langfuse.observation.output',
-                                               'langfuse.trace.input', 'langfuse.trace.output'}:
-                replacements[key] = '[CONTENT CAPTURE DISABLED]'
-                continue
-            if (not capture_content and key == 'langfuse.observation.status_message'
-                    and isinstance(value, str)
-                    and not re.fullmatch(r'[A-Za-z][A-Za-z0-9]*(?:Error|Cancelled)', value)):
-                replacements[key] = 'Operation failed (details excluded)'
-                continue
-            if isinstance(value, str):
-                try:
-                    parsed = json.loads(value)
-                except (ValueError, TypeError):
-                    masked = _redact(value, secrets)
-                else:
-                    normalized = (_normalize_tool_calls(parsed)
-                                  if key in {'langfuse.observation.input',
-                                             'langfuse.observation.output'} else parsed)
-                    redacted = _redact(normalized, secrets)
-                    masked = json.dumps(redacted) if redacted != parsed else value
-            else:
-                masked = _redact(value, secrets)
+            masked = mask_attribute(key, value, secrets, capture_content)
             if masked != value:
                 replacements[key] = masked
         if replacements:
@@ -111,9 +121,6 @@ def mask_otel_spans(*, params):
 
 def _privacy_exporter():
     """The SDK masking hook cannot edit OTEL status text or exception events."""
-    import base64
-    from importlib.metadata import version
-
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     from opentelemetry.sdk.trace import ReadableSpan
     from opentelemetry.trace import Status
@@ -131,22 +138,29 @@ def _privacy_exporter():
             ) for span in spans]
             return super().export(clean)
 
+    return PrivacyExporter(endpoint=otlp_endpoint(), headers=otlp_headers(), timeout=10)
+
+
+def otlp_endpoint() -> str:
+    return os.environ['LANGFUSE_BASE_URL'].rstrip('/') + '/api/public/otel/v1/traces'
+
+
+def otlp_headers() -> dict[str, str]:
+    import base64
+    from importlib.metadata import version
+
     auth = base64.b64encode(
         f"{os.environ['LANGFUSE_PUBLIC_KEY']}:{os.environ['LANGFUSE_SECRET_KEY']}".encode()
     ).decode()
-    return PrivacyExporter(
-        endpoint=os.environ['LANGFUSE_BASE_URL'].rstrip('/') + '/api/public/otel/v1/traces',
-        # Match the official SDK's routing/version headers. Do not force a
-        # self-hosted project's ingestion migration through a custom header.
-        headers={'Authorization': f'Basic {auth}', 'x-langfuse-sdk-name': 'python',
-                 'x-langfuse-sdk-version': version('langfuse'),
-                 'x-langfuse-public-key': os.environ['LANGFUSE_PUBLIC_KEY']},
-        timeout=10,
-    )
+    # Match the official SDK's routing/version headers. Do not force a
+    # self-hosted project's ingestion migration through a custom header.
+    return {'Authorization': f'Basic {auth}', 'x-langfuse-sdk-name': 'python',
+            'x-langfuse-sdk-version': version('langfuse'),
+            'x-langfuse-public-key': os.environ['LANGFUSE_PUBLIC_KEY']}
 
 
-# The MCP SDK traces every tools/call it serves to Claude, without arguments or results.
-# The Claude plugin already exports those calls, with their content, from the transcript.
+# The MCP SDK traces every tools/call it serves to Claude or Pi, without arguments or
+# results. Their plugins already export those calls, with their content.
 _IGNORED_SCOPES = {'mcp-python-sdk'}
 
 
@@ -273,24 +287,37 @@ def container_trace_context() -> 'TraceContext | None':
     return None
 
 
-def claude_trace_environment() -> dict[str, str]:
-    """Explicit cross-process parent context for the Claude observability plugin."""
-    environment = {'APP_CLAUDE_TRACING_ENABLED': 'false'}
+def native_trace_parent() -> dict[str, str] | None:
+    """Where a native agent's own tracing plugin attaches its observations: the current
+    trace and observation with the application's session and feature, or None when
+    tracing is off or this trace was sampled out."""
     client = tracing_client()
     if client is None:
-        return environment
+        return None
     from opentelemetry import trace
 
     current = trace.get_current_span().get_span_context()
     if current.is_valid and not current.trace_flags.sampled:
-        return environment
+        return None
     attributes = _trace_attributes.get()
+    return {'trace_id': client.get_current_trace_id() or '',
+            'span_id': client.get_current_observation_id() or '',
+            'session_id': attributes.get('session_id') or '',
+            'feature': attributes.get('feature') or ''}
+
+
+def claude_trace_environment() -> dict[str, str]:
+    """Explicit cross-process parent context for the Claude observability plugin."""
+    environment = {'APP_CLAUDE_TRACING_ENABLED': 'false'}
+    parent = native_trace_parent()
+    if parent is None:
+        return environment
     environment.update(
         APP_CLAUDE_TRACING_ENABLED='true',
-        CC_LANGFUSE_PARENT_TRACE_ID=client.get_current_trace_id() or '',
-        CC_LANGFUSE_PARENT_SPAN_ID=client.get_current_observation_id() or '',
-        APP_CLAUDE_TRACE_SESSION_ID=attributes.get('session_id') or '',
-        APP_CLAUDE_TRACE_FEATURE=attributes.get('feature') or '',
+        CC_LANGFUSE_PARENT_TRACE_ID=parent['trace_id'],
+        CC_LANGFUSE_PARENT_SPAN_ID=parent['span_id'],
+        APP_CLAUDE_TRACE_SESSION_ID=parent['session_id'],
+        APP_CLAUDE_TRACE_FEATURE=parent['feature'],
         # Images would otherwise upload outside the application's span masking.
         CC_LANGFUSE_CAPTURE_IMAGES='false', LANGFUSE_MEDIA_UPLOAD_ENABLED='false',
     )

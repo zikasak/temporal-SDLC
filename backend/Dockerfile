@@ -27,7 +27,10 @@ ADD --chmod=644 --checksum=sha256:3f1e6ce5c6ad4f15242c6170ab43aad4bad771622617ee
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-    && npm install --global @earendil-works/pi-coding-agent@1.0.0 && npm cache clean --force
+    && npm install --global @earendil-works/pi-coding-agent@1.6.0 \
+        @langfuse/pi-observability-plugin@0.1.2 && npm cache clean --force
+# The plugin that traces Pi sessions (app/llm/pi.py).
+ENV PI_LANGFUSE_PLUGIN=/usr/local/lib/node_modules/@langfuse/pi-observability-plugin
 COPY . .
 # UID/GID 10001 is also the group of the sandbox daemon's socket.
 RUN useradd --create-home --uid 10001 app && mkdir /data && chown app:app /data

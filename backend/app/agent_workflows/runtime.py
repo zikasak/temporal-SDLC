@@ -77,7 +77,7 @@ def _max_turns(profile: AgentProfile) -> int:
 READ_LINES = 500
 READ_CHARS = 30000
 # A shell command's default and longest time. The longest must stay below the time a
-# coding agent's model may go silent (app.llm.claude.ChatClaude.timeout), which a command
+# coding agent's model may go silent (ChatClaude.timeout, ChatPi.timeout), which a command
 # running in a tool call counts towards.
 SHELL_TIMEOUT = 120
 SHELL_MAX_TIMEOUT = 900
@@ -529,7 +529,7 @@ def configure_container_logging() -> None:
         level=level if isinstance(logging.getLevelName(level), int) else logging.INFO,
         format='%(levelname)s %(name)s: %(message)s', stream=sys.stderr, force=True,
     )
-    for name in ('httpx', 'httpcore', 'openai'):
+    for name in ('httpx', 'httpcore'):
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
@@ -583,14 +583,17 @@ async def _run_agent(profile: AgentProfile) -> str:
     # The worker sets these from the OpenAI endpoint saved in Settings (openai adapter only).
     provider = create_adapter(settings, api_key=os.getenv('OPENAI_API_KEY', ''),
                               base_url=os.getenv('OPENAI_BASE_URL', ''))
-    if settings.adapter == 'claude':
-        return await _run_claude(profile, provider)
+    # Claude and Pi (which serves the pi and openai adapters) run the stage natively.
+    if hasattr(provider, 'async_session'):
+        return await _run_native(profile, provider,
+                                 'claude' if settings.adapter == 'claude' else 'pi')
     return await _run_with_provider(profile, provider, settings.compaction_tokens)
 
 
-async def _run_claude(profile: AgentProfile, provider) -> str:
-    """Let the native SDK execute the stage through MCP and resume its real session."""
-    from app.llm.claude import ClaudeTurnLimit
+async def _run_native(profile: AgentProfile, provider, agent: str) -> str:
+    """Let the native agent (`agent`: claude or pi) execute the stage through MCP and
+    resume its real session."""
+    from app.llm.native import AgentTurnLimit
 
     directory = profile.root.parent
     state_file = directory / STATE_FILENAME
@@ -600,7 +603,7 @@ async def _run_claude(profile: AgentProfile, provider) -> str:
         if await run_sync(state_file.is_file)
         else None
     )
-    if state is not None and state.get('adapter') != 'claude':
+    if state is not None and state.get('adapter') != agent:
         raise ValueError('A paused run must resume with the same adapter')
     turns = state['turns'] if state else _max_turns(profile)
     if turns <= 0:
@@ -616,7 +619,7 @@ async def _run_claude(profile: AgentProfile, provider) -> str:
                                           args_schema=AskUserInput),
              *([note_tool([])] if profile.working_notes else [])]
     provider.cwd = profile.root
-    provider.config_dir = directory / '.claude-native'
+    provider.config_dir = directory / f'.{agent}-native'
     provider.resume = state['session_id'] if state else None
     head = [SystemMessage(profile.prompt + ASK_GUIDANCE)]
     if state and state.get('pending') is None:
@@ -637,7 +640,7 @@ async def _run_claude(profile: AgentProfile, provider) -> str:
         if problem:
             raise ValueError(problem)
         messages = [*head, HumanMessage(answers_result(state['pending']['questions'], answers))]
-        print('Resumed native Claude session with the user\'s answers', flush=True)
+        print('Resumed the native session with the user\'s answers', flush=True)
     else:
         messages = [*head, *(HumanMessage(text) for text in profile.initial_messages)]
     nudges = state.get('nudges', 0) if state else 0
@@ -645,8 +648,9 @@ async def _run_claude(profile: AgentProfile, provider) -> str:
         while True:
             if turns <= 0:
                 raise RuntimeError(profile.exhaustion_message)
-            # The SDK fixes max_turns at client startup. Resume the native transcript
-            # in a fresh client for each correction, with only the remaining budget.
+            # The Claude SDK fixes max_turns at client startup. Resume the native
+            # transcript in a fresh session for each correction, with only the remaining
+            # budget.
             # Counted per session; one that failed to start used none.
             provider.turns_used = 0
             try:
@@ -660,7 +664,7 @@ async def _run_claude(profile: AgentProfile, provider) -> str:
                     raise
                 turns -= provider.turns_used
                 await run_sync(_stop_for_limit, directory, {
-                    'adapter': 'claude', 'session_id': provider.session_id,
+                    'adapter': agent, 'session_id': provider.session_id,
                     'turns': turns, 'nudges': nudges}, ProviderLimit(exc))
                 return LIMITED
             turns -= provider.turns_used
@@ -669,7 +673,7 @@ async def _run_claude(profile: AgentProfile, provider) -> str:
                     _pause,
                     directory,
                     {
-                        'adapter': 'claude',
+                        'adapter': agent,
                         'session_id': provider.session_id,
                         'pending': pending,
                         'turns': turns,
@@ -690,13 +694,14 @@ async def _run_claude(profile: AgentProfile, provider) -> str:
             await run_sync(answers_file.unlink, missing_ok=True)
             print(profile.completion_message, flush=True)
             return DONE
-    except ClaudeTurnLimit as exc:
+    except AgentTurnLimit as exc:
         raise RuntimeError(profile.exhaustion_message) from exc
 
 
 async def _run_with_provider(profile: AgentProfile, provider, compaction_tokens: int) -> str:
-    """Run the application's tool loop, compacting its history into a checkpoint once
-    `compaction_tokens` are in use; 0 never compacts."""
+    """Run the application's tool loop for a model that is no native agent (such as a
+    custom adapter), compacting its history into a checkpoint once `compaction_tokens`
+    are in use; 0 never compacts."""
     working: list[str] = []
     tools = [*(await run_sync(workspace_tools, profile.root, profile.contracts, profile.build_dirs)),
              ask_user_tool(), *([note_tool(working)] if profile.working_notes else [])]

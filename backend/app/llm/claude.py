@@ -23,6 +23,7 @@ from langchain_core.tools import BaseTool
 from app.asyncio_utils import async_context, run_sync
 from app.llm.mcp import TOOL_PREFIX, TOOL_SERVER, flow_server
 from app.llm.limits import AGENT_RECURSION_LIMIT
+from app.llm.native import AgentTurnLimit, continuation, first_prompt
 from app.tracing import claude_trace_environment
 
 if TYPE_CHECKING:
@@ -38,10 +39,6 @@ FINAL_EXPORT_ENV = 'APP_CLAUDE_FINAL_EXPORT'
 # Claude Code reports this in its User-Agent; the SDK would label every run 'sdk-py'.
 ENTRYPOINT = 'temporal-sdlc'
 MCP_TOOL_TIMEOUT_MS = 960_000
-
-
-class ClaudeTurnLimit(RuntimeError):
-    """The native agent used the allowed number of model turns."""
 
 
 @dataclass
@@ -138,9 +135,12 @@ class ChatClaude(Runnable):
                 await run_sync(cwd.mkdir, parents=True, exist_ok=True)
                 config_dir = Path(await stack.enter_async_context(
                     async_context(tempfile.TemporaryDirectory, prefix='claude-native-')))
-                resumed = await self._restore(store, history, config_dir)
+                from app.llm.native_sessions import CLAUDE
+                assert self.conversation is not None
+                session, resumed = await CLAUDE.restore(store, self.conversation, history,
+                                                        config_dir)
                 if resumed:
-                    resume = self._native_session
+                    resume = self._native_session = session
                 self._history = history
                 # Saved once the CLI and the final trace export are done.
                 stack.push_async_exit(self._exit_saving(store, config_dir))
@@ -209,13 +209,13 @@ class ChatClaude(Runnable):
         if self._messages:
             if messages[:len(self._messages)] != self._messages:
                 raise ValueError('A native Claude session only accepts appended messages')
-            prompt = _continuation([message for message in messages[len(self._messages):]
+            prompt = continuation([message for message in messages[len(self._messages):]
                                     if not isinstance(message, SystemMessage)])
         elif resumed:
             # A saved session holds the conversation up to its last reply.
-            prompt = _continuation(history[resumed:])
+            prompt = continuation(history[resumed:])
         else:
-            prompt = _prompt(messages)
+            prompt = first_prompt(messages)
         result = None
         blocks = []
         message_id = None
@@ -252,7 +252,7 @@ class ChatClaude(Runnable):
         paused = until is not None and until()
         if result.is_error and not paused:
             if result.subtype == 'error_max_turns':
-                raise ClaudeTurnLimit('Claude exceeded the tool-turn limit')
+                raise AgentTurnLimit('Claude exceeded the tool-turn limit')
             raise RuntimeError('Claude response failed: ' + (
                 '; '.join(result.errors or []) or result.result or result.subtype))
         reply = AIMessage(
@@ -265,35 +265,6 @@ class ChatClaude(Runnable):
         self._completed = True
         return reply
 
-    async def _restore(self, store, history: list[BaseMessage], config_dir: Path) -> int:
-        """Restore the conversation's saved session into `config_dir`; returns how many
-        of `history`'s messages it holds, 0 when this turn starts a new session."""
-        from app.llm import claude_sessions
-
-        assert self.conversation is not None
-        try:
-            data = await run_sync(store.load,
-                                  claude_sessions.object_name(self.conversation.source))
-            if data is None:
-                return 0
-            meta = await run_sync(claude_sessions.unpack, data, config_dir)
-        except Exception:
-            logger.warning('Could not restore the Claude session of %s; starting a new one',
-                           self.conversation.source, exc_info=True)
-            return 0
-        resumed = await run_sync(claude_sessions.resumable, meta, history, config_dir,
-                                 self.conversation.context)
-        if resumed:
-            self._native_session = meta['session_id']
-            logger.info('Resuming Claude session %s of %s after %d messages',
-                        meta['session_id'], self.conversation.source, resumed)
-        else:
-            logger.info('The saved Claude session of %s does not continue this '
-                        'conversation; starting a new one', self.conversation.source)
-            # Not saved again with the new session.
-            await run_sync(claude_sessions.clear, config_dir)
-        return resumed
-
     def _exit_saving(self, store, config_dir: Path):
         async def save(exc_type, exc, traceback) -> bool:
             # A failed turn keeps the session saved before it, which its retry resumes.
@@ -303,25 +274,11 @@ class ChatClaude(Runnable):
         return save
 
     async def _save(self, store, config_dir: Path) -> None:
-        from app.llm import claude_sessions
-        from app.llm.saved_conversations import saved_meta
+        from app.llm.native_sessions import CLAUDE
 
-        assert self.conversation is not None
-        history = self._history
-        # The conversation goes on from this session's first messages and its final
-        # reply; the corrections a turn sent in between are not part of it.
-        meta = {'session_id': self._native_session,
-                **saved_meta(history, self.conversation.context)}
-        try:
-            data = await run_sync(claude_sessions.pack, config_dir, meta)
-            await run_sync(store.save, claude_sessions.object_name(self.conversation.name),
-                           data)
-        except Exception:
-            logger.warning('Could not save the Claude session of %s', self.conversation.name,
-                           exc_info=True)
-            return
-        logger.info('Saved Claude session %s of %s (%d bytes)', self._native_session,
-                    self.conversation.name, len(data))
+        assert self.conversation is not None and self._native_session is not None
+        await CLAUDE.save(store, self.conversation, self._history, self._native_session,
+                          config_dir)
 
     async def _export_session(self, env: dict[str, str], config_dir: Path) -> None:
         """Final export of the session once the CLI has exited. The plugin's Stop hook
@@ -357,43 +314,3 @@ class ChatClaude(Runnable):
         except Exception:
             logger.warning('Could not export the Claude session', exc_info=True)
 
-
-def _prompt(messages: list[BaseMessage]) -> str:
-    history = [message for message in messages if not isinstance(message, SystemMessage)]
-    if len(history) == 1 and isinstance(history[0], HumanMessage):
-        return history[0].text
-    # Application conversations are context for a new native session, never forged
-    # Claude transcript rows. Subsequent requests use the native session itself.
-    return 'Conversation context:\n' + json.dumps([
-        {'role': message.type, 'content': message.content} for message in history
-    ], ensure_ascii=False) + '\n\nContinue the conversation and complete the latest user request.'
-
-
-def _continuation(added: list[BaseMessage]) -> str:
-    """The prompt that appends `added` to a native session: the user's text, or the
-    whole exchange when it also holds replies the session has not seen."""
-    if all(isinstance(message, HumanMessage) for message in added):
-        return '\n\n'.join(message.text for message in added)
-    return 'Conversation since your last reply:\n' + json.dumps([
-        {'role': message.type, 'content': message.content} for message in added
-    ], ensure_ascii=False) + '\n\nContinue the conversation and complete the latest user request.'
-
-
-class ClaudeGraph:
-    """The flow's invocation interface, with the SDK owning all model/tool turns."""
-
-    def __init__(self, model: ChatClaude, tools, until, after_model_request=None):
-        self.model, self.tools, self.until = model, tools, until
-        self.after_model_request = after_model_request
-
-    async def ainvoke(self, state, config=None):
-        try:
-            reply = await self.model.ainvoke(
-                state['messages'], tools=self.tools, until=self.until,
-                after_model_request=self.after_model_request,
-                max_turns=max(1, (config or {}).get('recursion_limit', AGENT_RECURSION_LIMIT)),
-            )
-        except ClaudeTurnLimit as exc:
-            from langgraph.errors import GraphRecursionError
-            raise GraphRecursionError(str(exc)) from exc
-        return {'messages': [*state['messages'], reply]}

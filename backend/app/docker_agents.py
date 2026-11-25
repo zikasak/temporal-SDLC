@@ -48,7 +48,8 @@ LOG_DRAIN_SECONDS = 2
 # The longest an agent may run.
 AGENT_TIMEOUT_SECONDS = 3600
 # How long an agent that ran out of time has, once asked to stop, to export its traces
-# (app.llm.claude.TRACE_EXPORT_TIMEOUT, then the tracing flush) before it is killed.
+# (app.llm.claude.TRACE_EXPORT_TIMEOUT or app.llm.pi.SHUTDOWN_TIMEOUT, then the tracing
+# flush) before it is killed.
 AGENT_STOP_GRACE_SECONDS = 150
 # A level name near the start of a line: Python's `INFO name: ...`, Logback's
 # `12:00:00.000 [main] WARN ...`, Spring Boot's `<timestamp>  ERROR 1 --- ...`.

@@ -16,6 +16,8 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTrace
 
 SECRET = 'private-provider-key-for-trace-tests'
 EMAIL = 'private@example.com'
+# The observation the Langfuse Pi plugin opens for a prompt, nested under the application's.
+PI_TURN = 'Subagent Turn'
 
 
 @pytest.fixture
@@ -37,9 +39,15 @@ def tracing_server():
                 self.send_response(200)
                 self.end_headers()
                 return
+            if self.headers.get('Authorization') != f'Bearer {SECRET}':
+                self.send_response(401)
+                self.end_headers()
+                return
             payload = json.loads(body)
             user = next(item['content'] for item in reversed(payload['messages'])
                         if item['role'] == 'user')
+            if isinstance(user, list):
+                user = ''.join(part.get('text', '') for part in user)
             # Echo what the user wrote, without the session state the prompt appends.
             user = user.split('\n\n<current_state>')[0]
             if 'provider-error' in user:
@@ -51,10 +59,15 @@ def tracing_server():
                 return
             if any(item['role'] == 'tool' for item in payload['messages']):
                 message: dict[str, Any] = {'role': 'assistant', 'content': f'Recorded {user}'}
+            elif not payload.get('tools'):
+                message = {'role': 'assistant', 'content': f'Answered {user}'}
             else:
-                coding = any(item['function']['name'] == 'write_file'
-                             for item in payload.get('tools', []))
-                name = 'write_file' if coding else 'record_requirement'
+                # Pi declares the flow's tools by their MCP names (mcp__flow__write_file).
+                names = [item['function']['name'] for item in payload.get('tools', [])]
+                name = next((item for item in names if item.endswith('write_file')), None)
+                coding = name is not None
+                name = name or next(item for item in names
+                                    if item.endswith('record_requirement'))
                 args = ({'path': 'done.txt', 'content': user} if coding else
                         {'category': 'functional', 'title': 'Search', 'description': user,
                          'priority': 'must'})
@@ -66,6 +79,8 @@ def tracing_server():
                         'choices': [{'index': 0, 'message': message, 'finish_reason':
                                      'tool_calls' if 'tool_calls' in message else 'stop'}],
                         'usage': {'prompt_tokens': 11, 'completion_tokens': 7, 'total_tokens': 18}}
+            if 'cached' in user:
+                response['usage']['prompt_tokens_details'] = {'cached_tokens': 4}
             if payload.get('stream'):
                 # Mirror the provider: usage arrives in a trailing chunk only when requested.
                 choice = response['choices'][0]
@@ -113,6 +128,21 @@ def tracing_server():
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+@pytest.fixture(params=['claude', 'pi'])
+def native_agent(request):
+    """A native agent against its loopback provider, set up before tracing_server reads
+    the environment: (the name of its plugin's turn observation, replies, requests, the
+    environment that selects it)."""
+    if request.param == 'claude':
+        replies, requests = request.getfixturevalue('claude_http')
+        return ('Conversational Turn', replies, requests, {
+            'TEST_MODEL_SETTINGS': json.dumps({'adapter': 'claude', 'model': 'claude-test'})})
+    replies, requests = request.getfixturevalue('pi_http')
+    return (PI_TURN, replies, requests, {
+        'TEST_MODEL_SETTINGS': json.dumps({'adapter': 'openai', 'model': 'test-model'}),
+        'OPENAI_BASE_URL': os.environ['OPENAI_BASE_URL']})
 
 
 def run_script(script, environment):
@@ -185,10 +215,13 @@ shutdown_tracing()
             if span is not root:
                 assert span.parent_span_id in by_id
                 assert by_id[span.parent_span_id].trace_id == root.trace_id
+        # Pi runs the turn natively; its plugin's observations nest under the activity's.
+        native_turn, = [span for span in related if span.name == PI_TURN]
+        assert native_turn.parent_span_id == root.span_id
         generations = [span for span in related
                        if attributes(span).get('langfuse.observation.type') == 'generation']
         assert len(generations) == 2
-        assert all(span.parent_span_id == root.span_id for span in generations)
+        assert all(span.parent_span_id == native_turn.span_id for span in generations)
         for generation in generations:
             attrs = attributes(generation)
             assert attrs['langfuse.observation.model.name'] == 'test-model'
@@ -196,15 +229,14 @@ shutdown_tracing()
             assert usage['input'] == 11 and usage['output'] == 7
         tools = [span for span in related
                  if attributes(span).get('langfuse.observation.type') == 'tool']
-        assert [span.name for span in tools] == ['record_requirement']
-        assert tools[0].parent_span_id == root.span_id
+        assert [span.name for span in tools] == ['Tool: mcp__flow__record_requirement']
+        assert tools[0].parent_span_id == native_turn.span_id
+        # The application's feature, beside the plugin's own tag.
+        assert 'requirements' in str(attributes(tools[0])['langfuse.trace.tags'])
         if capture_content == 'true':
-            calls = [json.loads(attributes(span)['langfuse.observation.output']).get('tool_calls')
-                     for span in generations]
-            call, = next(items for items in calls if items)
-            assert call['type'] == 'function'
-            assert call['function']['name'] == 'record_requirement'
-            assert json.loads(call['function']['arguments'])['title'] == 'Search'
+            arguments = json.loads(attributes(tools[0])['langfuse.observation.input'])
+            assert arguments['title'] == 'Search'
+            assert '[REDACTED EMAIL]' in arguments['description']
         root_input = attributes(root)['langfuse.observation.input']
         if capture_content == 'true':
             assert session in root_input
@@ -342,25 +374,23 @@ shutdown_tracing()
     tool, = [span for span in spans
              if attributes(span).get('langfuse.observation.type') == 'tool']
     assert len(generations) == 2
-    if adapter == 'claude':
-        native_turn, = [span for span in spans if span.name == 'Conversational Turn']
-        assert native_turn.parent_span_id == agent.span_id
-        parent = native_turn
-    else:
-        parent = agent
-    assert tool.parent_span_id == parent.span_id
-    assert all(span.parent_span_id == parent.span_id for span in generations)
+    # Both run the stage natively, under the turn their plugin opens.
+    native_turn, = [span for span in spans if span.name == (
+        'Conversational Turn' if adapter == 'claude' else PI_TURN)]
+    assert native_turn.parent_span_id == agent.span_id
+    assert tool.parent_span_id == native_turn.span_id
+    assert all(span.parent_span_id == native_turn.span_id for span in generations)
     # The MCP SDK's own spans of the same calls carry no content and are not exported.
     assert not [span for span in spans if span.name.startswith('tools/call')]
     assert_no_sensitive_content(spans)
 
 
-def test_claude_agent_without_progress_times_out_and_still_exports_its_session(
-        claude_http, tracing_server, tmp_path):
-    replies, requests = claude_http
+def test_native_agent_without_progress_times_out_and_still_exports_its_session(
+        native_agent, tracing_server, tmp_path):
+    turn_name, replies, requests, settings = native_agent
     environment, spans = tracing_server
-    environment.update(TEST_MODEL_SETTINGS=json.dumps({'adapter': 'claude', 'model': 'claude-test'}),
-                       TEST_WORKSPACE=str(tmp_path / 'stage'),
+    environment.update(settings)
+    environment.update(TEST_WORKSPACE=str(tmp_path / 'stage'),
                        APP_TRACE_SESSION_ID='stalled-pipeline', APP_TRACE_AGENT_ROLE='implementation')
     # Together the replies outlast the timeout; only the last one is silent for longer.
     replies.extend([(1.5, [{'type': 'tool_use', 'id': 'first', 'name': 'mcp__flow__write_file',
@@ -399,22 +429,26 @@ shutdown_tracing()
     assert len(requests) == 3
     agent, = [span for span in spans if span.name == 'author-implementation']
     assert attributes(agent)['langfuse.observation.level'] == 'ERROR'
-    native_turn, = [span for span in spans if span.name == 'Conversational Turn']
+    native_turn, = [span for span in spans if span.name == turn_name]
     assert native_turn.parent_span_id == agent.span_id
     tools = [span for span in spans if attributes(span).get('langfuse.observation.type') == 'tool']
     assert [span.name for span in tools] == ['Tool: mcp__flow__write_file'] * 2
     assert all(span.parent_span_id == native_turn.span_id for span in tools)
     generations = [span for span in spans
                    if attributes(span).get('langfuse.observation.type') == 'generation']
-    assert len(generations) == 2
+    # Pi's plugin also exports the request it was waiting for, as aborted.
+    completed = [span for span in generations
+                 if attributes(span).get('langfuse.observation.metadata.stop_reason') != 'aborted']
+    assert len(completed) == 2
+    assert len(generations) == (2 if turn_name == 'Conversational Turn' else 3)
 
 
-def test_claude_agent_stopped_mid_turn_exports_its_session_before_exiting(
-        claude_http, tracing_server, tmp_path):
-    replies, requests = claude_http
+def test_native_agent_stopped_mid_turn_exports_its_session_before_exiting(
+        native_agent, tracing_server, tmp_path):
+    turn_name, replies, requests, settings = native_agent
     environment, spans = tracing_server
-    environment.update(TEST_MODEL_SETTINGS=json.dumps({'adapter': 'claude', 'model': 'claude-test'}),
-                       TEST_WORKSPACE=str(tmp_path / 'stage'),
+    environment.update(settings)
+    environment.update(TEST_WORKSPACE=str(tmp_path / 'stage'),
                        APP_TRACE_SESSION_ID='stopped-pipeline', APP_TRACE_AGENT_ROLE='implementation')
     # The turn is still running, waiting for its model, when the agent is stopped.
     replies.extend([[{'type': 'tool_use', 'id': 'first', 'name': 'mcp__flow__write_file',
@@ -447,19 +481,19 @@ else:
 ''', environment)
     agent, = [span for span in spans if span.name == 'author-implementation']
     assert attributes(agent)['langfuse.observation.level'] == 'ERROR'
-    native_turn, = [span for span in spans if span.name == 'Conversational Turn']
+    native_turn, = [span for span in spans if span.name == turn_name]
     assert native_turn.parent_span_id == agent.span_id
     tool, = [span for span in spans if attributes(span).get('langfuse.observation.type') == 'tool']
     assert tool.name == 'Tool: mcp__flow__write_file'
     assert tool.parent_span_id == native_turn.span_id
 
 
-def test_claude_agent_over_its_turn_budget_still_exports_its_session(
-        claude_http, tracing_server, tmp_path):
-    replies, requests = claude_http
+def test_native_agent_over_its_turn_budget_still_exports_its_session(
+        native_agent, tracing_server, tmp_path):
+    turn_name, replies, requests, settings = native_agent
     environment, spans = tracing_server
-    environment.update(TEST_MODEL_SETTINGS=json.dumps({'adapter': 'claude', 'model': 'claude-test'}),
-                       TEST_WORKSPACE=str(tmp_path / 'stage'), TEST_AGENT_MAX_TURNS='1',
+    environment.update(settings)
+    environment.update(TEST_WORKSPACE=str(tmp_path / 'stage'), TEST_AGENT_MAX_TURNS='1',
                        APP_TRACE_SESSION_ID='limited-pipeline', APP_TRACE_AGENT_ROLE='implementation')
     replies.append([{'type': 'tool_use', 'id': 'first', 'name': 'mcp__flow__write_file',
                      'input': {'path': 'first.txt', 'content': 'first'}}])
@@ -486,19 +520,19 @@ shutdown_tracing()
 ''', environment)
     assert len(requests) == 1
     agent, = [span for span in spans if span.name == 'author-implementation']
-    native_turn, = [span for span in spans if span.name == 'Conversational Turn']
+    native_turn, = [span for span in spans if span.name == turn_name]
     assert native_turn.parent_span_id == agent.span_id
     generation, = [span for span in spans
                    if attributes(span).get('langfuse.observation.type') == 'generation']
     assert generation.parent_span_id == native_turn.span_id
 
 
-def test_claude_pause_resume_exports_each_native_call_once_under_its_current_stage(
-        claude_http, tracing_server, tmp_path):
-    replies, requests = claude_http
+def test_native_pause_resume_exports_each_native_call_once_under_its_current_stage(
+        native_agent, tracing_server, tmp_path):
+    turn_name, replies, requests, settings = native_agent
     environment, spans = tracing_server
-    environment.update(TEST_MODEL_SETTINGS=json.dumps({'adapter': 'claude', 'model': 'claude-test'}),
-                       TEST_WORKSPACE=str(tmp_path / 'paused'),
+    environment.update(settings)
+    environment.update(TEST_WORKSPACE=str(tmp_path / 'paused'),
                        APP_TRACE_SESSION_ID='paused-pipeline', APP_TRACE_AGENT_ROLE='implementation')
     replies.append([{'type': 'tool_use', 'id': 'ask', 'name': 'mcp__flow__ask_user',
                      'input': {'questions': [{'question': 'Which currency?',
@@ -535,7 +569,7 @@ finally:
     assert len(requests) == 3
     stages = [span for span in spans if span.name == 'author-implementation']
     assert len(stages) == 2
-    turns = [span for span in spans if span.name == 'Conversational Turn']
+    turns = [span for span in spans if span.name == turn_name]
     assert len(turns) == 2
     assert {span.parent_span_id for span in turns} == {span.span_id for span in stages}
     generations = [span for span in spans
@@ -545,48 +579,83 @@ finally:
     assert all(attributes(span)['session.id'] == 'paused-pipeline' for span in spans)
 
 
-def test_pi_generation_reports_cache_usage_and_its_own_cost(tracing_server, tmp_path):
+def test_pi_generation_reports_cached_prompt_tokens(tracing_server):
     environment, spans = tracing_server
-    pi = tmp_path / 'pi'
-    pi.write_text(f'''#!{sys.executable}
-import json
-print(json.dumps({{'type': 'message_end', 'message': {{
-    'role': 'assistant', 'content': [{{'type': 'text', 'text': 'Hi'}}],
-    'provider': 'anthropic', 'model': 'claude-pi', 'stopReason': 'stop',
-    'usage': {{'input': 20, 'output': 5, 'cacheRead': 7, 'cacheWrite': 3,
-              'cost': {{'input': 0.2, 'output': 0.25, 'cacheRead': 0.007,
-                        'cacheWrite': 0.0375, 'total': 0.4945}}}}}}}}))
-''')
-    pi.chmod(0o755)
-    environment['TEST_PI_COMMAND'] = str(pi)
     run_script('''
-import os
 from langchain_core.messages import HumanMessage
-from app.llm.pi import ChatPi
-from app.tracing import langchain_config, shutdown_tracing, trace_operation
-with trace_operation('pi-turn', session_id='session-pi', feature='test'):
-    reply = ChatPi(command=os.environ['TEST_PI_COMMAND']).invoke(
-        [HumanMessage('Hello')], config=langchain_config())
-assert reply.content == 'Hi'
+from app.llm import model
+from app.tracing import shutdown_tracing, trace_operation
+import asyncio
+async def main():
+    with trace_operation('pi-turn', session_id='session-pi', feature='test'):
+        reply = await (await model.get_model('chat')).ainvoke([HumanMessage('cached question')])
+    assert reply.content == 'Answered cached question', reply.content
+asyncio.run(main())
 shutdown_tracing()
 ''', environment)
+    root, = [span for span in spans if span.name == 'pi-turn']
+    native_turn, = [span for span in spans if span.name == PI_TURN]
+    assert native_turn.parent_span_id == root.span_id
     generation, = [span for span in spans
                    if attributes(span).get('langfuse.observation.type') == 'generation']
-    attrs = attributes(generation)
-    usage = json.loads(attrs['langfuse.observation.usage_details'])
+    assert generation.parent_span_id == native_turn.span_id
+    usage = json.loads(attributes(generation)['langfuse.observation.usage_details'])
     # Cached prompt tokens are reported apart from the uncached input they add to.
-    assert (usage['input'], usage['input_cache_read'], usage['input_cache_creation'],
-            usage['output']) == (20, 7, 3, 5)
-    assert json.loads(attrs['langfuse.observation.cost_details']) == {
-        'input': 0.2, 'output': 0.25, 'input_cache_read': 0.007,
-        'input_cache_creation': 0.0375, 'total': 0.4945}
+    assert (usage['input'], usage['cache_read_input_tokens'], usage['output']) == (7, 4, 7)
+
+
+@pytest.mark.parametrize('capture_content', ['true', 'false'])
+def test_pi_plugin_exports_reach_langfuse_masked_and_in_the_application_session(
+        monkeypatch, capture_content):
+    from app.llm.pi_trace import masked_export
+
+    monkeypatch.setenv('APP_TRACE_CONTENT_ENABLED', capture_content)
+    monkeypatch.setenv('OPENAI_API_KEY', SECRET)
+    trace_id, span_id, parent_id = 'ab' * 16, 'cd' * 8, 'ef' * 8
+    # What the plugin's OTLP/JSON exporter posts: IDs in hex, attribute values typed.
+    export = {'resourceSpans': [{'resource': {'attributes': []}, 'scopeSpans': [{
+        'scope': {'name': 'langfuse-sdk'}, 'spans': [{
+            'traceId': trace_id, 'spanId': span_id, 'parentSpanId': parent_id,
+            'name': 'Tool: mcp__flow__lookup', 'kind': 1,
+            'startTimeUnixNano': '1', 'endTimeUnixNano': '2',
+            'attributes': [
+                {'key': 'langfuse.observation.input',
+                 'value': {'stringValue': json.dumps({'term': f'{EMAIL} {SECRET}'})}},
+                {'key': 'langfuse.observation.output', 'value': {'stringValue': 'Found it'}},
+                {'key': 'langfuse.observation.metadata.tool_name',
+                 'value': {'stringValue': f'lookup for {EMAIL}'}},
+                {'key': 'session.id', 'value': {'stringValue': 'pi-native-session'}},
+                {'key': 'langfuse.trace.tags',
+                 'value': {'arrayValue': {'values': [{'stringValue': 'pi'}]}}}],
+            'events': [{'name': 'exception', 'timeUnixNano': '1', 'attributes': [
+                {'key': 'exception.message', 'value': {'stringValue': SECRET}}]}],
+            'status': {'code': 2, 'message': f'failed for {EMAIL}'}}]}]}]}
+
+    span, = ExportTraceServiceRequest.FromString(masked_export(
+        json.dumps(export).encode(), session_id='session-a',
+        feature='requirements')).resource_spans[0].scope_spans[0].spans
+
+    assert (span.trace_id.hex(), span.span_id.hex(), span.parent_span_id.hex()) == (
+        trace_id, span_id, parent_id)
+    attrs = attributes(span)
+    assert attrs['session.id'] == 'session-a'
+    tags = [item['stringValue'] for item in attrs['langfuse.trace.tags']['arrayValue']['values']]
+    assert tags == ['pi', 'requirements']
+    assert not span.events and not span.status.message and span.status.code == 2
+    if capture_content == 'true':
+        assert json.loads(attrs['langfuse.observation.input']) == {
+            'term': '[REDACTED EMAIL] [REDACTED]'}
+    else:
+        assert attrs['langfuse.observation.input'] == '[CONTENT CAPTURE DISABLED]'
+        assert attrs['langfuse.observation.output'] == '[CONTENT CAPTURE DISABLED]'
+    assert attrs['langfuse.observation.metadata.tool_name'] == 'lookup for [REDACTED EMAIL]'
+    assert_no_sensitive_content([span])
 
 
 def test_provider_failure_still_raises_and_exports_a_redacted_error(tracing_server):
     environment, spans = tracing_server
     run_script('''
 import asyncio
-from openai import BadRequestError
 from temporalio.testing import ActivityEnvironment
 from app.temporal.activities import requirements_turn
 from app.tracing import shutdown_tracing
@@ -594,8 +663,8 @@ async def main():
     try:
         await ActivityEnvironment().run(requirements_turn,
             [{'role':'user', 'content':'provider-error'}], [])
-    except BadRequestError:
-        pass
+    except RuntimeError as exc:
+        assert '400' in str(exc), exc
     else:
         raise AssertionError('Tracing swallowed the provider failure')
 asyncio.run(main())
@@ -603,7 +672,7 @@ shutdown_tracing()
 ''', environment)
     root, = [span for span in spans if span.name == 'gather-requirements']
     assert attributes(root)['langfuse.observation.level'] == 'ERROR'
-    assert 'RequestError' in attributes(root)['langfuse.observation.status_message']
+    assert attributes(root)['langfuse.observation.status_message'] == 'RuntimeError'
     assert_no_sensitive_content(spans)
 
 

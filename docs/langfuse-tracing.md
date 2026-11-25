@@ -57,7 +57,8 @@ needed. No fabricated user IDs or token/cost estimates are added.
 With the Claude adapter, the pinned **Langfuse Claude Observability Plugin v1.2.1**
 exports native conversation turns, generations (including thinking), MCP calls/results,
 and token usage. It replaces LangChain generation/tool callbacks for Claude, avoiding
-repeated observations and cost accounting. Other providers retain their LangChain tracing.
+repeated observations and cost accounting. Pi has its own plugin (below); other
+providers retain their LangChain tracing.
 The upstream plugin source and license are vendored under
 `app/llm/plugins/langfuse-observability`; `UPSTREAM.md` records the exact commit.
 
@@ -75,8 +76,28 @@ on all observations; Claude's native session ID remains separate. Cache usage fo
 plugin's native names (`cache_read_input_tokens` and `cache_creation_input_tokens`, with
 separate cache-write durations when supplied), alongside uncached input and output.
 
-Claude owns its history and automatic compaction. The SDK's built-in tool loop calls the
-flow MCP server directly; the application never hands back placeholder tool results.
+With the pi and openai adapters, the pinned
+[Langfuse Pi plugin](https://langfuse.com/integrations/developer-tools/pi-agent)
+(`@langfuse/pi-observability-plugin` 0.1.2, installed with Pi in the images and in CI)
+exports Pi's native turns, generations (with cache usage and Pi's own cost), and MCP
+calls/results. `app/llm/pi.py` loads it into each `pi` process with `--extension`, from
+`PI_LANGFUSE_PLUGIN` or else npm's global packages; when it is missing, Pi runs untraced
+with a warning. The plugin nests the session's `Subagent Turn` under the current
+application observation (its `LANGFUSE_PI_PARENT_*` variables), with the application's
+session ID; generations and `Tool: mcp__flow__...` observations are its children.
+
+The plugin never sees the application's Langfuse secret. It exports through a relay on
+the session's loopback server (`app/llm/pi_trace.py`), authenticated by a per-session
+token, which applies the same content opt-in, masking, and removal of exception events
+and status text as the application's exporter, adds the application's session ID and
+feature tag, and only then sends the spans to Langfuse with the application's
+credentials. Image upload is disabled. Missing credentials,
+`LANGFUSE_TRACING_ENABLED=false` or an unsampled application root keep the plugin
+unloaded. A stopped or timed-out session still exports: Pi is asked to abort and exit,
+and the plugin flushes on shutdown before the relay closes.
+
+Claude and Pi own their history and automatic compaction. Their built-in tool loops call
+the flow MCP server directly; the application never hands back placeholder tool results.
 Host activities start a native session from application conversation context and keep it
 open through tool calls and any corrective follow-ups. The turns of a conversation (chat,
 requirements, architecture, API design and onboarding) resume one native session: after a
@@ -87,13 +108,14 @@ saved session that no longer matches the conversation, or missing storage, start
 session from the conversation context. So does a repository checkout of another commit,
 such as a refreshed one, since earlier tool results came from the old one. Each chat
 request saves its own session and continues its parent request's, so branches continued
-from one request never continue each other. Other providers (OpenAI-compatible, Gemini, Pi)
-have no native session: their turn's messages, with its tool calls and results, are saved
-the same way, and the next turn sends them, unchanged, before its new messages. A saved
+from one request never continue each other. Pi's session file is saved and resumed the
+same way (`pi.tar.gz`, or `openai.tar.gz` for the openai adapter). Other providers have
+no native session: their turn's messages, with its tool calls and results, are saved the
+same way, and the next turn sends them, unchanged, before its new messages. A saved
 conversation over 400 kB starts anew from the session's messages, since these providers
-do not compact their history. Coding pauses retain `.claude-native`
+do not compact their history. Coding pauses retain `.claude-native` or `.pi-native`
 beside the project and resume the same native session in the next container. Normal
-completion, errors, timeouts and limits close the SDK client.
+completion, errors, timeouts and limits close the SDK client or the `pi` process.
 
 Other host sessions disable transcript persistence when native tracing is off. The tracing
 plugin reads Claude's JSONL files, so traced host sessions use a temporary Claude config

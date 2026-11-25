@@ -1,40 +1,71 @@
-// Loaded into every `pi` process started by ChatPi (app/llm/pi.py). It makes Pi act as a
-// bare chat model: the caller's conversation and tools go in, one assistant message comes
-// out, and the caller - not Pi - runs any tool the model asks for.
+// Loaded into every `pi` process started by ChatPi (app/llm/pi.py). Pi runs the flow
+// natively: the flow's tools come from the session's MCP server, and after each model
+// turn the session decides whether Pi goes on (a paused flow or a spent turn budget
+// stops it) and what the model reads before its next request.
 import { readFileSync } from "node:fs";
 
 export default function (pi: any) {
-	const input = JSON.parse(readFileSync(process.env.PI_LANGCHAIN_INPUT!, "utf8"));
-	for (const tool of input.tools) {
-		pi.registerTool({
-			name: tool.name,
-			label: tool.name,
-			description: tool.description,
-			parameters: tool.parameters,
-			// Never does the work: ending the run here hands the call back to the caller.
-			async execute() {
-				return { content: [{ type: "text", text: "" }], details: undefined, terminate: true };
-			},
+	const config = JSON.parse(process.env.PI_FLOW_CONFIG!);
+	// The session's token; the MCP server's header reads it by reference.
+	const token = process.env.PI_FLOW_TOKEN!;
+	// The flow's own prompt, exactly: none of Pi's, which describes its coding tools and
+	// names its working directory.
+	const systemPrompt = readFileSync(config.systemPrompt, "utf8");
+	pi.on("before_agent_start", async () => ({ systemPrompt }));
+	// The OpenAI-compatible endpoint saved in Settings, as a provider of this process
+	// only. Its key stays in the environment: Pi reads it from the `$NAME` reference.
+	if (config.provider) {
+		const { name, model, ...provider } = config.provider;
+		pi.registerProvider(name, {
+			...provider,
+			apiKey: "$PI_FLOW_API_KEY",
+			models: [{ ...model, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
 		});
 	}
-	// The caller owns the conversation and its compaction. Pi's own would only summarize the
-	// placeholder prompt, and its recovery from a response cut off at the output limit (or a
-	// context overflow) is a second request, which the handler below aborts: the caller saw
-	// "This operation was aborted" instead of the cut-off response. Cancelling it also
-	// cancels that recovery request.
-	pi.on("session_before_compact", async () => ({ cancel: true }));
-	let requests = 0;
-	let lastStopReason: string | undefined;
-	pi.on("message_end", async (event: any) => {
-		if (event.message?.role === "assistant") lastStopReason = event.message.stopReason;
-	});
-	// Replaces the placeholder prompt with the caller's history as native messages.
-	pi.on("context", async (_event: unknown, ctx: any) => {
-		// A call Pi rejects itself (such as invalid arguments) does not end the run, and
-		// a second request would only repeat the first. A request following a failed one
-		// is Pi's auto-retry of a transient error (rate limit, overload) and must go ahead:
-		// aborting it would also hide the original error behind "operation was aborted".
-		if (++requests > 1 && lastStopReason !== "error") ctx.abort();
-		return { messages: input.messages };
+	if (config.tools) {
+		pi.registerMcpServer(config.server, {
+			url: `${config.url}/mcp`,
+			headers: { Authorization: "Bearer ${PI_FLOW_TOKEN}" },
+			// Declared to the model like built-in tools, not reached through codemode.
+			exposure: "direct",
+			timeout: config.toolTimeout,
+		});
+	}
+	pi.on("turn_end", async (event: any, ctx: any) => {
+		let decision: any;
+		try {
+			const response = await fetch(`${config.url}/turn`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+				body: JSON.stringify({
+					stopReason: event.message?.stopReason,
+					toolResults: event.toolResults?.length ?? 0,
+				}),
+			});
+			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			decision = await response.json();
+		} catch (error) {
+			// Unchecked, a paused flow or a spent turn budget would go on: stop instead.
+			ctx.abort();
+			throw new Error(`The flow did not answer after the turn: ${error}`);
+		}
+		if (decision.stop) {
+			// Before the next request: the run ends with the tool results it has.
+			ctx.abort();
+			return;
+		}
+		if (decision.notices?.length) {
+			return {
+				entries: [
+					...event.entries,
+					...decision.notices.map((content: string) => ({
+						type: "custom_message",
+						customType: "flow-notice",
+						content,
+						display: false,
+					})),
+				],
+			};
+		}
 	});
 }

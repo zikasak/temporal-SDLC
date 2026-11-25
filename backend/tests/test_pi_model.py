@@ -1,318 +1,326 @@
-"""Drive the Pi adapter through a real subprocess standing in for the `pi` CLI."""
+"""Drive the Pi adapter: the real `pi` CLI, as the openai adapter runs it, against a
+loopback OpenAI-compatible endpoint (the pi_http fixture). Pi runs the flow natively and
+calls its tools over MCP, as Claude does (test_claude_session.py)."""
 import asyncio
 import json
 import os
-import sys
+import shutil
 
+import httpx
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 
 from app import docker_agents
 from app.agent_workflows import runtime
 from app.implementation.agent import validate_completion
-from app.llm import model as llm_model
+from app.llm.factory import create_adapter
 from app.llm.pi import ChatPi
+from app.settings.models import ModelSettings
 
-# Answers each invocation with the next scripted event stream and records what it was given.
-FAKE_PI = '''#!{python}
-import json, os, pathlib, sys
-log = pathlib.Path({log!r})
-calls = json.loads(log.read_text()) if log.exists() else []
-argv = sys.argv[1:]
-system = (pathlib.Path(argv[argv.index('--system-prompt') + 1]).read_text(encoding='utf-8')
-          if '--system-prompt' in argv else None)
-calls.append({{'argv': argv, 'stdin': sys.stdin.read(), 'system': system,
-              'agent_dir': os.environ.get('PI_CODING_AGENT_DIR'),
-              'input': json.load(open(os.environ['PI_LANGCHAIN_INPUT']))}})
-log.write_text(json.dumps(calls))
-sys.stderr.write({stderr!r})
-sys.stdout.write({runs!r}[len(calls) - 1])
-sys.exit({code})
-'''
+needs_pi = pytest.mark.skipif(shutil.which('pi') is None, reason='the Pi CLI is not installed')
 
 
-def assistant(*content, stop='stop', **fields):
-    blocks = [{'type': 'text', 'text': item} if isinstance(item, str) else
-              {'type': 'toolCall', 'id': item[0], 'name': item[1], 'arguments': item[2]}
-              for item in content]
-    return {'type': 'message_end', 'message': {
-        'role': 'assistant', 'content': [{'type': 'thinking', 'thinking': 'hmm'}, *blocks],
-        'provider': 'openai', 'model': 'gpt-test', 'stopReason': stop,
-        'usage': {'input': 20, 'output': 5, 'cacheRead': 7, 'cacheWrite': 3,
-                  'cost': {'input': 0.2, 'output': 0.25, 'cacheRead': 0.007,
-                           'cacheWrite': 0.0375, 'total': 0.4945}}, **fields}}
+def native_call(identifier, name, **arguments):
+    return {'type': 'tool_use', 'id': identifier, 'name': 'mcp__flow__' + name,
+            'input': arguments}
 
 
-@pytest.fixture
-def fake_pi(tmp_path):
-    """Returns (install, calls): install(*runs) writes a `pi` whose nth invocation emits
-    the nth list of events; calls() is what every invocation received."""
-    log = tmp_path / 'pi-calls.json'
-
-    def install(*runs, code=0, stderr=''):
-        streams = [''.join(json.dumps(event, ensure_ascii=False) + '\n' for event in run)
-                   for run in runs]
-        script = tmp_path / 'pi'
-        script.write_text(FAKE_PI.format(python=sys.executable, log=str(log), runs=streams,
-                                         stderr=stderr, code=code))
-        script.chmod(0o755)
-        return str(script)
-
-    return install, lambda: json.loads(log.read_text())
+def text(value):
+    return [{'type': 'text', 'text': value}]
 
 
-def test_returns_final_text_and_usage(fake_pi):
-    install, calls = fake_pi
-    model = ChatPi(model='openai/gpt-test', command=install([
-        {'type': 'session', 'version': 3},
-        {'type': 'message_end', 'message': {'role': 'user', 'content': 'question'}},
-        assistant('first attempt', stop='error', errorMessage='overloaded'),
-        # A separator that is a line break to str.splitlines but not a record boundary.
-        assistant('line one line two'),
-        {'type': 'agent_settled'},
-    ]))
-
-    reply = model.invoke([SystemMessage('Be brief.'), HumanMessage('- question')])
-
-    assert reply.content == 'line one line two'
-    assert reply.tool_calls == []
-    assert reply.usage_metadata == {'input_tokens': 30, 'output_tokens': 5, 'total_tokens': 35,
-                                    'input_token_details': {'cache_read': 7, 'cache_creation': 3}}
-    assert reply.response_metadata['model_name'] == 'gpt-test'
-    [call] = calls()
-    argv = call['argv']
-    assert call['system'] == 'Be brief.'
-    assert argv[argv.index('--model') + 1] == 'openai/gpt-test'
-    assert {'--mode', 'json', '--no-tools', '--no-session'} <= set(argv)
-    assert os.path.isfile(argv[argv.index('--extension') + 1])
-    assert call['input']['tools'] == []
-    assert [(item['role'], item['content']) for item in call['input']['messages']] == [
-        ('user', [{'type': 'text', 'text': '- question'}])]
+def endpoint_model(**options) -> ChatPi:
+    """The openai adapter, calling the pi_http endpoint."""
+    model = create_adapter(ModelSettings(adapter='openai', model='test-model'),
+                           api_key=os.environ['OPENAI_API_KEY'],
+                           base_url=os.environ['OPENAI_BASE_URL'])
+    assert isinstance(model, ChatPi)
+    for name, value in options.items():
+        setattr(model, name, value)
+    return model
 
 
-def test_history_is_sent_as_native_messages(fake_pi):
-    install, calls = fake_pi
-    ChatPi(command=install([assistant('ok')])).invoke([
-        HumanMessage('Weather in Paris?'),
-        AIMessage('Checking.', tool_calls=[
-            {'name': 'get_weather', 'args': {'city': 'Paris'}, 'id': 'call-1'},
-            {'name': 'get_time', 'args': {'city': 'Paris'}, 'id': 'call-2'}]),
-        ToolMessage('17C', tool_call_id='call-1'),
-        ToolMessage('unknown city', tool_call_id='call-2', status='error'),
-    ])
-
-    [call] = calls()
-    assert '--system-prompt' not in call['argv'] and '--model' not in call['argv']
-    user, asked, weather, clock = call['input']['messages']
-    assert user['role'] == 'user'
-    assert asked['role'] == 'assistant' and asked['stopReason'] == 'toolUse'
-    assert asked['content'] == [
-        {'type': 'text', 'text': 'Checking.'},
-        {'type': 'toolCall', 'id': 'call-1', 'name': 'get_weather',
-         'arguments': {'city': 'Paris'}},
-        {'type': 'toolCall', 'id': 'call-2', 'name': 'get_time', 'arguments': {'city': 'Paris'}}]
-    assert (weather['role'], weather['toolCallId'], weather['toolName'], weather['isError'],
-            weather['content']) == ('toolResult', 'call-1', 'get_weather', False,
-                                    [{'type': 'text', 'text': '17C'}])
-    assert (clock['toolCallId'], clock['toolName'], clock['isError']) == (
-        'call-2', 'get_time', True)
-    # The history above replaces this prompt inside Pi; no conversation text goes here.
-    assert 'Paris' not in call['stdin']
+def assert_appended(requests):
+    """Every request continues the conversation of the one before it."""
+    for before, after in zip(requests, requests[1:]):
+        assert after['messages'][:len(before['messages'])] == before['messages']
+        assert after.get('tools') == before.get('tools')
 
 
-def test_requests_of_one_conversation_share_a_session_id(fake_pi):
-    install, calls = fake_pi
-    model = ChatPi(command=install([assistant('a')], [assistant('b')], [assistant('c')]))
-    opening = [SystemMessage('Be brief.'), HumanMessage('Weather in Paris?')]
-
-    model.invoke(opening)
-    model.invoke([*opening, AIMessage('Sunny.'), HumanMessage('And tomorrow?')])
-    model.invoke([SystemMessage('Be brief.'), HumanMessage('Weather in Rome?')])
-
-    first, later, other = [call['argv'][call['argv'].index('--session-id') + 1]
-                           for call in calls()]
-    # Pi turns the session id into the provider's prompt cache key.
-    assert first == later != other
+def content_text(message):
+    content = message['content']
+    return content if isinstance(content, str) else ''.join(
+        part.get('text', '') for part in content)
 
 
-def test_bound_tools_are_declared_and_their_calls_returned(fake_pi):
-    install, calls = fake_pi
-
-    @tool
-    def lookup(term: str, limit: int = 5) -> str:
-        """Look a term up."""
-        return term
-
-    model = ChatPi(command=install([
-        assistant('Looking.', ('call-9', 'lookup', {'term': 'pi'}), stop='toolUse'),
-        # What Pi emits when the extension stops a repeat request.
-        assistant(stop='error', errorMessage='This operation was aborted'),
-    ])).bind_tools([lookup], tool_choice='auto')
-
-    reply = model.invoke('look up pi')
-
-    assert reply.content == 'Looking.'
-    assert reply.tool_calls == [
-        {'name': 'lookup', 'args': {'term': 'pi'}, 'id': 'call-9', 'type': 'tool_call'}]
-    [call] = calls()
-    argv = call['argv']
-    assert argv[argv.index('--tools') + 1] == 'lookup' and '--no-tools' not in argv
-    [declared] = call['input']['tools']
-    assert declared['name'] == 'lookup' and declared['description'] == 'Look a term up.'
-    assert declared['parameters']['required'] == ['term']
-    assert set(declared['parameters']['properties']) == {'term', 'limit'}
+def tool_results(request):
+    return {message['tool_call_id']: content_text(message)
+            for message in request['messages'] if message['role'] == 'tool'}
 
 
-async def test_host_model_runs_pi_against_the_configured_directory(fake_pi, tmp_path, monkeypatch):
-    install, calls = fake_pi
-    monkeypatch.setenv('PI_CODING_AGENT_DIR', str(tmp_path / 'inherited'))
-    from app.settings.models import ModelSettings
-    async def load(workflow_type):
-        return ModelSettings(adapter='pi', model='openai/gpt-test', thinking_level='high')
-    monkeypatch.setattr(llm_model, 'get_workflow_settings', load)
-    monkeypatch.setattr(llm_model, 'PI_CREDENTIALS_DIR', tmp_path / 'configured')
-    install([assistant('ok')], [assistant('ok')])
-    monkeypatch.setenv('PATH', str(tmp_path) + os.pathsep + os.environ['PATH'])
-    model = await llm_model.get_model('chat')
-    await model.ainvoke('hi')
-    # Without a directory of its own the adapter leaves Pi's environment alone.
-    await ChatPi().ainvoke('hi')
-
-    assert [call['agent_dir'] for call in calls()] == [
-        str(tmp_path / 'configured'), str(tmp_path / 'inherited')]
-    argv = calls()[0]['argv']
-    assert argv[argv.index('--model') + 1] == 'openai/gpt-test'
-    assert argv[argv.index('--thinking') + 1] == 'high'
+def profile(root, **options):
+    return runtime.AgentProfile(
+        root=root, prompt='Implement the supplied contract', initial_messages=['requirements'],
+        max_turns_env='TEST_AGENT_MAX_TURNS', validate_completion=validate_completion,
+        completion_message='Completed', exhaustion_message='Tool-turn limit exceeded', **options)
 
 
-@pytest.mark.parametrize('cancel', [False, True])
-async def test_interrupted_generation_reaps_pi_process(tmp_path, cancel):
-    pid_file = tmp_path / 'pid'
-    script = tmp_path / 'pi'
-    script.write_text(f'#!{sys.executable}\n'
-                      'import os, pathlib, time\n'
-                      f'pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\n'
-                      'time.sleep(60)\n')
-    script.chmod(0o755)
-    # The timeout must let the fake start and write its pid even on a loaded machine.
-    model = ChatPi(command=str(script), timeout=10 if cancel else 3)
-    task = asyncio.create_task(model.ainvoke('hi'))
-    pid = None
-    try:
-        async with asyncio.timeout(5):
-            while not pid_file.exists():
-                await asyncio.sleep(0.01)
-        pid = int(pid_file.read_text())
-        if cancel:
-            task.cancel()
-        with pytest.raises(asyncio.CancelledError if cancel else TimeoutError):
-            await task
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
-    finally:
-        if not task.done():
-            task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        if pid is not None:
-            try:
-                os.kill(pid, 9)
-            except ProcessLookupError:
-                pass
-
-
-def test_failed_response_raises(fake_pi):
-    install, _ = fake_pi
-    model = ChatPi(command=install([assistant(stop='error', errorMessage='quota exceeded')]))
-    with pytest.raises(RuntimeError, match='quota exceeded'):
-        model.invoke('hi')
-
-
-# What Pi emits when the extension stops its recovery request after a cut-off response.
-CUT_OFF = [assistant('I will', stop='length'),
-           assistant(stop='aborted', errorMessage='This operation was aborted')]
-
-
-def test_a_response_cut_off_at_the_output_limit_is_requested_again(fake_pi):
-    install, calls = fake_pi
-    model = ChatPi(command=install(CUT_OFF, [assistant('Done.')]))
-    assert model.invoke('hi').content == 'Done.'
-    assert len(calls()) == 2
-
-
-def test_a_response_cut_off_every_time_fails_saying_so(fake_pi):
-    install, calls = fake_pi
-    model = ChatPi(command=install(CUT_OFF, CUT_OFF, CUT_OFF, [assistant('Done.')]))
-    with pytest.raises(RuntimeError, match='cut off at the output limit 3 times'):
-        model.invoke('hi')
-    assert len(calls()) == 3
-
-
-def test_system_prompt_too_long_for_an_argument_reaches_every_attempt(fake_pi):
-    install, calls = fake_pi
-    system = 'Требование ✓ 𝛑\n' * 7_000
-    assert len(system.encode()) > 200_000
-    model = ChatPi(command=install(CUT_OFF, [assistant('Done.')]))
-
-    assert model.invoke([SystemMessage(system), HumanMessage('hi')]).content == 'Done.'
-
-    first, second = calls()
-    assert first['system'] == second['system'] == system
-    for call in (first, second):
-        assert max(len(arg.encode()) for arg in call['argv']) < 128 * 1024
-        assert not os.path.exists(call['argv'][call['argv'].index('--system-prompt') + 1])
-
-
-def test_system_prompt_file_is_removed_when_pi_fails(fake_pi):
-    install, calls = fake_pi
-    model = ChatPi(command=install([], code=3, stderr='No API key\n'))
-    with pytest.raises(RuntimeError, match='code 3'):
-        model.invoke([SystemMessage('Be brief.'), HumanMessage('hi')])
-    [call] = calls()
-    assert call['system'] == 'Be brief.'
-    assert not os.path.exists(call['argv'][call['argv'].index('--system-prompt') + 1])
-
-
-def test_process_failure_reports_stderr(fake_pi):
-    install, _ = fake_pi
-    with pytest.raises(RuntimeError, match='code 3: No API key'):
-        ChatPi(command=install([], code=3, stderr='No API key\n')).invoke('hi')
-
-
-def test_missing_response_raises(fake_pi):
-    install, _ = fake_pi
-    with pytest.raises(RuntimeError, match='no assistant response'):
-        ChatPi(command=install([{'type': 'agent_settled'}])).invoke('hi')
-
-
-async def test_coding_agent_runs_its_tools_through_pi(fake_pi, tmp_path, monkeypatch):
-    install, calls = fake_pi
-    install([assistant(('call-1', 'write_file',
-                        {'path': 'Dockerfile', 'content': 'FROM scratch'}), stop='toolUse')],
-            [assistant('Finished')])
-    monkeypatch.setenv('PATH', str(tmp_path) + os.pathsep + os.environ['PATH'])
-    from app.settings.models import ModelSettings, SETTINGS_FILENAME
-    (tmp_path / SETTINGS_FILENAME).write_text(ModelSettings(
-        adapter='pi', model='openai/gpt-test', thinking_level='high').model_dump_json())
-    for name in ('OPENAI_MODEL', 'OPENAI_API_KEY', 'OPENAI_BASE_URL'):
-        monkeypatch.delenv(name, raising=False)
+@needs_pi
+async def test_authoring_keeps_native_history_through_many_tool_turns(pi_http, tmp_path):
+    replies, requests = pi_http
+    replies.append([native_call('write', 'write_file', path='Dockerfile', content='FROM scratch'),
+                    native_call('missing', 'read_file', path='missing.txt'),
+                    native_call('invalid', 'read_file')])
+    for i in range(3):
+        replies.append([native_call(f'read_{i}', 'read_file', path='Dockerfile')])
+    replies.append(text('Finished'))
     root = tmp_path / 'service'
     root.mkdir()
 
-    await runtime.run_agent(runtime.AgentProfile(
-        root=root, prompt='Implement the supplied contract', initial_messages=['requirements'],
-        max_turns_env='TEST_AGENT_MAX_TURNS', validate_completion=validate_completion,
-        completion_message='Completed', exhaustion_message='Tool-turn limit exceeded',
-    ))
+    await runtime.run_agent(profile(root))
 
     assert (root / 'Dockerfile').read_text() == 'FROM scratch'
-    first, second = calls()
-    assert first['argv'][first['argv'].index('--model') + 1] == 'openai/gpt-test'
-    assert first['argv'][first['argv'].index('--thinking') + 1] == 'high'
-    assert 'write_file' in first['argv'][first['argv'].index('--tools') + 1].split(',')
-    assert [item['role'] for item in second['input']['messages']] == [
-        'user', 'assistant', 'toolResult']
-    assert second['input']['messages'][-1]['content'] == [{'type': 'text', 'text': 'Written'}]
+    assert len(requests) == 5
+    assert_appended(requests)
+    # The stage's prompt as it is, and the endpoint's key; the flow's tools only.
+    assert requests[0]['messages'][0] == {
+        'role': 'system', 'content': 'Implement the supplied contract' + runtime.ASK_GUIDANCE}
+    assert requests[0]['authorization'] == 'Bearer local-test-key'
+    assert {item['function']['name'] for item in requests[0]['tools']} == {
+        'mcp__flow__' + name for name in ('read_file', 'write_file', 'edit_file', 'list_files',
+                                          'search_files', 'shell', 'ask_user')}
+    results = tool_results(requests[-1])
+    assert results['write'] == 'Written'
+    assert results['missing'].startswith('Tool failed: FileNotFoundError:')
+    assert 'path' in results['invalid']
+    assert [results[f'read_{i}'] for i in range(3)] == ['FROM scratch'] * 3
+
+
+@needs_pi
+@pytest.mark.parametrize('stop', ['limit', 'pause'])
+async def test_authoring_stops_without_another_model_request(pi_http, tmp_path, monkeypatch, stop):
+    replies, requests = pi_http
+    root = tmp_path / 'service'
+    root.mkdir()
+    if stop == 'limit':
+        monkeypatch.setenv('TEST_AGENT_MAX_TURNS', '1')
+        call = native_call('write', 'write_file', path='Dockerfile', content='FROM scratch')
+        exception, match = RuntimeError, 'Tool-turn limit exceeded'
+    else:
+        call = native_call('ask', 'ask_user', questions=[{
+            'question': 'Which currency?', 'options': ['EUR', 'USD']}])
+        exception, match = SystemExit, '75'
+    replies.append([call])
+
+    with pytest.raises(exception, match=match):
+        await runtime.run_agent(profile(root))
+
+    assert len(requests) == 1
+    if stop == 'pause':
+        (tmp_path / runtime.ANSWERS_FILENAME).write_text(json.dumps({'answers': ['EUR']}))
+        replies.extend([[native_call('write', 'write_file', path='Dockerfile',
+                                     content='FROM scratch')], text('Finished')])
+        await runtime.run_agent(profile(root))
+        assert (root / 'Dockerfile').read_text() == 'FROM scratch'
+        # The paused session goes on with the answers after its own question.
+        assert requests[1]['messages'][:len(requests[0]['messages'])] == requests[0]['messages']
+        assert 'EUR' in str(requests[1]['messages'][len(requests[0]['messages']):])
+        assert not (tmp_path / runtime.STATE_FILENAME).exists()
+
+
+@needs_pi
+async def test_native_session_continues_followups_and_resumes_from_disk(pi_http, tmp_path):
+    replies, requests = pi_http
+    replies.extend([[native_call('first', 'lookup', term='first')], text('First reply'),
+                    text('After follow-up'), text('Resumed reply')])
+
+    @tool
+    def lookup(term: str) -> str:
+        """Look up a term."""
+        return term.upper()
+
+    options = dict(cwd=tmp_path, config_dir=tmp_path / 'native-config')
+    provider = endpoint_model(**options)
+    messages = [SystemMessage('Be brief'), HumanMessage('Original task')]
+    async with provider.async_session():
+        response = await provider.ainvoke(messages, tools=[lookup])
+        assert response.text == 'First reply'
+        response = await provider.ainvoke(
+            [*messages, response, HumanMessage('Follow up')], tools=[lookup])
+    resumed = endpoint_model(**options, resume=provider.session_id)
+    assert (await resumed.ainvoke([SystemMessage('Be brief'),
+                                   HumanMessage('Continue after restarting')],
+                                  tools=[lookup])).text == 'Resumed reply'
+
+    assert resumed.session_id == provider.session_id
+    assert len(requests) == 4
+    assert_appended(requests)
+    conversation = str(requests[-1]['messages'])
+    for part in ('Original task', 'FIRST', 'First reply', 'Follow up', 'After follow-up',
+                 'Continue after restarting'):
+        assert part in conversation
+
+
+@needs_pi
+def test_graph_turn_runs_tools_natively_and_shows_notices_before_the_next_request(pi_http):
+    from app.llm.graph import get_message_graph, interview, native_session
+
+    replies, requests = pi_http
+    replies.extend([[native_call('first', 'lookup', term='first')],
+                    [native_call('second', 'lookup', term='second')], text('Done')])
+    notices = iter(['[System] Two minutes left.'])
+
+    @tool
+    def lookup(term: str) -> str:
+        """Look up a term."""
+        return term.upper()
+
+    async def turn():
+        provider = endpoint_model()
+        graph = get_message_graph([lookup], model=provider,
+                                  after_model_request=lambda: next(notices, None))
+        async with native_session(provider):
+            return await interview(
+                graph, [SystemMessage('Be brief'), HumanMessage('Look both up')],
+                {'recursion_limit': 10}, lambda: False)
+
+    assert asyncio.run(turn()) == 'Done'
+    assert len(requests) == 3
+    assert_appended(requests)
+    first, second = (tool_results(request) for request in requests[1:])
+    assert (first['first'], second['second']) == ('FIRST', 'SECOND')
+    # Shown once, after the results of the request that returned it.
+    added = requests[1]['messages'][len(requests[0]['messages']):]
+    assert '[System] Two minutes left.' in str(added[-1])
+    assert str(requests[2]['messages']).count('Two minutes left') == 1
+
+
+@needs_pi
+def test_graph_turn_over_its_budget_stops_without_another_request(pi_http):
+    from langgraph.errors import GraphRecursionError
+
+    from app.llm.graph import get_message_graph
+
+    replies, requests = pi_http
+    replies.extend([[native_call(f'call_{i}', 'lookup', term='x')] for i in range(3)])
+
+    @tool
+    def lookup(term: str) -> str:
+        """Look up a term."""
+        return term
+
+    graph = get_message_graph([lookup], model=endpoint_model())
+    with pytest.raises(GraphRecursionError):
+        asyncio.run(graph.ainvoke({'messages': [HumanMessage('Look it up')]},
+                                  {'recursion_limit': 2}))
+    assert len(requests) == 2
+
+
+@needs_pi
+def test_a_failure_deciding_after_a_turn_ends_the_run_with_it(pi_http):
+    from app.llm.graph import get_message_graph
+
+    replies, requests = pi_http
+    replies.extend([[native_call('first', 'lookup', term='x')], text('Unchecked')])
+
+    @tool
+    def lookup(term: str) -> str:
+        """Look up a term."""
+        return term
+
+    def heartbeat():
+        raise RuntimeError('The activity was cancelled')
+
+    graph = get_message_graph([lookup], model=endpoint_model(), after_model_request=heartbeat)
+    with pytest.raises(RuntimeError, match='The activity was cancelled'):
+        asyncio.run(graph.ainvoke({'messages': [HumanMessage('Look it up')]}))
+    assert len(requests) == 1
+
+
+@needs_pi
+async def test_conversation_turns_resume_one_native_session_across_workers(
+    pi_http, conversation_storage
+):
+    from app.llm.saved_conversations import ConversationRef
+
+    replies, requests = pi_http
+    replies += [text('First reply.'), text('Second reply.'), text('Third reply.')]
+    system = SystemMessage('Interview the user.')
+
+    async def turn(*history):
+        # A new model per turn, as each turn is a new activity on any worker.
+        provider = endpoint_model(conversation=ConversationRef('workflow-1/requirements'))
+        return await provider.ainvoke([system, *history])
+
+    await turn(HumanMessage('Kickoff\n\n<current_state>none</current_state>'))
+    second = await turn(HumanMessage('Kickoff'), AIMessage('First reply.'),
+                        HumanMessage('Add login\n\n<current_state>one</current_state>'))
+    # An earlier message the session never saw: it cannot continue this conversation.
+    await turn(HumanMessage('Another kickoff'), AIMessage('First reply.'),
+               HumanMessage('Add login'), AIMessage('Second reply.'),
+               HumanMessage('Add logout'))
+
+    assert second.text == 'Second reply.'
+    assert list(conversation_storage.objects) == ['workflow-1/requirements/openai.tar.gz']
+    assert_appended(requests[:2])
+    assert requests[1]['messages'][len(requests[0]['messages'])]['role'] == 'assistant'
+    assert content_text(requests[1]['messages'][-1]) == (
+        'Add login\n\n<current_state>one</current_state>')
+    assert [message['role'] for message in requests[2]['messages']] == ['system', 'user']
+    assert content_text(requests[2]['messages'][-1]).startswith('Conversation context:')
+
+
+@needs_pi
+async def test_native_session_propagates_provider_failure_and_closes(pi_http, tmp_path):
+    replies, requests = pi_http
+    replies.extend([[native_call('write', 'write_file', path='Dockerfile', content='FROM scratch')],
+                    {'error': {'type': 'authentication_error',
+                               'message': 'Invalid local test credentials'}}])
+    root = tmp_path / 'service'
+    root.mkdir()
+    with pytest.raises(RuntimeError, match='Invalid local test credentials'):
+        await runtime.run_agent(profile(root))
+    assert (root / 'Dockerfile').is_file()
+    assert len(requests) >= 2
+
+
+@needs_pi
+async def test_silent_model_times_out(pi_http):
+    replies, _ = pi_http
+    replies.append((5, text('Too late')))
+    with pytest.raises(TimeoutError, match='Pi sent nothing for 1.5 seconds'):
+        await endpoint_model(timeout=1.5).ainvoke('Hello')
+
+
+async def test_session_server_answers_only_its_own_pi():
+    """Every route of a session's loopback server takes the token only its Pi has."""
+    from app.llm.pi import MCP_PATH, TRACE_PATH, TURN_PATH, _Server
+
+    @tool
+    def lookup(term: str) -> str:
+        """Look up a term."""
+        return term
+
+    server = _Server('session-token', [lookup], lambda: False, lambda report: {'stop': True},
+                     {'trace_id': '', 'span_id': '', 'session_id': '', 'feature': ''})
+    initialize = {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {
+        'protocolVersion': '2025-06-18', 'capabilities': {},
+        'clientInfo': {'name': 'test', 'version': '1'}}}
+    mcp_headers = {'Accept': 'application/json, text/event-stream'}
+    async with server.serve() as url, httpx.AsyncClient(base_url=url) as client:
+        for token in ('', 'Bearer other-token'):
+            headers = {'Authorization': token} if token else {}
+            assert (await client.post(TURN_PATH, json={}, headers=headers)).status_code == 401
+            assert (await client.post(MCP_PATH, json=initialize,
+                                      headers={**mcp_headers, **headers})).status_code == 401
+        assert (await client.post(TRACE_PATH + '/api/public/otel/v1/traces', content=b'{}',
+                                  auth=('pk-lf-key', 'other-token'))).status_code == 401
+        allowed = {'Authorization': 'Bearer session-token'}
+        assert (await client.post(TURN_PATH, json={'toolResults': 1},
+                                  headers=allowed)).json() == {'stop': True}
+        assert (await client.post(MCP_PATH, json=initialize,
+                                  headers={**mcp_headers, **allowed})).status_code == 200
 
 
 async def test_pi_harness_mounts_credential_files_in_a_shared_directory(

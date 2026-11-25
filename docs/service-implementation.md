@@ -108,20 +108,32 @@ have no model calls of their own.
 
 Every host turn reloads its workflow's settings. Coding containers receive a validated
 snapshot in `/workspace/llm-settings.json` at launch, including on a resumed run.
-An agent already running keeps its snapshot. Pi receives `--thinking`, OpenAI receives
-`reasoning_effort`, and Claude receives SDK thinking/effort options in both standalone
+An agent already running keeps its snapshot. Pi, which also serves the openai adapter, receives
+`--thinking`, and Claude receives SDK thinking/effort options in both standalone
 requests and native coding sessions. `default` leaves the provider's reasoning default
 unchanged. Model support for individual thinking levels is provider-dependent.
 
 The openai adapter's endpoint (base URL and API key) is the one saved on the Settings page;
-the worker hands it to the container as `OPENAI_BASE_URL` and `OPENAI_API_KEY`.
+the worker hands it to the container as `OPENAI_BASE_URL` and `OPENAI_API_KEY`, and the
+container's Pi calls it as a provider of its own; no Pi login or credential mount is needed.
 Loopback provider URLs are translated to `host.docker.internal` inside Docker; remote
 URLs are preserved. `TEMPORAL_IMPLEMENTATION_TASK_QUEUE` defaults to `implementation`
 and `TEMPORAL_TEST_GENERATION_TASK_QUEUE` defaults to `test-generation`. The containers
 require outbound access to the LLM provider and Maven repositories.
 
-Selecting the **Pi** adapter routes model calls through the Pi CLI: the host chat
-uses the `pi` on its `PATH`, and the coding-agent image installs its own. Pi signs in with
+Selecting the **Pi** adapter (or the openai adapter, which Pi serves) runs a native Pi
+session (`app/llm/pi.py`), as the Claude adapter does: one `pi --mode rpc` process owns
+the model/tool loop, its history and its compaction. The flow's tools are the same `flow`
+MCP server Claude uses, served over streamable HTTP on a loopback port that only that
+process can call (a per-session token), and Pi declares them as `mcp__flow__*`. Pi's
+built-in tools, the user's extensions, skills, templates and context files stay disabled,
+and the extension `app/llm/pi_extension.ts` sends the flow's system prompt exactly. After
+each model turn the extension asks the session whether to go on: a paused flow
+(`ask_user`, a written completion file) or a spent turn budget stops Pi before another
+request, and notices (such as a deadline) reach the model before its next request. The
+openai adapter's model gets the context window at which Pi starts compacting at the
+workflow's `compaction_tokens`; Pi's own providers compact by their models' windows.
+The host chat uses the `pi` on its `PATH`, and the coding-agent image installs its own. Pi signs in with
 the credentials in `PI_CREDENTIALS_DIR` (default: Pi's own `PI_CODING_AGENT_DIR`, else
 `~/.pi/agent`). Host calls run Pi with that directory as its configuration directory, and
 each coding container gets
@@ -141,12 +153,13 @@ appends follow-ups within that native session. There are no forged transcript ro
 placeholder tool results, bridge threads or forced single-turn handoffs to LangGraph.
 
 Coding agents use the project as their stable working directory. Their native session
-transcripts and plugin export state live beside the project in `.claude-native`, included
-in the preserved workspace when a run pauses. `ask_user` stops native execution before
-another model request. The next container resumes that native session ID and sends the
-answers as a new user message. Completion and native turn limits still enforce the stage's
-existing validation and failure behavior. A paused run must keep the Claude adapter when
-resumed; pauses saved by the previous custom runner cannot be resumed by this version.
+transcripts and plugin export state live beside the project in `.claude-native` (Claude)
+or `.pi-native` (Pi), included in the preserved workspace when a run pauses. `ask_user`
+stops native execution before another model request. The next container resumes that
+native session ID and sends the answers as a new user message. Completion and native turn
+limits still enforce the stage's existing validation and failure behavior. A paused run
+must keep its agent (Claude, or Pi for the pi and openai adapters) when resumed; pauses
+saved by the previous custom runner cannot be resumed by this version.
 
 On the host Claude Code signs in with its own login, or with
 `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) when set. A
@@ -294,7 +307,9 @@ exactly edit workspace files, and execute shell commands. Long command output is
 under `.agent-output/` in the workspace and returned as its diagnostic lines and tail;
 that directory is never published.
 
-For OpenAI and Pi, the application loop compacts its context once it reaches the
+Claude and Pi run their coding loops natively and compact their own context (Pi at the
+openai adapter's `compaction_tokens`, see above). For a model that is no native agent,
+the application loop compacts its context once it reaches the
 workflow type's compaction threshold (`compaction_tokens` in Settings, default 48000;
 `0` never compacts). Saving a threshold above the context window the provider reports
 for the model is rejected. Pi reports the windows of its models, an OpenAI-compatible
@@ -309,11 +324,11 @@ at least the latest) are kept verbatim; current code is re-read from disk. The t
 reaches coding containers in their model settings snapshot. Claude uses native
 compaction instead, and its threshold is not used.
 
-The OpenAI and Pi loop reports the remaining turn budget during its last ten turns,
+The application loop reports the remaining turn budget during its last ten turns,
 asking the agent to finish its required files. History compaction does not reset the
 turn budget. The review stage ends as soon as it writes a valid `findings.json`, including
-on the final allowed tool turn; it needs no additional model reply. Native Claude reviews
-also stop after this file is written. Missing or malformed findings still fail the review.
+on the final allowed tool turn; it needs no additional model reply. Native Claude and Pi
+reviews also stop after this file is written. Missing or malformed findings still fail the review.
 
 Host checks may skip or decide a review run, each only where it is certain and each behind
 its own setting, off by default until compared with reviews without it
@@ -1576,7 +1591,7 @@ usage limit, an overloaded service: HTTP 429 or 529, or a message saying so;
   provider asks for (at most a minute). Then the agent saves where it stopped, as a run
   paused for the user's answers does, and exits with code 76; the host keeps its workspace
   and returns `provider_limit` (the wait asked for and the provider's message, without
-  credentials). Native Claude sessions are resumed by their session ID.
+  credentials). Native Claude and Pi sessions are resumed by their session ID.
 - The stage's workflow (`AgentWorkflow`) waits, as a timer that holds no worker: the wait
   the provider asked for (plus 30 seconds), else 5 minutes doubling, between 1 minute and 2
   hours. Then a new container goes on from the kept workspace. When the worker that

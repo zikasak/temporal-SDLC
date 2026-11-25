@@ -8,7 +8,6 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from langchain_openai import ChatOpenAI
 
 from app.api.routes import settings as settings_routes
 from app.api.routes.auth import require_user
@@ -150,10 +149,13 @@ async def test_settings_persist_per_workflow_and_models_reload_after_save(databa
     assert (await client.get('/settings')).json()['workflows'] == response.json()['workflows']
 
     chat = await model.get_model('chat')
-    assert isinstance(chat, ChatOpenAI)
-    assert chat.model_name == 'saved-chat-model' and chat.reasoning_effort is None
+    # The openai adapter is Pi calling the saved endpoint with its key.
+    assert isinstance(chat, ChatPi)
+    assert chat.model == 'saved-chat-model' and chat.thinking_level == 'default'
+    assert chat.endpoint is not None and chat.endpoint.base_url == 'http://localhost:1234/v1'
+    assert chat.endpoint.api_key.get_secret_value() == SAVED_KEY
     requirements = await model.get_model('requirements')
-    assert isinstance(requirements, ChatPi)
+    assert isinstance(requirements, ChatPi) and requirements.endpoint is None
     assert requirements.model == 'openai/saved-pi-model' and requirements.thinking_level == 'high'
     design = await model.get_model('api_design')
     assert isinstance(design, ChatClaude)

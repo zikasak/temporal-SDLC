@@ -2,8 +2,9 @@ import { useEffect, useState, type FormEvent } from "react";
 import { errorMessage, failure, readBody } from "./api";
 
 type Adapter = "pi" | "openai" | "claude";
-// compaction_tokens: tokens in use at which the coding loops of Pi and the openai adapter
-// compact their history; 0 never compacts. Claude compacts its own context.
+// compaction_tokens: tokens in use at which Pi compacts a conversation with the openai
+// adapter's endpoint; 0 waits for the endpoint to refuse a context as too long. Pi's own
+// providers and Claude compact by their models' context windows.
 type ModelSettings = { adapter: Adapter; model: string; thinking_level: string; compaction_tokens: number };
 type Workflows = Record<string, ModelSettings>;
 // context_window is null when the provider does not report it.
@@ -334,7 +335,7 @@ export default function Settings() {
             );
           })}
           <p className="settings-hint">Models and thinking levels come from the selected provider. Model default leaves reasoning unchanged. Workflows without model calls have no model settings.</p>
-          <p className="settings-hint">Coding agents of Pi and the openai adapter summarize their oldest work into a checkpoint once their context reaches the compaction threshold, and keep the most recent third verbatim. Choose a value below the model's context window that leaves room for its reply; 0 never compacts. Claude compacts its own context.</p>
+          <p className="settings-hint">With the openai adapter, Pi summarizes the oldest part of a conversation once its context reaches the compaction threshold, since the endpoint does not report its model's context window. Choose a value below that window that leaves room for its reply; 0 compacts only once the endpoint refuses a context as too long. Pi's own providers and Claude compact by their models' context windows.</p>
           <div className="settings-heading">
             <h2>Agent inputs</h2>
             <p>Shared by every workflow.</p>

@@ -16,6 +16,12 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements.txt
       - run: pip install -r backend/requirements.txt
+      # Pi serves the pi and openai adapters; tests drive it against stand-in endpoints,
+      # traced by its Langfuse plugin. The versions the application images install.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: npm install --global @earendil-works/pi-coding-agent@1.6.0 @langfuse/pi-observability-plugin@0.1.2
       - name: Backend tests
         working-directory: backend
         run: python -m pytest -q

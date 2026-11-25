@@ -3,8 +3,6 @@ langchain
 langfuse==4.16.0
 python-dotenv==1.2.3
 langgraph
-langchain-openai
-langchain-google-genai
 claude-agent-sdk==0.2.186
 fastapi
 httpx

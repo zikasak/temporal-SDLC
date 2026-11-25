@@ -144,6 +144,76 @@ def claude_http(monkeypatch, tmp_path):
         thread.join()
 
 
+@pytest.fixture
+def pi_http(monkeypatch, tmp_path):
+    """The Pi CLI, as the openai adapter runs it, against a loopback OpenAI-compatible
+    endpoint: returns (replies, requests) as claude_http does, each reply the content
+    blocks of the next response in Claude's form (text and tool_use), a (seconds, blocks)
+    pair to send them after a delay, or an error body to answer with 401."""
+    from app.settings.models import ModelSettings, SETTINGS_FILENAME
+
+    requests, replies = [], []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            body['authorization'] = self.headers.get('Authorization')
+            requests.append(body)
+            blocks = replies.pop(0) if replies else [{'type': 'text', 'text': 'Unexpected request'}]
+            if isinstance(blocks, tuple):
+                delay, blocks = blocks
+                time.sleep(delay)
+            if isinstance(blocks, dict):
+                self.send_response(401)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(blocks).encode())
+                return
+            calls = [{'index': i, 'id': block['id'], 'type': 'function',
+                      'function': {'name': block['name'],
+                                   'arguments': json.dumps(block['input'])}}
+                     for i, block in enumerate(item for item in blocks
+                                               if item['type'] == 'tool_use')]
+            text = ''.join(block['text'] for block in blocks if block['type'] == 'text')
+            base = {'id': f'completion-{len(requests)}', 'object': 'chat.completion.chunk',
+                    'created': 1, 'model': body['model']}
+            delta: dict = {'role': 'assistant', 'content': text or None}
+            if calls:
+                delta['tool_calls'] = calls
+            chunks = [{**base, 'choices': [{'index': 0, 'delta': delta, 'finish_reason': None}]},
+                      {**base, 'choices': [{'index': 0, 'delta': {},
+                                            'finish_reason': 'tool_calls' if calls else 'stop'}]},
+                      {**base, 'choices': [], 'usage': {'prompt_tokens': 20,
+                                                        'completion_tokens': 5,
+                                                        'total_tokens': 25}}]
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.end_headers()
+            for chunk in chunks:
+                self.wfile.write(f'data: {json.dumps(chunk)}\n\n'.encode())
+            self.wfile.write(b'data: [DONE]\n\n')
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    # What the worker hands a coding container for the openai adapter.
+    monkeypatch.setenv('OPENAI_BASE_URL', f'http://127.0.0.1:{server.server_port}/v1')
+    monkeypatch.setenv('OPENAI_API_KEY', 'local-test-key')
+    # No developer's Pi login, settings or MCP servers.
+    monkeypatch.setenv('PI_CODING_AGENT_DIR', str(tmp_path / 'pi-agent'))
+    (tmp_path / SETTINGS_FILENAME).write_text(ModelSettings(
+        adapter='openai', model='test-model', thinking_level='high').model_dump_json())
+    try:
+        yield replies, requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 @pytest.fixture(autouse=True)
 def no_conversation_storage(monkeypatch):
     """Tests never reach a developer's S3 storage; a test that saves conversations
