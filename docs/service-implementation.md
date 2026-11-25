@@ -527,7 +527,9 @@ The implementation author in a checkout also sees the repository's own unit test
 language's test directories, such as `backend/tests`; never `contract-tests/` or any
 `component-tests/`) and maintains them with the code: a change that renames or removes
 what a test uses updates that test, and a test is never deleted, skipped or weakened only
-to pass. It runs [the repository's checks](#the-repositorys-checks) before it finishes. An
+to pass. Before it finishes it runs only the tests its change concerns, not the whole of
+[the repository's checks](#the-repositorys-checks): those take minutes, and verification
+runs them after it anyway, sending their failures back to it. An
 onboarding's author leaves them, as all existing code, as they are.
 
 The checkout itself is untouched until verification passes. Then the main worker makes the
@@ -1468,8 +1470,9 @@ the repository root: it installs each part's dependencies, builds each part and 
 own tests, and exits non-zero when anything fails. It must not run the contract tests,
 need a running service, external services, Docker or secrets, or change tracked files.
 An onboarding's implementation author writes it from the build files and any CI
-configuration and makes sure it passes on the existing code; every implementation author
-of a later task can run it. This repository's own is `.sdlc/checks.sh`.
+configuration and makes sure it passes on the existing code; an implementation author of a
+later task reads it for how to run the tests its change concerns, and leaves the whole run
+to verification. This repository's own is `.sdlc/checks.sh`.
 
 Once the contract tests (and component tests) pass, `run_repository_checks`
 (`app/verification/checks.py`, on the verification queue) assembles the repository as the

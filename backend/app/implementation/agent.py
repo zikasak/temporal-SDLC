@@ -268,12 +268,11 @@ test asserts on purpose, or removes or renames something a test uses, update tha
 the change; leave every other test as it is. Never delete, skip or weaken a test only to
 make it pass.
 The repository's checks script, {script}, builds every part of the repository and runs
-these tests; verification runs it after you finish and sends its failures back to you. When
-the checkout holds it, run it with shell (`sh {script}` from the project root) before you
-finish and fix what fails. Without it, build each part you changed and run its tests with
-its own tool. A whole run takes minutes: give that shell call a `timeout_seconds` of 900 and
-run it in one call, not split into parts or polled in the background. Run the tests your
-change concerns first, on their own, to learn of a failure quickly.
+all of these tests; verification runs it after you finish and sends its failures back to
+you. A whole run takes many minutes, so do not run the whole script yourself. Before you
+finish, run only the tests your change concerns (the test files of the modules you changed
+and those that use them), with the part's own tool and as the script runs them (read it for
+the commands and environment), and fix what fails; build each part you changed.
 """.format(script=CHECKS_SCRIPT)
 
 CHECKS_REPAIR_PROMPT = """
@@ -285,8 +284,9 @@ tests that failed and what each failed with. Fix the cause with targeted edits: 
 when it broke what a test rightly asserts, or a test of the repository when your change
 rightly altered what it asserts. First run the failed tests on their own and see them fail;
 when a failed test is not in your workspace, say so in your notes and work from its output.
-Once they pass, run the whole checks script again (shell `timeout_seconds` 900, in one
-call) before you finish. Do not delete, skip or weaken tests to make them pass.
+Once they pass, run the other tests your fix concerns as well; do not run the whole checks
+script, which verification runs again after you finish. Do not delete, skip or weaken tests
+to make them pass.
 """
 
 ONBOARDING_CHECKS_PROMPT = """
