@@ -6,10 +6,12 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError, TimeoutType
+from temporalio.exceptions import TimeoutError as ActivityTimeout
 
 with workflow.unsafe.imports_passed_through():
     from app.agent_workflows.host import ANSWERS_KEY, RESUME_KEY
+    from app.docker_agents import INTERRUPTED_ERROR
     from app.llm.questions import Question, answer_problem
 
 # How long a paused agent waits for the user before its stage fails.
@@ -38,16 +40,41 @@ def provider_wait(attempt: int, retry_after: float | None) -> timedelta:
     return max(PROVIDER_WAIT_MIN, min(PROVIDER_WAIT_MAX, wait))
 
 
+# How often in a row a stage goes on after its worker stopped, before it fails.
+MAX_INTERRUPTIONS = 5
+
+
+def interrupted(exc: ActivityError) -> bool:
+    """Whether the activity's worker stopped it: shutting down (as for a redeploy), or
+    killed, which leaves its heartbeats to time out."""
+    cause = exc.cause
+    return ((isinstance(cause, ApplicationError) and cause.type == INTERRUPTED_ERROR)
+            or (isinstance(cause, ActivityTimeout) and cause.type == TimeoutType.HEARTBEAT))
+
+
 async def execute_agent_activity(
     activity_fn: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]],
     session_id: str, context: dict[str, Any],
 ) -> dict[str, Any]:
-    return await workflow.execute_activity(
-        activity_fn, args=[session_id, context],
-        start_to_close_timeout=timedelta(minutes=100),
-        heartbeat_timeout=timedelta(minutes=2),
-        retry_policy=RetryPolicy(maximum_attempts=1),
-    )
+    """Run the stage's activity; one its worker stopped runs again, on the next worker,
+    continuing (RESUME_KEY) from where its agent was or from the work it saved."""
+    interruptions = 0
+    while True:
+        try:
+            return await workflow.execute_activity(
+                activity_fn, args=[session_id, context],
+                start_to_close_timeout=timedelta(minutes=100),
+                heartbeat_timeout=timedelta(minutes=2),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+        except ActivityError as exc:
+            if not interrupted(exc) or interruptions >= MAX_INTERRUPTIONS:
+                raise
+            interruptions += 1
+            workflow.logger.warning('Stage activity stopped by its worker; continuing it '
+                                    '(%d/%d): %s', interruptions, MAX_INTERRUPTIONS,
+                                    exc.cause)
+            context = {**context, RESUME_KEY: True}
 
 
 class AgentWorkflow:

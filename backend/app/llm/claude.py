@@ -73,6 +73,12 @@ class ChatClaude(Runnable):
     # tool result: Claude's loop takes no messages between its own requests.
     _notices: list[str] = field(default_factory=list, init=False, repr=False)
 
+    @property
+    def resumable_session(self) -> str | None:
+        """The native session to continue, also while its turn has not ended: a stopped
+        run resumes it (app.agent_workflows.runtime)."""
+        return self._native_session or self.session_id
+
     @asynccontextmanager
     async def async_session(self):
         if self._stack is not None:

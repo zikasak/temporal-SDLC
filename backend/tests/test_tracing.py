@@ -475,15 +475,33 @@ try:
         validate_completion=lambda root: None, completion_message='Done',
         exhaustion_message='Too many turns')))
 except SystemExit as exc:
-    assert exc.code == 128 + signal.SIGTERM, exc.code
+    assert exc.code == runtime.INTERRUPTED_EXIT, exc.code
 else:
     raise AssertionError('The stopped agent finished')
 ''', environment)
-    agent, = [span for span in spans if span.name == 'author-implementation']
+    stopped = list(spans)
+    # It saved where it was: a new container goes on in the same native session.
+    state = json.loads((tmp_path / 'stage' / '.agent-state.json').read_text())
+    assert state['interrupted'] and state['pending'] is None and state['session_id']
+    replies.append([{'type': 'text', 'text': 'Finished'}])
+    run_script('''
+import asyncio, os
+from pathlib import Path
+from app.agent_workflows import runtime
+root = Path(os.environ['TEST_WORKSPACE']) / 'service'
+asyncio.run(runtime.run_agent(runtime.AgentProfile(root=root, prompt='Write files',
+    initial_messages=['Create a service'], max_turns_env='TEST_AGENT_MAX_TURNS',
+    validate_completion=lambda root: None, completion_message='Done',
+    exhaustion_message='Too many turns')))
+''', environment)
+    resumed = json.dumps(requests[-1])
+    assert 'stopped part-way' in resumed and 'first.txt' in resumed
+    agent, = [span for span in stopped if span.name == 'author-implementation']
     assert attributes(agent)['langfuse.observation.level'] == 'ERROR'
-    native_turn, = [span for span in spans if span.name == turn_name]
+    native_turn, = [span for span in stopped if span.name == turn_name]
     assert native_turn.parent_span_id == agent.span_id
-    tool, = [span for span in spans if attributes(span).get('langfuse.observation.type') == 'tool']
+    tool, = [span for span in stopped
+             if attributes(span).get('langfuse.observation.type') == 'tool']
     assert tool.name == 'Tool: mcp__flow__write_file'
     assert tool.parent_span_id == native_turn.span_id
 

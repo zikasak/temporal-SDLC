@@ -205,12 +205,6 @@ async def save_stage_work(stage: StageSpec, session_dir: Path, context: dict[str
                        session_dir.name, exc)
 
 
-def runtime_state() -> str:
-    """The file in which a stopped agent saved where it was."""
-    from app.agent_workflows.runtime import STATE_FILENAME
-    return STATE_FILENAME
-
-
 async def restore_stage_project(stage: StageSpec, session_dir: Path, context: dict[str, Any],
                                 project: Path) -> bool:
     """Make the agent's freshly populated `project` what the stage's last run left, as its
@@ -291,11 +285,11 @@ async def _run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
         async with async_context(tempfile.TemporaryDirectory, dir=artifact_dir) as temporary:
             work = Path(temporary)
             workspace = work / 'workspace'
-            if resume and not answers and not await run_sync(
-                    (paused / runtime_state()).is_file):
-                # The workspace the provider's limits stopped the agent in was kept on
-                # another worker's disk, now lost: a new run starts over, from the
-                # project as the stage's latest work ref saved it when it stopped.
+            if resume and not await run_sync(docker_agents.has_saved_run, paused):
+                # The workspace the provider's limits or a worker restart stopped the agent
+                # in was kept on another worker's disk, now lost, or never saved (its
+                # worker was killed): a new run starts over, from the project as the
+                # stage's latest work ref saved it when it stopped.
                 logger.warning('%s stage lost the workspace its agent stopped in; starting '
                                'over from its saved work (session=%s)', stage.role, session_id)
                 await run_sync(workspace.mkdir)
@@ -332,6 +326,13 @@ async def _run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
                                       paused / stage.workspace_name,
                                       'stopped by the provider\'s limits')
                 return limited_result(session_id, exc)
+            except docker_agents.AgentInterrupted as exc:
+                # The worker shuts down: the stage's next attempt continues the kept
+                # workspace, or, when there is none, starts over from this saved work.
+                await save_stage_work(stage, session_dir, context,
+                                      paused / stage.workspace_name if exc.kept else output,
+                                      'stopped by a worker restart')
+                raise
             except Exception as exc:
                 await save_stage_work(stage, session_dir, context, output,
                                       f'agent failed: {_first_line(exc)}')

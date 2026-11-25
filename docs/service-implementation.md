@@ -1603,6 +1603,27 @@ usage limit, an overloaded service: HTTP 429 or 529, or a message saying so;
   on, and the page says so.
 - The analysis of failed checks waits the same way; a commit message never waits.
 
+## Worker restarts
+
+A redeploy shuts the sandbox worker down while a coding stage's agent may be running; the
+stage goes on afterwards instead of failing:
+
+- The worker's shutdown cancels the stage's activity. The host stops the agent with
+  `docker stop` (SIGTERM, up to 150 seconds), never only `docker rm -f`, so the agent
+  exports its traces and saves where it was, as for the provider's limits (a native
+  session by its ID, the application's own loop from the start of its current turn), and
+  exits with code 77. The host keeps its workspace; without a saved state it keeps what the
+  agent wrote. A stage that changes the project also saves that to its `latest`
+  [work ref](#work-kept-in-the-repository) (`Sdlc-Status: stopped by a worker restart`).
+- The activity then fails with the `StageInterrupted` error instead of being cancelled
+  (`app/agent_workflows/interruption.py`), and the stage's workflow runs it again with
+  `resume_after_limit`, on the next worker: the agent continues in the kept workspace, told
+  it was stopped part-way, or, with none, starts over from the saved work. A worker killed
+  outright is noticed by its heartbeats timing out (2 minutes) and continued the same way.
+  After 5 such interruptions in a row the stage fails.
+- The sandbox worker's `stop_grace_period` (Coolify compose) leaves room for this; a
+  worker killed sooner loses what its agent had not saved.
+
 ## Run the generated tests manually
 
 Generation compiles the service and test suite; automatic verification executes them.

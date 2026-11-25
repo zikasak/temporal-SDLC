@@ -17,6 +17,7 @@ from app.config import (
     REVIEW_TASK_QUEUE, ROUTING_TASK_QUEUE, TEMPORAL_ADDRESS, TEST_GENERATION_TASK_QUEUE,
     VERIFICATION_TASK_QUEUE,
 )
+from app.agent_workflows.interruption import InterruptionInterceptor
 from app.diagnosis.activities import diagnose_failure
 from app.diagnosis.workflows import DiagnosisWorkflow
 from app.documentation.activities import write_documentation
@@ -73,7 +74,8 @@ async def main() -> None:
     workers = []
     for label, task_queue, workflow_type, activities in STAGES:
         workers.append(Worker(client, task_queue=task_queue, workflows=[workflow_type],
-                              activities=activities, max_concurrent_activities=1))
+                              activities=activities, max_concurrent_activities=1,
+                              interceptors=[InterruptionInterceptor()]))
         logger.info('%s worker started on %s', label, task_queue)
     try:
         await run_worker(*workers)

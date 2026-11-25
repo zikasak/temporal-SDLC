@@ -218,7 +218,10 @@ async def run_diagnosis(session_id: str, context: dict[str, Any]) -> dict[str, A
         work = Path(temporary)
         workspace = work / 'workspace'
         await run_sync(artifact_dir.mkdir, exist_ok=True)
-        if answers or resume:
+        # A continued run that did not save where it was (its worker was killed) starts
+        # over.
+        if (answers or resume) and (
+                not resume or await run_sync(docker_agents.has_saved_run, paused)):
             # The paused review continues in the workspace it left.
             await run_sync(docker_agents.resume_workspace, paused, workspace,
                            answers or None)

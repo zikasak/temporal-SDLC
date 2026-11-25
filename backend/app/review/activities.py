@@ -538,7 +538,10 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
     async with async_context(tempfile.TemporaryDirectory) as temporary:
         work = Path(temporary)
         workspace = work / 'workspace'
-        if answers or resume:
+        # A continued run that did not save where it was (its worker was killed) starts
+        # over.
+        if (answers or resume) and (
+                not resume or await run_sync(docker_agents.has_saved_run, paused)):
             # The paused review continues in the workspace it left.
             await run_sync(docker_agents.resume_workspace, paused, workspace,
                            answers or None)

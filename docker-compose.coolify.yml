@@ -143,6 +143,12 @@ services:
   sandbox-worker:
     <<: *sandbox-worker
     command: ["python", "-m", "app.agent_workflows.worker"]
+    # A redeploy cancels the running agents, which then get up to
+    # docker_agents.AGENT_STOP_GRACE_SECONDS (150s) to export their traces and save where
+    # they were; the worker then saves their work to the repository and flushes its own
+    # traces. Docker's default 10s would kill it first, losing all that
+    # (docs/service-implementation.md#worker-restarts).
+    stop_grace_period: 6m
 
   sandbox:
     image: docker:29-dind

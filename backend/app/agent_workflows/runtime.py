@@ -122,6 +122,10 @@ CHECKPOINT_NOTICE = ('[Checkpoint] Older tool calls and their results were remov
 # stopped, beside its project: the host keeps the workspace and starts a new container
 # from it, with the answers, once they arrive.
 PAUSE_EXIT = 75
+# A run stopped by SIGTERM (its worker shutting down, as for a redeploy) exits with this
+# code once it has saved where it was, as one its provider's limits stopped does: the host
+# keeps the workspace and a new container goes on from it.
+INTERRUPTED_EXIT = 77
 STATE_FILENAME = '.agent-state.json'
 ANSWERS_FILENAME = '.agent-answers.json'
 ASK_GUIDANCE = """
@@ -142,6 +146,11 @@ FINISHING_TURNS = 10
 LIMIT_CONTINUE = ('[System] The model provider was unavailable for a while and the run was '
                   'stopped. Continue the task where you left off; check the files you were '
                   'working on before you change them.')
+# What a native session that was stopped (its worker shutting down) is told when it goes on.
+INTERRUPTED_CONTINUE = ('[System] The run was stopped part-way, by a restart of the system '
+                        'running it, and is now continued. Continue the task where you left '
+                        'off; a tool call that was running may not have finished, so check '
+                        'the files you were working on before you change them.')
 TURN_BUDGET = """
 You have {turns} model turns for this task; each reply of yours is one, however many tool
 calls it makes. Plan the work to fit, and batch independent tool calls into one turn.
@@ -449,7 +458,11 @@ def note_tool(notes: list[str]) -> BaseTool:
 LIMIT_RETRIES = 2
 LIMIT_RETRY_SECONDS = 60
 # What a run of the agent ended with.
-DONE, PAUSED, LIMITED, STOPPED = 'done', 'paused', 'limited', 'stopped'
+DONE, PAUSED, LIMITED, STOPPED, INTERRUPTED = (
+    'done', 'paused', 'limited', 'stopped', 'interrupted')
+# Where the running run stands, as the state it would save to be continued, or None while
+# it has no such state yet: what a run stopped by SIGTERM saves (see run_agent).
+Resumable = Callable[[], dict[str, Any] | None]
 
 
 class ProviderLimit(Exception):
@@ -548,12 +561,13 @@ async def run_agent(profile: AgentProfile) -> None:
             task.cancel()
 
     loop.add_signal_handler(signal.SIGTERM, stop)
+    resumable: list[Resumable] = []
     try:
         with trace_operation(f'author-{role}', as_type='agent', feature=role,
                              session_id=os.getenv('APP_TRACE_SESSION_ID'),
                              input=list(profile.initial_messages),
                              trace_context=container_trace_context()) as span:
-            outcome = await _run_agent(profile)
+            outcome = await _run_agent(profile, resumable)
             if span is not None:
                 span.update(output={
                     PAUSED: 'Paused for the user\'s answers',
@@ -562,22 +576,32 @@ async def run_agent(profile: AgentProfile) -> None:
     except asyncio.CancelledError:
         if not stopped:
             raise
-        print('Stopped before finishing', flush=True)
         outcome = STOPPED
+        state = resumable[-1]() if resumable else None
+        if state is not None:
+            # Saved as a stop for the provider's limits is, without its report: the host
+            # keeps the workspace and a new container continues the run from it.
+            await run_sync(_pause, profile.root.parent,
+                           {**state, 'pending': None, 'interrupted': True})
+            outcome = INTERRUPTED
+        print('Stopped before finishing'
+              + ('; saved where the run was' if outcome == INTERRUPTED else ''), flush=True)
     finally:
         loop.remove_signal_handler(signal.SIGTERM)
         await run_sync(shutdown_tracing)
     if outcome == STOPPED:
         sys.exit(128 + signal.SIGTERM)
+    if outcome == INTERRUPTED:
+        sys.exit(INTERRUPTED_EXIT)
     if outcome == PAUSED:
         sys.exit(PAUSE_EXIT)
     if outcome == LIMITED:
         sys.exit(PROVIDER_LIMIT_EXIT)
 
 
-async def _run_agent(profile: AgentProfile) -> str:
+async def _run_agent(profile: AgentProfile, resumable: list[Resumable]) -> str:
     """Work until the profile's task is done: DONE, PAUSED for the user's answers, or
-    LIMITED by the provider's limits."""
+    LIMITED by the provider's limits. The run keeps in `resumable` where it stands."""
     settings = ModelSettings.model_validate_json(
         await run_sync((profile.root.parent / SETTINGS_FILENAME).read_text))
     # The worker sets these from the OpenAI endpoint saved in Settings (openai adapter only).
@@ -586,11 +610,12 @@ async def _run_agent(profile: AgentProfile) -> str:
     # Claude and Pi (which serves the pi and openai adapters) run the stage natively.
     if hasattr(provider, 'async_session'):
         return await _run_native(profile, provider,
-                                 'claude' if settings.adapter == 'claude' else 'pi')
-    return await _run_with_provider(profile, provider, settings.compaction_tokens)
+                                 'claude' if settings.adapter == 'claude' else 'pi', resumable)
+    return await _run_with_provider(profile, provider, settings.compaction_tokens, resumable)
 
 
-async def _run_native(profile: AgentProfile, provider, agent: str) -> str:
+async def _run_native(profile: AgentProfile, provider, agent: str,
+                      resumable: list[Resumable]) -> str:
     """Let the native agent (`agent`: claude or pi) execute the stage through MCP and
     resume its real session."""
     from app.llm.native import AgentTurnLimit
@@ -626,12 +651,15 @@ async def _run_native(profile: AgentProfile, provider, agent: str) -> str:
         # Stopped by the provider's limits: the native session goes on where it stopped.
         await run_sync(state_file.unlink)
         await run_sync((directory / LIMIT_FILENAME).unlink, missing_ok=True)
+        interrupted = bool(state.get('interrupted'))
         if state.get('session_id'):
-            messages = [*head, HumanMessage(LIMIT_CONTINUE)]
+            messages = [*head, HumanMessage(
+                INTERRUPTED_CONTINUE if interrupted else LIMIT_CONTINUE)]
         else:
             provider.resume = None
             messages = [*head, *(HumanMessage(text) for text in profile.initial_messages)]
-        print('Resumed after the provider\'s limits', flush=True)
+        print('Resumed after being stopped' if interrupted
+              else 'Resumed after the provider\'s limits', flush=True)
         state = None
     elif state:
         answers = json.loads(await run_sync(answers_file.read_text))['answers']
@@ -644,6 +672,11 @@ async def _run_native(profile: AgentProfile, provider, agent: str) -> str:
     else:
         messages = [*head, *(HumanMessage(text) for text in profile.initial_messages)]
     nudges = state.get('nudges', 0) if state else 0
+    # The native session holds the conversation, also of a turn that is stopped part-way.
+    resumable.append(lambda: {
+        # Turns are counted as each session ends: one stopped mid-way may count again.
+        'adapter': agent, 'turns': max(1, turns - provider.turns_used), 'nudges': nudges,
+        'session_id': getattr(provider, 'resumable_session', None) or provider.session_id})
     try:
         while True:
             if turns <= 0:
@@ -698,7 +731,8 @@ async def _run_native(profile: AgentProfile, provider, agent: str) -> str:
         raise RuntimeError(profile.exhaustion_message) from exc
 
 
-async def _run_with_provider(profile: AgentProfile, provider, compaction_tokens: int) -> str:
+async def _run_with_provider(profile: AgentProfile, provider, compaction_tokens: int,
+                             resumable: list[Resumable]) -> str:
     """Run the application's tool loop for a model that is no native agent (such as a
     custom adapter), compacting its history into a checkpoint once `compaction_tokens`
     are in use; 0 never compacts."""
@@ -730,7 +764,15 @@ async def _run_with_provider(profile: AgentProfile, provider, compaction_tokens:
     config = langchain_config(run_name='decide-next-action')
     # Disabled tracing leaves the invocation unchanged for custom model adapters.
     traced_config = {'config': config} if 'callbacks' in config else {}
+    stable: dict[str, Any] = {}
+    # A run stopped part-way through a turn goes on from that turn's start, whose history
+    # has a result for every call; the tools it ran meanwhile may run again.
+    resumable.append(lambda: dict(stable) or None)
     for turn in range(turns):
+        stable.update({
+            'history': messages_to_dict(history), 'checkpoint': messages_to_dict(checkpoint),
+            'notes': notes, 'changed': list(changed), 'working': list(working),
+            'turns': turns - turn, 'nudges': nudges})
         remaining = turns - turn
         notice = []
         if remaining <= FINISHING_TURNS:

@@ -15,7 +15,10 @@ Restart workers after changing settings. Missing credentials/base URL or
 `LANGFUSE_TRACING_ENABLED=false` disables tracing without disabling application
 features. The SDK batches exports in the background; network/export failures are
 logged and do not retry application operations. Workers and short-lived agents
-flush on graceful shutdown. Forced termination can lose buffered spans.
+flush on graceful shutdown. A stopping sandbox worker (a redeploy) cancels its stages,
+which `docker stop` their agent containers with a grace period so the agents export
+before removal; the Coolify `stop_grace_period` of the sandbox worker leaves room for
+that. Forced termination can lose buffered spans.
 
 Useful settings:
 

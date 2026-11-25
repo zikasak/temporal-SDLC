@@ -147,7 +147,7 @@ async def test_contract_only_generation_publishes_compiled_suite(tmp_path, monke
     assert runner_built == (failure in {None, 'build'})
     assert removed == [container_name]
     assert stopped == ([(container_name, str(docker_agents.AGENT_STOP_GRACE_SECONDS))]
-                       if failure == 'timeout' else [])
+                       if failure in {'timeout', 'cancel'} else [])
     assert private_source.read_text() == 'PRIVATE IMPLEMENTATION SOURCE'
 
 

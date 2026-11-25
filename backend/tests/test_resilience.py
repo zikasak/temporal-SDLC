@@ -3,7 +3,10 @@ and their excerpts, decisions about further rounds of fixes, and failure causes.
 # Assertions read optional fields directly: a None there fails the test anyway.
 # pyright: reportOptionalSubscript=false, reportOptionalMemberAccess=false
 
+import asyncio
 import json
+import os
+import signal
 import subprocess
 import tarfile
 from datetime import timedelta
@@ -113,6 +116,40 @@ async def test_agent_stopped_by_limits_saves_where_it_was_and_goes_on_there(
     assert (profile.root / 'Dockerfile').is_file()
 
 
+async def test_agent_stopped_mid_turn_saves_that_turns_start_and_goes_on_there(
+        tmp_path, profile, scripted_model):  # noqa: F811
+    # SIGTERM (its worker shutting down) arrives while the model is asked for the second
+    # turn: the run saves where that turn started, whose calls all have results.
+    write = AIMessage(content='', tool_calls=[
+        {'name': 'write_file', 'args': {'path': 'Orders.java', 'content': 'class Orders {}'},
+         'id': 'orders'}])
+    model = scripted_model([write])
+    answer = model.ainvoke
+
+    async def ainvoke(messages):
+        if len(model.requests) == 1:
+            model.requests.append(list(messages))
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.Event().wait()
+        return await answer(messages)
+
+    model.ainvoke = ainvoke
+    with pytest.raises(SystemExit) as stopped:
+        await runtime.run_agent(profile)
+    assert stopped.value.code == runtime.INTERRUPTED_EXIT
+    state = json.loads((tmp_path / runtime.STATE_FILENAME).read_text())
+    assert state['pending'] is None and state['turns'] == profile.default_max_turns - 1
+    model = scripted_model([
+        AIMessage(content='', tool_calls=[
+            {'name': 'write_file', 'args': {'path': 'Dockerfile', 'content': 'FROM scratch'},
+             'id': 'dockerfile'}]),
+        AIMessage(content='Finished')])
+    await runtime.run_agent(profile)
+    *_, call, written = model.requests[0]
+    assert call.tool_calls[0]['id'] == 'orders' and written.tool_call_id == 'orders'
+    assert not (tmp_path / runtime.STATE_FILENAME).exists()
+
+
 def _stage(tmp_path, populated, work=None):
     def prepare_inputs(session_dir, context, *, embed_chars):
         def populate(workspace):
@@ -200,6 +237,108 @@ async def test_failed_agent_output_is_saved_before_the_failure_is_raised(tmp_pat
     # The status keeps the first 200 characters of the error, however long tmp_path is.
     error = f'Documentation agent exited with code 1. Log: {tmp_path}/session/docs-stage/agent.log'
     assert saved == [('agent failed: ' + error[:200], {'half.md'})]
+
+
+@pytest.mark.parametrize('saved_state', [True, False])
+async def test_stage_its_worker_stops_goes_on_where_it_was_in_the_next_attempt(
+        tmp_path, monkeypatch, saved_state):
+    # A redeploy shuts the worker down: the stopped agent's workspace (where it saved its
+    # state) or else what it wrote is kept, and the stage's next attempt goes on from it.
+    saved: list[str] = []
+
+    async def save(stage, session_dir, context, tree, status, published=False):
+        saved.append(status)
+        if not saved_state:
+            assert (tree / 'draft.md').read_text() == '# Half done'
+
+    async def restore(stage, session_dir, context, project):
+        (project / 'draft.md').write_text('# Half done')
+        return True
+
+    monkeypatch.setattr(host, 'save_stage_work', save)
+    monkeypatch.setattr(host, 'restore_stage_project', restore)
+    sent: list[dict[str, bytes]] = []
+    waiting = asyncio.Event()
+    first = True
+
+    async def docker(*args, **kwargs):
+        nonlocal first
+        if args[0] == 'cp' and args[1] == '-a':
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.append({item.name: archive.extractfile(item).read()
+                             for item in archive.getmembers() if item.isfile()})
+        if args[0] == 'wait' and first:
+            first = False
+            waiting.set()
+            await asyncio.Event().wait()
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': runtime.INTERRUPTED_EXIT if saved_state else 143}
+                              if len(sent) == 1 else {'ExitCode': 0})
+        if args[0] == 'cp' and args[1].endswith(':/workspace/.'):
+            (Path(args[2]) / 'notes').mkdir()
+            (Path(args[2]) / 'notes/draft.md').write_text('# Half done')
+            (Path(args[2]) / runtime.STATE_FILENAME).write_text(
+                json.dumps({'pending': None, 'interrupted': True}))
+        if args[0] == 'cp' and args[1].endswith(':/workspace/notes/.'):
+            (Path(args[2]) / 'draft.md').write_text('# Half done')
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    stage = _stage(tmp_path, [])
+    environment = ActivityEnvironment()
+    running = asyncio.create_task(environment.run(run_stage, stage, 'session', {}, tmp_path))
+    await asyncio.wait_for(waiting.wait(), 10)
+    environment.worker_shutdown()
+    environment.cancel()
+    with pytest.raises(docker_agents.AgentInterrupted):
+        await running
+    assert saved == ['stopped by a worker restart']
+    await ActivityEnvironment().run(run_stage, stage, 'session', {host.RESUME_KEY: True},
+                                    tmp_path)
+    # Continued in the kept workspace, its saved state included, or else started over
+    # from the saved work.
+    assert sent[1]['notes/draft.md'] == b'# Half done'
+    assert (runtime.STATE_FILENAME in sent[1]) is saved_state
+
+
+async def test_answered_stage_its_worker_stops_before_the_agent_saved_keeps_its_answers(
+        tmp_path, monkeypatch):
+    # The agent continuing with the user's answers is stopped before it saved anew (it
+    # exits 143): its next attempt continues the paused workspace with the answers again.
+    monkeypatch.setattr(host, 'save_stage_work', lambda *args, **kwargs: asyncio.sleep(0))
+    paused = tmp_path / 'session/docs-stage' / docker_agents.PAUSED_DIR
+    paused.mkdir(parents=True)
+    (paused / runtime.STATE_FILENAME).write_text(json.dumps({'pending': {'questions': []}}))
+    sent: list[dict[str, bytes]] = []
+    waiting = asyncio.Event()
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'cp' and args[1] == '-a':
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.append({item.name: archive.extractfile(item).read()
+                             for item in archive.getmembers() if item.isfile()})
+        if args[0] == 'wait' and len(sent) == 1:
+            waiting.set()
+            await asyncio.Event().wait()
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': 143 if len(sent) == 1 else 0})
+        return ''
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    stage = _stage(tmp_path, [])
+    context = {host.ANSWERS_KEY: ['EUR']}
+    environment = ActivityEnvironment()
+    running = asyncio.create_task(environment.run(run_stage, stage, 'session', context,
+                                                  tmp_path))
+    await asyncio.wait_for(waiting.wait(), 10)
+    environment.worker_shutdown()
+    environment.cancel()
+    with pytest.raises(docker_agents.AgentInterrupted):
+        await running
+    await ActivityEnvironment().run(run_stage, stage, 'session',
+                                    {**context, host.RESUME_KEY: True}, tmp_path)
+    assert json.loads(sent[1][runtime.STATE_FILENAME]) == {'pending': {'questions': []}}
+    assert json.loads(sent[1][runtime.ANSWERS_FILENAME]) == {'answers': ['EUR']}
 
 
 # Work refs.
@@ -642,3 +781,51 @@ async def test_checks_output_is_kept_to_its_end_within_a_byte_bound(tmp_path, mo
     assert len(text) < 1100
     assert text.startswith('… (the start of the output was cut)')
     assert text.rstrip().endswith('E   AssertionError: the end')
+
+
+@pytest.mark.parametrize('stopped_agent', [False, True])
+async def test_stage_activity_its_worker_shuts_down_runs_again_on_the_next_worker(
+        stopped_agent):
+    from temporalio import activity
+    from temporalio.worker import Worker
+
+    from app.agent_workflows.interruption import InterruptionInterceptor
+    from app.implementation.workflows import ImplementationWorkflow
+    from tests.dev_server import start_dev_server
+
+    contexts: list[dict] = []
+    started = asyncio.Event()
+
+    @activity.defn(name='implement_service')
+    async def implement_service(session_id: str, context: dict) -> dict:
+        contexts.append(context)
+        if len(contexts) == 1:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # As docker_agents.run_agent ends once it stopped a running agent.
+                if stopped_agent and docker_agents.worker_shutting_down():
+                    raise docker_agents.AgentInterrupted(kept=True) from None
+                raise
+        return {'session_id': session_id, 'path': 'built'}
+
+    def worker(env):
+        return Worker(env.client, task_queue='interrupted-stage',
+                      workflows=[ImplementationWorkflow], activities=[implement_service],
+                      interceptors=[InterruptionInterceptor()])
+
+    async with await start_dev_server() as env:
+        first = worker(env)
+        running = asyncio.create_task(first.run())
+        handle = await env.client.start_workflow(
+            ImplementationWorkflow.run, args=['session', {'language': 'java'}],
+            id=f'implementation-interrupted-{stopped_agent}', task_queue='interrupted-stage')
+        await asyncio.wait_for(started.wait(), 10)
+        # As a redeploy stops it: the running activity is cancelled, and fails as stopped.
+        await first.shutdown()
+        await running
+        async with worker(env):
+            result = await asyncio.wait_for(handle.result(), 30)
+    assert result == {'session_id': 'session', 'path': 'built'}
+    assert contexts == [{'language': 'java'}, {'language': 'java', host.RESUME_KEY: True}]

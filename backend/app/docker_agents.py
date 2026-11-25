@@ -22,7 +22,9 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from app.asyncio_utils import async_context, run_sync
-from app.agent_workflows.runtime import ANSWERS_FILENAME, PAUSE_EXIT, STATE_FILENAME
+from app.agent_workflows.runtime import (
+    ANSWERS_FILENAME, INTERRUPTED_EXIT, PAUSE_EXIT, STATE_FILENAME,
+)
 # The images pulled ahead of use, by digest; the languages build their runners on them.
 from app.images import PLAYWRIGHT_IMAGE, PREPULLED_IMAGES  # noqa: F401
 from app.llm.limits import LIMIT_FILENAME, MESSAGE_CHARS, PROVIDER_LIMIT_EXIT
@@ -47,7 +49,8 @@ CONTAINER_LINE_CHARS = 4000
 LOG_DRAIN_SECONDS = 2
 # The longest an agent may run.
 AGENT_TIMEOUT_SECONDS = 3600
-# How long an agent that ran out of time has, once asked to stop, to export its traces
+# How long an agent that ran out of time or was cancelled (a worker shutting down for a
+# redeploy, say) has, once asked to stop, to export its traces
 # (app.llm.claude.TRACE_EXPORT_TIMEOUT or app.llm.pi.SHUTDOWN_TIMEOUT, then the tracing
 # flush) before it is killed.
 AGENT_STOP_GRACE_SECONDS = 150
@@ -94,6 +97,32 @@ class AgentLimited(Exception):
     def __init__(self, report: dict[str, Any]) -> None:
         super().__init__(f'Agent stopped by its provider\'s limits: {report.get("message")}')
         self.report = report
+
+
+# The ApplicationError type of a stage activity its worker stopped by shutting down (as for
+# a redeploy): the stage's workflow runs it again, which goes on from what it saved.
+INTERRUPTED_ERROR = 'StageInterrupted'
+
+
+class AgentInterrupted(Exception):
+    """The worker shut down while the agent ran. The agent was stopped; `kept` tells
+    whether it saved where it was, its workspace then kept, as a paused agent's is, for a
+    new container to continue from. Otherwise what it wrote is in the output."""
+
+    def __init__(self, kept: bool) -> None:
+        super().__init__('The agent was stopped by its worker shutting down'
+                         + ('; it saved where it was' if kept else ''))
+        self.kept = kept
+
+
+def worker_shutting_down() -> bool:
+    return activity.in_activity() and activity.is_worker_shutdown()
+
+
+def has_saved_run(paused: Path) -> bool:
+    """Whether `paused` holds a stopped agent's workspace that a new container can
+    continue from."""
+    return (paused / STATE_FILENAME).is_file()
 
 
 def resume_workspace(paused: Path, workspace: Path, answers: list[str] | None) -> None:
@@ -148,6 +177,15 @@ def _limit_report(staging: Path) -> dict[str, Any]:
                 'message': str(report.get('message') or '')[:MESSAGE_CHARS]}
     except (ValueError, AttributeError, TypeError) as exc:
         raise RuntimeError(f'The agent stopped with an unusable limit report: {exc}') from exc
+
+
+def _interrupted_state(staging: Path) -> None:
+    try:
+        state = json.loads(_read_small(staging / STATE_FILENAME, 'state'))
+    except ValueError as exc:
+        raise RuntimeError(f'The agent stopped with an unusable state: {exc}') from exc
+    if not isinstance(state, dict) or state.get('pending') is not None:
+        raise RuntimeError('The agent stopped with an unusable state')
 
 
 async def _keep_paused(name: str, paused: Path) -> list[Question]:
@@ -682,11 +720,11 @@ def _archive_workspace(workspace: Path, archive: Path) -> None:
             tar.add(item, arcname=item.name, filter=owner)
 
 
-async def _stop_agent(name: str, role: str, session_id: str) -> None:
-    """Ask an agent that ran out of time to stop, so that it exports its traces before
+async def _stop_agent(name: str, role: str, session_id: str, reason: str) -> None:
+    """Ask an agent that has to end early to stop, so that it exports its traces before
     it is removed; `docker rm -f` alone kills it with whatever it had not exported."""
-    logger.warning('%s agent ran out of time; stopping it (session=%s, container=%s)',
-                   role, session_id, name)
+    logger.warning('%s agent %s; stopping it (session=%s, container=%s)',
+                   role, reason, session_id, name)
     try:
         await docker('stop', '-t', str(AGENT_STOP_GRACE_SECONDS), name,
                      timeout=AGENT_STOP_GRACE_SECONDS + 30)
@@ -728,7 +766,9 @@ async def run_agent(role: str, session_id: str, workspace: Path,
     setting_args = [argument for key in AGENT_SETTINGS if key in os.environ
                     for argument in ('-e', key)]
     logger.info('%s agent starting (session=%s, container=%s)', role, session_id, name)
-    kept = False
+    kept = interrupted = False
+    # Whether this run continues the one kept in `paused`, whose copy the workspace holds.
+    continuing = await run_sync((workspace / STATE_FILENAME).is_file)
     try:
         await _build_image(image_build, agent_image, log_path.parent / 'agent-build.log')
         await docker(
@@ -753,9 +793,32 @@ async def run_agent(role: str, session_id: str, workspace: Path,
             try:
                 await docker('wait', name, timeout=AGENT_TIMEOUT_SECONDS)
             except TimeoutError:
-                await _stop_agent(name, role, session_id)
+                await _stop_agent(name, role, session_id, 'ran out of time')
                 raise
+            except asyncio.CancelledError:
+                # Cancelled with its activity: stopped, the agent exports its observations
+                # under the stage's span, which `docker rm -f` below would lose.
+                await _stop_agent(name, role, session_id, 'was cancelled')
+                if not worker_shutting_down():
+                    raise
+                # The worker shuts down, as for a redeploy: the agent saved where it was,
+                # which is kept for the stage's next attempt, on the next worker.
+                task = asyncio.current_task()
+                if task is not None:
+                    task.uncancel()
+                interrupted = True
         state = json.loads(await docker('inspect', '--format', '{{json .State}}', name))
+        if interrupted:
+            if state['ExitCode'] == INTERRUPTED_EXIT:
+                try:
+                    await _keep_workspace(name, paused, _interrupted_state)
+                    kept = True
+                except Exception as exc:
+                    logger.warning('Could not keep the stopped %s agent\'s workspace: %s',
+                                   role, exc)
+            if not kept:
+                await _salvage_output(name, output, output_name)
+            raise AgentInterrupted(kept)
         try:
             agent_log = await docker('logs', '--tail', '200', name, timeout=30)
         except Exception as exc:
@@ -783,14 +846,16 @@ async def run_agent(role: str, session_id: str, workspace: Path,
             )
         await run_sync(output.mkdir)
         await docker('cp', name + f':/workspace/{output_name}/.', str(output))
-    except (AgentPaused, AgentLimited) as exc:
+    except (AgentPaused, AgentLimited, AgentInterrupted) as exc:
         logger.info('%s agent paused (session=%s): %s', role, session_id, exc)
         raise
     except Exception:
         logger.exception('%s agent failed (session=%s, container=%s)', role, session_id, name)
         raise
     finally:
-        if not kept:
+        # A continuing run its worker stopped before the agent saved anew keeps the
+        # workspace it continued (with its questions, say), for the next attempt.
+        if not kept and not (continuing and worker_shutting_down()):
             await run_sync(shutil.rmtree, paused, ignore_errors=True)
         try:
             await docker('rm', '-f', name, timeout=30)
