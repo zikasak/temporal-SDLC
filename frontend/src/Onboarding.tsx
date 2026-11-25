@@ -3,11 +3,11 @@ import { errorMessage, failure, isObject, readBody } from "./api";
 import { ApiModelSection, isApiModel, type ApiModel } from "./ApiModel";
 import { ArchitectureSection, architectureStructure, type ArchitectureStructure } from "./Architecture";
 import {
-  DeliveryResults, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress,
-  type DeliveryProgress, type GenerationStage,
+  DeliveryResults, OpenQuestionsForm, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress,
+  type DeliveryProgress, type GenerationStage, type OpenAnswers,
 } from "./Delivery";
 import ForkButton from "./ForkButton";
-import { AskedQuestions, QuestionForm, questionList, type Question } from "./Questions";
+import { AskedQuestions, questionList, type Question } from "./Questions";
 import RepositoryPicker, { RepositorySummary } from "./RepositoryPicker";
 import {
   repositoryCheckout, repositorySelection, selectionInput, type RepositoryCheckout, type RepositorySelection,
@@ -314,12 +314,51 @@ export default function Onboarding() {
     if (sent) setMessage("");
   }
 
-  function answerQuestions(answers: string[]) {
-    const content = asked.map((item, index) => `${item.question}\n→ ${answers[index]}`).join("\n\n");
-    return act((id) => post(`/${id}/answers`, { answers }), (current) => ({
-      ...current, status: "turn_running", error: null,
-      messages: [...current.messages, { role: "user", content, questions: [] }],
-    }), "Could not send the answers.");
+  /** Sends each group of the open questions on its own: the interviewer's answers to
+   * .../answers and each agent's to .../delivery/answers, one call per agent. */
+  async function sendOpenAnswers({ interviewer, agents }: OpenAnswers) {
+    if (!session) return [];
+    setSubmitting(true);
+    setError("");
+    const id = encodeURIComponent(session.session_id);
+    const sent: string[] = [];
+    const errors: string[] = [];
+    if (interviewer) {
+      try {
+        await post(`/${id}/answers`, { answers: interviewer });
+        sent.push("interviewer");
+      } catch (caught) {
+        errors.push(failure(caught, "Could not send the answers to the interviewer."));
+      }
+    }
+    for (const agent of agents) {
+      try {
+        await post(`/${id}/delivery/answers`, agent);
+        sent.push(agent.workflow_id);
+      } catch (caught) {
+        errors.push(failure(caught, "Could not send the answers to the agent."));
+      }
+    }
+    let next = session;
+    if (interviewer && sent.includes("interviewer")) {
+      const content = asked.map((item, index) => `${item.question}\n→ ${interviewer[index]}`).join("\n\n");
+      next = {
+        ...next, status: "turn_running", error: null,
+        messages: [...next.messages, { role: "user", content, questions: [] }],
+      };
+    }
+    for (const agent of agents) {
+      if (sent.includes(agent.workflow_id) && next.delivery) {
+        next = { ...next, delivery: answeredProgress(next.delivery, agent.workflow_id) };
+      }
+    }
+    if (sent.length > 0) {
+      setSession(next);
+      setRefreshKey((value) => value + 1);
+    }
+    if (errors.length > 0) setError(errors.join(" "));
+    setSubmitting(false);
+    return sent;
   }
 
   function decideContract(decision: Decision) {
@@ -363,12 +402,6 @@ export default function Onboarding() {
       ...current, error: null, status: "finalizing",
       review: { ...current.review, status: "running", error: null },
     }), "Could not retry the review round.");
-  }
-
-  function answerAgent(workflowId: string, answers: string[]) {
-    return act((id) => post(`/${id}/delivery/answers`, { workflow_id: workflowId, answers }),
-      (current) => ({ ...current, delivery: current.delivery && answeredProgress(current.delivery, workflowId) }),
-      "Could not send the answers.");
   }
 
   function decideFindings(instructions: string | null) {
@@ -480,6 +513,15 @@ export default function Onboarding() {
             <h2 id="onboarding-title">{session ? "Your review" : "New onboarding"}</h2>
           </div>
 
+          {!(session && session.status !== "awaiting_confirmation" && asked.length > 0) &&
+            (session?.delivery?.agent_questions.length ?? 0) > 0 && (
+            <div className="message-form">
+              <OpenQuestionsForm questions={[]} questionsKey={session?.messages.length ?? 0}
+                questionsDisabled progress={session?.delivery} submitting={submitting}
+                onSubmit={sendOpenAnswers} />
+            </div>
+          )}
+
           {session?.status === "awaiting_confirmation" ? (
             <div className="message-form contract-decision" role="group" aria-label="Existing contract">
               <p className="connector-error" role="alert">
@@ -510,9 +552,9 @@ export default function Onboarding() {
             </div>
           ) : session && asked.length > 0 ? (
             <div className="message-form">
-              <QuestionForm key={session.messages.length} questions={asked}
-                disabled={!canCompose} submitting={submitting}
-                onSubmit={answerQuestions} />
+              <OpenQuestionsForm questions={asked} questionsKey={session.messages.length}
+                questionsDisabled={!canCompose} progress={session.delivery} submitting={submitting}
+                onSubmit={sendOpenAnswers} />
               {session.review.questions_open && (
                 <>
                   <p className="field-hint">
@@ -707,7 +749,6 @@ export default function Onboarding() {
                   <DeliveryResults progress={session.delivery} onboarding retrying={retryingGeneration}
                     disabled={submitting || deliveryPending(session.delivery)}
                     onRetry={(stage) => void retryGeneration(stage)}
-                    answering={submitting} onAnswer={answerAgent}
                     onFindings={decideFindings} />
                 ) : <p role="status">Starting the delivery…</p>}
               </section>

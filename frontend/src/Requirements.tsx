@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { errorMessage, failure, readBody } from "./api";
 import {
-  DeliveryResults, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress,
-  type DeliveryProgress, type GenerationStage,
+  DeliveryResults, OpenQuestionsForm, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress,
+  type DeliveryProgress, type GenerationStage, type OpenAnswers,
 } from "./Delivery";
 import ForkButton from "./ForkButton";
 import { onboardingLink, startOnboarding } from "./Onboarding";
 import IntakeForm, { type Intake } from "./Intake";
-import { AskedQuestions, QuestionForm, questionList, type Question } from "./Questions";
+import { AskedQuestions, questionList, type Question } from "./Questions";
 import RepositoryPicker, { RepositorySummary } from "./RepositoryPicker";
 import { repositoryCheckout, repositorySelection, selectionInput, type RepositoryCheckout, type RepositorySelection } from "./github";
 import {
@@ -326,29 +326,6 @@ export default function Requirements() {
     }
   }
 
-  async function answerQuestions(answers: string[]) {
-    if (!session) return false;
-    setSubmitting(true);
-    setError("");
-    try {
-      await post(`/${encodeURIComponent(session.session_id)}/answers`, { answers });
-      const content = asked.map((item, index) => `${item.question}\n→ ${answers[index]}`).join("\n\n");
-      setSession({
-        ...session,
-        status: "turn_running",
-        error: null,
-        messages: [...session.messages, { role: "user", content, questions: [] }],
-      });
-      setRefreshKey((value) => value + 1);
-      return true;
-    } catch (caught) {
-      setError(failure(caught, "Could not send the answers."));
-      return false;
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
   async function decideFindings(instructions: string | null) {
     if (!session?.delivery) return false;
     setSubmitting(true);
@@ -367,22 +344,53 @@ export default function Requirements() {
     }
   }
 
-  async function answerAgent(workflowId: string, answers: string[]) {
-    if (!session?.delivery) return false;
+  /** Sends each group of the open questions on its own: the interviewer's answers to
+   * .../answers and each agent's to .../delivery/answers, one call per agent. */
+  async function sendOpenAnswers({ interviewer, agents }: OpenAnswers) {
+    if (!session) return [];
     setSubmitting(true);
     setError("");
-    try {
-      await post(`/${encodeURIComponent(session.session_id)}/delivery/answers`,
-        { workflow_id: workflowId, answers });
-      setSession({ ...session, delivery: answeredProgress(session.delivery, workflowId) });
-      setRefreshKey((value) => value + 1);
-      return true;
-    } catch (caught) {
-      setError(failure(caught, "Could not send the answers."));
-      return false;
-    } finally {
-      setSubmitting(false);
+    const id = encodeURIComponent(session.session_id);
+    const sent: string[] = [];
+    const errors: string[] = [];
+    if (interviewer) {
+      try {
+        await post(`/${id}/answers`, { answers: interviewer });
+        sent.push("interviewer");
+      } catch (caught) {
+        errors.push(failure(caught, "Could not send the answers to the interviewer."));
+      }
     }
+    for (const agent of agents) {
+      try {
+        await post(`/${id}/delivery/answers`, agent);
+        sent.push(agent.workflow_id);
+      } catch (caught) {
+        errors.push(failure(caught, "Could not send the answers to the agent."));
+      }
+    }
+    let next = session;
+    if (interviewer && sent.includes("interviewer")) {
+      const content = asked.map((item, index) => `${item.question}\n→ ${interviewer[index]}`).join("\n\n");
+      next = {
+        ...next,
+        status: "turn_running",
+        error: null,
+        messages: [...next.messages, { role: "user", content, questions: [] }],
+      };
+    }
+    for (const agent of agents) {
+      if (sent.includes(agent.workflow_id) && next.delivery) {
+        next = { ...next, delivery: answeredProgress(next.delivery, agent.workflow_id) };
+      }
+    }
+    if (sent.length > 0) {
+      setSession(next);
+      setRefreshKey((value) => value + 1);
+    }
+    if (errors.length > 0) setError(errors.join(" "));
+    setSubmitting(false);
+    return sent;
   }
 
   async function retryMessage() {
@@ -553,11 +561,19 @@ export default function Requirements() {
             <h2 id="interview-title">{session ? "Your answer" : "New session"}</h2>
           </div>
 
+          {!(session && asked.length > 0) && (session?.delivery?.agent_questions.length ?? 0) > 0 && (
+            <div className="message-form">
+              <OpenQuestionsForm questions={[]} questionsKey={session?.messages.length ?? 0}
+                questionsDisabled progress={session?.delivery} submitting={submitting}
+                onSubmit={sendOpenAnswers} />
+            </div>
+          )}
+
           {session && asked.length > 0 ? (
             <div className="message-form">
-              <QuestionForm key={session.messages.length} questions={asked}
-                disabled={!canCompose} submitting={submitting}
-                onSubmit={answerQuestions} />
+              <OpenQuestionsForm questions={asked} questionsKey={session.messages.length}
+                questionsDisabled={!canCompose} progress={session.delivery} submitting={submitting}
+                onSubmit={sendOpenAnswers} />
               {session.review.questions_open && (
                 <p className="field-hint">
                   Or write a message below the questions instead: it drops them, and the
@@ -795,7 +811,6 @@ export default function Requirements() {
                     documentation={session.kind === "docs"}
                     disabled={submitting || deliveryPending(session.delivery)}
                     onRetry={(stage) => void retryGeneration(stage)}
-                    answering={submitting} onAnswer={answerAgent}
                     onFindings={decideFindings} />
                 )}
               </section>

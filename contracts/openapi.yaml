@@ -57,10 +57,12 @@ paths:
       - FR-55
       - FR-83
       - FR-85
-      - FR-118
       - FR-119
       - FR-120
-      - FR-123
+      - FR-185
+      - FR-188
+      - FR-191
+      - TR-8
   /api-design/sessions/{session_id}/answers:
     post:
       operationId: postApiDesignSessionsBySessionIdAnswers
@@ -123,7 +125,12 @@ paths:
     post:
       operationId: postApiDesignSessionsBySessionIdDeliveryAnswers
       summary: Answer a delivery agent's questions
-      description: Resumes the paused coding agent of the named stage workflow.
+      description: 'Resumes the paused coding agent of the named stage workflow. The
+        web client shows each agent''s open questions (agent_questions) in the panel''s
+        left column, in one form with the interviewer''s open questions, and sends
+        each group separately: the interviewer''s answers to POST .../answers and
+        each agent''s answers here, one call per agent. Agent groups are ordered by
+        stage: implementation, diagnosis, tests, then documentation.'
       tags:
       - api-design
       parameters:
@@ -152,12 +159,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
         '404':
           description: Not Found
           content:
@@ -176,8 +177,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-14
+      - FR-185
+      - FR-190
+      - TR-8
   /api-design/sessions/{session_id}/delivery/findings/accept:
     post:
       operationId: postApiDesignSessionsBySessionIdDeliveryFindingsAccept
@@ -685,9 +695,9 @@ paths:
       - FR-80
       - FR-84
       - FR-86
-      - FR-118
       - FR-119
       - FR-120
+      - FR-188
   /architecture/sessions/{session_id}/answers:
     post:
       operationId: postArchitectureSessionsBySessionIdAnswers
@@ -2224,10 +2234,13 @@ paths:
       x-requirements:
       - FR-65
       - FR-66
-      - FR-118
       - FR-119
       - FR-120
-      - FR-123
+      - FR-185
+      - FR-187
+      - FR-188
+      - FR-191
+      - TR-8
   /onboarding/sessions/{session_id}/answers:
     post:
       operationId: postOnboardingSessionsBySessionIdAnswers
@@ -2432,13 +2445,17 @@ paths:
     post:
       operationId: postOnboardingSessionsBySessionIdDeliveryAnswers
       summary: Answer an onboarding agent's questions
-      description: Resumes the paused coding agent of the named stage workflow, including
+      description: 'Resumes the paused coding agent of the named stage workflow, including
         an agent asking whether a failing contract test reveals a bug in the existing
-        code. Like other agent questions, the agent waits for the answer without a
-        timeout. The code is changed only when the answer confirms the bug; otherwise
-        the tests and drafted contract are repaired. A result whose existing code
-        was changed is verified as usual once the tests pass, and its commit message
-        and pull request description say that the existing code was changed.
+        code, which the web client shows in the left column of the onboarding''s panel
+        like other agent questions. Like other agent questions, the agent waits for
+        the answer without a timeout. The code is changed only when the answer confirms
+        the bug; otherwise the tests and drafted contract are repaired. A result whose
+        existing code was changed is verified as usual once the tests pass, and its
+        commit message and pull request description say that the existing code was
+        changed. The web client shows agent questions in one form with the interviewer''s
+        open questions and sends each group separately, one call per agent here. Agent
+        groups are ordered by stage: implementation, diagnosis, tests, then documentation.'
       tags:
       - onboarding
       parameters:
@@ -2493,8 +2510,11 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-59
-      - FR-63
       - FR-65
+      - FR-185
+      - FR-187
+      - FR-190
+      - TR-8
   /onboarding/sessions/{session_id}/delivery/findings/accept:
     post:
       operationId: postOnboardingSessionsBySessionIdDeliveryFindingsAccept
@@ -3163,10 +3183,12 @@ paths:
       - FR-52
       - FR-54
       - FR-55
-      - FR-118
       - FR-119
       - FR-120
-      - FR-123
+      - FR-185
+      - FR-188
+      - FR-191
+      - TR-8
   /requirements/sessions/{session_id}/answers:
     post:
       operationId: postRequirementsSessionsBySessionIdAnswers
@@ -3290,7 +3312,12 @@ paths:
     post:
       operationId: postRequirementsSessionsBySessionIdDeliveryAnswers
       summary: Answer a delivery agent's questions
-      description: Resumes the paused coding agent of the named stage workflow.
+      description: 'Resumes the paused coding agent of the named stage workflow. The
+        web client shows each agent''s open questions (agent_questions) in the panel''s
+        left column, in one form with the interviewer''s open questions, and sends
+        each group separately: the interviewer''s answers to POST .../answers and
+        each agent''s answers here, one call per agent. Agent groups are ordered by
+        stage: implementation, diagnosis, tests, then documentation.'
       tags:
       - requirements
       parameters:
@@ -3319,12 +3346,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-        '503':
-          description: Service Unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
         '404':
           description: Not Found
           content:
@@ -3343,8 +3364,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-14
+      - FR-185
+      - FR-190
+      - TR-8
   /requirements/sessions/{session_id}/delivery/findings/accept:
     post:
       operationId: postRequirementsSessionsBySessionIdDeliveryFindingsAccept
@@ -4892,9 +4922,15 @@ components:
           type: array
           items:
             type: object
-          description: Questions of paused delivery agents. The other delivery progress
-            fields (code, implementation, tests, repairs and their errors) are returned
-            alongside.
+          description: 'Open questions of paused coding agents, one entry per waiting
+            agent: workflow_id (the stage workflow the answers are sent to through
+            POST .../delivery/answers), stage (which agent asked: implementation,
+            tests, documentation or diagnosis) and questions (Question list). The
+            web client shows them in the panel''s left column, where the interviewer''s
+            open questions are shown, not in the delivery progress section; each agent''s
+            group is answered separately. Unchanged in shape and content. The other
+            delivery progress fields (code, implementation, tests, repairs and their
+            errors) are returned alongside.'
         reviews:
           type: array
           items:
