@@ -1682,7 +1682,7 @@ h2 {
   }
 }
 
-/* The coding agents' open questions, in the left column above the interviewer's. Kept at
+/* The open questions in the left column: the interviewer's and the coding agents', in one form. Kept at
    their full height so that every question, option and send button can be scrolled to. */
 .agent-questions {
   flex-shrink: 0;
@@ -1690,6 +1690,7 @@ h2 {
   max-width: 100%;
 }
 
+.question-group,
 .agent-question-group {
   display: flex;
   flex-direction: column;
