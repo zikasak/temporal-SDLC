@@ -35,7 +35,7 @@ from tests.pipeline import (
 
 TASK_QUEUE = "api-design-test"
 # How long a session waits for the user before it expires, in the tests that let it.
-IDLE_TIMEOUT = timedelta(seconds=3)
+IDLE_TIMEOUT = timedelta(seconds=1.5)
 DOCUMENT = {"document_id": "0" * 32, "filename": "openapi.yaml",
             "content_type": "application/yaml", "size_bytes": 10, "revision": 1}
 

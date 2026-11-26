@@ -18,7 +18,11 @@ FAST_TASK_DISPATCH = [
     arg for setting in ('history.transferProcessorMaxPollRPS=10000',
                         'history.timerProcessorMaxPollRPS=10000',
                         'history.visibilityProcessorMaxPollRPS=10000',
-                        'history.workflowIdReuseMinimalInterval="0s"')
+                        'history.workflowIdReuseMinimalInterval="0s"',
+                        'frontend.rps=100000', 'frontend.namespaceRPS=100000',
+                        'frontend.globalNamespaceRPS=100000', 'frontend.namespaceCount=100000',
+                        'frontend.globalNamespaceCount=100000', 'matching.rps=100000',
+                        'history.rps=100000')
     for arg in ('--dynamic-config-value', setting)]
 
 
