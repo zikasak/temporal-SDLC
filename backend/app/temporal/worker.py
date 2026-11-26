@@ -14,7 +14,7 @@ with workflow.unsafe.imports_passed_through():
     from app.architecture.activities import architecture_turn, write_architecture_document
     from app.architecture.workflows import ArchitectureWorkflow
     from app.delivery.ci_activities import (
-        ci_failure_report, comment_pull_request, commit_checks,
+        ci_failure_report, comment_pull_request, commit_checks, pull_request_checks,
     )
     from app.delivery.mention_activities import (
         answer_mention, classify_mention, mention_body, record_new_mention, reply_to_mention,
@@ -91,7 +91,7 @@ async def main():
             revise_onboarding_architecture,
             classify_mention, answer_mention, reply_to_mention,
             record_new_mention, save_mention, mention_body,
-            pull_request_state, commit_checks, ci_failure_report, comment_pull_request,
+            pull_request_state, commit_checks, pull_request_checks, ci_failure_report, comment_pull_request,
             name_task_flow, review_requirements,
         ],
     )

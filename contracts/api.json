@@ -1,7 +1,7 @@
 {
   "endpoints": [
     {
-      "description": "The session's conversation, state and delivery progress, with lookup_requirements for explaining requirement IDs.",
+      "description": "The session's conversation, state and delivery progress, with lookup_requirements for explaining requirement IDs. The delivery progress's ci reports the CI of the pull request's current head commit.",
       "error_statuses": [
         401,
         404,
@@ -36,7 +36,12 @@
         "FR-185",
         "FR-188",
         "FR-191",
-        "TR-8"
+        "TR-8",
+        "FR-210",
+        "FR-211",
+        "FR-3",
+        "FR-212",
+        "FR-213"
       ],
       "response_array": false,
       "response_schema": "ApiDesignSession",
@@ -1174,7 +1179,7 @@
       "tag": "onboarding"
     },
     {
-      "description": "The onboarding's drafts, conversation, state and delivery progress, with lookup_requirements for explaining requirement IDs.",
+      "description": "The onboarding's drafts, conversation, state and delivery progress, with lookup_requirements for explaining requirement IDs. The delivery progress's ci reports the CI of the pull request's current head commit.",
       "error_statuses": [
         401,
         404,
@@ -1201,7 +1206,12 @@
         "FR-187",
         "FR-188",
         "FR-191",
-        "TR-8"
+        "TR-8",
+        "FR-210",
+        "FR-211",
+        "FR-3",
+        "FR-212",
+        "FR-213"
       ],
       "response_array": false,
       "response_schema": "OnboardingSession",
@@ -1641,7 +1651,7 @@
       "tag": "requirements"
     },
     {
-      "description": "The session's conversation, state and delivery progress, with lookup_requirements for explaining requirement IDs.",
+      "description": "The session's conversation, state and delivery progress, with lookup_requirements for explaining requirement IDs. The delivery progress's ci reports the CI of the pull request's current head commit.",
       "error_statuses": [
         401,
         404,
@@ -1674,7 +1684,12 @@
         "FR-185",
         "FR-188",
         "FR-191",
-        "TR-8"
+        "TR-8",
+        "FR-210",
+        "FR-211",
+        "FR-3",
+        "FR-212",
+        "FR-213"
       ],
       "response_array": false,
       "response_schema": "RequirementsSession",
@@ -3080,7 +3095,7 @@
         },
         {
           "array": false,
-          "description": "Progress of the delivery of a bugfix or documentation task, which runs as the delivery child of the task flow, started for a bugfix once its requirements review passed or the user continued despite it. A bugfix's progress also holds reviews (ReviewRound list), review_error, the open_findings flag, findings_acceptance (FindingsAcceptance), the reviewing and findings_open verification_status values and the publication (RepositoryPublication) with its verified flag, the first 20 open findings its commit message lists and findings_count, as in ApiDesignSession. Every delivery's progress also holds pull_request_status and, once a pushed delivery's pull request is open, pull_request (PullRequest), pull_request_error, pull_request_text_error, mentions (PullRequestMention list) of the app on that pull request and fix_flow_ids (the new task flows started by fix rounds after the flow closed), as in ApiDesignSession.",
+          "description": "Progress of the delivery of a bugfix or documentation task, which runs as the delivery child of the task flow, started for a bugfix once its requirements review passed or the user continued despite it. A bugfix's progress also holds reviews (ReviewRound list), review_error, the open_findings flag, findings_acceptance (FindingsAcceptance), the reviewing and findings_open verification_status values and the publication (RepositoryPublication) with its verified flag, the first 20 open findings its commit message lists and findings_count, as in ApiDesignSession. Every delivery's progress also holds pull_request_status and, once a pushed delivery's pull request is open, pull_request (PullRequest), pull_request_error, pull_request_text_error, mentions (PullRequestMention list) of the app on that pull request, fix_flow_ids (the new task flows started by fix rounds after the flow closed) and ci (CiChecks: the CI of the pull request's current head commit, with pushed_outside), as in ApiDesignSession.",
           "name": "delivery",
           "required": false,
           "type": "object"
@@ -3351,6 +3366,13 @@
           "name": "fix_flow_ids",
           "required": false,
           "type": "string"
+        },
+        {
+          "array": false,
+          "description": "The repository's CI on the pull request's current head commit while the delivery waits after its push (null before a pull request exists). Follows the head commit when someone else pushes to the pull request branch, resetting since for the new commit.",
+          "name": "ci",
+          "required": false,
+          "type": "CiChecks"
         }
       ]
     },
@@ -4136,7 +4158,7 @@
         },
         {
           "array": false,
-          "description": "Progress of the delivery child of the onboarding's task flow, which verifies and publishes the contract, contract tests and Dockerfile, with the same fields as an ApiDesignSession's delivery progress: verification_status, publication_status, verification, publication (its branch named onboarding/<source branch>-<short id>), agent_questions (including a coding agent's question whether a failing test reveals a bug in the existing code, which waits for an answer without a timeout), reviews, review_error, open_findings, findings_acceptance, pull_request_status, pull_request, pull_request_error, pull_request_text_error, mentions and fix_flow_ids (the new onboarding task flows started by fix rounds after the onboarding closed). When the existing code was changed after the user confirmed a bug, the result is still verified as usual once the tests pass, and the pushed commit's message and the pull request's description say that the existing code was changed. For an architecture-only onboarding, verification_status is not_applicable, reviews stay empty and open_findings is never raised; only the publication of contracts/architecture.md and contracts/architecture.json and its pull request are reported.",
+          "description": "Progress of the delivery child of the onboarding's task flow, which verifies and publishes the contract, contract tests and Dockerfile, with the same fields as an ApiDesignSession's delivery progress: verification_status, publication_status, verification, publication (its branch named onboarding/<source branch>-<short id>), agent_questions (including a coding agent's question whether a failing test reveals a bug in the existing code, which waits for an answer without a timeout), reviews, review_error, open_findings, findings_acceptance, pull_request_status, pull_request, pull_request_error, pull_request_text_error, mentions, fix_flow_ids (the new onboarding task flows started by fix rounds after the onboarding closed) and ci (CiChecks: the CI of the pull request's current head commit, with pushed_outside). When the existing code was changed after the user confirmed a bug, the result is still verified as usual once the tests pass, and the pushed commit's message and the pull request's description say that the existing code was changed. For an architecture-only onboarding, verification_status is not_applicable, reviews stay empty and open_findings is never raised; only the publication of contracts/architecture.md and contracts/architecture.json and its pull request are reported.",
           "name": "delivery",
           "required": false,
           "type": "object"
@@ -4765,6 +4787,102 @@
           "name": "workflow_types",
           "required": true,
           "type": "string"
+        }
+      ]
+    },
+    {
+      "description": "One GitHub check of the commit whose CI is reported, such as a GitHub Actions job.",
+      "name": "CiCheck",
+      "properties": [
+        {
+          "array": false,
+          "name": "name",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "queued, in_progress or completed, as GitHub reports it.",
+          "name": "status",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "success, failure, timed_out, cancelled, skipped, neutral... once completed; null before.",
+          "name": "conclusion",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "name": "url",
+          "required": false,
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "description": "The repository's CI on the pull request's current head commit while the delivery waits after its push. When someone other than the delivery pushes to the pull request branch, the watch moves to that new head commit; when the delivery later pushes its own commit on top, the watch moves to that one, with pushed_outside false, and automatic fix rounds resume. Deliveries already waiting on CI when this change is deployed switch to the pull request's head commit at their next check, and pushed_outside is computed then.",
+      "name": "CiChecks",
+      "properties": [
+        {
+          "array": false,
+          "description": "SHA of the pull request's current head commit whose checks are reported: the delivery's own pushed commit until someone else pushes to the pull request branch, then that newer head commit (breaking change: before, always the delivery's own pushed commit).",
+          "name": "commit",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "pending while the head commit's checks run or none has appeared yet; passed when all succeeded or were skipped; failed when one failed or timed out; inconclusive when they finished otherwise; none when no check appeared within the 10-minute grace period (CI_REGISTRATION_GRACE); timed_out when they ran longer than 3 hours (CI_CHECK_TIMEOUT); unavailable when the GitHub App may not read them. On a commit pushed outside the delivery: passed is treated like a pass on the delivery's own commit (the count of automatic fix rounds starts over); failed and timed_out are only reported here, with no automatic fix round and no pull request comment.",
+          "enum": [
+            "pending",
+            "passed",
+            "failed",
+            "inconclusive",
+            "none",
+            "timed_out",
+            "unavailable"
+          ],
+          "name": "status",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "When the delivery first saw this head commit; reset each time the pull request's head commit changes. The grace period and the timeout count from it.",
+          "format": "date-time",
+          "name": "since",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "array": true,
+          "name": "checks",
+          "required": true,
+          "type": "CiCheck"
+        },
+        {
+          "array": false,
+          "description": "Why the checks could not be read, while unavailable.",
+          "name": "error",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "array": false,
+          "description": "The automatic fix round that pushed the commit; 0 for any other push, including a commit pushed outside the delivery.",
+          "name": "fix_round",
+          "required": true,
+          "type": "integer"
+        },
+        {
+          "array": false,
+          "description": "True when the head commit's GitHub author or committer is not the GitHub App's bot account, that is, someone other than the delivery pushed it; the delivery page then shows \"(pushed outside the delivery)\" after the commit hash. False for a commit the delivery pushed, including one it pushes on top of an outside commit.",
+          "name": "pushed_outside",
+          "required": true,
+          "type": "boolean"
         }
       ]
     }
