@@ -120,7 +120,7 @@ class TestGracefulTermination:
     async def test_cancel_sends_sigterm_and_a_process_that_exits_is_not_waited_out(
         self, make_cli,
     ) -> None:
-        # requirement: FR-203, FR-204
+        # requirement: FR-206, FR-207
         cli = make_cli(exit_on_term=True)
         task = await start()
         pid = await cli.pid()
@@ -139,7 +139,7 @@ class TestGracefulTermination:
     async def test_timeout_sends_sigterm_and_a_process_that_exits_is_not_waited_out(
         self, make_cli,
     ) -> None:
-        # requirement: FR-203
+        # requirement: FR-206
         cli = make_cli(exit_on_term=True)
         task = await start(timeout=1)
         pid = await cli.pid()
@@ -158,7 +158,7 @@ class TestGracefulTermination:
     async def test_timeout_kills_a_process_ignoring_sigterm_only_after_the_grace_period(
         self, make_cli,
     ) -> None:
-        # requirement: FR-203
+        # requirement: FR-206
         cli = make_cli(exit_on_term=False)
         began = time.monotonic()
         task = await start(timeout=1)
@@ -183,7 +183,7 @@ class TestGracefulTermination:
     async def test_process_ignoring_sigterm_is_killed_after_the_grace_period_and_reaped(
         self, make_cli,
     ) -> None:
-        # requirement: FR-203, FR-206
+        # requirement: FR-206, FR-208
         cli = make_cli(exit_on_term=False)
         task = await start()
         pid = await cli.pid()
@@ -209,7 +209,7 @@ class TestReapIsShielded:
     async def test_second_cancel_during_the_wait_leaves_no_running_process(
         self, make_cli,
     ) -> None:
-        # requirement: FR-204, FR-207
+        # requirement: FR-207, FR-209
         cli = make_cli(exit_on_term=False)
         task = await start()
         pid = await cli.pid()
