@@ -34,14 +34,12 @@ from app.requirements import service as requirements_service
 from app.requirements.document import render_requirements_markdown
 from app.requirements.models import Requirement, RequirementsState, TaskKind
 from app.temporal import sessions
-from app.temporal.executions import ensure_search_attributes
 from app.temporal.workflows import ApiDesignWorkflow, RequirementsWorkflow
 from tests.pipeline import (
     ADDED_COMPONENT_TESTS, ADDED_TESTS, BASELINE_IMAGE, BROKEN_TEST, CHANGED_COMPONENT_IMAGE,
     ADDED_PAGE, ADDED_SEAM, CODE, COMPONENT_IMAGE, PAGE, SEAM, SEAM_IMAGE, FakeCodegenWorkflow,
     FakeStages, finished, legacy_patch_markers, patch_ids, stage_workers,
 )
-from tests.dev_server import start_dev_server
 
 TASK_QUEUE = "delivery-test"
 DOCUMENT = {"document_id": "0" * 32, "filename": "requirements.md",
@@ -144,15 +142,13 @@ class FakeActivities(FakeStages):
         return DOCUMENT
 
 
-@pytest.fixture(scope="module")
-async def env():
+@pytest.fixture
+def env(temporal_server):
     """The dev server: deliveries start their code generation with the repository's
     search attributes, which the time-skipping server cannot register, and it tells a
     parent that its child was terminated and terminates children with their parent. No
     test here needs time skipped."""
-    async with await start_dev_server() as env:
-        await ensure_search_attributes(env.client)
-        yield env
+    return temporal_server
 
 
 @pytest.fixture

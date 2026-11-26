@@ -10,7 +10,7 @@ from temporalio.exceptions import ApplicationError
 from temporalio.client import (
     WorkflowExecutionStatus, WorkflowUpdateFailedError, WorkflowUpdateStage,
 )
-from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
+from temporalio.testing import ActivityEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from app.api_design.models import ApiDesignState
@@ -19,7 +19,6 @@ from app.conversations.models import ConversationMessage
 from app.requirements import service
 from app.requirements.models import RequirementsState
 from app.temporal import sessions
-from app.temporal.executions import ensure_search_attributes
 from app.temporal.sessions import InvalidForkPoint
 from app.temporal import workflows as session_workflows
 from app.temporal.workflows import RequirementsWorkflow
@@ -28,7 +27,6 @@ from app.tasks.models import TaskFlowState
 from app.temporal.execution_fields import FLOW_STATE_ATTRIBUTE
 from app.tasks.workflows import TaskWorkflow
 from tests.pipeline import abandoned
-from tests.dev_server import start_dev_server
 
 TASK_QUEUE = "requirements-test"
 # How long a session waits for the user before it expires, in the tests that let it.
@@ -123,19 +121,16 @@ class FakeArchitecture:
         return ArchitectureResult(api_design_session_id=design_id, design=state.design)
 
 
-@pytest.fixture(scope="session")
-async def env():
-    async with await WorkflowEnvironment.start_time_skipping() as env:
-        yield env
+@pytest.fixture
+def env(time_skipping_server):
+    return time_skipping_server
 
 
-@pytest.fixture(scope="module")
-async def server():
+@pytest.fixture
+def server(temporal_server):
     """The dev server, for children started with the repository's search attributes,
     which the time-skipping one does not know."""
-    async with await start_dev_server() as server:
-        await ensure_search_attributes(server.client)
-        yield server
+    return temporal_server
 
 
 @asynccontextmanager

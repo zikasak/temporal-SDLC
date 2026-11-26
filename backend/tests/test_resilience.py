@@ -9,6 +9,7 @@ import os
 import signal
 import subprocess
 import tarfile
+import uuid
 from datetime import timedelta
 from pathlib import Path
 
@@ -785,13 +786,12 @@ async def test_checks_output_is_kept_to_its_end_within_a_byte_bound(tmp_path, mo
 
 @pytest.mark.parametrize('stopped_agent', [False, True])
 async def test_stage_activity_its_worker_shuts_down_runs_again_on_the_next_worker(
-        stopped_agent):
+        stopped_agent, temporal_server):
     from temporalio import activity
     from temporalio.worker import Worker
 
     from app.agent_workflows.interruption import InterruptionInterceptor
     from app.implementation.workflows import ImplementationWorkflow
-    from tests.dev_server import start_dev_server
 
     contexts: list[dict] = []
     started = asyncio.Event()
@@ -815,17 +815,17 @@ async def test_stage_activity_its_worker_shuts_down_runs_again_on_the_next_worke
                       workflows=[ImplementationWorkflow], activities=[implement_service],
                       interceptors=[InterruptionInterceptor()])
 
-    async with await start_dev_server() as env:
-        first = worker(env)
-        running = asyncio.create_task(first.run())
-        handle = await env.client.start_workflow(
-            ImplementationWorkflow.run, args=['session', {'language': 'java'}],
-            id=f'implementation-interrupted-{stopped_agent}', task_queue='interrupted-stage')
-        await asyncio.wait_for(started.wait(), 10)
-        # As a redeploy stops it: the running activity is cancelled, and fails as stopped.
-        await first.shutdown()
-        await running
-        async with worker(env):
-            result = await asyncio.wait_for(handle.result(), 30)
+    env = temporal_server
+    first = worker(env)
+    running = asyncio.create_task(first.run())
+    handle = await env.client.start_workflow(
+        ImplementationWorkflow.run, args=['session', {'language': 'java'}],
+        id=f'implementation-interrupted-{uuid.uuid4().hex}', task_queue='interrupted-stage')
+    await asyncio.wait_for(started.wait(), 10)
+    # As a redeploy stops it: the running activity is cancelled, and fails as stopped.
+    await first.shutdown()
+    await running
+    async with worker(env):
+        result = await asyncio.wait_for(handle.result(), 30)
     assert result == {'session_id': 'session', 'path': 'built'}
     assert contexts == [{'language': 'java'}, {'language': 'java', host.RESUME_KEY: True}]

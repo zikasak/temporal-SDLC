@@ -4,7 +4,6 @@ import pytest
 from temporalio import workflow
 from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ApplicationError
-from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from app.conversations import service
@@ -22,10 +21,9 @@ class FakeRequest:
         return f"Answer {len(messages)}"
 
 
-@pytest.fixture(scope="module")
-async def env():
-    async with await WorkflowEnvironment.start_time_skipping() as env:
-        yield env
+@pytest.fixture
+def env(time_skipping_server):
+    return time_skipping_server
 
 
 async def request(env, messages: list, parent: str = "") -> tuple[str, list]:
