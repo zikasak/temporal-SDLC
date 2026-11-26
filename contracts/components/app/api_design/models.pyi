@@ -32,3 +32,50 @@ class ApiDesignState:
     # The task flow the session belongs to; `pending` while the flow has not started it.
     task_flow_id: str | None = ...
     pending: bool = ...
+
+from typing import Literal
+from typing import NotRequired
+from typing import TypedDict
+class ApiModel(TypedDict):
+    info: ApiInfo
+    schemas: list[Schema]
+    endpoints: list[Endpoint]
+class ApiInfo(TypedDict):
+    title: str
+    version: str
+    description: str
+    auth: AuthScheme
+class Schema(TypedDict):
+    name: str
+    description: str
+    properties: list[Property]
+class Endpoint(TypedDict):
+    method: HttpMethod
+    path: str
+    summary: str
+    description: str
+    tag: str
+    parameters: list[Parameter]
+    request_schema: str | None
+    response_status: int
+    response_schema: str | None
+    response_array: bool
+    error_statuses: list[int]
+    requirement_ids: list[str]
+AuthScheme = Literal['none', 'bearer', 'api_key', 'basic']
+class Property(TypedDict):
+    name: str
+    type: str
+    required: bool
+    array: bool
+    format: NotRequired[str]
+    enum: NotRequired[list[str]]
+    description: NotRequired[str]
+HttpMethod = Literal['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
+class Parameter(TypedDict):
+    name: str
+    location: ParameterLocation
+    type: str
+    required: bool
+    description: NotRequired[str]
+ParameterLocation = Literal['path', 'query', 'header']

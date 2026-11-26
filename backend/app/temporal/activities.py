@@ -1,4 +1,6 @@
+import difflib
 import re
+import shutil
 import time
 from collections.abc import Callable
 from functools import partial
@@ -43,6 +45,7 @@ from app.delivery.pull_request import describe as pull_request_description
 from app.github import checkout as repository_checkout
 from app.github import client as github_client
 from app.github import service as github_service
+from app.github import work_refs
 from app.github import storage as github_storage
 from app.github.errors import GitHubError
 from app.github.models import (
@@ -226,13 +229,121 @@ def _workspace(session_id: str) -> SessionWorkspace:
     return SessionWorkspace.of(GENERATED_CODE_DIR, session_id)
 
 
+UNVERIFIED_MARKER = " (unverified)"
+# Files larger than this are named in a published commit's diff but not compared.
+DIFF_FILE_BYTES = 512 * 1024
+
+
+def _git_diffable(target: Path) -> bool:
+    """Whether the commit's diff is read from Git: a working copy, and Git to read it."""
+    return (target / ".git").is_dir() and shutil.which("git") is not None
+
+
+def _tree_snapshot(target: Path) -> dict[str, bytes | None]:
+    """The files of `target` outside .git by relative path; None for one too large to
+    compare. What the commit's diff is computed from without Git."""
+    files: dict[str, bytes | None] = {}
+    if not target.is_dir():
+        return files
+    for item in target.rglob("*"):
+        relative = item.relative_to(target)
+        if relative.parts[0] == ".git" or item.is_symlink() or not item.is_file():
+            continue
+        try:
+            files[relative.as_posix()] = (
+                None if item.stat().st_size > DIFF_FILE_BYTES else item.read_bytes())
+        except OSError:
+            continue
+    return files
+
+
+def _snapshot_diff(before: dict[str, bytes | None], after: dict[str, bytes | None]) -> str:
+    """A diff, file summary first, of what changed from `before` to `after`."""
+    changed = sorted(name for name in before.keys() | after.keys()
+                     if before.get(name) != after.get(name) or (name in before) != (name in after))
+    stat: list[str] = []
+    patches: list[str] = []
+    for name in changed:
+        old, new = before.get(name), after.get(name)
+        stat.append(f" {name} | {'deleted' if name not in after else 'added' if name not in before else 'changed'}")
+        try:
+            old_lines = [] if old is None else old.decode().splitlines(keepends=True)
+            new_lines = [] if new is None else new.decode().splitlines(keepends=True)
+        except UnicodeDecodeError:
+            patches.append(f"Binary file {name} differs\n")
+            continue
+        patches.append("".join(difflib.unified_diff(
+            old_lines, new_lines, f"a/{name}" if name in before else "/dev/null",
+            f"b/{name}" if name in after else "/dev/null", n=1)))
+    if not changed:
+        return ""
+    stat.append(f" {len(changed)} files changed")
+    return "\n".join(stat) + "\n\n" + "\n".join(patches)
+
+
+async def _commit_diff(target: Path, before: dict[str, bytes | None] | None) -> str:
+    """What the commit about to be pushed from `target` changes: with Git, the staged
+    working copy against its HEAD; else the change from the `before` snapshot."""
+    if before is not None:
+        after = await run_sync(_tree_snapshot, target)
+        text = _snapshot_diff(before, after)
+    else:
+        git = repository_checkout._git
+        await git("add", "--all", cwd=target)
+        stat = await git("diff", "--cached", "--no-color", "--no-ext-diff", "--stat=120",
+                         cwd=target)
+        patch = await git("diff", "--cached", "--no-color", "--no-ext-diff", "--unified=1",
+                          cwd=target)
+        text = f"{stat}\n\n{patch}" if stat else ""
+    text = text[:work_refs.DIFF_CHARS]
+    # Like the diffs of the wip/ commits, the diff ends its line, so that the prompt
+    # around it is the same.
+    return text if not text.strip() or text.endswith("\n") else text + "\n"
+
+
+async def _commit_message(target: Path, before: dict[str, bytes | None] | None,
+                          verified: bool) -> str | None:
+    """The LLM's message of the commit about to be pushed, written from its diff alone
+    with the prompt and in the format of the `wip/` commits; None when it could not write
+    one, so that the fixed subject is used. Never fails."""
+    try:
+        diff = await _commit_diff(target, before)
+        if not diff.strip():
+            return None
+        from app.agent_workflows.host import _work_message
+        return work_refs.clean_message(await _work_message(
+            "review", "publication", "verified" if verified else "unverified", diff))
+    except Exception as exc:
+        activity.logger.info("No LLM commit message for the published commit: %s: %s",
+                             type(exc).__name__, exc)
+        return None
+
+
+def _published_message(written: str | None, subject: str, verified: bool, branch: str,
+                       session_id: str, details: str, note: str) -> str:
+    """A published commit's message: the LLM's text, or the fixed `subject` without it,
+    marked as unverified when it is, then the lines every published commit carries."""
+    first, _, body = (written or subject).partition("\n")
+    first, body = first.strip(), body.strip()
+    if not verified and not first.endswith(UNVERIFIED_MARKER.strip()):
+        first += UNVERIFIED_MARKER
+    return (first + (f"\n\n{body}" if body else "")
+            + f"\n\nGenerated from {branch} by session {session_id}."
+            + (f"\n\n{details}" if details else "")
+            + ("" if verified else f"\n\n{note}"))
+
+
 async def _publish(workspace: SessionWorkspace, session_id: str,
                    repository: RepositorySelection, subject: str,
                    update: Callable[[], None], verified: bool = True,
                    note: str = UNVERIFIED_NOTE, branch: str | None = None,
                    details: str = "", resolved: str | None = None) -> RepositoryPublication:
     """Apply `update` to the workspace's checkout, commit it to a new branch and push it.
-    Remote commits that conflict with it fail the push with a non-retryable
+    The commit's message is written by the LLM from the commit's diff alone, with the
+    prompt and in the format of the `wip/` commits; `subject` is its subject only when the
+    LLM cannot write one, which never fails the push. Either way the message keeps the
+    ' (unverified)' marker when not `verified`, the 'Generated from' line, `details` and,
+    when not `verified`, `note`. Remote commits that conflict with it fail the push with a non-retryable
     PUSH_CONFLICT error whose details are the remote tip, the conflicting files and what
     those commits changed in them; `resolved` is a remote tip whose changes the sources
     were made to take in, so its conflicts are settled as the sources have them."""
@@ -240,14 +351,15 @@ async def _publish(workspace: SessionWorkspace, session_id: str,
     token, connection = await _github_token()
     bot = f"{connection['app_slug']}[bot]"
     try:
+        with_git = await run_sync(_git_diffable, target)
+        before = None if with_git else await run_sync(_tree_snapshot, target)
         await run_sync(update)
+        written = await _commit_message(target, before, verified)
         result = await repository_checkout.push(
             target, repository, token,
             branch=branch or repository_checkout.publication_branch(session_id),
-            message=(f"{subject}\n\n"
-                     f"Generated from {repository['branch']} by session {session_id}."
-                     + (f"\n\n{details}" if details else "")
-                     + ("" if verified else f"\n\n{note}")),
+            message=_published_message(written, subject, verified, repository['branch'],
+                                       session_id, details, note),
             author=(bot, f"{connection['bot_user_id']}+{bot}@users.noreply.github.com"),
             verified=verified, resolved=resolved,
         )

@@ -1420,8 +1420,47 @@
   },
   {
     "category": "functional",
-    "description": "When docker() is cancelled or its timeout expires while the docker process is still running, it first sends SIGTERM, waits up to 10 seconds for the process to exit, and sends SIGKILL only if the process is still running after those 10 seconds.",
+    "description": "The commit pushed when a delivery (new service, API change, bugfix or documentation), an onboarding or an architecture-only onboarding is published has a message written by an LLM from that commit's diff only, whose subject names the specific change instead of the fixed subject of the task kind.",
+    "id": "FR-201",
+    "priority": "must",
+    "rationale": "User chose every published commit, written from the pushed diff only.",
+    "title": "LLM writes the message of every published commit from its diff"
+  },
+  {
+    "category": "functional",
+    "description": "When the LLM cannot write a published commit's message (for example, it is unavailable), the commit is pushed with today's fixed message of the task kind and the push does not fail.",
+    "id": "FR-202",
+    "priority": "must",
+    "rationale": "User chose the fixed message as a fallback without failing the push.",
+    "title": "Fall back to today's fixed commit message"
+  },
+  {
+    "category": "functional",
+    "description": "The LLM-written messages of work-in-progress commits on wip/ branches are written with the same prompt and in the same format as those of published commits, so that both read alike.",
     "id": "FR-203",
+    "priority": "must",
+    "rationale": "User chose the same prompt and format for wip/ and published commits.",
+    "title": "wip/ commits use the same prompt and format as published commits"
+  },
+  {
+    "category": "functional",
+    "description": "Besides the LLM-written text, a published commit's message keeps everything it carries today: the \"(unverified)\" marker in the subject of an unverified commit, the list of open review findings, the notes (unverified, code changed, component tests) and the \"Generated from <branch> by session <id>.\" line.",
+    "id": "FR-204",
+    "priority": "must",
+    "rationale": "User chose to keep everything added today.",
+    "title": "Published commit keeps today's added parts"
+  },
+  {
+    "category": "functional",
+    "description": "A published bugfix commit's subject names the specific change rather than \"Fix the service and add regression tests\", and its LLM-written subject is at most 72 characters; with the LLM unavailable, the push succeeds and the commit has today's fixed subject.",
+    "id": "FR-205",
+    "priority": "must",
+    "rationale": "User's acceptance criteria, including the 72-character subject check.",
+    "title": "Acceptance: descriptive, bounded subject with a working fallback"
+  },
+  {
+    "description": "When docker() is cancelled or its timeout expires while the docker process is still running, it first sends SIGTERM, waits up to 10 seconds for the process to exit, and sends SIGKILL only if the process is still running after those 10 seconds.",
+    "id": "FR-206",
     "priority": "must",
     "rationale": "User chose SIGTERM first, then SIGKILL after 10 seconds.",
     "title": "docker() terminates gracefully before killing"
@@ -1429,7 +1468,7 @@
   {
     "category": "functional",
     "description": "docker()'s wait for the process it terminated or killed is shielded from a further cancellation, so that even when the calling task is cancelled again during that wait, the docker process has exited and been reaped before the cancellation propagates.",
-    "id": "FR-204",
+    "id": "FR-207",
     "priority": "must",
     "rationale": "User chose to make the reap safe against a second cancellation.",
     "title": "docker() always reaps the stopped process"
@@ -1437,7 +1476,7 @@
   {
     "category": "functional",
     "description": "A test runs docker() with a fake docker that ignores SIGTERM and writes its PID atomically, cancels the call, and shows that the call raises CancelledError, the fake is killed after the 10-second grace period, and os.kill(pid, 0) then raises ProcessLookupError.",
-    "id": "FR-206",
+    "id": "FR-208",
     "priority": "must",
     "rationale": "User's acceptance criterion.",
     "title": "Acceptance: a process ignoring SIGTERM is still killed and reaped"
@@ -1445,7 +1484,7 @@
   {
     "category": "functional",
     "description": "A test cancels a running docker() call, cancels it again while docker() waits for the stopped process, and shows that once the CancelledError reaches the caller, os.kill(pid, 0) for the fake docker's PID raises ProcessLookupError.",
-    "id": "FR-207",
+    "id": "FR-209",
     "priority": "must",
     "rationale": "User's acceptance criterion.",
     "title": "Acceptance: a second cancellation during the reap leaves no running process"
