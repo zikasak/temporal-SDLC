@@ -155,6 +155,31 @@ class TestGracefulTermination:
             f"docker() waited {elapsed:.1f}s for a process that exited on SIGTERM")
         assert_gone(pid, "the timed-out process was not reaped")
 
+    async def test_timeout_kills_a_process_ignoring_sigterm_only_after_the_grace_period(
+        self, make_cli,
+    ) -> None:
+        # requirement: FR-203
+        cli = make_cli(exit_on_term=False)
+        began = time.monotonic()
+        task = await start(timeout=1)
+        pid = await cli.pid()
+
+        # the timeout (1s) has expired by now: SIGTERM first, the process ignores it
+        await asyncio.sleep(max(0.0, began + 3 - time.monotonic()))
+        assert cli.terms() >= 1, "no SIGTERM reached the fake docker after its timeout expired"
+        assert alive(pid), "the process that ignores SIGTERM was killed before the grace period ended"
+        assert not task.done(), "docker() returned during the grace period of a running process"
+
+        await finished(task, 20, "docker() did not return after the grace period of the timeout")
+        elapsed = time.monotonic() - began
+
+        assert not task.cancelled(), "the timed-out docker() call raised CancelledError"
+        assert task.exception() is not None, "docker() returned normally although its timeout expired"
+        assert elapsed >= GRACE_SECONDS, (
+            f"the process was killed {elapsed:.1f}s after the call began, before the "
+            f"{GRACE_SECONDS}s grace period that follows the 1s timeout")
+        assert_gone(pid, "the process that ignored SIGTERM was not killed and reaped after the timeout")
+
     async def test_process_ignoring_sigterm_is_killed_after_the_grace_period_and_reaped(
         self, make_cli,
     ) -> None:
