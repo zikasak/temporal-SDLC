@@ -24,7 +24,9 @@ FILE_PURPOSES = {
 GUIDE = ('The contracts are too large to include here. This index lists every requirement, '
          'endpoint and schema; the complete text is in the read-only contract files. Before '
          'working on a requirement or endpoint, find it with search_contracts and read its '
-         'full definition with read_contract. Never rely on a title or summary alone.')
+         'full definition with read_contract; contract_schema shows an operation or a schema '
+         'of openapi.yaml with its references resolved. Never rely on a title or summary '
+         'alone.')
 
 
 def on_demand_contracts(context: dict[str, Any], embedded_chars: int, limit: int,

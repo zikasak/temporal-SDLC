@@ -10,6 +10,7 @@ from functools import partial
 from pathlib import Path
 
 import pytest
+import yaml
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
@@ -358,6 +359,47 @@ def test_contract_files_are_read_and_searched_but_never_written(tmp_path):
         with pytest.raises(ValueError, match='Path must be inside'):
             tools[name].invoke(args)
     assert tools['list_files'].invoke({}) == 'No files found'
+
+
+def test_contract_schema_shows_an_operation_or_a_schema_with_its_references_resolved(tmp_path):
+    supplied = tmp_path / 'contracts'
+    supplied.mkdir()
+    (supplied / 'openapi.yaml').write_text('''
+paths:
+  /sessions/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getSession
+      responses:
+        '200':
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/Session'}}
+components:
+  schemas:
+    Session:
+      type: object
+      properties:
+        status: {$ref: '#/components/schemas/Status'}
+        parent: {$ref: '#/components/schemas/Session'}
+    Status: {type: string, enum: [open, closed]}
+''')
+    contract_schema = {item.name: item for item in runtime.workspace_tools(
+        tmp_path / 'tests', supplied)}['contract_schema']
+    session = {'type': 'object', 'properties': {
+        'status': {'type': 'string', 'enum': ['open', 'closed']},
+        'parent': {'$ref': '#/components/schemas/Session', 'recursive': True}}}
+
+    assert yaml.safe_load(contract_schema.invoke({'name': 'getSession'})) == {
+        'operationId': 'getSession', 'method': 'GET', 'path': '/sessions/{id}',
+        'parameters': [{'name': 'id', 'in': 'path', 'required': True,
+                        'schema': {'type': 'string'}}],
+        'responses': {'200': {'content': {'application/json': {'schema': session}}}}}
+    assert yaml.safe_load(contract_schema.invoke({'name': 'Session'})) == {
+        'Session': session}
+    with pytest.raises(ValueError, match='No operationId or schema named'):
+        contract_schema.invoke({'name': 'getOrders'})
+    with pytest.raises(ValueError, match='Path must be inside'):
+        contract_schema.invoke({'name': 'Session', 'contract': '../secret.yaml'})
 
 
 @pytest.mark.parametrize('prepare_inputs', [

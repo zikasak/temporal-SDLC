@@ -1,8 +1,11 @@
 // Loaded into every `pi` process started by ChatPi (app/llm/pi.py). Pi runs the flow
 // natively: the flow's tools come from the session's MCP server, and after each model
 // turn the session decides whether Pi goes on (a paused flow or a spent turn budget
-// stops it) and what the model reads before its next request.
+// stops it) and what the model reads before its next request. A summary of the history
+// keeps what the stage's checkpoint prompt asks for, and is followed by what the session
+// pins: the task's inputs and notes, which the summary would otherwise replace.
 import { readFileSync } from "node:fs";
+import { compact } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: any) {
 	const config = JSON.parse(process.env.PI_FLOW_CONFIG!);
@@ -29,6 +32,63 @@ export default function (pi: any) {
 			// Declared to the model like built-in tools, and callable from codemode scripts too.
 			exposure: "direct",
 			timeout: config.toolTimeout,
+		});
+	}
+	if (config.compactionPrompt) {
+		const instructions = readFileSync(config.compactionPrompt, "utf8");
+		// Pi's own summary, as its automatic compaction makes it, with the stage's
+		// instructions; any failure leaves it to Pi's own summary.
+		pi.on("session_before_compact", async (event: any, ctx: any) => {
+			const model = ctx.model;
+			if (!model) return;
+			try {
+				const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+				if (!auth.ok) return;
+				const compaction = await compact(
+					event.preparation,
+					auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model,
+					auth.apiKey,
+					auth.headers,
+					instructions,
+					event.signal,
+					pi.getThinkingLevel(),
+				);
+				return { compaction };
+			} catch (error) {
+				if (event.signal?.aborted) throw error;
+				console.error(`The stage's summary failed; Pi summarizes on its own: ${error}`);
+			}
+		});
+	}
+	if (config.pinned) {
+		// Asked for once per summary, so the requests that follow it stay the same.
+		let pinned: { summary: number; text: string } | undefined;
+		pi.on("context", async (event: any) => {
+			const messages = event.messages;
+			const at = messages.findLastIndex((message: any) => message.role === "compactionSummary");
+			if (at < 0) return;
+			const summary = messages[at].timestamp;
+			if (pinned?.summary !== summary) {
+				try {
+					const response = await fetch(`${config.url}/pinned`, {
+						method: "POST",
+						headers: { Authorization: `Bearer ${token}` },
+					});
+					if (!response.ok) throw new Error(`HTTP ${response.status}`);
+					pinned = { summary, text: (await response.json()).text };
+				} catch (error) {
+					console.error(`The flow did not say what follows the summary: ${error}`);
+					return;
+				}
+			}
+			const message = {
+				role: "custom",
+				customType: "flow-pinned",
+				content: pinned!.text,
+				display: false,
+				timestamp: summary,
+			};
+			return { messages: [...messages.slice(0, at + 1), message, ...messages.slice(at + 1)] };
 		});
 	}
 	pi.on("turn_end", async (event: any, ctx: any) => {

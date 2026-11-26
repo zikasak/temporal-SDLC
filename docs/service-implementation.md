@@ -324,6 +324,14 @@ at least the latest) are kept verbatim; current code is re-read from disk. The t
 reaches coding containers in their model settings snapshot. Claude uses native
 compaction instead, and its threshold is not used.
 
+Pi's compaction summarizes the whole conversation, the task's first message too. The
+application's Pi extension therefore follows each summary with a pinned message: the
+checkpoint notice, the agent's notes so far (from the `note` tool of stages with working
+notes, such as review and routing) and the task's inputs as they were given. It is read
+once per summary, so the requests after it keep one prefix. A stage with its own checkpoint
+prompt (review, routing) has Pi's summary keep what that prompt asks for, as its additional
+focus; without one, or if that summary fails, Pi summarizes as it does by default.
+
 The application loop reports the remaining turn budget during its last ten turns,
 asking the agent to finish its required files. History compaction does not reset the
 turn budget. The review stage ends as soon as it writes a valid `findings.json`, including
@@ -370,8 +378,10 @@ are supplied on demand instead. `/workspace/input.json` then holds an index of e
 requirement (ID, category, priority, title), endpoint (operation, summary, requirement
 IDs) and schema name, and the complete documents are written to `/workspace/contracts/`
 (`requirements.json`, `openapi.yaml`, and `requirements.md` when there is a narrative or
-unrecognised document). The agent gets two extra read-only tools, `read_contract` and
-`search_contracts`, confined to that directory, which lies outside the agent's project
+unrecognised document). The agent gets three extra read-only tools, `read_contract`,
+`search_contracts` and `contract_schema` (an operation, by `operationId`, or a schema of
+`openapi.yaml` with every local `$ref` resolved), confined to that directory, which lies
+outside the agent's project
 and is not the repository's own `contracts/` (see
 [Working in the repository](#working-in-the-repository)). Smaller contracts are embedded
 exactly as described here.

@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import shutil
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -16,7 +17,7 @@ from app.agent_workflows import runtime
 from app.implementation.agent import validate_completion
 from app.llm.factory import create_adapter
 from app.llm.pi import CODEMODE_GUIDANCE, ChatPi
-from app.settings.models import ModelSettings
+from app.settings.models import SETTINGS_FILENAME, ModelSettings
 
 needs_pi = pytest.mark.skipif(shutil.which('pi') is None, reason='the Pi CLI is not installed')
 
@@ -129,6 +130,40 @@ async def test_authoring_stops_without_another_model_request(pi_http, tmp_path, 
         assert requests[1]['messages'][:len(requests[0]['messages'])] == requests[0]['messages']
         assert 'EUR' in str(requests[1]['messages'][len(requests[0]['messages']):])
         assert not (tmp_path / runtime.STATE_FILENAME).exists()
+
+
+@needs_pi
+async def test_a_summary_keeps_the_stage_checkpoint_and_is_followed_by_inputs_and_notes(
+        pi_http, tmp_path):
+    replies, requests = pi_http
+    (tmp_path / SETTINGS_FILENAME).write_text(ModelSettings(
+        adapter='openai', model='test-model', compaction_tokens=4000).model_dump_json())
+    root = tmp_path / 'service'
+    root.mkdir()
+    # Four reads of it outgrow the threshold and the recent tokens Pi keeps.
+    (root / 'large.txt').write_text(('x' * 99 + '\n') * 300)
+    fact = 'Orders.tsx:120 renders the gathered requirements'
+    replies.extend([
+        [native_call('note', 'note', text=fact),
+         native_call('write', 'write_file', path='Dockerfile', content='FROM scratch'),
+         *(native_call(f'read_{i}', 'read_file', path='large.txt') for i in range(4))],
+        text('Summary of the reads'),
+        text('Finished'),
+    ])
+
+    await runtime.run_agent(replace(profile(root), working_notes=True,
+                                    checkpoint_prompt='Keep every route decided.',
+                                    initial_messages=['The brief']))
+
+    summarizing, after = requests[1], requests[2]
+    assert content_text(summarizing['messages'][-1]).endswith(
+        'Additional focus: Keep every route decided.')
+    # The summary, then what it replaced and what the session pins, before the kept turn.
+    assert 'Summary of the reads' in content_text(after['messages'][1])
+    assert content_text(after['messages'][2]) == (
+        f'{runtime.CHECKPOINT_NOTICE}\nYour notes so far:\n- {fact}\n\n'
+        f'{runtime.PINNED_INPUTS}\nThe brief')
+    assert after['messages'][3]['role'] == 'assistant'
 
 
 @needs_pi
