@@ -2,6 +2,8 @@
 test and changes no code."""
 import asyncio
 import json
+import subprocess
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -93,6 +95,17 @@ model client given a fake transport). A requirement is `component` when it is no
 is not needed: a stubbed symbol must already exist with the stubbed signature, or the
 check fails, unless you list it in the seam's `added`.
 
+Prefer explicit-input seams over implicit-lookup wrappers: when the code already has a
+function or method that takes its dependencies, workspace, checkout, or client directly as
+arguments (such as `*_from(workspace, ...)` beside a wrapper taking only `session_id`),
+route to the explicit-input seam so tests pass inputs directly instead of reconstructing
+worker disk state or globals. Only when no explicit-input seam exists and an ID-based
+wrapper reads hidden global state or directories (such as a session directory under a
+configured root), either add a narrow explicit-input seam in `added` (calling it from the
+wrapper with no behaviour change) when appropriate, or stub every lookup/config symbol it
+uses and state the exact directory layout, environment variables, and failure preconditions
+in the contract.
+
 Only when no existing interface can observe the requirement, the change may add the
 narrowest one that can, before anything is fixed: an entry point the code lacks, such as
 a workflow's signal, update or query, or a method of an existing class, through which the
@@ -122,6 +135,18 @@ whole other workflow of the code to run, rather than a fake of it, is observed a
 workflow's own seam, or is `unobservable` when none is narrow enough. Prefer `contract` whenever HTTP
 can observe the requirement, an existing seam over an added one, and choose
 `unobservable` only when no seam exists or could be added this way.
+
+Before finishing, verify every `component` route from the test author's point of view
+(assuming zero access to service source):
+- Every argument and return type can be constructed or read from the stubs alone (no
+  unstubbed custom types or unexplained dict shapes).
+- Any file, directory, environment variable, or session/worker state resolved implicitly
+  by an ID or global (rather than passed as an argument) is either avoided via an
+  explicit-input seam or has its lookup/config symbols stubbed with exact paths,
+  preconditions, and failure behavior stated in the docstring (or `reason` for a
+  published symbol).
+- Every external or side-effecting collaborator is stubbed for faking or named as running
+  as it is.
 
 {parts}{instructions}
 
@@ -226,6 +251,7 @@ MODULE_SUFFIXES = ('.pyi', '.py', '.d.ts', '.tsx', '.ts', '.java')
 LISTED_MODULES = 60
 # How many times a failed check of the routing is sent back to the running agent.
 COMPLETION_FEEDBACK = 5
+STUB_PLACEHOLDER = 'TODO: state the behaviour the brief or the existing contract asks for.'
 
 
 def module_key(name: str) -> str:
@@ -357,6 +383,32 @@ def _check_routing(root: Path, seam_modules: bool) -> None:
             + '. '.join(problems) + '. Name each seam module (and each module of its '
             'added_elsewhere) as its stub\'s module, as listed, or write the missing stub '
             'at that module\'s path.')
+    if seam_modules and (root / 'repository').is_dir() and (
+            root / COMPONENTS / 'runtime.json').is_file():
+        _check_python_stubs(root)
+
+
+def _check_python_stubs(root: Path) -> None:
+    """When running in a Python routing workspace, catch placeholder docstrings and
+    unstubbed collaborators while the agent still has turns to fix them."""
+    placeholders = [
+        file.relative_to(root).as_posix()
+        for file in sorted((root / COMPONENTS).rglob('*.pyi'))
+        if file.is_file() and not file.is_symlink()
+        and STUB_PLACEHOLDER in file.read_text(encoding='utf-8', errors='replace')
+    ]
+    if placeholders:
+        raise RuntimeError(
+            'These stubs still hold placeholder docstrings: '
+            + ', '.join(placeholders[:20])
+            + '. Replace each placeholder with the behaviour the symbol has to have.')
+    make_stub = root.parent / 'tools' / 'make_stub.py'
+    if make_stub.is_file():
+        result = subprocess.run([sys.executable, str(make_stub), '--check'], cwd=root,
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            raise RuntimeError(detail or 'make_stub.py --check failed')
 
 
 async def main() -> None:
