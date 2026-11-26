@@ -1,6 +1,7 @@
 import difflib
 import re
 import shutil
+import tempfile
 import time
 from collections.abc import Callable
 from functools import partial
@@ -22,8 +23,8 @@ from app.api_design.prompt import api_turn_messages
 from app.conversations.models import ConversationMessage
 from app.config import GENERATED_CODE_DIR
 from app.delivery.contract import (
-    ContractError, RepositoryContract, read_contract, read_service_contract, write_architecture,
-    write_contract,
+    ContractError, RepositoryContract, merge_contracts, read_contract, read_service_contract,
+    write_architecture, write_contract,
 )
 from app.documentation.activities import is_documentation_file
 from app.documents import (
@@ -230,6 +231,8 @@ def _workspace(session_id: str) -> SessionWorkspace:
 
 
 UNVERIFIED_MARKER = " (unverified)"
+# How many conflicting files the message of a base merge commit names.
+LISTED_CONFLICTS = 20
 # Files larger than this are named in a published commit's diff but not compared.
 DIFF_FILE_BYTES = 512 * 1024
 
@@ -354,6 +357,9 @@ async def _publish(workspace: SessionWorkspace, session_id: str,
         with_git = await run_sync(_git_diffable, target)
         before = None if with_git else await run_sync(_tree_snapshot, target)
         await run_sync(update)
+        # The sources were written as they were made, which may be before the base
+        # branch was merged into the branch: what that merge brought in stays.
+        await repository_checkout.keep_base_merge(target, merge_contracts)
         written = await _commit_message(target, before, verified)
         result = await repository_checkout.push(
             target, repository, token,
@@ -645,6 +651,133 @@ async def pull_request_state(full_name: str, number: int) -> dict[str, Any]:
             type='PullRequestError', non_retryable=True)
     return {'state': 'closed' if current['state'] == 'closed' else 'open',
             'merged': bool(current['merged'])}
+
+
+@activity.defn
+async def pull_request_conflicts(full_name: str, number: int) -> dict[str, Any]:
+    """Activity 'pull_request_conflicts' (task queue of the delivery, like the other
+    activities of the delivery): how open pull request `number` of repository `full_name`
+    ('owner/name') stands with its base branch on GitHub, as {'conflicting': bool,
+    'base': base branch name, 'base_commit': tip commit of the base branch, 'files':
+    [paths that conflict], 'changes': text of what the base branch changed in them}.
+    A waiting delivery or onboarding (with a pull request and a repository) runs it, args
+    [full_name, number], in its periodic check every PULL_REQUEST_CHECK_INTERVAL, right
+    after 'pull_request_state' found the pull request open; a failed run changes nothing.
+    It also runs when the signal 'pull_request_conflicted' arrives (see
+    PullRequestWait.pull_request_conflicted). A result with conflicting true starts a base
+    merge fix round (see publish_base_merge) unless one is already running or queued for
+    that pull request, however many signals and checks report it."""
+    token, _ = await _github_token()
+    try:
+        current = await github_client.get_pull_request_mergeable(token, full_name, number)
+    except GitHubError as exc:
+        activity.logger.warning("Could not read pull request #%s of %s: %s",
+                                number, full_name, exc)
+        raise ApplicationError(str(exc), type='PullRequestError',
+                               non_retryable=True) from exc
+    if current is None:
+        raise ApplicationError(f"Pull request #{number} of {full_name} was not found.",
+                               type='PullRequestError', non_retryable=True)
+    base = current['base']
+    if current['state'] != 'open' or current['merged'] or current['mergeable'] is True:
+        # Only an open pull request GitHub cannot merge, or has not decided about yet,
+        # is worked out here.
+        return {'conflicting': False, 'base': base, 'base_commit': '', 'files': [],
+                'changes': ''}
+    try:
+        temporary = Path(await run_sync(tempfile.mkdtemp))
+        try:
+            found = await repository_checkout.base_conflicts(
+                temporary / 'merge', full_name, token, number, base)
+        finally:
+            await run_sync(partial(shutil.rmtree, temporary, ignore_errors=True))
+    except (repository_checkout.CheckoutError, OSError) as exc:
+        activity.logger.warning("Could not merge pull request #%s of %s with %s: %s",
+                                number, full_name, base, exc)
+        raise ApplicationError(str(exc)) from exc
+    activity.logger.info("Pull request #%s of %s %s %s", number, full_name,
+                         'conflicts with' if found['conflicting'] else 'merges cleanly into',
+                         base)
+    return {**found, 'base': base}
+
+
+@activity.defn
+async def publish_base_merge(
+    session_id: str, repository: Any, base_commit: str, files: list[str],
+) -> Any:
+    """Activity 'publish_base_merge': push the session's sources, as the base merge fix
+    round left them, to the pull request branch as a merge commit that has `base_commit`
+    (the base branch's tip) and the branch's own tip as parents; afterwards GitHub reports
+    the pull request mergeable. Args [session_id, repository, base_commit, files]; returns
+    the publication {'branch', 'commit', 'url', 'verified', 'ignored', 'ignored_count'}.
+    Fails with an ApplicationError (non-retryable) when it cannot push.
+
+    How a delivery or onboarding workflow uses it after 'pull_request_conflicts' reported
+    conflicts (round number n counts with the push-conflict rounds towards
+    MAX_MERGE_FIX_ROUNDS = 2 in a row, state.merge_fix = {'commit': base_commit, 'files',
+    'round': n}):
+    - It runs activity 'comment_pull_request' (args [full_name, number, text] -> comment
+      URL) with a text naming the conflicting files and 'round n of 2', then the fix round
+      (the delivery's usual agent and, for new service, API change and bugfix deliveries
+      and onboardings producing the full contract, verification and code review), then
+      this activity, then 'comment_pull_request' again with the outcome (the merge commit
+      pushed, or what failed).
+    - A documentation-only delivery pushes the merge right after its fix round, and an
+      architecture-only onboarding runs no agent: it calls this activity right away; both
+      without contract tests, verification or code review.
+    - When round 2 has ended and the pull request still conflicts, no round starts; it
+      comments once that the conflict remains and keeps waiting for the user.
+    The round and its outcome show in the progress the 'get_state' query reports."""
+    workspace = _workspace(session_id)
+    target = workspace.checkout
+    if not await run_sync(target.is_dir):
+        raise ApplicationError("The repository checkout is unavailable.", non_retryable=True)
+    selection = cast(RepositorySelection, repository)
+    token, connection = await _github_token()
+    bot = f"{connection['app_slug']}[bot]"
+    branches = [repository_checkout.publication_branch(session_id),
+                onboarding_branch(selection['branch'], session_id)]
+    try:
+        current = await repository_checkout._git(
+            'rev-parse', '--abbrev-ref', 'HEAD', cwd=target)
+    except repository_checkout.CheckoutError:
+        current = ''
+    if current in branches:
+        # The branch this session pushed last.
+        branches.remove(current)
+        branches.insert(0, current)
+    written = workspace.documentation
+
+    def resolve(path: str) -> Path | None:
+        # Documentation its author settled; anything else the push of the round's
+        # sources already put on the branch, which the merge keeps.
+        candidate = written / path
+        try:
+            inside = candidate.resolve().is_relative_to(written.resolve())
+        except OSError:
+            return None
+        return candidate if inside else None
+
+    named = ", ".join(files[:LISTED_CONFLICTS]) + (
+        f" and {len(files) - LISTED_CONFLICTS} more files"
+        if len(files) > LISTED_CONFLICTS else "")
+    message = (f"Merge the base branch into the pull request branch\n\n"
+               f"Merged {base_commit} of the base branch; the conflicts"
+               + (f" in {named}" if named else "")
+               + " were settled by an automatic fix round."
+               + f"\n\nGenerated by session {session_id}.")
+    try:
+        result = await repository_checkout.merge_base_branch(
+            target, selection, token, branches=branches, base_commit=base_commit,
+            resolve=resolve, message=message, combine=merge_contracts,
+            author=(bot, f"{connection['bot_user_id']}+{bot}@users.noreply.github.com"))
+    except (repository_checkout.CheckoutError, GitHubError, OSError) as exc:
+        activity.logger.warning("Could not push the base merge of %s: %s",
+                                selection["full_name"], exc)
+        raise ApplicationError(str(exc), non_retryable=True) from exc
+    activity.logger.info("Merged %s into %s of %s (%s)", base_commit, result["branch"],
+                         selection["full_name"], result["commit"])
+    return result
 
 
 @activity.defn

@@ -19,6 +19,16 @@ export type RepositoryPublication = {
   branch: string; commit: string; url: string; ignored: string[]; ignored_count: number;
   // False when the sources were pushed without a check of them.
   verified: boolean;
+  // The automatic fix round that merges the base branch into the pull request branch
+  // after the pull request came to conflict with it, and how it stands.
+  base_merge?: BaseMerge;
+};
+
+export type BaseMerge = {
+  round: number; limit: number; base: string; files: string[];
+  status: "running" | "completed" | "error";
+  // The merge commit pushed, or why none was.
+  commit: string | null; error: string | null;
 };
 
 export type Connection = {
@@ -66,9 +76,24 @@ export function repositoryPublication(value: unknown, repository: RepositorySele
   }
   const ignored = Array.isArray(value.ignored)
     ? value.ignored.filter((item): item is string => typeof item === "string") : [];
+  const merge = baseMerge(value.base_merge);
   return { branch: value.branch, commit: value.commit, url: value.url, ignored,
     ignored_count: typeof value.ignored_count === "number" ? value.ignored_count : ignored.length,
-    verified: value.verified !== false };
+    verified: value.verified !== false, ...(merge ? { base_merge: merge } : {}) };
+}
+
+function baseMerge(value: unknown): BaseMerge | null {
+  if (!object(value) || typeof value.round !== "number" || typeof value.base !== "string" ||
+      !(value.status === "running" || value.status === "completed" || value.status === "error")) {
+    return null;
+  }
+  return {
+    round: value.round, limit: typeof value.limit === "number" ? value.limit : value.round,
+    base: value.base, status: value.status,
+    files: Array.isArray(value.files) ? value.files.filter((item): item is string => typeof item === "string") : [],
+    commit: typeof value.commit === "string" ? value.commit : null,
+    error: typeof value.error === "string" ? value.error : null,
+  };
 }
 
 export function connectionRecord(value: unknown): Connection {

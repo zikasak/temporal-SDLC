@@ -43,6 +43,18 @@ class PullRequestWait(FlowBase):
                                  'merged' if merged else 'closed without merging')
 
     @workflow.signal
+    def pull_request_conflicted(self, number: int) -> None:
+        """Signal 'pull_request_conflicted', arg [number]: GitHub reported (a pull_request
+        webhook event) that pull request `number` may conflict with its base branch. A
+        waiting delivery or onboarding whose pull request it is runs the activity
+        'pull_request_conflicts' at once instead of at the next check interval; a signal
+        about another pull request, or while no pull request exists, changes nothing."""
+        pull = self.progress.pull_request
+        if not pull or type(number) is not int or pull.get('number') != number:
+            return
+        self._conflict_requested = True
+
+    @workflow.signal
     def check_pull_request(self) -> None:
         """Check the pull request's state now rather than at the next interval, such as
         when the workers start; a run that began to wait before deliveries checked their
@@ -86,6 +98,10 @@ class PullRequestWait(FlowBase):
             workflow.logger.info('Pull request #%d found %s', number,
                                  'merged' if merged else 'closed without merging')
             self._closed = (number, merged)
+        elif current.get('state') == 'open' and not merged:
+            # An open pull request may conflict with its base branch, which moved on.
+            self._conflict_requested = False
+            await self._check_base_conflicts()
 
     async def _wait_for_pull_request(self) -> bool:
         """Wait for the user's next decision, a mention's fix round or the end of the
@@ -151,11 +167,17 @@ class PullRequestWait(FlowBase):
             try:
                 await workflow.wait_condition(
                     lambda: (self._next is not None or self._closing() is not None
-                             or self._check_requested),
+                             or self._check_requested or self._conflict_requested),
                     timeout=timeout)
             except asyncio.TimeoutError:
                 pass
             if self._next is not None or self._closing() is not None:
+                continue
+            if self._conflict_requested:
+                # GitHub reported that the pull request may conflict with its base branch.
+                self._conflict_requested = False
+                if workflow.now() < deadline:
+                    await self._check_base_conflicts()
                 continue
             if watching:
                 if self._check_requested:
