@@ -39,6 +39,8 @@ COMPONENT_SNAPSHOT = 'components'
 CONTRACTS_DIR = 'contracts'
 # Where, inside it, the component contract is: the stubs of the seams component tests use.
 COMPONENTS_DIR = 'components'
+# Where, inside it, the contracts of the repository's other parts are: contracts/parts/P/.
+CONTRACT_PARTS_DIR = 'parts'
 # A part's page contract, beside its component contract: contracts/parts/P/browser/.
 BROWSER_DIR = 'browser'
 # Where a part keeps its browser tests: P/browser-tests/.

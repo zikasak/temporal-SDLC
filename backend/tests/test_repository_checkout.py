@@ -329,16 +329,21 @@ async def test_a_change_with_component_tests_of_its_web_client_pushes_them_in_th
     assert "P/component-tests/" in message
 
 
-def test_writing_the_contract_keeps_the_component_contract(tmp_path):
-    for name in ("contracts/obsolete.json", "contracts/old/nested.json",
-                 "contracts/components/app/rooms.pyi"):
+def test_writing_the_contract_keeps_the_component_contracts_of_every_part(tmp_path):
+    """A delivery that does not route to a part leaves its stubs and page contract as
+    published: the repository's tests of that part are written against them."""
+    kept = ("contracts/components/app/rooms.pyi",
+            "contracts/parts/frontend/components/runtime.json",
+            "contracts/parts/frontend/browser/viewports.json",
+            "contracts/parts/frontend/browser/fixtures/getMe.json")
+    for name in ("contracts/obsolete.json", "contracts/old/nested.json", *kept):
         (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / name).write_text("before")
     write_contract(tmp_path, CONTRACT)
     assert read_contract(tmp_path) == CONTRACT
     assert not (tmp_path / "contracts/obsolete.json").exists()
     assert not (tmp_path / "contracts/old").exists()
-    assert (tmp_path / "contracts/components/app/rooms.pyi").read_text() == "before"
+    assert all((tmp_path / name).read_text() == "before" for name in kept)
 
 
 async def test_documentation_is_pushed_alone_and_marked_as_unverified(tmp_path, remote, repository_selection):

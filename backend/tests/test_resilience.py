@@ -21,7 +21,7 @@ from temporalio.testing import ActivityEnvironment
 from app import docker_agents
 from app.agent_workflows import host, runtime
 from app.agent_workflows.host import (
-    StageInputs, StageSpec, WorkTarget, copy_regular_files, run_stage,
+    STATUS_CHARS, StageInputs, StageSpec, WorkTarget, copy_regular_files, run_stage,
 )
 from app.agent_workflows.workflows import PROVIDER_WAIT_MAX, PROVIDER_WAIT_MIN, provider_wait
 from app.delivery.causes import failure_cause, with_cause
@@ -235,9 +235,10 @@ async def test_failed_agent_output_is_saved_before_the_failure_is_raised(tmp_pat
     monkeypatch.setattr(docker_agents, 'docker', docker)
     with pytest.raises(RuntimeError, match='exited with code 1'):
         await ActivityEnvironment().run(run_stage, _stage(tmp_path, []), 'session', {}, tmp_path)
-    # The status keeps the first 200 characters of the error, however long tmp_path is.
+    # The status keeps the first STATUS_CHARS characters of the error, however long
+    # tmp_path is.
     error = f'Documentation agent exited with code 1. Log: {tmp_path}/session/docs-stage/agent.log'
-    assert saved == [('agent failed: ' + error[:200], {'half.md'})]
+    assert saved == [('agent failed: ' + error[:STATUS_CHARS], {'half.md'})]
 
 
 @pytest.mark.parametrize('saved_state', [True, False])
