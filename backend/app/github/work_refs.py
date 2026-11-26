@@ -43,6 +43,7 @@ RECORD = 'work-refs.json'
 DIFF_CHARS = 20000
 SUBJECT_CHARS = 72
 BODY_CHARS = 2000
+BODY_LINES = 5
 SAVE_TIMEOUT = 300
 # Larger files stay out of the commit: GitHub refuses a push with any file over 100 MB,
 # and such a file, like a crashed process's core dump, is no source.
@@ -119,16 +120,24 @@ def fallback_message(stage: str, status: str, stat: str) -> str:
     return f'{subject[:SUBJECT_CHARS]}\n\n{stat[-BODY_CHARS:]}'.strip()
 
 
-def _clean_message(text: str | None) -> str | None:
+def clean_message(text: str | None) -> str | None:
+    """An LLM-written commit message as a commit carries it: a subject of at most
+    SUBJECT_CHARS characters, then at most BODY_LINES lines of body; None for no message."""
     if not text:
         return None
     text = re.sub(r'^```\w*\n|\n?```$', '', text.strip()).strip()
     lines = text.splitlines()
     if not lines or not lines[0].strip():
         return None
-    subject = lines[0].strip().strip('"')[:SUBJECT_CHARS]
-    body = '\n'.join(lines[1:]).strip()[:BODY_CHARS]
+    subject = lines[0].strip().strip('"').strip()[:SUBJECT_CHARS].rstrip()
+    if not subject:
+        return None
+    body_lines = [line.rstrip() for line in lines[1:] if line.strip()][:BODY_LINES]
+    body = '\n'.join(body_lines).strip()[:BODY_CHARS]
     return f'{subject}\n\n{body}'.strip()
+
+
+_clean_message = clean_message
 
 
 async def save_work(session_dir: Path, session_id: str, stage: str, tree: Path,

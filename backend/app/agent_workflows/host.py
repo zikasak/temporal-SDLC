@@ -160,7 +160,9 @@ async def _work_token() -> tuple[str, str]:
     return token, f"{bot}\n{connection['bot_user_id']}+{bot}@users.noreply.github.com"
 
 
-WORK_MESSAGE_PROMPT = """Write the Git commit message of a work-in-progress commit of a
+# The prompt of every LLM-written commit message: the work-in-progress commits of the
+# `wip/` branches and the published commits alike, so that both read alike.
+WORK_MESSAGE_PROMPT = """Write the Git commit message of a commit of a
 code-generating pipeline's {stage} stage ({status}), from its diff below. The first line is
 the subject: at most 72 characters, imperative mood, naming what changed. Then an empty
 line and at most five short lines on what changed and why. Plain text only, nothing else.

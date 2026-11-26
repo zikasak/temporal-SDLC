@@ -32,3 +32,16 @@ class RequirementsState:
     # The requirements review of a task: its ID and its state.
     review_id: str | None = ...
     review: Any = ...
+
+from typing import Literal
+from typing import NotRequired
+from typing import TypedDict
+class Requirement(TypedDict):
+    id: str
+    category: Category
+    title: str
+    description: str
+    priority: Priority
+    rationale: NotRequired[str]
+Category = Literal['functional', 'non_functional', 'technical']
+Priority = Literal['must', 'should', 'could']

@@ -1417,5 +1417,45 @@
     "priority": "must",
     "rationale": "User's acceptance criterion.",
     "title": "Acceptance: path-form seam routes, a missing stub still fails"
+  },
+  {
+    "category": "functional",
+    "description": "The commit pushed when a delivery (new service, API change, bugfix or documentation), an onboarding or an architecture-only onboarding is published has a message written by an LLM from that commit's diff only, whose subject names the specific change instead of the fixed subject of the task kind.",
+    "id": "FR-201",
+    "priority": "must",
+    "rationale": "User chose every published commit, written from the pushed diff only.",
+    "title": "LLM writes the message of every published commit from its diff"
+  },
+  {
+    "category": "functional",
+    "description": "When the LLM cannot write a published commit's message (for example, it is unavailable), the commit is pushed with today's fixed message of the task kind and the push does not fail.",
+    "id": "FR-202",
+    "priority": "must",
+    "rationale": "User chose the fixed message as a fallback without failing the push.",
+    "title": "Fall back to today's fixed commit message"
+  },
+  {
+    "category": "functional",
+    "description": "The LLM-written messages of work-in-progress commits on wip/ branches are written with the same prompt and in the same format as those of published commits, so that both read alike.",
+    "id": "FR-203",
+    "priority": "must",
+    "rationale": "User chose the same prompt and format for wip/ and published commits.",
+    "title": "wip/ commits use the same prompt and format as published commits"
+  },
+  {
+    "category": "functional",
+    "description": "Besides the LLM-written text, a published commit's message keeps everything it carries today: the \"(unverified)\" marker in the subject of an unverified commit, the list of open review findings, the notes (unverified, code changed, component tests) and the \"Generated from <branch> by session <id>.\" line.",
+    "id": "FR-204",
+    "priority": "must",
+    "rationale": "User chose to keep everything added today.",
+    "title": "Published commit keeps today's added parts"
+  },
+  {
+    "category": "functional",
+    "description": "A published bugfix commit's subject names the specific change rather than \"Fix the service and add regression tests\", and its LLM-written subject is at most 72 characters; with the LLM unavailable, the push succeeds and the commit has today's fixed subject.",
+    "id": "FR-205",
+    "priority": "must",
+    "rationale": "User's acceptance criteria, including the 72-character subject check.",
+    "title": "Acceptance: descriptive, bounded subject with a working fallback"
   }
 ]
