@@ -55,6 +55,8 @@ AGENT_TIMEOUT_SECONDS = 3600
 # (app.llm.claude.TRACE_EXPORT_TIMEOUT or app.llm.pi.SHUTDOWN_TIMEOUT, then the tracing
 # flush) before it is killed.
 AGENT_STOP_GRACE_SECONDS = 150
+# How many parallel test workers an agent's `pytest -n auto` starts: one per CPU it has.
+AGENT_TEST_WORKERS = 2
 # A level name near the start of a line: Python's `INFO name: ...`, Logback's
 # `12:00:00.000 [main] WARN ...`, Spring Boot's `<timestamp>  ERROR 1 --- ...`.
 _LINE_LEVEL = re.compile(r'\b(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL|CRITICAL)\b')
@@ -962,6 +964,10 @@ async def run_agent(role: str, session_id: str, workspace: Path,
             # No bytecode caches in the project: they were copied into what tests read as
             # text, and failed them in the sandbox only.
             '-e', 'PYTHONDONTWRITEBYTECODE=1',
+            # pytest-xdist's `-n auto` counts the host's cores, not the two CPUs above: a
+            # repository's pytest.ini with it started a worker, each with its own Temporal
+            # dev server, per host core, and the container's 4 GB killed the agent's CLI.
+            '-e', f'PYTEST_XDIST_AUTO_NUM_WORKERS={AGENT_TEST_WORKERS}',
             *openai_args, *trace_args, *setting_args, *adapter_args, agent_image, env=environment,
         )
         archive = workspace.parent / 'workspace.tar'

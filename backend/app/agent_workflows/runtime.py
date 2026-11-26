@@ -321,6 +321,11 @@ def workspace_tools(root: Path, contracts: Path | None = None,
         run. Processes it starts in the background end with it: start a server and use it
         in one command.
 
+        The sandbox has 2 CPUs and 4 GB of memory, shared with you: when you run more than one
+        test file, run tests with at most 2 parallel workers (as the repository's checks
+        script runs them, for example `pytest -n 2`), never one per core; more are killed
+        for lack of memory and end your run.
+
         Long output is saved to a log file and summarized as its error lines and tail;
         the summary names the log so read_file or search_files can retrieve the rest.
         """
