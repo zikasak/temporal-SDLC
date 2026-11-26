@@ -17,6 +17,7 @@ from pathlib import Path
 
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.host import copy_file
+from app.github import contract_merge
 from app.github.client import validate_selection
 from app.github.models import RepositoryCheckout, RepositoryPublication, RepositorySelection
 
@@ -314,6 +315,74 @@ async def remote_branch_exists(target: Path, token: str, branch: str) -> bool:
     return bool(found.strip())
 
 
+async def _git_bytes(*args: str, cwd: Path) -> bytes | None:
+    """The raw output of a local git command; None when it fails."""
+    process = await asyncio.create_subprocess_exec(
+        'git', *args, cwd=cwd, env=_environment(None), stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        output, _ = await asyncio.wait_for(process.communicate(), GIT_TIMEOUT)
+    except BaseException:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        raise
+    return None if process.returncode else output
+
+
+async def _union_merge(target: Path, base: str, ours: str, theirs: str) -> str:
+    """The merge of three texts that keeps the lines both sides added."""
+    with tempfile.TemporaryDirectory() as directory:
+        paths = []
+        for name, text in (('ours', ours), ('base', base), ('theirs', theirs)):
+            path = Path(directory) / name
+            await run_sync(path.write_text, text)
+            paths.append(str(path))
+        merged = await _git_bytes('merge-file', '--union', '-p', *paths, cwd=target)
+    if merged is None:
+        raise CheckoutError('The contract files could not be merged.')
+    return merged.decode('utf-8', 'replace')
+
+
+async def _merge_contract_files(target: Path, base_commit: str,
+                                conflicts: list[str]) -> set[str]:
+    """Settle the conflicting files of the repository's contract (contracts/, without
+    its component and part contracts) in a merge of `base_commit` into HEAD by merging
+    both sides' contracts by their content, and write the files rendered from them; the
+    conflicting paths settled."""
+    names = {path.split('/', 1)[1] for path in conflicts
+             if path.startswith(f'{CONTRACTS_DIR}/') and path.count('/') == 1}
+    if not names:
+        return set()
+    parted = await _git_bytes('merge-base', 'HEAD', base_commit, cwd=target)
+    revisions = (parted.decode().strip() if parted else None, 'HEAD', base_commit)
+    versions: dict[str, contract_merge.Versions] = {}
+    for name in {*names, *contract_merge.CONTRACT_FILES}:
+        texts: list[str | None] = []
+        for revision in revisions:
+            shown = (await _git_bytes('show', f'{revision}:{CONTRACTS_DIR}/{name}', cwd=target)
+                     if revision else None)
+            texts.append(None if shown is None else shown.decode('utf-8', 'replace'))
+        versions[name] = (texts[0], texts[1], texts[2])
+
+    async def merge_text(base: str, ours: str, theirs: str) -> str:
+        return await _union_merge(target, base, ours, theirs)
+
+    merged = await contract_merge.merge_contract(versions, names, merge_text)
+    directory = target / CONTRACTS_DIR
+    for name, text in merged.items():
+        path = f'{CONTRACTS_DIR}/{name}'
+        if text is None:
+            await _git('rm', '--quiet', '--force', '--ignore-unmatch', '--', path,
+                       cwd=target)
+            continue
+        await run_sync(directory.mkdir, exist_ok=True)
+        await run_sync((directory / name).write_text, text)
+        await _git('add', '--', path, cwd=target)
+    return {f'{CONTRACTS_DIR}/{name}' for name in names if name in merged}
+
+
 async def merge_base_commit(target: Path, repository: RepositorySelection, token: str, *,
                             branch: str, base_commit: str, message: str,
                             author: tuple[str, str],
@@ -321,7 +390,9 @@ async def merge_base_commit(target: Path, repository: RepositorySelection, token
     """Merge `base_commit`, the tip of a pull request's base branch, into the remote
     `branch` and push the merge, never forcing. The merge commit has the branch's tip and
     `base_commit` as parents; files that conflict are taken as the branch has them, as a
-    fix round made them take in the base branch's changes. Raises CheckoutError when the
+    fix round made them take in the base branch's changes, except the contract's own
+    (contracts/), which are merged by their content so that both sides' requirements,
+    API and architecture are kept. Raises CheckoutError when the
     merge cannot be made or pushed, such as when the branch moved meanwhile."""
     validate_selection(repository['full_name'], branch)
     if not re.fullmatch(r'[0-9a-f]{40,64}', base_commit):
@@ -359,7 +430,12 @@ async def merge_base_commit(target: Path, repository: RepositorySelection, token
             raise CheckoutError(
                 f'The base branch could not be merged into {branch}: '
                 f'{str(exc)[-500:]}') from exc
+        # The contract is merged by its content, so the base branch's requirements and
+        # API changes are kept beside the delivery's.
+        settled = await _merge_contract_files(target, base_commit, conflicts)
         for path in conflicts:
+            if path in settled:
+                continue
             try:
                 await _git('cat-file', '-e', f'HEAD:{path}', cwd=target)
             except CheckoutError:

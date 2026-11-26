@@ -27,9 +27,10 @@ request branch, and these files are taken as you leave them, in place of the bas
 branch's versions, so a change of the base branch you leave out is lost. Where both
 changed the same lines, combine them; where they contradict, keep the behaviour this
 delivery's contract asks for. The paths are the repository's: the service's files are
-where the repository has them, and contract-tests/ is the contract test suite. Files
-under contracts/ are written from the delivery's contract and keep its version. What
-the base branch changed in these files, from where the branches parted:
+where the repository has them, and contract-tests/ is the contract test suite. Leave
+the files under contracts/ as they are: the merge combines the base branch's
+requirements, API and architecture there with this delivery's on its own. What the base
+branch changed in these files, from where the branches parted:
 
 {changes}"""
 BASE_MERGE_STARTED = ('This pull request conflicts with its base branch `{base}` in {files}. '
@@ -78,12 +79,29 @@ class BaseMerge(FlowBase):
         except ActivityError as exc:
             workflow.logger.warning('Pull request conflicts not read: %s', exc.cause or exc)
             return False
-        if not isinstance(found, dict) or found.get('conflicting') is not True:
+        if not isinstance(found, dict):
+            return False
+        if found.get('conflicting') is False:
+            if found.get('pending') is not True:
+                # The pull request merges cleanly: rounds in a row end here, and a later
+                # conflict starts its count over. While GitHub has not computed it yet,
+                # such as right after a push, the row goes on.
+                self._end_merge_row()
+            return False
+        if found.get('conflicting') is not True:
             return False
         # A fix round requested meanwhile, or the end of the pull request, goes first.
         if not self._ready_to_merge():
             return False
         return await self._base_merge_round(found)
+
+    def _end_merge_row(self) -> None:
+        """Count the next automatic merge fix round from 1 again, and say anew when it
+        cannot start, unless a merge fix round is running or queued."""
+        if self.state.merge_fix is not None or self._push_conflict is not None:
+            return
+        self._merge_round = None
+        self._base_merge_stopped = False
 
     def _ready_to_merge(self) -> bool:
         return (self.state.waiting and self._next is None and self._closing() is None

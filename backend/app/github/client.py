@@ -415,7 +415,8 @@ async def get_pull_request_conflicts(token: str, full_name: str,
                                      number: int) -> dict[str, Any] | None:
     """How the open pull request stands with its base branch: {'conflicting', 'base',
     'base_commit', 'files', 'changes'}. GitHub computes mergeability in the background;
-    while it has not, the pull request counts as not conflicting. The files are those
+    while it has not, the pull request counts as not conflicting, with 'pending' true.
+    The files are those
     both the pull request and the base branch changed since they parted, and `changes`
     what the base branch changed in them. None when the pull request is gone."""
     validate_selection(full_name, "main")
@@ -437,6 +438,9 @@ async def get_pull_request_conflicts(token: str, full_name: str,
                    and data.get("mergeable_state") in (None, "dirty"))
     result: dict[str, Any] = {"conflicting": conflicting, "base": base_ref,
                               "base_commit": "", "files": [], "changes": ""}
+    if data.get("state") == "open" and data.get("mergeable") is None:
+        # Not computed yet: not known to merge cleanly either.
+        result["pending"] = True
     if not conflicting or not isinstance(head_sha, str) or not COMMIT_PATTERN.fullmatch(head_sha):
         return result
     compared, _ = await _request(
