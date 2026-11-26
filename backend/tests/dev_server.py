@@ -7,10 +7,14 @@ from temporalio.testing import WorkflowEnvironment
 # default, so a workflow task, an activity or a child started right after another waits up
 # to 50 ms. A delivery takes hundreds of such steps: without the limit its tests run in a
 # fraction of the time.
+# The server also holds back a run continued as new, or a workflow started again under
+# the same ID, until a second after the previous run started; a retry or restart of a
+# stage would otherwise wait out that second.
 FAST_TASK_DISPATCH = [
     arg for setting in ('history.transferProcessorMaxPollRPS=10000',
                         'history.timerProcessorMaxPollRPS=10000',
-                        'history.visibilityProcessorMaxPollRPS=10000')
+                        'history.visibilityProcessorMaxPollRPS=10000',
+                        'history.workflowIdReuseMinimalInterval="0s"')
     for arg in ('--dynamic-config-value', setting)]
 
 
