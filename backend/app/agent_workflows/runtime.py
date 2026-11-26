@@ -156,11 +156,14 @@ INTERRUPTED_EXIT = 77
 STATE_FILENAME = '.agent-state.json'
 ANSWERS_FILENAME = '.agent-answers.json'
 ASK_GUIDANCE = """
-You can ask the user with the ask_user tool when the task leaves open a decision that
-changes the result and that neither the inputs nor the files settle. The run pauses until
-the user answers, which may take long, so ask only what you cannot reasonably decide
-yourself, and put every question you have into one call. Never ask a question in your
-text: nobody reads it, and a reply without a tool call ends the run.
+You can ask the user with the ask_user tool only when the task leaves open a genuine
+product or requirement decision that changes the user-facing result and that neither the
+inputs nor the files settle. Never ask the user about internal code mechanics, where
+workspaces or checkouts live, what collaborators or signatures exist, or anything the
+repository or contracts already settle—the user does not know those internals. The run
+pauses until the user answers, which may take long, so ask only what you cannot
+reasonably decide yourself, and put every question you have into one call. Never ask a
+question in your text: nobody reads it, and a reply without a tool call ends the run.
 """
 # How often a final reply that asks something in its text is sent back.
 DIRECT_QUESTION_NUDGES = 2

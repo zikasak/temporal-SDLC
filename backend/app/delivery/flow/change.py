@@ -27,6 +27,10 @@ BASELINE_FAILURES = 50
 BASELINE_MESSAGE_CHARS = 1000
 ROUTING_PATCH = 'routing'
 COMPONENT_RUNS_PATCH = 'component-runs'
+AUTO_REROUTE_PATCH = 'auto-reroute'
+# How many times a change automatically bounces a test-author contract/stub gap back to
+# routing before stopping to ask the user.
+MAX_CONTRACT_GAP_REROUTES = 2
 
 
 def routing_failure(exc: BaseException) -> str:
@@ -59,11 +63,25 @@ class Change(FlowBase):
         self.progress.baseline_status = 'waiting'
         # No test is written for criteria no suite can observe, nor before the seam they
         # are observed at, when the code does not have it yet, is added.
-        if not await self._route() or not await self._prepare_seam():
-            self.progress.baseline_status = 'skipped'
-            self.progress.verification_status = 'skipped'
-            return
-        await self._generate_tests()
+        reroutes = 0
+        auto_reroute = workflow.patched(AUTO_REROUTE_PATCH)
+        while True:
+            if not await self._route() or not await self._prepare_seam():
+                self.progress.baseline_status = 'skipped'
+                self.progress.verification_status = 'skipped'
+                return
+            await self._generate_tests()
+            if (auto_reroute and reroutes < MAX_CONTRACT_GAP_REROUTES
+                    and not self.progress.component_tests_error
+                    and self.progress.routing_status == 'unobservable'
+                    and self._has_reroutable_decline()):
+                reroutes += 1
+                workflow.logger.info(
+                    'Test author reported a contract gap; re-routing automatically (%d/%d)',
+                    reroutes, MAX_CONTRACT_GAP_REROUTES)
+                self._prepare_contract_gap_reroute()
+                continue
+            break
         # A failed author, or one that found a criterion its suite cannot observe, leaves
         # nothing to hold against the service, whatever the other author wrote.
         if self.progress.component_tests_error or self.progress.routing_status not in (
@@ -82,6 +100,24 @@ class Change(FlowBase):
         if not self.progress.implementation:
             await self._implement_service()
         await self._verify_built()
+
+    def _prepare_contract_gap_reroute(self) -> None:
+        """Feed test-author contract/stub declines back into ObservabilityWorkflow."""
+        self.state.declined_routes = {
+            requirement: route for requirement, route in (self.progress.routing or {}).items()
+            if route['source'] == 'tests'
+        } or None
+        self.progress.routing = None
+        self.progress.routing_status = 'waiting'
+        self.progress.routing_error = None
+        self.progress.tests = None
+        self.progress.tests_error = None
+        self.progress.component_tests = None
+        self.progress.component_tests_error = None
+        self.progress.seam = None
+        self.progress.seam_status = 'not_applicable'
+        self.progress.seam_error = None
+        self.progress.seam_reviews = []
 
     async def _route(self) -> bool:
         """Decide which suite can prove each criterion of the brief: true when every one

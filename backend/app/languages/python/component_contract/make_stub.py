@@ -655,11 +655,46 @@ class Reach:
         return _module_path(self.root, module) is not None
 
 
+def _reused_seams(routes_file: Path) -> dict[str, set[str]]:
+    """Service-part seam symbols named in `routes_file`, keyed by dotted module."""
+    try:
+        data = json.loads(routes_file.read_text(encoding='utf-8'))
+    except (OSError, ValueError, TypeError):
+        return {}
+    items = data.get('routes') if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return {}
+    seams: dict[str, set[str]] = {}
+    for item in items:
+        if not isinstance(item, dict) or item.get('route') != 'component':
+            continue
+        seam = item.get('seam')
+        if not isinstance(seam, dict) or seam.get('part') is not None:
+            continue
+        module = seam.get('module')
+        symbols = seam.get('symbols')
+        if isinstance(module, str) and module.strip() and isinstance(symbols, list):
+            target = seams.setdefault(module.strip(), set())
+            target.update(str(sym).strip() for sym in symbols if isinstance(sym, str) and sym.strip())
+    return seams
+
+
+def _is_reused(module: str, qualified: str, reused: dict[str, set[str]] | None) -> bool:
+    if not reused:
+        return False
+    targets = reused.get(module)
+    if not targets:
+        return False
+    return qualified in targets or qualified.partition('.')[0] in targets
+
+
 def unstubbed(repository: Path, components: Path, source_root: str,
-              only: set[tuple[str, str]] | None = None) -> list[str]:
+              only: set[tuple[str, str]] | None = None,
+              reused: dict[str, set[str]] | None = None) -> list[str]:
     """For each documented function of the stubs in `components` that the published stubs
-    do not hold (or each of `only`, as (module, qualified name)), the collaborators its
-    code reaches that no stub declares and its docstring does not name."""
+    do not hold (or each of `only`, as (module, qualified name), or each published symbol
+    named by a `component` seam in `reused`), the collaborators its code reaches that no
+    stub declares and its docstring does not name."""
     reach = Reach(repository / source_root, components)
     problems: list[str] = []
     for stub in sorted(components.rglob('*.pyi')) if components.is_dir() else []:
@@ -672,7 +707,8 @@ def unstubbed(repository: Path, components: Path, source_root: str,
         kept = (_qualified(ast.parse(published.read_text(encoding='utf-8')).body)
                 if published.is_file() else set())
         for qualified, node in _documented(tree.body):
-            if qualified in kept or only is not None and (module, qualified) not in only:
+            in_kept = qualified in kept and not _is_reused(module, qualified, reused)
+            if in_kept or only is not None and (module, qualified) not in only:
                 continue
             docstring = ast.get_docstring(node) or ''
             missing = [name for name in reach.of(module, qualified)
@@ -864,6 +900,7 @@ def main() -> int:
                         help='check the published stubs are kept, and write nothing')
     parser.add_argument('--repository', default='repository', type=Path)
     parser.add_argument('--components', default='components', type=Path)
+    parser.add_argument('--routes', default='routes.json', type=Path)
     parser.add_argument('--source-root')
     arguments = parser.parse_args()
     source_root = arguments.source_root
@@ -882,7 +919,9 @@ def main() -> int:
                   'import as a statement of its own (`from typing import Final`), never by '
                   'editing a published one, and state new behaviour in the docstrings of the '
                   'symbols you add, not in a published docstring.', file=sys.stderr)
-        missing = unstubbed(arguments.repository, arguments.components, source_root)
+        reused = _reused_seams(arguments.routes) if arguments.routes.is_file() else None
+        missing = unstubbed(arguments.repository, arguments.components, source_root,
+                            reused=reused)
         for problem in missing:
             print(f'make_stub: {problem}', file=sys.stderr)
         if missing:

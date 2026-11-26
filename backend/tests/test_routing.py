@@ -195,12 +195,20 @@ def test_the_test_author_may_name_criteria_of_the_brief_instead_of_writing_a_sui
         {'requirement_id': 'FR-3', 'reason': 'Needs a pull request.'}]}))
     assert read_unobservable(ids, tmp_path) == {'unobservable': [
         {'requirement_id': 'FR-3', 'reason': 'Needs a pull request.'}]}
+    file.write_text(json.dumps({'unobservable': [
+        {'requirement_id': 'FR-2', 'reason': 'Stubs omit _workspace.', 'kind': 'contract_gap'},
+        {'requirement_id': 'FR-3', 'reason': 'Needs GitHub.', 'kind': 'unobservable'}]}))
+    assert read_unobservable(ids, tmp_path) == {'unobservable': [
+        {'requirement_id': 'FR-2', 'reason': 'Stubs omit _workspace.', 'kind': 'contract_gap'},
+        {'requirement_id': 'FR-3', 'reason': 'Needs GitHub.', 'kind': 'unobservable'}]}
     for content, error in [
         ('[]', 'names no criterion'), ('{"unobservable": []}', 'names no criterion'),
         ('nope', 'not valid JSON'),
         (json.dumps({'unobservable': [{'requirement_id': 'FR-9', 'reason': 'R'}]}),
          'does not have: FR-9'),
         (json.dumps({'unobservable': [{'requirement_id': 'FR-2', 'reason': ''}]}), 'no reason'),
+        (json.dumps({'unobservable': [{'requirement_id': 'FR-2', 'reason': 'R', 'kind': 'bad'}]}),
+         'invalid kind'),
     ]:
         file.write_text(content)
         with pytest.raises(RuntimeError, match=error):

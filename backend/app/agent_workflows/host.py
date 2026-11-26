@@ -16,6 +16,7 @@ from typing import Any, cast
 from temporalio.exceptions import ApplicationError
 
 from app import docker_agents
+from app.agent_workflows.triage import MAX_TRIAGE_ROUNDS, triage_questions
 from app.asyncio_utils import async_context, run_sync
 from app.languages import Language, UnsupportedLanguage, get_language
 from app.settings.storage import get_agent_settings
@@ -313,31 +314,46 @@ async def _run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
                     json.dumps(inputs.context, ensure_ascii=False),
                 )
             output = work / 'output'
-            try:
-                await docker_agents.run_agent(
-                    stage.role, session_id, workspace, output, stage.workspace_name,
-                    artifact_dir / 'agent.log', image_build=stage.image_build, paused=paused,
-                )
-            except docker_agents.AgentPaused as exc:
-                return paused_result(session_id, exc)
-            except docker_agents.AgentLimited as exc:
-                logger.warning('%s stage waits for its provider (session=%s): %s',
-                               stage.role, session_id, exc.report.get('message'))
-                await save_stage_work(stage, session_dir, context,
-                                      paused / stage.workspace_name,
-                                      'stopped by the provider\'s limits')
-                return limited_result(session_id, exc)
-            except docker_agents.AgentInterrupted as exc:
-                # The worker shuts down: the stage's next attempt continues the kept
-                # workspace, or, when there is none, starts over from this saved work.
-                await save_stage_work(stage, session_dir, context,
-                                      paused / stage.workspace_name if exc.kept else output,
-                                      'stopped by a worker restart')
-                raise
-            except Exception as exc:
-                await save_stage_work(stage, session_dir, context, output,
-                                      f'agent failed: {_first_line(exc)}')
-                raise
+            triage_rounds = 0
+            while True:
+                try:
+                    await docker_agents.run_agent(
+                        stage.role, session_id, workspace, output, stage.workspace_name,
+                        artifact_dir / 'agent.log', image_build=stage.image_build, paused=paused,
+                    )
+                    break
+                except docker_agents.AgentPaused as exc:
+                    if triage_rounds < MAX_TRIAGE_ROUNDS:
+                        triaged = await triage_questions(
+                            stage.role, session_dir, inputs.context, exc.questions)
+                        if triaged is not None:
+                            triage_rounds += 1
+                            logger.info(
+                                '%s stage questions answered by pre-triage (%d/%d, session=%s)',
+                                stage.role, triage_rounds, MAX_TRIAGE_ROUNDS, session_id)
+                            workspace = work / f'workspace-triage-{triage_rounds}'
+                            await run_sync(
+                                docker_agents.resume_workspace, paused, workspace, triaged)
+                            continue
+                    return paused_result(session_id, exc)
+                except docker_agents.AgentLimited as exc:
+                    logger.warning('%s stage waits for its provider (session=%s): %s',
+                                   stage.role, session_id, exc.report.get('message'))
+                    await save_stage_work(stage, session_dir, context,
+                                          paused / stage.workspace_name,
+                                          'stopped by the provider\'s limits')
+                    return limited_result(session_id, exc)
+                except docker_agents.AgentInterrupted as exc:
+                    # The worker shuts down: the stage's next attempt continues the kept
+                    # workspace, or, when there is none, starts over from this saved work.
+                    await save_stage_work(stage, session_dir, context,
+                                          paused / stage.workspace_name if exc.kept else output,
+                                          'stopped by a worker restart')
+                    raise
+                except Exception as exc:
+                    await save_stage_work(stage, session_dir, context, output,
+                                          f'agent failed: {_first_line(exc)}')
+                    raise
             try:
                 return await _publish_output(stage, session_id, session_dir, context,
                                              artifact_dir, work, output)

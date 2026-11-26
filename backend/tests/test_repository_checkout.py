@@ -512,3 +512,25 @@ async def test_chat_reads_the_checked_out_repository(remote, monkeypatch, reposi
     model.replies = iter([AIMessage(content="No repository")])
     await environment.run(activities.send_llm_message, question, session)
     assert not model.tools & {"list_files", "search_files", "read_file"}
+
+
+async def test_publish_onboarding_architecture_from_pushes_architecture_from_workspace(
+    tmp_path, remote, repository_selection,
+):
+    from app.delivery.workspace import SessionWorkspace
+
+    environment = ActivityEnvironment()
+    await environment.run(activities.checkout_repository, SESSION, repository_selection)
+    workspace = SessionWorkspace.of(tmp_path / "generated", SESSION)
+    structure = {
+        "components": [{"name": "API", "responsibilities": ["Serve rooms"]}],
+        "data_flows": [],
+        "technology_choices": [],
+    }
+    publication = await activities.publish_onboarding_architecture_from(
+        workspace, SESSION, repository_selection, "# Architecture\n", structure,
+    )
+    branch = publication["branch"]
+    assert branch.startswith("onboarding/")
+    assert git("show", f"{branch}:contracts/architecture.md", cwd=remote) == "# Architecture"
+    assert json.loads(git("show", f"{branch}:contracts/architecture.json", cwd=remote)) == structure

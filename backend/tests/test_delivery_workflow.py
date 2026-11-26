@@ -926,7 +926,7 @@ async def test_criteria_routed_to_a_seam_get_component_tests_written_from_their_
     worker.component_declined = ['FR-2'] if outcome == 'declined' else []
     worker.fail_component_tests = outcome == 'failed'
     handle, state = await fixed(env, repository_selection)
-    context, = worker.component_contexts
+    context = worker.component_contexts[0]
     assert context['routes'] == {'FR-2': {'route': 'component', 'reason': 'Route of FR-2.',
                                           'source': 'routing', 'seam': SEAM}}
     assert context['repository'] == repository_selection and context['brief']
@@ -938,7 +938,11 @@ async def test_criteria_routed_to_a_seam_get_component_tests_written_from_their_
         assert state.baseline_status == 'reproduced'
     else:
         # Nothing is run against the service, nothing changes it and nothing is pushed.
-        assert worker.stages == ['routing', 'component-tests']
+        assert len(worker.component_contexts) == 3 if outcome == 'declined' else 1
+        assert worker.stages == (
+            ['routing', 'component-tests'] * 3 if outcome == 'declined'
+            else ['routing', 'component-tests']
+        )
         assert state.baseline is None and state.implementation is None
         assert state.baseline_status == 'skipped' and state.verification_status == 'skipped'
         assert state.publication_status == 'skipped' and not worker.published
@@ -960,7 +964,7 @@ async def test_criteria_routed_to_a_seam_get_component_tests_written_from_their_
     worker.component_declined, worker.fail_component_tests = [], False
     await requirements_service.retry_generation(handle.id, 'tests')
     state = await delivered(env, handle.id)
-    assert worker.stages.count('routing') == (2 if outcome == 'declined' else 1)
+    assert worker.stages.count('routing') == (4 if outcome == 'declined' else 1)
     if outcome == 'declined':
         # The new routing is told what the author lacked, and only that one.
         assert 'declined' not in worker.routed[0]
@@ -970,6 +974,24 @@ async def test_criteria_routed_to_a_seam_get_component_tests_written_from_their_
     assert state.component_tests_error is None
     assert state.component_tests['added_tests'] == ADDED_COMPONENT_TESTS
     assert state.baseline_status == 'reproduced'
+
+
+async def test_contract_gap_decline_reroutes_automatically_and_delivers(
+        env, worker, repository_selection):
+    worker.routes = [{}, {'FR-2': 'component'}]
+    worker.contract_gap_declines = ['FR-2']
+    handle, state = await fixed(env, repository_selection)
+    assert worker.stages.count('routing') == 2
+    assert 'declined' not in worker.routed[0]
+    assert worker.routed[1]['declined'] == {'FR-2': {
+        'route': 'unobservable',
+        'reason': 'Needs a component seam with _workspace stubbed.',
+        'source': 'tests',
+        'kind': 'contract_gap',
+    }}
+    assert state.routing_status == 'routed' and state.publication_status == 'completed'
+    history = await env.client.get_workflow_handle(delivery_id(handle.id)).fetch_history()
+    await Replayer(workflows=[DeliveryWorkflow]).replay_workflow(history)
 
 
 async def test_a_bugfix_proved_at_a_seam_runs_its_component_tests_red_then_green(

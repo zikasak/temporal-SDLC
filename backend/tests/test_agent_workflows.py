@@ -758,3 +758,121 @@ async def test_final_validation_decides_once_no_feedback_is_left(profile, script
     await runtime.run_agent(replace(profile, validate_completion=validate,
                                     completion_feedback=1, final_validation=final.append))
     assert len(model.requests) == 2 and final == [profile.root]
+
+
+async def test_triage_questions_answers_from_baseline_repo_without_leaking_other_stages(
+    tmp_path, monkeypatch,
+):
+    from app.agent_workflows import triage
+
+    session_dir = tmp_path / 'session'
+    (session_dir / 'repository/app').mkdir(parents=True)
+    (session_dir / 'repository/app/activities.py').write_text(
+        'def publish(session_id: str) -> str:\n    return f"/data/{session_id}/repository"\n')
+    (session_dir / 'routing/components/app').mkdir(parents=True)
+    (session_dir / 'routing/components/app/activities.pyi').write_text(
+        'def publish(session_id: str) -> str: ...\n')
+    # Another stage's artifacts must never be reachable by triage tools.
+    (session_dir / 'implementation/service').mkdir(parents=True)
+    (session_dir / 'implementation/service/secret.py').write_text('IMPL_SECRET = 1\n')
+    (session_dir / 'tests/suite').mkdir(parents=True)
+    (session_dir / 'tests/suite/test_secret.py').write_text('TEST_SECRET = 1\n')
+
+    tools_seen: list[str] = []
+
+    class TriageModel:
+        def __init__(self, reply_text: str):
+            self.reply_text = reply_text
+
+        def bind_tools(self, tools):
+            tools_seen[:] = [item.name for item in tools]
+            by_name = {item.name: item for item in tools}
+            assert 'IMPL_SECRET' not in by_name['repo_search_files'].invoke({'regex': 'IMPL_SECRET'})
+            assert 'TEST_SECRET' not in by_name['repo_search_files'].invoke({'regex': 'TEST_SECRET'})
+            assert 'activities.py' in by_name['repo_list_files'].invoke({})
+            assert 'activities.pyi' in by_name['stub_list_files'].invoke({})
+            return self
+
+        async def ainvoke(self, messages, config=None):
+            return AIMessage(content=self.reply_text)
+
+    async def fake_get_model(workflow_type):
+        assert workflow_type == 'routing'
+        return TriageModel(json.dumps({
+            'answerable': True,
+            'answers': ['Decline via unobservable.json with kind "contract_gap".'],
+        }))
+
+    monkeypatch.setattr(triage, 'get_model', fake_get_model)
+    questions = [{'question': 'How does publish find the checkout?', 'options': ['A', 'B']}]
+    answers = await triage.triage_questions(
+        'component_test_generation', session_dir, {'brief': {'requirements': []}}, questions,
+    )
+    assert answers == ['Decline via unobservable.json with kind "contract_gap".']
+    assert 'repo_read_file' in tools_seen and 'stub_read_file' in tools_seen
+
+    # Unanswerable product questions fall back to None so the user answers them.
+    async def unanswerable_model(workflow_type):
+        return TriageModel(json.dumps({'answerable': False, 'reason': 'Product choice'}))
+
+    monkeypatch.setattr(triage, 'get_model', unanswerable_model)
+    assert await triage.triage_questions(
+        'implementation', session_dir, {'brief': {'requirements': []}}, questions,
+    ) is None
+
+
+async def test_run_stage_resumes_with_triage_answers_before_asking_user(tmp_path, monkeypatch):
+    from app.agent_workflows import host
+
+    questions = ASK['args']['questions']
+    (tmp_path / 'session/repository').mkdir(parents=True)
+
+    def prepare_inputs(session_dir, context, *, embed_chars):
+        def populate(workspace):
+            (workspace / 'tests').mkdir()
+        return StageInputs(context={'brief': {'requirements': []}}, populate=populate)
+
+    stage = StageSpec(
+        role='test_generation', artifact_subdir='tests-stage', workspace_name='tests',
+        output_subdir='suite', heartbeat='Authoring tests', image_label=None,
+        image_build=docker_agents.AgentImageBuild(tmp_path, tmp_path / 'Dockerfile'),
+        prepare_inputs=prepare_inputs,
+        sanitize_output=lambda src, dst: copy_regular_files(src, dst, include=lambda _: True),
+        validate_output=lambda clean: None,
+    )
+    sent: list[dict[str, bytes]] = []
+    exit_codes = iter([runtime.PAUSE_EXIT, 0])
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'cp' and args[1] == '-a':
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                sent.append({item.name: archive.extractfile(item).read()
+                             for item in archive.getmembers() if item.isfile()})
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': next(exit_codes)})
+        if args[0] == 'cp' and args[1].endswith(':/workspace/.'):
+            (Path(args[2]) / 'tests').mkdir()
+            (Path(args[2]) / runtime.STATE_FILENAME).write_text(
+                json.dumps({'pending': {'call_id': 'ask', 'questions': questions}}))
+        if args[0] == 'cp' and args[1].endswith(':/workspace/tests/.'):
+            (Path(args[2]) / 'test_ok.py').write_text('def test_ok(): pass\n')
+        return ''
+
+    triage_calls: list[str] = []
+
+    async def fake_triage(role, session_dir, context, asked):
+        triage_calls.append(role)
+        return ['EUR']
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    monkeypatch.setattr(host, 'triage_questions', fake_triage)
+    result = await ActivityEnvironment().run(run_stage, stage, 'session', {}, tmp_path)
+    assert triage_calls == ['test_generation']
+    assert 'questions' not in result
+    assert json.loads(sent[1][runtime.ANSWERS_FILENAME]) == {'answers': ['EUR']}
+    assert (Path(result['path']) / 'test_ok.py').is_file()
+
+    # After MAX_TRIAGE_ROUNDS consecutive pauses, the run escalates to the user.
+    exit_codes = iter([runtime.PAUSE_EXIT] * (host.MAX_TRIAGE_ROUNDS + 1))
+    result = await ActivityEnvironment().run(run_stage, stage, 'session', {}, tmp_path)
+    assert result == {'session_id': 'session', 'questions': questions}

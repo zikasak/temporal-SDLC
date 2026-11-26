@@ -368,6 +368,15 @@ def repository_prompt(inputs: dict) -> str:
         generated=GENERATED if inputs.get('generated_code', True) else OWN_LAYOUT)
 
 
+IMPLEMENTATION_ASK_GUIDANCE = """
+Never call `ask_user` to ask what the independent tests might assert, internal wiring,
+or conventions the existing codebase, contracts, or stubs already settle—inspect the
+files in /workspace/service and /workspace/contracts and decide consistently with them.
+Call `ask_user` only for genuine product or requirement choices that neither the inputs
+nor the repository settle.
+"""
+
+
 def validate_completion(root: Path) -> None:
     if not (root / 'Dockerfile').is_file():
         raise RuntimeError('Agent finished without a Dockerfile')
@@ -380,6 +389,7 @@ async def main() -> None:
     await run_agent(AgentProfile(
         root=ROOT, prompt=(base_prompt(inputs, language['instructions'])
                            + unit_tests_prompt(inputs) + repair_prompt(inputs)
+                           + IMPLEMENTATION_ASK_GUIDANCE
                            + (USER_ANSWERS_PROMPT if inputs.get(USER_ANSWERS_KEY) else '')),
         initial_messages=[context],
         max_turns_env='IMPLEMENTATION_MAX_TURNS',

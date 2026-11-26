@@ -413,9 +413,19 @@ async def publish_onboarding_architecture(
     session_id: str, repository: RepositorySelection, architecture: str,
     structure: dict[str, Any] | None,
 ) -> RepositoryPublication:
+    """Activity: `publish_onboarding_architecture_from` the session's workspace on this worker."""
+    return await publish_onboarding_architecture_from(
+        _workspace(session_id), session_id, repository, architecture, structure)
+
+
+async def publish_onboarding_architecture_from(
+    workspace: SessionWorkspace, session_id: str, repository: RepositorySelection,
+    architecture: str, structure: dict[str, Any] | None,
+) -> RepositoryPublication:
     """Commit the architecture an onboarding drafted to its own new branch and push it:
-    contracts/architecture.md and contracts/architecture.json, and nothing else."""
-    workspace = _workspace(session_id)
+    contracts/architecture.md and contracts/architecture.json, and nothing else.
+
+    Reads the workspace's checkout; does not clone origin."""
     target = workspace.checkout
     if not await run_sync(target.is_dir):
         raise ApplicationError("The repository checkout is unavailable.", non_retryable=True)

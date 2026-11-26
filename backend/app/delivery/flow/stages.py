@@ -158,6 +158,8 @@ class Stages(FlowBase):
             seam = earlier.get('seam') if earlier else None
             page = earlier.get('page') if earlier else None
             route = RequirementRoute(route='unobservable', reason=item['reason'], source='tests')
+            if item.get('kind') in ('contract_gap', 'unobservable'):
+                route['kind'] = item['kind']  # type: ignore[typeddict-item]
             if seam:
                 route['seam'] = seam
             if page:
@@ -167,6 +169,14 @@ class Stages(FlowBase):
         self.progress.routing_status, self.progress.routing_error = self._judge_routes(routing)
         workflow.logger.info('The test author found %d criteria unobservable',
                              len(unobservable))
+
+    def _has_reroutable_decline(self) -> bool:
+        """Whether a test author declined because of a contract/stub gap routing may fix."""
+        return any(
+            route.get('source') == 'tests'
+            and (route.get('kind') == 'contract_gap' or 'seam' in route or 'page' in route)
+            for route in (self.progress.routing or {}).values()
+        )
 
     async def _implement_service(self, repair: dict[str, Any] | None = None) -> None:
         try:

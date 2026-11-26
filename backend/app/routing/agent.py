@@ -128,9 +128,13 @@ can observe the requirement, an existing seam over an added one, and choose
 When the input has a `declined` entry, the criteria it lists were routed before, to the
 `seam` or the `page` it names or else to the contract tests, and the test author found
 them unobservable there for the `reason` it gives, having seen only the stubs, the page
-contract or the API. Read each reason as what the stubs or the page contract lacked:
-route the criterion again with a contract that gives the author what it names, at that
-seam or page or at a better one, and route it `unobservable` only when none could.
+contract or the API. Read each reason as what the stubs, the page contract or the HTTP
+route lacked (especially when `kind` is `contract_gap`, or when `seam`/`page` is named):
+if it was routed to `contract` and needs an internal seam or page, re-route it to
+`component` or `browser` and write its stubs; if it was already routed to a `seam` or
+`page`, extend the contract with the missing collaborator, constant, precondition, or
+docstring detail the author names (or pick a better seam/page), and route it `unobservable`
+only when none could.
 """
 
 PARTS_PROMPT = """

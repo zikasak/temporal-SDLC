@@ -96,6 +96,9 @@ class RequirementRoute(TypedDict):
     seam: NotRequired[Seam]
     # For the `browser` route: the page it was routed to.
     page: NotRequired[Page]
+    # For an `unobservable` route declined by the test author: whether the author hit
+    # a missing/underspecified stub or seam (`contract_gap`) or genuine unobservability.
+    kind: NotRequired[Literal['contract_gap', 'unobservable']]
     # For an `unobservable` route of the routing: the criterion rephrased as behaviour a
     # suite observes, and the other criteria that already prove all of it that any suite
     # could, so it can be removed. Either is absent when the routing found none.

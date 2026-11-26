@@ -472,3 +472,32 @@ def test_a_changed_published_statement_is_named_to_the_agent_and_by_the_host(tmp
     stub.write_text(published + '\nfrom typing import Final\n\nSUBJECT: Final = "Change"\n')
     assert _make_stub(tmp_path, '--check').returncode == 0
     read()
+
+
+def test_make_stub_check_checks_reused_published_seams_from_routes(tmp_path):
+    _write(tmp_path / 'repository', {
+        'app/__init__.py': '',
+        'app/config.py': ('import os\nfrom pathlib import Path\n\n'
+                          'DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))\n'),
+        'app/activities.py': ('from app.config import DATA_DIR\n\n'
+                              'def publish(session_id: str) -> str:\n'
+                              '    return str(DATA_DIR / session_id)\n'),
+    })
+    published = ('def publish(session_id: str) -> str:\n'
+                 '    """Push the branch."""\n    ...\n')
+    routes = {'routes': [{'requirement_id': 'FR-1', 'route': 'component', 'reason': 'R',
+                          'seam': {'module': 'app.activities', 'symbols': ['publish']}}]}
+    _write(tmp_path, {
+        'repository/contracts/components/app/activities.pyi': published,
+        'components/runtime.json': '{"source_root": ".", "requirements": []}',
+        'components/app/activities.pyi': published,
+        'routes.json': json.dumps(routes),
+    })
+    # A reused published seam must still declare the collaborators it reaches.
+    missing = _make_stub(tmp_path, '--check')
+    assert missing.returncode == 1 and 'app.activities.DATA_DIR' in missing.stderr
+    # Stubbing the missing collaborator in its own module keeps the published stub intact.
+    assert _make_stub(tmp_path, 'app.activities', 'DATA_DIR').returncode == 0
+    for path in (tmp_path / 'components').rglob('*.pyi'):
+        path.write_text(_described(path.read_text()))
+    assert _make_stub(tmp_path, '--check').returncode == 0

@@ -1,5 +1,7 @@
 from typing import Any
 
+from app.delivery.workspace import SessionWorkspace
+
 
 async def open_pull_request(
     session_id: str, repository: Any, publication: Any,
@@ -13,13 +15,32 @@ async def open_pull_request(
     ...
 
 
+def _workspace(session_id: str) -> SessionWorkspace:
+    """The session's workspace on this worker (`SessionWorkspace.of(GENERATED_CODE_DIR, session_id)`)."""
+    ...
+
+
 async def publish_onboarding_architecture(
     session_id: str, repository: Any, architecture: str,
     structure: dict[str, Any] | None,
 ) -> Any:
-    """Activity 'publish_onboarding_architecture': push the architecture an onboarding
-    drafted to its own new branch; returns the publication {'branch', 'commit', 'url',
-    'verified', 'ignored', 'ignored_count', 'findings', 'findings_count'}."""
+    """Activity 'publish_onboarding_architecture': delegates to
+    `publish_onboarding_architecture_from(_workspace(session_id), ...)` to push the
+    architecture an onboarding drafted to its own new branch. Expects an existing git
+    checkout at `GENERATED_CODE_DIR / session_id / 'repository'` (it does not clone
+    origin), calls `_github_token()`, and pushes via `repository_checkout.push`; returns
+    the publication {'branch', 'commit', 'url', 'verified', 'ignored', 'ignored_count',
+    'findings', 'findings_count'}."""
+    ...
+
+
+async def publish_onboarding_architecture_from(
+    workspace: SessionWorkspace, session_id: str, repository: Any,
+    architecture: str, structure: dict[str, Any] | None,
+) -> Any:
+    """Commit `contracts/architecture.md` and `contracts/architecture.json` into
+    `workspace.checkout` (an existing git working copy; does not clone origin) on a new
+    branch and push it using `_github_token()`."""
     ...
 
 

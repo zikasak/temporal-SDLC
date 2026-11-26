@@ -113,13 +113,23 @@ Only finish when the regression tests and a successful build are complete.
 DECLINE_PROMPT = """Never write a test for such a criterion that skips
 itself, passes vacuously or asserts something else instead. Write /workspace/tests/{file}
 with write_file, containing exactly this JSON object, and finish:
-{{"unobservable": [{{"requirement_id": "FR-…", "reason": "…"}}]}}
+{{"unobservable": [{{"requirement_id": "FR-…", "reason": "…", "kind": "contract_gap" or "unobservable"}}]}}
 with one entry for each such criterion: `requirement_id` is the `id` of its requirement in
-the brief, and `reason` says in one or two sentences, for the user who wrote it, what a
-test would need that the suite does not have. The delivery then stops and the user is
-asked to rephrase those criteria; any test you wrote is discarded. Do this only when you
-are sure that no test of the suite can observe the criterion.
+the brief, and `reason` says in one or two sentences what was missing or unobservable. Set
+`kind` to `"contract_gap"` when the criterion seems testable if routing supplies a seam, a
+missing collaborator/constant in the stubs, or a missing setup precondition in a docstring
+(that automatically sends it back to routing without bothering the user). Set `kind` to
+`"unobservable"` only when no suite at all could observe it. Any test you wrote is
+discarded. Do this only when you are sure that no test of the suite can observe the
+criterion with what you were given.
 """.format(file=UNOBSERVABLE)
+
+TEST_ASK_GUIDANCE = """
+Never call `ask_user` to ask how existing code works, where checkouts/workspaces live,
+what collaborators or signatures exist, or how a stubbed symbol should be fed test inputs.
+Call `ask_user` only for genuine ambiguities in user-facing product behaviour that neither
+the brief, requirements, nor contracts settle.
+"""
 
 UNOBSERVABLE_PROMPT = """
 The suite runs in its own container against the service built from the repository's root
@@ -506,7 +516,7 @@ async def main() -> None:
     inputs = json.loads(context)
     language = json.loads(await run_sync(LANGUAGE.read_text))
     await run_agent(AgentProfile(
-        root=ROOT, prompt=(prompt(inputs, language)
+        root=ROOT, prompt=(prompt(inputs, language) + TEST_ASK_GUIDANCE
                            + (USER_ANSWERS_PROMPT if inputs.get(USER_ANSWERS_KEY) else '')),
         initial_messages=[context,
                           *(['OpenAPI contract:\n' + (await run_sync(OPENAPI.read_text))]

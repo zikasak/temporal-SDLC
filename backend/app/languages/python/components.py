@@ -63,13 +63,16 @@ docstrings of the symbols you add).
   PYTHONPATH=repository/<source_root> MYPYPATH=components python -m mypy.stubtest
   --ignore-missing-stub <every stubbed module>. It must report no error but, for each
   symbol a seam lists in `added` or `added_elsewhere`, that it is not present at
-  runtime. Then run python {tools}/make_stub.py --check from /workspace/routing: it must
+  runtime. Then run python {tools}/make_stub.py --check from /workspace/routing (after
+  writing routes.json, so reused published seams are checked too): it must
   report that the published stubs are kept and every collaborator is declared, else
   restore the published statements it names, and stub each collaborator it names that
   the requirement's behaviour reaches (python {tools}/make_stub.py <module> <name>, in
   the module that uses it, also for a name that module imports, such as a directory
-  constant or a function a test replaces), or name it in the docstring of the symbol
-  that reaches it, saying it runs as it is."""
+  constant or a function a test replaces), or—for a new, unpublished symbol—name it in
+  the docstring of the symbol that reaches it, saying it runs as it is. For a reused
+  published symbol whose docstring cannot change, stub missing collaborators in their own
+  modules."""
 
 
 def _module(path: Path) -> str:

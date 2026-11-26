@@ -158,13 +158,24 @@ def read_unobservable(requirement_ids: list[str], output: Path) -> dict[str, Any
     if not isinstance(items, list) or not items:
         raise RuntimeError(f'{UNOBSERVABLE_FILE} names no criterion')
     named = {item.get('requirement_id') for item in items if isinstance(item, dict)}
+    kinds: dict[str, str] = {}
+    for item in items:
+        if isinstance(item, dict) and 'kind' in item and item['kind'] is not None:
+            kind = item['kind']
+            if kind not in ('contract_gap', 'unobservable'):
+                raise RuntimeError(f'{UNOBSERVABLE_FILE} has an invalid kind: {str(kind)[:40]}')
+            req_id = item.get('requirement_id')
+            if isinstance(req_id, str):
+                kinds[req_id.strip()] = kind
     # The same checks as a routing's, but only of the criteria the file names.
     routes = read_routes(
         {'routes': [{**item, 'route': 'unobservable'} if isinstance(item, dict) else item
                     for item in items]},
         [requirement for requirement in requirement_ids if requirement in named])
-    return {'unobservable': [{'requirement_id': requirement, 'reason': route['reason']}
-                             for requirement, route in routes.items()]}
+    return {'unobservable': [
+        {'requirement_id': requirement, 'reason': route['reason'],
+         **({'kind': kinds[requirement]} if requirement in kinds else {})}
+        for requirement, route in routes.items()]}
 
 
 def stage(language: Language, frozen: dict[str, str] | None = None,

@@ -205,6 +205,8 @@ class FakeStages:
         self.routed: list[dict[str, Any]] = []
         # Requirements of the brief the first author of a change's tests finds unobservable.
         self.declined: list[str] = []
+        # Criteria declined once with `kind='contract_gap'` before routing resolves them.
+        self.contract_gap_declines: list[str] = []
         # The contexts of the component tests' author, and the requirements it finds
         # unobservable.
         self.component_contexts: list[dict[str, Any]] = []
@@ -398,6 +400,14 @@ class FakeStages:
             return {'session_id': session_id, 'unobservable': [
                 {'requirement_id': requirement, 'reason': 'Needs a pull request.'}
                 for requirement in self.declined]}
+        if self.contract_gap_declines and 'brief' in context and 'repair' not in context:
+            declined_now = list(self.contract_gap_declines)
+            self.contract_gap_declines.clear()
+            return {'session_id': session_id, 'unobservable': [
+                {'requirement_id': requirement,
+                 'reason': 'Needs a component seam with _workspace stubbed.',
+                 'kind': 'contract_gap'}
+                for requirement in declined_now]}
         changed = {"added_tests": ADDED_TESTS, "changed_tests": [], "removed_tests": []}
         if 'repair' in context:
             self.repairs.append(('tests', context['repair']))

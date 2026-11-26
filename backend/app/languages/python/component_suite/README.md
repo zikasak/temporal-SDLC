@@ -20,3 +20,15 @@ uses Temporal, the build fetches the servers of `temporalio.testing.WorkflowEnvi
 (`start_time_skipping` and `start_local`) so the tests can start them offline. Each test is
 limited to 30 seconds and pytest to ten minutes; the JUnit XML report, written to
 `/tests/reports/junit.xml`, holds the tests that ran even when the ten minutes run out.
+
+## Common test seams
+
+- **Temporal workflows:** register fakes of child workflows (`@workflow.defn(name=...)`)
+  and activities (`@activity.defn(name=...)`) on the test worker under the registered names
+  and task queues declared by the workflow stub's docstrings.
+- **Activity/workspace seams:** activities that take `session_id` without a workspace
+  parameter read the session's workspace at `<GENERATED_CODE_DIR>/<session_id>/repository`
+  (`SessionWorkspace.of(GENERATED_CODE_DIR, session_id).checkout`) rather than cloning from
+  origin; tests should monkeypatch `GENERATED_CODE_DIR` (or `_workspace` / use a `*_from`
+  helper if stubbed) to point at a `tmp_path` containing a local git checkout and bare
+  remote.
