@@ -4,14 +4,15 @@ import json
 import os
 import subprocess
 import sys
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
 import pytest
 from google.protobuf.json_format import MessageToDict
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+
+from tests.loopback import loopback_server
 
 
 SECRET = 'private-provider-key-for-trace-tests'
@@ -106,28 +107,21 @@ def tracing_server():
             self.end_headers()
             self.wfile.write(json.dumps(response).encode())
 
-    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    environment = {**os.environ, 'LANGFUSE_PUBLIC_KEY': 'pk-lf-local-tests',
-                   'LANGFUSE_SECRET_KEY': 'sk-lf-local-tests',
-                   'LANGFUSE_BASE_URL': f'http://127.0.0.1:{server.server_port}',
-                   'LANGFUSE_TRACING_ENABLED': 'true', 'LANGFUSE_SAMPLE_RATE': '1',
-                   'LANGFUSE_TRACING_ENVIRONMENT': 'test', 'LANGFUSE_RELEASE': 'test-release',
-                   'OPENAI_API_KEY': SECRET,
-                   'TEST_MODEL_SETTINGS': json.dumps({'adapter': 'openai', 'model': 'test-model'}),
-                   'OPENAI_BASE_URL': f'http://127.0.0.1:{server.server_port}/v1',
-                   'APP_TRACE_CONTENT_ENABLED': 'true'}
-    # Do not inherit a developer's upstream context or exporter configuration.
-    for key in list(environment):
-        if key.startswith(('APP_TRACE_ID', 'APP_TRACE_PARENT', 'OTEL_')):
-            del environment[key]
-    try:
+    with loopback_server(Handler) as server:
+        url = f'http://127.0.0.1:{server.server_port}'
+        environment = {**os.environ, 'LANGFUSE_PUBLIC_KEY': 'pk-lf-local-tests',
+                       'LANGFUSE_SECRET_KEY': 'sk-lf-local-tests', 'LANGFUSE_BASE_URL': url,
+                       'LANGFUSE_TRACING_ENABLED': 'true', 'LANGFUSE_SAMPLE_RATE': '1',
+                       'LANGFUSE_TRACING_ENVIRONMENT': 'test',
+                       'LANGFUSE_RELEASE': 'test-release', 'OPENAI_API_KEY': SECRET,
+                       'TEST_MODEL_SETTINGS': json.dumps({'adapter': 'openai',
+                                                          'model': 'test-model'}),
+                       'OPENAI_BASE_URL': f'{url}/v1', 'APP_TRACE_CONTENT_ENABLED': 'true'}
+        # Do not inherit a developer's upstream context or exporter configuration.
+        for key in list(environment):
+            if key.startswith(('APP_TRACE_ID', 'APP_TRACE_PARENT', 'OTEL_')):
+                del environment[key]
         yield environment, exported
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join()
 
 
 @pytest.fixture(params=['claude', 'pi'])

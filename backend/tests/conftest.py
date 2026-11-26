@@ -3,9 +3,8 @@ import json
 import os
 import sys
 import tempfile
-import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import cast
 
@@ -14,6 +13,8 @@ import pytest
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+
+from tests.loopback import loopback_server
 
 # Set before application imports/.env loading. Tracing transport tests opt in
 # explicitly in isolated child processes with disposable local credentials.
@@ -123,25 +124,19 @@ def claude_http(monkeypatch, tmp_path):
                 usage={'output_tokens': 5})
             send('message_stop')
 
-    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    for name in ('CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS',
-                 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv('ANTHROPIC_BASE_URL', f'http://127.0.0.1:{server.server_port}')
-    monkeypatch.setenv('ANTHROPIC_API_KEY', 'local-test-key')
-    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-config'))
-    monkeypatch.setenv('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', '1')
-    monkeypatch.setenv('CLAUDE_CODE_MAX_RETRIES', '0')
-    (tmp_path / SETTINGS_FILENAME).write_text(ModelSettings(
-        adapter='claude', model='claude-opus-5-5', thinking_level='high').model_dump_json())
-    try:
+    with loopback_server(Handler) as server:
+        for name in ('CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS',
+                     'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX',
+                     'CLAUDE_CODE_USE_FOUNDRY'):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv('ANTHROPIC_BASE_URL', f'http://127.0.0.1:{server.server_port}')
+        monkeypatch.setenv('ANTHROPIC_API_KEY', 'local-test-key')
+        monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-config'))
+        monkeypatch.setenv('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', '1')
+        monkeypatch.setenv('CLAUDE_CODE_MAX_RETRIES', '0')
+        (tmp_path / SETTINGS_FILENAME).write_text(ModelSettings(
+            adapter='claude', model='claude-opus-5-5', thinking_level='high').model_dump_json())
         yield replies, requests
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join()
 
 
 @pytest.fixture
@@ -196,22 +191,15 @@ def pi_http(monkeypatch, tmp_path):
                 self.wfile.write(f'data: {json.dumps(chunk)}\n\n'.encode())
             self.wfile.write(b'data: [DONE]\n\n')
 
-    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    # What the worker hands a coding container for the openai adapter.
-    monkeypatch.setenv('OPENAI_BASE_URL', f'http://127.0.0.1:{server.server_port}/v1')
-    monkeypatch.setenv('OPENAI_API_KEY', 'local-test-key')
-    # No developer's Pi login, settings or MCP servers.
-    monkeypatch.setenv('PI_CODING_AGENT_DIR', str(tmp_path / 'pi-agent'))
-    (tmp_path / SETTINGS_FILENAME).write_text(ModelSettings(
-        adapter='openai', model='test-model', thinking_level='high').model_dump_json())
-    try:
+    with loopback_server(Handler) as server:
+        # What the worker hands a coding container for the openai adapter.
+        monkeypatch.setenv('OPENAI_BASE_URL', f'http://127.0.0.1:{server.server_port}/v1')
+        monkeypatch.setenv('OPENAI_API_KEY', 'local-test-key')
+        # No developer's Pi login, settings or MCP servers.
+        monkeypatch.setenv('PI_CODING_AGENT_DIR', str(tmp_path / 'pi-agent'))
+        (tmp_path / SETTINGS_FILENAME).write_text(ModelSettings(
+            adapter='openai', model='test-model', thinking_level='high').model_dump_json())
         yield replies, requests
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join()
 
 
 @pytest.fixture(scope='session')
