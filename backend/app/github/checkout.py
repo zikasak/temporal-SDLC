@@ -14,6 +14,7 @@ import shutil
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.host import copy_file
@@ -459,32 +460,28 @@ async def merge_base_commit(target: Path, repository: RepositorySelection, token
             'ignored': [], 'ignored_count': 0}
 
 
-async def base_merge_changes(target: Path, base_commit: str) -> tuple[str | None, list[str]]:
-    """What the merge of `base_commit` at the working copy's HEAD took into the branch:
-    the branch's own tip it was merged into (its first parent), and the paths the merge
-    changed from that tip. (None, []) when HEAD is no such merge, as nothing was merged."""
-    parents = (await _git('rev-list', '--parents', '-n', '1', 'HEAD', cwd=target)).split()
-    if len(parents) != 3 or parents[2] != base_commit:
-        return None, []
-    ours = parents[1]
-    changed = await _git('diff', '--name-only', '-z', '--no-renames', ours, 'HEAD',
-                         cwd=target)
-    return ours, [path for path in changed.split('\0') if path]
-
-
-async def contract_files(target: Path, revision: str) -> dict[str, bytes]:
-    """The files directly in the contract directory (contracts/, without its component
-    and part contracts) at `revision` of the working copy, by name."""
-    listed = await _git_bytes('ls-tree', '-z', f'{revision}:{CONTRACTS_DIR}', cwd=target)
-    files: dict[str, bytes] = {}
-    for entry in (listed or b'').decode('utf-8', 'replace').split('\0'):
-        meta, _, name = entry.partition('\t')
-        if not name or meta.split()[1:2] != ['blob']:
-            continue
-        shown = await _git_bytes('show', f'{revision}:{CONTRACTS_DIR}/{name}', cwd=target)
-        if shown is not None:
-            files[name] = shown
-    return files
+async def merge_changes(target: Path) -> dict[str, Any]:
+    """What the merge commit at HEAD of the working copy took in from the branch it
+    merged: {'parent': the commit it was merged into (its first parent), 'parent_files':
+    every path of that commit, 'changed': the paths the merge changed relative to it,
+    'contract': {name: text} of the top-level files of contracts/ in that commit}."""
+    parent = (await _git('rev-parse', 'HEAD^1', cwd=target)).strip()
+    listed = await _git_bytes('ls-tree', '-r', '--name-only', '-z', parent, cwd=target)
+    changed = await _git_bytes('diff', '--name-only', '--no-renames', '-z', parent, 'HEAD',
+                               cwd=target)
+    if listed is None or changed is None:
+        raise CheckoutError('The changes of the merge could not be read.')
+    parent_files = [item for item in listed.decode('utf-8', 'replace').split('\0') if item]
+    contract: dict[str, str] = {}
+    for path in parent_files:
+        if path.startswith(f'{CONTRACTS_DIR}/') and path.count('/') == 1:
+            shown = await _git_bytes('show', f'{parent}:{path}', cwd=target)
+            if shown is not None:
+                contract[path.split('/', 1)[1]] = shown.decode('utf-8', 'replace')
+    return {'parent': parent, 'parent_files': parent_files,
+            'changed': [item for item in changed.decode('utf-8', 'replace').split('\0')
+                        if item],
+            'contract': contract}
 
 
 def replace_files(source: Path, target: Path, include: Callable[[Path], bool]) -> None:
