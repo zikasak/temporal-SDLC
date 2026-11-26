@@ -296,6 +296,93 @@ async def _merge_remote(target: Path, token: str, branch: str, author: tuple[str
         else changes[:CONFLICT_CHARS] + '\n… (the diff goes on)') from failure
 
 
+async def current_branch(target: Path) -> str | None:
+    """The branch the working copy has checked out; None when detached or unavailable."""
+    if not await run_sync((target / '.git').is_dir):
+        return None
+    try:
+        name = await _git('symbolic-ref', '--quiet', '--short', 'HEAD', cwd=target)
+    except CheckoutError:
+        return None
+    return name or None
+
+
+async def remote_branch_exists(target: Path, token: str, branch: str) -> bool:
+    """Whether the repository on GitHub has `branch`."""
+    found = await _git('ls-remote', '--heads', 'origin', f'refs/heads/{branch}', cwd=target,
+                       token=token)
+    return bool(found.strip())
+
+
+async def merge_base_commit(target: Path, repository: RepositorySelection, token: str, *,
+                            branch: str, base_commit: str, message: str,
+                            author: tuple[str, str],
+                            verified: bool = True) -> RepositoryPublication:
+    """Merge `base_commit`, the tip of a pull request's base branch, into the remote
+    `branch` and push the merge, never forcing. The merge commit has the branch's tip and
+    `base_commit` as parents; files that conflict are taken as the branch has them, as a
+    fix round made them take in the base branch's changes. Raises CheckoutError when the
+    merge cannot be made or pushed, such as when the branch moved meanwhile."""
+    validate_selection(repository['full_name'], branch)
+    if not re.fullmatch(r'[0-9a-f]{40,64}', base_commit):
+        raise CheckoutError('Invalid commit')
+    if not await run_sync((target / '.git').is_dir):
+        raise CheckoutError('The repository checkout is unavailable')
+    shallow = await _git('rev-parse', '--is-shallow-repository', cwd=target) == 'true'
+    await _git('fetch', '--quiet', '--no-tags', *(['--unshallow'] if shallow else []),
+               'origin', f'refs/heads/{branch}', cwd=target, token=token)
+    tip = await _git('rev-parse', 'FETCH_HEAD', cwd=target)
+    await _git('checkout', '--quiet', '--force', '-B', branch, tip, cwd=target)
+    try:
+        await _git('fetch', '--quiet', '--no-tags', 'origin', base_commit, cwd=target,
+                   token=token)
+    except CheckoutError:
+        # Fetching by commit may be refused; the selected branch then brings it.
+        await _git('fetch', '--quiet', '--no-tags', 'origin',
+                   f'refs/heads/{repository["branch"]}', cwd=target, token=token)
+    try:
+        await _git('cat-file', '-e', f'{base_commit}^{{commit}}', cwd=target)
+    except CheckoutError as exc:
+        raise CheckoutError(
+            f'The base branch commit {base_commit[:12]} could not be fetched.') from exc
+    try:
+        await _git(*_author(author), 'merge', '--quiet', '--no-ff', '--no-edit',
+                   '--no-verify', '-m', message, base_commit, cwd=target)
+    except CheckoutError as exc:
+        conflicts = [path for path in (await _git(
+            'diff', '--name-only', '-z', '--diff-filter=U', cwd=target)).split('\0') if path]
+        if not conflicts:
+            try:
+                await _git('merge', '--abort', cwd=target)
+            except CheckoutError:
+                pass  # Nothing was merged.
+            raise CheckoutError(
+                f'The base branch could not be merged into {branch}: '
+                f'{str(exc)[-500:]}') from exc
+        for path in conflicts:
+            try:
+                await _git('cat-file', '-e', f'HEAD:{path}', cwd=target)
+            except CheckoutError:
+                await _git('rm', '--quiet', '--', path, cwd=target)
+            else:
+                await _git('checkout', 'HEAD', '--', path, cwd=target)
+        await _git(*_author(author), 'commit', '--quiet', '--no-edit', '--no-verify',
+                   cwd=target)
+    try:
+        await _git('push', '--quiet', 'origin', f'HEAD:refs/heads/{branch}', cwd=target,
+                   token=token)
+    except CheckoutError as exc:
+        if '[rejected]' in str(exc):
+            raise CheckoutError(
+                f'The branch {branch} on GitHub moved while the base branch was merged '
+                'into it.') from exc
+        raise
+    commit = await _git('rev-parse', 'HEAD', cwd=target)
+    return {'branch': branch, 'commit': commit,
+            'url': f'{repository["html_url"]}/tree/{branch}', 'verified': verified,
+            'ignored': [], 'ignored_count': 0}
+
+
 def replace_files(source: Path, target: Path, include: Callable[[Path], bool]) -> None:
     """Make the included files under `target` exactly those of `source`.
 

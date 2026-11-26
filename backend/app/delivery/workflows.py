@@ -6,6 +6,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ChildWorkflowError
 
+from app.delivery.flow.base_merge import BaseMerge
 from app.delivery.flow.baseline import Baseline
 from app.delivery.flow.change import Change
 from app.delivery.flow.ci import CiWatch
@@ -46,8 +47,8 @@ def _same_mention(first: tuple[str | None, int | None],
 
 @workflow.defn
 class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, MergeConflicts,
-                       Change, Baseline, Verification, ReviewRounds, Publication, FlowFlags,
-                       PendingStage):
+                       BaseMerge, Change, Baseline, Verification, ReviewRounds, Publication,
+                       FlowFlags, PendingStage):
     """Turns a specified task into verified, published sources: code generation, the
     parallel service and test authors, verification with its repair loop, and the push.
     A bugfix generates no code and goes red to green instead: regression tests, proof
@@ -106,6 +107,11 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, MergeCon
         # round, and those this run's push met, which a round takes in next.
         self._merge_round: dict[str, Any] | None = state.merge_fix
         self._push_conflict: dict[str, Any] | None = None
+        # Whether GitHub reported that the pull request may conflict with its base
+        # branch, to be checked now; and whether this run said in the pull request that
+        # no further base merge fix round starts on its own.
+        self._conflict_requested = False
+        self._base_merge_stopped = False
         self._init_flags()
         self._init_pending()
 

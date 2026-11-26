@@ -43,6 +43,18 @@ class PullRequestWait(FlowBase):
                                  'merged' if merged else 'closed without merging')
 
     @workflow.signal
+    def pull_request_conflicted(self, number: int) -> None:
+        """Signal 'pull_request_conflicted', arg [number]: GitHub reported (a pull_request
+        webhook event) that pull request `number` may conflict with its base branch. A
+        waiting delivery or onboarding whose pull request it is runs the activity
+        'pull_request_conflicts' at once instead of at the next check interval; a signal
+        about another pull request, or while no pull request exists, changes nothing."""
+        pull = self.progress.pull_request
+        if not pull or type(number) is not int or pull.get('number') != number:
+            return
+        self._conflict_requested = True
+
+    @workflow.signal
     def check_pull_request(self) -> None:
         """Check the pull request's state now rather than at the next interval, such as
         when the workers start; a run that began to wait before deliveries checked their
@@ -63,11 +75,12 @@ class PullRequestWait(FlowBase):
         return bool(pull and pull.get('number') and repository
                     and repository.get('full_name'))
 
-    async def _check_pull_request(self) -> None:
-        """Ask GitHub how the pull request stands; a failed check changes nothing."""
+    async def _check_pull_request(self) -> bool:
+        """Ask GitHub how the pull request stands; a failed check changes nothing. True
+        when it was found open."""
         pull, repository = self.progress.pull_request, self.spec.repository
         if not self._checks_pull_request() or pull is None or repository is None:
-            return
+            return False
         number = pull['number']
         try:
             current = await workflow.execute_activity(
@@ -78,14 +91,15 @@ class PullRequestWait(FlowBase):
             )
         except ActivityError as exc:
             workflow.logger.warning('Pull request state not read: %s', exc.cause or exc)
-            return
+            return False
         if not isinstance(current, dict):
-            return
+            return False
         merged = current.get('merged') is True
         if (merged or current.get('state') == 'closed') and self._closed is None:
             workflow.logger.info('Pull request #%d found %s', number,
                                  'merged' if merged else 'closed without merging')
             self._closed = (number, merged)
+        return not merged and current.get('state') == 'open'
 
     async def _wait_for_pull_request(self) -> bool:
         """Wait for the user's next decision, a mention's fix round or the end of the
@@ -151,13 +165,19 @@ class PullRequestWait(FlowBase):
             try:
                 await workflow.wait_condition(
                     lambda: (self._next is not None or self._closing() is not None
-                             or self._check_requested),
+                             or self._check_requested or self._conflict_requested),
                     timeout=timeout)
             except asyncio.TimeoutError:
                 pass
             if self._next is not None or self._closing() is not None:
                 continue
-            if watching:
+            merging = False
+            if self._conflict_requested:
+                # GitHub reported that the pull request may conflict with its base branch.
+                self._conflict_requested = False
+                if workflow.now() < deadline:
+                    merging = await self._check_conflicts()
+            elif watching:
                 if self._check_requested:
                     # A requested check reads the CI too.
                     next_ci = workflow.now()
@@ -165,13 +185,19 @@ class PullRequestWait(FlowBase):
                                              and workflow.now() >= next_pull_request):
                     self._check_requested = False
                     next_pull_request = workflow.now() + PULL_REQUEST_CHECK_INTERVAL
-                    if workflow.now() < deadline:
-                        await self._check_pull_request()
-                continue
-            if self._check_requested or checking:
+                    if workflow.now() < deadline and await self._check_pull_request():
+                        merging = await self._check_conflicts()
+            elif self._check_requested or checking:
                 self._check_requested = False
-                if workflow.now() < deadline:
-                    await self._check_pull_request()
+                if workflow.now() < deadline and await self._check_pull_request():
+                    merging = await self._check_conflicts()
+            if merging:
+                # A base merge fix round ran: the CI of what it pushed is watched, and
+                # the delivery waits for the user anew.
+                watching = self._ci_watching()
+                next_ci = workflow.now()
+                next_pull_request = workflow.now() + PULL_REQUEST_CHECK_INTERVAL
+                deadline = workflow.now() + TASK_IDLE_TIMEOUT
 
     def _is_follow_up(self) -> bool:
         """Whether this delivery is a flow that carries on a closed one."""
