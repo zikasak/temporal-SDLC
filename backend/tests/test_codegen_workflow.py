@@ -5,7 +5,6 @@ import pytest
 from temporalio import activity
 from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ApplicationError
-from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from app.codegen.workflows import CodegenWorkflow
@@ -28,10 +27,9 @@ class FakeActivities:
         return {"path": f"/generated/{session_id}/server", "files": 12}
 
 
-@pytest.fixture(scope="session")
-async def env():
-    async with await WorkflowEnvironment.start_time_skipping() as env:
-        yield env
+@pytest.fixture
+def env(time_skipping_server):
+    return time_skipping_server
 
 
 @pytest.fixture

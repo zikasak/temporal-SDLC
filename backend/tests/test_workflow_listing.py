@@ -8,7 +8,7 @@ from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from app.api.routes import workflows as workflows_route
 from app.temporal import executions
-from tests.dev_server import start_dev_server
+from tests.dev_server import own_namespace
 
 TASK_QUEUE = "listing-test"
 
@@ -50,22 +50,17 @@ class FakeSession:
         await workflow.execute_child_workflow("DeliveryWorkflow", id=f"delivery-{session_id}")
 
 
-@pytest.fixture(scope="module")
-async def env():
-    async with await start_dev_server() as env:
-        # Listings filter on the custom search attributes, such as LinkedTaskFlows.
-        await executions.ensure_search_attributes(env.client)
-        yield env
-
-
 @pytest.fixture
-async def client(env, monkeypatch):
+async def client(temporal_server, monkeypatch):
+    """A namespace of the test's own, whose listings hold only the executions it started."""
+    namespace = await own_namespace(temporal_server)
+
     async def connect():
-        return env.client
+        return namespace
 
     monkeypatch.setattr(executions, "connect_temporal", connect)
     monkeypatch.setattr(executions, "PAGE_SIZE", 2)
-    return env.client
+    return namespace
 
 
 async def _listed(workflow_type: str | None, expected: int, **filters) -> list[dict]:

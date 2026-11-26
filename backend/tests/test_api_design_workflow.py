@@ -12,7 +12,6 @@ from httpx import ASGITransport, AsyncClient
 from temporalio import activity
 from temporalio.client import WorkflowUpdateFailedError, WorkflowUpdateStage
 from temporalio.exceptions import ApplicationError
-from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
 
 from app.api.routes.api_design import router
@@ -27,18 +26,16 @@ from app.requirements.document import render_requirements_markdown
 from app.requirements.models import Requirement, RequirementsState
 from app.tasks.workflows import TaskWorkflow
 from app.temporal import sessions
-from app.temporal.executions import ensure_search_attributes
 from app.temporal import workflows as session_workflows
 from app.temporal.workflows import ApiDesignWorkflow
 from tests.pipeline import (
     CODE, FakeCodegenWorkflow, FakeStages, abandoned, finished, legacy_patch_markers, patch_ids,
     stage_workers,
 )
-from tests.dev_server import start_dev_server
 
 TASK_QUEUE = "api-design-test"
 # How long a session waits for the user before it expires, in the tests that let it.
-IDLE_TIMEOUT = timedelta(seconds=3)
+IDLE_TIMEOUT = timedelta(seconds=1.5)
 DOCUMENT = {"document_id": "0" * 32, "filename": "openapi.yaml",
             "content_type": "application/yaml", "size_bytes": 10, "revision": 1}
 
@@ -96,19 +93,16 @@ class FakeActivities(FakeStages):
         return DOCUMENT
 
 
-@pytest.fixture(scope="session")
-async def env():
-    async with await WorkflowEnvironment.start_time_skipping() as env:
-        yield env
+@pytest.fixture
+def env(time_skipping_server):
+    return time_skipping_server
 
 
-@pytest.fixture(scope="module")
-async def server():
+@pytest.fixture
+def server(temporal_server):
     """The dev server, for sessions that start their deliveries and forks with the
     repository's search attributes, which the time-skipping one does not know."""
-    async with await start_dev_server() as server:
-        await ensure_search_attributes(server.client)
-        yield server
+    return temporal_server
 
 
 @asynccontextmanager

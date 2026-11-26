@@ -5,7 +5,6 @@ import uuid
 from typing import Any
 
 from temporalio import activity
-from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from app.languages import get_language
@@ -51,7 +50,8 @@ def test_each_part_gets_only_its_files_diff_and_the_others_listed(tmp_path, monk
     assert count == 1 and 'review_part' not in inputs and '# stock.py' in diff
 
 
-async def test_review_workflow_reviews_every_part_and_adds_up_their_findings():
+async def test_review_workflow_reviews_every_part_and_adds_up_their_findings(
+        time_skipping_server):
     contexts: list[dict[str, Any]] = []
 
     @activity.defn(name='review_changes')
@@ -63,7 +63,8 @@ async def test_review_workflow_reviews_every_part_and_adds_up_their_findings():
         return {'session_id': session_id, 'findings': [finding], 'path': '/review',
                 **({'next_part': part + 1} if part < 2 else {})}
 
-    async with await WorkflowEnvironment.start_time_skipping() as env, Worker(
+    env = time_skipping_server
+    async with Worker(
             env.client, task_queue='review-test', workflows=[ReviewWorkflow],
             activities=[review_changes]):
         result = await env.client.execute_workflow(

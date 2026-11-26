@@ -214,6 +214,32 @@ def pi_http(monkeypatch, tmp_path):
         thread.join()
 
 
+@pytest.fixture(scope='session')
+async def temporal_server():
+    """The local Temporal dev server every test shares, one per xdist worker, with the
+    repository's search attributes registered: executions started with them need it,
+    since the time-skipping server cannot register them, and it tells a parent that its
+    child was terminated and terminates children with their parent. Tests on it keep to
+    their own task queues and unique workflow IDs; one that lists executions takes a
+    namespace of its own (tests.dev_server.own_namespace)."""
+    from app.temporal.search_attributes import ensure_search_attributes
+    from tests.dev_server import start_dev_server
+
+    async with await start_dev_server() as env:
+        await ensure_search_attributes(env.client)
+        yield env
+
+
+@pytest.fixture(scope='session')
+async def time_skipping_server():
+    """The time-skipping Temporal test server every test that skips time shares, one per
+    xdist worker."""
+    from temporalio.testing import WorkflowEnvironment
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        yield env
+
+
 @pytest.fixture(autouse=True)
 def no_conversation_storage(monkeypatch):
     """Tests never reach a developer's S3 storage; a test that saves conversations
