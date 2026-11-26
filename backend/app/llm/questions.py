@@ -14,7 +14,7 @@ MIN_OPTIONS = 2
 MAX_OPTIONS = 6
 QUESTION_CHARS = 500
 OPTION_CHARS = 200
-ANSWER_CHARS = 2000
+ANSWER_CHARS = 50000
 # What a free answer's choice is called in the page; the model never offers it itself.
 OTHER = 'Other'
 
