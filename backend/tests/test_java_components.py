@@ -349,25 +349,29 @@ public class FlowWorkflowImpl implements FlowWorkflow {
 MODULES = ['com.example.flows.FlowWorkflow', 'com.example.flows.FlowWorkflowImpl']
 
 
-def compiled_code(tmp_path) -> Path:
-    sources = tmp_path / 'code'
+@pytest.fixture(scope='module')
+def compiled_code(tmp_path_factory) -> Path:
+    """CODE compiled once for the module's tests, which only read it: the classes and an
+    empty list of dependencies beside them."""
+    build = tmp_path_factory.mktemp('code')
+    sources = build / 'code'
     for path, text in CODE.items():
         (sources / path).parent.mkdir(parents=True, exist_ok=True)
         (sources / path).write_text(text)
-    subprocess.run(['javac', '-d', str(tmp_path / 'classes'),
+    subprocess.run(['javac', '-d', str(build / 'classes'),
                     *map(str, sources.rglob('*.java'))], check=True)
-    (tmp_path / 'dependencies.txt').write_text('')
-    return tmp_path / 'classes'
+    (build / 'dependencies.txt').write_text('')
+    return build
 
 
-def check(tmp_path, stubs: dict[str, str]) -> subprocess.CompletedProcess:
+def check(tmp_path, code: Path, stubs: dict[str, str]) -> subprocess.CompletedProcess:
     contract = tmp_path / 'components'
     shutil.rmtree(contract, ignore_errors=True)
     for path, text in stubs.items():
         (contract / path).parent.mkdir(parents=True, exist_ok=True)
         (contract / path).write_text(text)
-    return subprocess.run(['java', str(STUBS), 'check', str(contract), str(tmp_path / 'classes'),
-                           str(tmp_path / 'dependencies.txt'), *MODULES],
+    return subprocess.run(['java', str(STUBS), 'check', str(contract), str(code / 'classes'),
+                           str(code / 'dependencies.txt'), *MODULES],
                           capture_output=True, text=True, timeout=120)
 
 
@@ -376,9 +380,8 @@ STUBBED = {'com/example/flows/FlowWorkflow.java': WORKFLOW,
 
 
 @needs_jdk
-def test_stubs_that_describe_the_compiled_code_conform(tmp_path):
-    compiled_code(tmp_path)
-    result = check(tmp_path, STUBBED)
+def test_stubs_that_describe_the_compiled_code_conform(tmp_path, compiled_code):
+    result = check(tmp_path, compiled_code, STUBBED)
     assert (result.returncode, result.stdout, result.stderr) == (0, '', '')
 
 
@@ -406,18 +409,17 @@ def test_stubs_that_describe_the_compiled_code_conform(tmp_path):
      'is not annotated @java.lang.Deprecated'),
 ])
 def test_a_stub_that_differs_from_the_code_is_named_with_the_difference(
-        tmp_path, stub, old, new, error):
-    compiled_code(tmp_path)
+        tmp_path, compiled_code, stub, old, new, error):
     path = f'com/example/flows/{stub}.java'
     assert old in STUBBED[path]
-    result = check(tmp_path, {**STUBBED, path: STUBBED[path].replace(old, new)})
+    result = check(tmp_path, compiled_code, {**STUBBED, path: STUBBED[path].replace(old, new)})
     assert result.returncode == 1 and error in result.stdout, result.stdout + result.stderr
 
 
 @needs_jdk
-def test_stubs_name_no_type_of_the_code_they_do_not_stub(tmp_path):
-    compiled_code(tmp_path)
-    result = check(tmp_path, {'com/example/flows/FlowWorkflowImpl.java': IMPLEMENTATION})
+def test_stubs_name_no_type_of_the_code_they_do_not_stub(tmp_path, compiled_code):
+    result = check(tmp_path, compiled_code,
+                   {'com/example/flows/FlowWorkflowImpl.java': IMPLEMENTATION})
     assert result.returncode == 1
     assert 'stub every type of the code they name' in result.stdout
     assert 'FlowWorkflowImpl.java:7: cannot find symbol' in result.stdout

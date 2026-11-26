@@ -39,6 +39,8 @@ FINAL_EXPORT_ENV = 'APP_CLAUDE_FINAL_EXPORT'
 # Claude Code reports this in its User-Agent; the SDK would label every run 'sdk-py'.
 ENTRYPOINT = 'temporal-sdlc'
 MCP_TOOL_TIMEOUT_MS = 960_000
+# Seconds the CLI has to stop a request when its run is stopped.
+INTERRUPT_TIMEOUT = 5
 # Makes the CLI write its prompt cache with a 5-minute TTL, never a 1-hour one.
 PROMPT_CACHING_5M_ENV = 'FORCE_PROMPT_CACHING_5M'
 
@@ -255,6 +257,12 @@ class ChatClaude(Runnable):
         except TimeoutError as exc:
             await self._client.interrupt()
             raise TimeoutError(f'Claude sent nothing for {self.timeout:g} seconds') from exc
+        except asyncio.CancelledError:
+            # Closed mid-request, the CLI would finish the request before it exits, and
+            # the SDK waits seconds for that before it terminates the CLI: a stopped run
+            # (as by its worker shutting down) ends the request first.
+            await self._interrupt()
+            raise
         except ClaudeSDKError:
             if result is None:
                 raise
@@ -277,6 +285,14 @@ class ChatClaude(Runnable):
         self._messages = [*messages, reply]
         self._completed = True
         return reply
+
+    async def _interrupt(self) -> None:
+        """Stop the current request, if the CLI still answers."""
+        assert self._client is not None
+        try:
+            await asyncio.wait_for(self._client.interrupt(), INTERRUPT_TIMEOUT)
+        except Exception:
+            logger.warning('Claude did not stop its turn', exc_info=True)
 
     def _exit_saving(self, store, config_dir: Path):
         async def save(exc_type, exc, traceback) -> bool:

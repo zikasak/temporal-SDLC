@@ -9,7 +9,8 @@
 # Run again in the same place, it reuses the virtualenv and node_modules while the
 # dependency files they were made from are unchanged. The tests run in parallel
 # (pytest-xdist; PYTEST_WORKERS sets how many, default 2: the sandbox gives the checks
-# two CPUs, and more workers than CPUs make tests with short deadlines flaky), with short
+# two CPUs, and more workers than CPUs make tests with short deadlines flaky; a worker
+# that runs out of tests takes those still queued on another), with short
 # tracebacks: the failures, not the source of the libraries they passed through, are what
 # a reader needs.
 set -eu
@@ -28,7 +29,7 @@ echo '== Backend tests'
 (cd backend && python -m pytest -q -p no:cacheprovider --tb=short -n "$workers")
 
 echo '== Component tests'
-(cd component-tests && PYTHONPATH=../backend python -m pytest -q -p no:cacheprovider --tb=short -n "$workers")
+(cd component-tests && PYTHONPATH=../backend python -m pytest -q -p no:cacheprovider --tb=short -n "$workers" --dist worksteal)
 
 echo '== Frontend typecheck and build'
 (

@@ -555,13 +555,13 @@ async def test_cancelled_shell_stops_its_descendants(tmp_path, tools):
 
 async def test_shell_command_is_stopped_after_the_time_it_was_given(tmp_path, tools):
     finished = tmp_path / 'finished'
-    script = f'import time; from pathlib import Path; time.sleep(3); Path({str(finished)!r}).touch()'
+    script = f'import time; from pathlib import Path; time.sleep(2); Path({str(finished)!r}).touch()'
     result = await tools['shell'].ainvoke({
         'command': f'{shlex.quote(sys.executable)} -c {shlex.quote(script)}',
         'timeout_seconds': 1,
     })
     assert result.startswith('Command timed out after 1 seconds')
-    await asyncio.sleep(2.5)
+    await asyncio.sleep(1.5)
     assert not finished.exists()
 
 
