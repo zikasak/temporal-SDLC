@@ -1393,5 +1393,29 @@
     "priority": "must",
     "rationale": "User chose: leave them for the operator to prune.",
     "title": "Old per-session images left in place"
+  },
+  {
+    "category": "functional",
+    "description": "When a component seam's module, or a module named in its added_elsewhere, is written in path form (for example app/docker_agents or app/docker_agents.py) and converting it to dotted form gives exactly one module the component contract has a stub of (app.docker_agents), the routing uses that dotted name and goes on as if the agent had written it.",
+    "id": "FR-198",
+    "priority": "must",
+    "rationale": "User chose: normalize what is unambiguous, also in added_elsewhere.",
+    "title": "Path-form seam modules are normalized to the stubbed dotted name"
+  },
+  {
+    "category": "functional",
+    "description": "When a seam's module, or a module in its added_elsewhere, cannot be matched to exactly one stubbed module even after normalizing, the routing agent is told, while it still runs, which module names no stub and which modules the component contract stubs, so that it can correct its routes or its stubs; only if its final routing still names such a module does the routing fail with today's error \"The seam of requirement … names a module the component contract has no stub of: …\".",
+    "id": "FR-199",
+    "priority": "must",
+    "rationale": "User chose: otherwise send it back to the agent; a module that really has no stub still fails with today's error.",
+    "title": "Unmatched seam modules are sent back to the routing agent"
+  },
+  {
+    "category": "functional",
+    "description": "A test shows that a routing whose seam names app/docker_agents (and one naming app/docker_agents.py, and one naming it in added_elsewhere) with a component contract stubbing app.docker_agents ends with routing_status \"routed\" and the seam's module recorded as app.docker_agents; and a test shows that a routing whose seam names a module with no stub, in either form, still ends with routing_status \"error\" and today's message naming that module.",
+    "id": "FR-200",
+    "priority": "must",
+    "rationale": "User's acceptance criterion.",
+    "title": "Acceptance: path-form seam routes, a missing stub still fails"
   }
 ]
