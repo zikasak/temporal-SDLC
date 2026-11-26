@@ -9,6 +9,7 @@ from temporalio.exceptions import ActivityError
 
 from app.delivery.flow.base import FlowBase
 from app.delivery.flow.merge_conflicts import MAX_MERGE_FIX_ROUNDS
+from app.delivery.models import KEPT_BASE_MERGES, BaseMergeRound
 
 # Marks the workflow code that checks, while the delivery waits, whether its pull request
 # conflicts with its base branch, and merges the base branch in a fix round of its own.
@@ -103,6 +104,12 @@ class BaseMerge(FlowBase):
         self._merge_round = None
         self._base_merge_stopped = False
 
+    def _record_base_merge(self, entry: BaseMergeRound) -> None:
+        """Show the round in the delivery progress, keeping the latest ones."""
+        rounds = self.progress.base_merges
+        rounds.append(entry)
+        del rounds[:-KEPT_BASE_MERGES]
+
     def _ready_to_merge(self) -> bool:
         return (self.state.waiting and self._next is None and self._closing() is None
                 and not self._fix_pending())
@@ -131,6 +138,11 @@ class BaseMerge(FlowBase):
             if not self._base_merge_stopped:
                 # Said once; the delivery waits for the user.
                 self._base_merge_stopped = True
+                stamp = workflow.now().isoformat()
+                self._record_base_merge(BaseMergeRound(
+                    round=round_, limit=MAX_MERGE_FIX_ROUNDS, base=base,
+                    base_commit=commit, files=files, status='stopped', merge_commit=None,
+                    error=refused, started_at=stamp, finished_at=stamp))
                 await self._ci_comment(BASE_MERGE_REMAINS.format(
                     base=base, files=_named(files), reason=refused))
             return False
@@ -141,6 +153,11 @@ class BaseMerge(FlowBase):
             base=base, files=_named(files), round=round_, limit=MAX_MERGE_FIX_ROUNDS,
             steps=steps))
         fix = {'commit': commit, 'files': files, 'round': round_}
+        entry = BaseMergeRound(
+            round=round_, limit=MAX_MERGE_FIX_ROUNDS, base=base, base_commit=commit,
+            files=list(files), status='running', merge_commit=None, error=None,
+            started_at=workflow.now().isoformat(), finished_at=None)
+        self._record_base_merge(entry)
         self._merge_round = fix
         self.state.merge_fix = dict(fix)
         self.state.waiting = False
@@ -197,6 +214,13 @@ class BaseMerge(FlowBase):
         finally:
             self.state.merge_fix = None
             self.state.instructions = None
+            entry['finished_at'] = workflow.now().isoformat()
+            if merged is not None:
+                entry['status'] = 'completed'
+                entry['merge_commit'] = str(merged['commit'])
+            else:
+                entry['status'] = 'failed'
+                entry['error'] = error or 'The round was stopped before it pushed.'
         # Reports that arrived during the round are answered by its push.
         self._conflict_requested = False
         self.state.waiting = True

@@ -441,7 +441,8 @@ def _follow_up_state(state: DeliveryState, session_id: str) -> DeliveryState:
     spec = dataclasses.replace(state.spec, session_id=session_id)
     progress = dataclasses.replace(
         state.progress, mentions=[], agent_questions=[], pull_request=None,
-        pull_request_error=None, pull_request_status='skipped', fix_flow_ids=[])
+        pull_request_error=None, pull_request_status='skipped', fix_flow_ids=[],
+        base_merges=[])
     return dataclasses.replace(
         state, spec=spec, progress=progress, retry_stage=None, instructions=None,
         record_only=True, mention=None, mention_type=None, mention_queue=[],
