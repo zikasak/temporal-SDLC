@@ -5,13 +5,15 @@ publish_documentation_from, _publish and the fixed-subject constants) and
 app.agent_workflows.host._work_message for the wip/ format.
 
 Faked collaborators: the saved workflow settings (adapter 'claude'), the Claude SDK client
-(app.llm.claude.ClaudeSDKClient) and _github_token. The push is app.github.checkout.push as it
-is, against a local bare repository that stands for origin; the test reads the pushed commit.
+(app.llm.claude.ClaudeSDKClient), _github_token and the push (app.github.checkout.push), which
+records the message it is given; the test reads the message of that push.
 """
 from __future__ import annotations
 
 import inspect
+import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -26,7 +28,7 @@ from app.github.models import RepositoryPublication
 from app.review.models import ReviewFinding, commit_findings
 from app.settings.models import ModelSettings
 
-from helpers import REPOSITORY
+from helpers import REPOSITORY, patch_everywhere
 
 SESSION = "sess-commit-1"
 MARKER = "UNIQUE-DIFF-MARKER-7f3a9c"
@@ -133,44 +135,74 @@ def llm(monkeypatch: pytest.MonkeyPatch) -> type[FakeClaudeSDKClient]:
 @pytest.fixture(autouse=True)
 def github_token(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_token() -> tuple[str, dict[str, Any]]:
-        return "test-token", {}
+        # the connection fields the commit's author is built from
+        return "test-token", {"app_slug": "flows", "bot_user_id": 1}
 
     import app.temporal.activities as activities
     monkeypatch.setattr(activities, "_github_token", fake_token)
 
 
-def _git(*args: str, cwd: Path | None = None) -> str:
-    result = subprocess.run(
+def _git(*args: str, cwd: Path) -> None:
+    subprocess.run(
         ["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
-        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(cwd or "/tmp"),
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(cwd),
              "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
              "GIT_TERMINAL_PROMPT": "0"})
-    return result.stdout
+
+
+@dataclass
+class Push:
+    """One call of the faked app.github.checkout.push."""
+    target: Path
+    branch: str
+    message: str
+    commit: str
+    verified: bool
+
+
+PUSHES: list[Push] = []
+
+
+@pytest.fixture(autouse=True)
+def push(monkeypatch: pytest.MonkeyPatch) -> list[Push]:
+    """The push collaborator (app.github.checkout.push) is faked: the runner has no git remote.
+    It records the message it is given and answers a publication."""
+    PUSHES.clear()
+
+    async def fake_push(
+        target: Path, repository: Any, token: str, *, branch: str, message: str,
+        author: tuple[str, str], verified: bool = True, resolved: str | None = None,
+    ) -> RepositoryPublication:
+        commit = f"{len(PUSHES) + 1:040x}"
+        PUSHES.append(Push(Path(target), branch, message, commit, verified))
+        return cast(RepositoryPublication, {
+            "branch": branch, "commit": commit,
+            "url": f"https://github.com/acme/widgets/tree/{branch}",
+            "ignored": [], "ignored_count": 0, "verified": verified,
+        })
+
+    import app.github.checkout
+    import app.temporal.activities
+    patch_everywhere(monkeypatch, [app.github.checkout, app.temporal.activities], "push", fake_push)
+    return PUSHES
 
 
 class Remote:
-    """A local bare repository standing for origin, with a workspace whose checkout is its clone."""
+    """The session's working copy: a workspace whose checkout holds the files a publication
+    changes. Its pushes are recorded by the faked push; the checkout is also made a git
+    repository when git is available, for code that reads the diff with it."""
 
-    def __init__(self, tmp_path: Path) -> None:
-        self.path = tmp_path / "origin.git"
-        _git("init", "--bare", "-b", "main", str(self.path))
-        seed = tmp_path / "seed"
-        _git("clone", str(self.path), str(seed))
-        for key, value in (("user.name", "Seed"), ("user.email", "seed@example.com")):
-            _git("config", key, value, cwd=seed)
-        _git("checkout", "-B", "main", cwd=seed)
-        (seed / "README.md").write_text("# Widgets\n")
-        _git("add", "-A", cwd=seed)
-        _git("commit", "-m", "Initial commit", cwd=seed)
-        _git("push", "origin", "main", cwd=seed)
-
-        self.workspace = SessionWorkspace(root=tmp_path / "workspace")
-        self.workspace.root.mkdir(parents=True, exist_ok=True)
+    def __init__(self, tmp_path: Path, root: Path | None = None) -> None:
+        self.workspace = SessionWorkspace(root=root or tmp_path / "workspace")
         checkout = self.workspace.checkout
-        checkout.parent.mkdir(parents=True, exist_ok=True)
-        _git("clone", str(self.path), str(checkout))
-        for key, value in (("user.name", "Flows"), ("user.email", "flows@example.com")):
-            _git("config", key, value, cwd=checkout)
+        checkout.mkdir(parents=True, exist_ok=True)
+        (checkout / "README.md").write_text("# Widgets\n")
+        if shutil.which("git"):
+            _git("init", "-q", "-b", "main", cwd=checkout)
+            for key, value in (("user.name", "Flows"), ("user.email", "flows@example.com")):
+                _git("config", key, value, cwd=checkout)
+            _git("add", "-A", cwd=checkout)
+            _git("commit", "-q", "-m", "Initial commit", cwd=checkout)
         for directory in (self.workspace.service, self.workspace.suite,
                           self.workspace.component_tests, self.workspace.documentation):
             directory.mkdir(parents=True, exist_ok=True)
@@ -178,9 +210,9 @@ class Remote:
         (self.workspace.suite / "test_widgets.py").write_text("def test_widgets():\n    pass\n")
 
     def message(self, publication: RepositoryPublication) -> str:
-        """The full message of the commit the push left on its branch of origin."""
-        return _git("--git-dir", str(self.path), "log", "-1", "--format=%B",
-                    publication["branch"]).strip()
+        """The full message the push of this publication was given."""
+        [pushed] = [p for p in PUSHES if p.commit == publication["commit"]]
+        return pushed.message.strip()
 
 
 @pytest.fixture
@@ -344,27 +376,36 @@ class TestWipFormatIsShared:
         import app.temporal.activities as activities
         from app.agent_workflows.host import _work_message
 
-        # a reply longer than the wip/ format allows: the same reply goes through both paths
-        llm.reply = LLM_SUBJECT + "\n\n" + "\n".join(f"- change number {n}" for n in range(1, 9))
         diff = f"diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-a\n+b {MARKER}\n"
         wip = await _work_message("implementation", "implementation", "passed", diff)
         assert wip, "the wip/ message call returned no message"
-        wip_prompt = llm.instances[-1]
+        wip_prompt = "\n".join(llm.instances[-1].prompts)
+        assert diff.strip() in wip_prompt, "the wip/ prompt does not hold the diff it was given"
+        # the instructions around the diff, which the published commit's prompt must share
+        before, _, after = wip_prompt.partition(diff.strip())
+        assert (before + after).strip(), "the wip/ prompt holds no instructions besides the diff"
 
         def update() -> None:
             (remote.workspace.checkout / "notes.md").write_text(f"notes {MARKER}\n")
 
+        asked_before = len(llm.instances)
         publication = await activities._publish(
             remote.workspace, SESSION, REPOSITORY, "Given fixed subject", update)
         message = remote.message(publication)
 
-        assert len(llm.instances) > 1, "the published commit's message was not written by the LLM"
-        published_prompt = llm.instances[-1]
-        assert published_prompt.system_prompt == wip_prompt.system_prompt, \
-            "published commits are not written from the same prompt as wip/ commits"
-        assert message.startswith(wip.strip()), (
+        assert len(llm.instances) > asked_before, \
+            "the published commit's message was not written by the LLM"
+        published_prompt = "\n".join(llm.instances[-1].prompts)
+        assert MARKER in published_prompt, "the published prompt does not hold the commit's diff"
+        assert published_prompt.startswith(before) and published_prompt.endswith(after), (
+            "published commits are not written from the same prompt as wip/ commits: "
+            f"wip/ instructions {before!r} ... {after!r}, published prompt {published_prompt!r}")
+        # the same format: the LLM's subject, an empty line, then its body
+        assert message.startswith(LLM_REPLY), (
             "the LLM text of the published commit is not in the wip/ format: "
-            f"wip/ gives {wip.strip()!r}, the commit has {message!r}")
+            f"the LLM wrote {LLM_REPLY!r}, the commit has {message!r}")
+        body = message[len(LLM_SUBJECT):].lstrip("\n").split("\n\n")[0].splitlines()
+        assert len(body) <= 5
 
 
 class TestBugfixSubject:
@@ -382,6 +423,25 @@ class TestBugfixSubject:
         assert subject == LLM_SUBJECT
         assert subject != FIXED_BUGFIX_SUBJECT
         assert len(subject) <= 72
+
+    async def test_bugfix_subject_longer_than_72_characters_is_bounded(
+        self, llm: type[FakeClaudeSDKClient], remote: Remote,
+    ) -> None:
+        # requirement: FR-205
+        import app.temporal.activities as activities
+
+        long_subject = ("Retry failed widget fetches with exponential backoff and jitter "
+                        "so that a flaky upstream no longer fails every request of a client")
+        assert len(long_subject) > 100
+        llm.reply = long_subject + "\n\n- Add a retry loop to the widget client"
+        publication = await activities.publish_repository_from(
+            remote.workspace, SESSION, REPOSITORY, _contract(), kind="bugfix")
+        subject = _subject(remote.message(publication))
+
+        assert llm.instances, "the LLM was never asked to write the commit message"
+        assert len(subject) <= 72, f"the subject has {len(subject)} characters: {subject!r}"
+        assert subject != FIXED_BUGFIX_SUBJECT
+        assert subject.startswith("Retry failed widget fetches")
 
     @pytest.mark.parametrize("failure", ["raises", "empty"])
     async def test_bugfix_push_succeeds_with_the_fixed_subject_when_the_llm_fails(
@@ -469,6 +529,142 @@ class TestPublishedCommitKeepsTodaysParts:
         assert llm.instances, "the LLM was never asked before the fixed subject was used"
         assert _subject(message) == activities.DOCUMENTATION_SUBJECT + " (unverified)"
         assert activities.UNVERIFIED_NOTE.strip() in message
+
+
+class TestOtherPartsOfTheMessageAreKept:
+    async def test_delivery_with_components_keeps_the_components_note(
+        self, llm: type[FakeClaudeSDKClient], remote: Remote, tmp_path: Path,
+    ) -> None:
+        # requirement: FR-204, FR-201
+        import app.temporal.activities as activities
+
+        plain = await activities.publish_repository_from(
+            remote.workspace, SESSION, REPOSITORY, _contract(), kind="api_change")
+        plain_message = remote.message(plain)
+
+        other = Remote(tmp_path / "with-components")
+        (other.workspace.component_tests / "test_widgets_component.py").write_text(
+            "def test_component():\n    pass\n")
+        components = {"files": ["test_widgets_component.py"], "tests": 1, "passed": True}
+        with_components = await activities.publish_repository_from(
+            other.workspace, SESSION, REPOSITORY, _contract(), kind="api_change",
+            components=components)
+        message = other.message(with_components)
+
+        assert _subject(plain_message) == LLM_SUBJECT
+        assert _subject(message) == LLM_SUBJECT
+        for line in LLM_BODY:
+            assert line in message
+        assert re_search(GENERATED, message)
+        assert len(message) > len(plain_message) and message != plain_message, (
+            "the component tests note is missing from the message of a delivery with components")
+
+    async def test_onboarding_with_changed_code_keeps_the_code_changed_note(
+        self, llm: type[FakeClaudeSDKClient], remote: Remote, tmp_path: Path,
+    ) -> None:
+        # requirement: FR-204, FR-201
+        import app.temporal.activities as activities
+
+        unchanged = await activities.publish_onboarding_from(
+            remote.workspace, SESSION, REPOSITORY, _contract())
+        unchanged_message = remote.message(unchanged)
+
+        other = Remote(tmp_path / "code-changed")
+        changed = await activities.publish_onboarding_from(
+            other.workspace, SESSION, REPOSITORY, _contract(), code_changed=True)
+        message = other.message(changed)
+
+        assert _subject(unchanged_message) == LLM_SUBJECT
+        assert _subject(message) == LLM_SUBJECT
+        assert re_search(GENERATED, message)
+        assert len(message) > len(unchanged_message) and message != unchanged_message, (
+            "the code-changed note is missing from the message of an onboarding that changed code")
+
+    async def test_onboarding_with_open_findings_keeps_marker_and_findings(
+        self, llm: type[FakeClaudeSDKClient], remote: Remote,
+    ) -> None:
+        # requirement: FR-204, FR-201
+        import app.temporal.activities as activities
+
+        findings = [_finding()]
+        publication = await activities.publish_onboarding_from(
+            remote.workspace, SESSION, REPOSITORY, _contract(), findings=findings)
+        message = remote.message(publication)
+
+        assert _subject(message) == LLM_SUBJECT + " (unverified)"
+        assert findings[0]["summary"] in message
+        assert commit_findings(findings).strip() in message
+        assert activities.FINDINGS_NOTE.strip() in message
+        assert re_search(GENERATED, message)
+
+    async def test_fallback_onboarding_keeps_marker_and_findings_on_the_fixed_subject(
+        self, llm: type[FakeClaudeSDKClient], remote: Remote,
+    ) -> None:
+        # requirement: FR-202, FR-204
+        import app.temporal.activities as activities
+
+        llm.error = RuntimeError("the LLM is unavailable")
+        findings = [_finding()]
+        publication = await activities.publish_onboarding_from(
+            remote.workspace, SESSION, REPOSITORY, _contract(), findings=findings)
+        message = remote.message(publication)
+
+        assert llm.instances, "the LLM was never asked before the fixed subject was used"
+        assert _subject(message) == activities.ONBOARDING_SUBJECT + " (unverified)"
+        assert findings[0]["summary"] in message
+
+
+ARCHITECTURE = f"# Architecture\n\nOne module, core. {MARKER}\n"
+STRUCTURE: dict[str, Any] = {"components": [{"name": "core"}]}
+
+
+@pytest.fixture
+def architecture_remote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> Remote:
+    """The session's checkout where the architecture-only publication looks for it:
+    GENERATED_CODE_DIR/<session>/repository."""
+    import app.temporal.activities as activities
+    generated = tmp_path / "generated"
+    monkeypatch.setattr(activities, "GENERATED_CODE_DIR", generated)
+    return Remote(tmp_path, root=generated / SESSION)
+
+
+class TestArchitectureOnlyOnboardingCommit:
+    async def test_architecture_subject_is_the_llm_subject(
+        self, llm: type[FakeClaudeSDKClient], architecture_remote: Remote,
+    ) -> None:
+        # requirement: FR-201
+        import app.temporal.activities as activities
+
+        publication = await activities.publish_onboarding_architecture(
+            SESSION, REPOSITORY, ARCHITECTURE, STRUCTURE)
+        message = architecture_remote.message(publication)
+
+        assert _subject(message) == LLM_SUBJECT
+        assert activities.ARCHITECTURE_SUBJECT not in message.splitlines()[0]
+        for line in LLM_BODY:
+            assert line in message
+        assert re_search(GENERATED, message)
+        _assert_llm_asked_with_diff(llm, "the architecture-only onboarding")
+
+    @pytest.mark.parametrize("failure", ["raises", "empty"])
+    async def test_architecture_push_succeeds_with_the_fixed_subject_when_the_llm_fails(
+        self, llm: type[FakeClaudeSDKClient], architecture_remote: Remote, failure: str,
+    ) -> None:
+        # requirement: FR-202
+        import app.temporal.activities as activities
+
+        if failure == "raises":
+            llm.error = RuntimeError("the LLM is unavailable")
+        else:
+            llm.reply = ""
+        publication = await activities.publish_onboarding_architecture(
+            SESSION, REPOSITORY, ARCHITECTURE, STRUCTURE)
+
+        assert llm.instances, "the LLM was never asked before the fixed subject was used"
+        assert publication["commit"]
+        assert _subject(architecture_remote.message(publication)) == activities.ARCHITECTURE_SUBJECT
 
 
 def re_search(pattern: str, text: str) -> bool:
