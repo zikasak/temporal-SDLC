@@ -228,7 +228,11 @@ def _contract() -> RepositoryContract:
             "title": "Serve widgets", "description": "The service serves widgets.",
         }],
         "requirements_document": f"# Requirements\n\nServe widgets. {MARKER}\n",
-        "api": {"paths": {"/widgets": {}}},
+        "api": {
+            "info": {"title": "Widgets", "version": "1.0.0", "description": "", "auth": "none"},
+            "schemas": [],
+            "endpoints": [],
+        },
     })
 
 
