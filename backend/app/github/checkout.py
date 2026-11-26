@@ -633,15 +633,44 @@ async def merge_base_branch(target: Path, repository: RepositorySelection, token
         await _remember_merge(target, head, head)
         return {'branch': branch, 'commit': head, 'url': url, 'verified': verified,
                 'ignored': [], 'ignored_count': 0}
+    try:
+        commit = await _merge_and_push(target, token, branch=branch,
+                                       base_commit=base_commit, resolve=resolve,
+                                       message=message, author=author, combine=combine)
+    except BaseException:
+        # Nothing of a merge that was not pushed may stay in the working copy: a later
+        # push of the sources would carry it and so undo the base branch's changes.
+        await _restore_branch(target, head)
+        raise
+    await _remember_merge(target, commit, head)
+    return {'branch': branch, 'commit': commit, 'url': url, 'verified': verified,
+            'ignored': [], 'ignored_count': 0}
+
+
+async def _restore_branch(target: Path, head: str) -> None:
+    """Abort any merge in progress and put the checked-out branch, its index and its
+    files back at `head`, the tip it was checked out from. Best effort: it runs while
+    another failure is raised, which it must not hide."""
+    try:
+        if await _revision('MERGE_HEAD', target):
+            await _git_code('merge', '--abort', cwd=target)
+        await _git_code('reset', '--quiet', '--hard', head, cwd=target)
+        await _git_code('clean', '--quiet', '-fd', cwd=target)
+    except Exception:  # noqa: BLE001 - the original failure is the one to report
+        pass
+
+
+async def _merge_and_push(target: Path, token: str, *, branch: str, base_commit: str,
+                          resolve: Callable[[str], Path | None], message: str,
+                          author: tuple[str, str],
+                          combine: ContractMerge | None) -> str:
+    """Merge `base_commit` into the checked-out `branch`, settle its conflicts as
+    merge_base_branch describes, commit and push the merge; returns the merge commit."""
     code, failure = await _git_code(*_author(author), 'merge', '--quiet', '--no-ff',
                                     '--no-commit', '--no-verify', base_commit, cwd=target)
     conflicts = [path for path in (await _git(
         'diff', '--name-only', '-z', '--diff-filter=U', cwd=target)).split('\0') if path]
     if code and not conflicts:
-        try:
-            await _git('merge', '--abort', cwd=target)
-        except CheckoutError:
-            pass
         raise CheckoutError(f'The base branch cannot be merged: {failure[-500:]}')
     root = target.resolve()
     contract = [path for path in conflicts if path.startswith(f'{CONTRACTS_DIR}/')]
@@ -691,9 +720,7 @@ async def merge_base_branch(target: Path, repository: RepositorySelection, token
             await _git('add', '--', path, cwd=target)
     await _git(*_author(author), 'commit', '--quiet', '--no-verify', '-m', message,
                cwd=target)
+    commit = await _git('rev-parse', 'HEAD', cwd=target)
     await _git('push', '--quiet', 'origin', f'HEAD:refs/heads/{branch}', cwd=target,
                token=token)
-    commit = await _git('rev-parse', 'HEAD', cwd=target)
-    await _remember_merge(target, commit, head)
-    return {'branch': branch, 'commit': commit, 'url': url, 'verified': verified,
-            'ignored': [], 'ignored_count': 0}
+    return commit
