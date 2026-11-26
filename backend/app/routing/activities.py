@@ -258,8 +258,10 @@ async def _publish_part(part: ComponentPart, session_dir: Path, output: Path,
                 seams.add(key)
                 if reason:
                     reasons[key] = f'{reasons[key]}\n{reason}' if key in reasons else reason
+        # The baseline holds no contracts/: the published stubs are the checkout's.
         missing = unstubbed(repository, clean, read['runtime']['source_root'],
-                            seams=seams, reasons=reasons)
+                            seams=seams, reasons=reasons,
+                            published=session_dir / CHECKOUT_DIR / part.published_dir())
         if missing:
             raise RuntimeError('\n'.join(missing) + '\n' + UNSTUBBED_ADVICE)
     added = added_seams(routes)
