@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
+from app.agent_workflows import host
 from app.delivery.contract import (
     ContractError, RepositoryContract, read_contract, write_contract,
 )
@@ -70,7 +71,25 @@ def remote(tmp_path, monkeypatch, repository_selection, github_connection):
     github_connection(TOKEN)
     monkeypatch.setattr(checkout, "GITHUB_URL", f"file://{tmp_path / 'remote'}/")
     monkeypatch.setattr(activities, "GENERATED_CODE_DIR", tmp_path / "generated")
+    # No LLM writes the published commits' messages unless a test sets one up.
+    commit_messages.clear()
+    commit_messages.append(None)
+    monkeypatch.setattr(host, "_work_message", _fake_work_message)
     return bare
+
+
+# The commit message the fake LLM replies with: the last item; None for no reply, an
+# exception to raise it. The prompts it was given are recorded in `commit_prompts`.
+commit_messages: list = []
+commit_prompts: list[tuple[str, str, str, str]] = []
+
+
+async def _fake_work_message(role, stage, status, diff):
+    commit_prompts.append((role, stage, status, diff))
+    reply = commit_messages[-1]
+    if isinstance(reply, BaseException):
+        raise reply
+    return reply
 
 
 async def test_verified_sources_are_pushed_to_a_new_branch(tmp_path, remote, repository_selection):
@@ -158,6 +177,53 @@ async def test_bugfix_of_a_requirements_session_gets_its_own_branch(tmp_path, re
         "Fix the service and add regression tests")
     # The next task on that branch starts from the contract published with it.
     assert await environment.run(activities.read_repository_contract, session_id) == CONTRACT
+
+
+async def test_the_llm_writes_a_published_commits_message_from_its_diff(
+        tmp_path, remote, repository_selection):
+    environment = ActivityEnvironment()
+    await environment.run(activities.checkout_repository, SESSION, repository_selection)
+    session = tmp_path / "generated" / SESSION
+    for name, text in {"implementation/service/src/main/Kept.java": "kept, with the fix",
+                       "tests/suite/pom.xml": "pom"}.items():
+        (session / name).parent.mkdir(parents=True, exist_ok=True)
+        (session / name).write_text(text)
+    commit_messages.append("Stop dropping orders placed at midnight " + "x" * 60
+                           + "\n\nKept.java keeps them now.\n" + "line\n" * 9)
+    commit_prompts.clear()
+    published = await environment.run(
+        activities.publish_repository, SESSION, repository_selection, CONTRACT, "bugfix",
+        [{"summary": "Leaks", "path": "src/main/Kept.java", "target": "implementation",
+          "reason": "Code"}])
+    message = git("log", "-1", "--format=%B", published["branch"], cwd=remote)
+    subject, _, rest = message.partition("\n")
+    # The LLM's subject, cut at 72 characters, keeps the unverified marker.
+    assert subject.startswith("Stop dropping orders placed at midnight")
+    assert subject.endswith(" (unverified)")
+    assert len(subject.removesuffix(" (unverified)")) <= 72
+    assert "Kept.java keeps them now." in rest
+    assert rest.count("line") <= 4
+    assert f"Generated from {repository_selection['branch']} by session {SESSION}." in rest
+    assert activities.FINDINGS_NOTE in rest and "Leaks" in rest
+    # Written from the commit's diff, with the prompt of the wip/ commits.
+    _, stage, status, diff = commit_prompts[-1]
+    assert (stage, status) == ("publication", "unverified")
+    assert "src/main/Kept.java" in diff and "src/main/Old.java" in diff
+
+
+async def test_a_published_commit_without_the_llm_keeps_the_fixed_subject(
+        tmp_path, remote, repository_selection):
+    environment = ActivityEnvironment()
+    await environment.run(activities.checkout_repository, SESSION, repository_selection)
+    session = tmp_path / "generated" / SESSION
+    for name in ("implementation/service/src/main/Kept.java", "tests/suite/pom.xml"):
+        (session / name).parent.mkdir(parents=True, exist_ok=True)
+        (session / name).write_text("fixed")
+    commit_messages.append(RuntimeError("provider down"))
+    published = await environment.run(activities.publish_repository, SESSION,
+                                      repository_selection, CONTRACT, "bugfix")
+    assert git("log", "-1", "--format=%s", published["branch"], cwd=remote) == (
+        activities.COMMIT_SUBJECTS["bugfix"])
 
 
 async def test_a_change_with_component_tests_pushes_them_with_its_component_contract(
