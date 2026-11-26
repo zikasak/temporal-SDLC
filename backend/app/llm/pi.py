@@ -647,7 +647,9 @@ class ChatPi(Runnable):
         pi = _Process(process)
         stack.push_async_callback(pi.close)
         self._process = pi
-        state = await pi.command({'type': 'get_state'}, self.timeout)
+        # Starting Pi is not the model's silence: a short silence timeout must not
+        # cut its start short.
+        state = await pi.command({'type': 'get_state'}, max(self.timeout, COMMAND_TIMEOUT))
         if not state.get('success'):
             raise RuntimeError(f'pi did not start: {state.get("error")}')
         self.session_id = state['data']['sessionId']
@@ -675,7 +677,8 @@ class ChatPi(Runnable):
         """One prompt, until Pi settles; its final reply."""
         pi = self._process
         assert pi is not None
-        response = await pi.command({'type': 'prompt', 'message': prompt}, self.timeout)
+        response = await pi.command({'type': 'prompt', 'message': prompt},
+                                    max(self.timeout, COMMAND_TIMEOUT))
         if not response.get('success'):
             raise RuntimeError(f'pi refused the prompt: {response.get("error")}')
         last = answer = None
