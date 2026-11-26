@@ -11,7 +11,7 @@ with workflow.unsafe.imports_passed_through():
     from app.conversations.models import ConversationMessage
     from app.llm.questions import Question, answer_problem, answers_text
 
-MAX_TRANSCRIPT_BYTES = 64 * 1024
+MAX_TRANSCRIPT_BYTES = 512 * 1024
 MAX_MESSAGE_CHARS = 10000
 
 
@@ -22,16 +22,21 @@ def pending_questions(messages: Sequence[Mapping[str, Any]]) -> list[Question]:
     return messages[-1].get("questions") or []
 
 
-def check_message(messages: Sequence[Mapping[str, Any]], text: str, too_long: str) -> None:
-    """Raise ValueError unless `text` can be the session's next user message."""
-    if not text or len(text) > MAX_MESSAGE_CHARS:
-        raise ValueError(f"A message must contain 1 to {MAX_MESSAGE_CHARS} characters.")
+def _check_transcript_bytes(messages: Sequence[Mapping[str, Any]], text: str,
+                            too_long: str) -> None:
     encoded = json.dumps(
         [*messages, {"role": "user", "content": text}],
         ensure_ascii=False, separators=(",", ":"),
     )
     if len(encoded.encode("utf-8")) > MAX_TRANSCRIPT_BYTES:
         raise ValueError(too_long)
+
+
+def check_message(messages: Sequence[Mapping[str, Any]], text: str, too_long: str) -> None:
+    """Raise ValueError unless `text` can be the session's next user message."""
+    if not text or len(text) > MAX_MESSAGE_CHARS:
+        raise ValueError(f"A message must contain 1 to {MAX_MESSAGE_CHARS} characters.")
+    _check_transcript_bytes(messages, text, too_long)
 
 
 def check_answers(messages: Sequence[Mapping[str, Any]], answers: list[str],
@@ -43,7 +48,7 @@ def check_answers(messages: Sequence[Mapping[str, Any]], answers: list[str],
     problem = answer_problem(questions, answers)
     if problem:
         raise ValueError(problem)
-    check_message(messages, answers_text(questions, answers), too_long)
+    _check_transcript_bytes(messages, answers_text(questions, answers), too_long)
 
 
 def assistant_message(result: dict[str, Any]) -> ConversationMessage:
