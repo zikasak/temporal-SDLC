@@ -272,7 +272,8 @@ all of these tests; verification runs it after you finish and sends its failures
 you. A whole run takes many minutes, so do not run the whole script yourself. Before you
 finish, run only the tests your change concerns (the test files of the modules you changed
 and those that use them), with the part's own tool and as the script runs them (read it for
-the commands and environment), and fix what fails; build each part you changed.
+the commands, environment and number of parallel workers, and use no more workers than it
+does), and fix what fails; build each part you changed.
 """.format(script=CHECKS_SCRIPT)
 
 CHECKS_REPAIR_PROMPT = """
