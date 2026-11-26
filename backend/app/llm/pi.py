@@ -109,6 +109,8 @@ COMMAND_TIMEOUT = 60
 MAX_ERROR_CHARS = 2000
 # Where the extension reports a turn, and where the plugin's exporter is sent.
 TURN_PATH = '/turn'
+# Where the extension reads what the model re-reads after a summary of its history.
+PINNED_PATH = '/pinned'
 MCP_PATH = '/mcp'
 TRACE_PATH = '/langfuse'
 
@@ -146,9 +148,10 @@ class _Server:
 
     def __init__(self, token: str, tools: Sequence[BaseTool],
                  until: Callable[[], bool], decide: Callable[[dict], dict],
-                 trace: dict[str, str] | None):
+                 trace: dict[str, str] | None,
+                 pinned: Callable[[], str] | None = None):
         self.token, self.tools, self.until = token, tools, until
-        self.decide, self.trace = decide, trace
+        self.decide, self.trace, self.pinned = decide, trace, pinned
 
     def _bearer(self, headers) -> bool:
         return hmac.compare_digest(headers.get('authorization', ''), f'Bearer {self.token}')
@@ -177,6 +180,11 @@ class _Server:
                 return Response(status_code=401)
             return JSONResponse(self.decide(await request.json()))
 
+        async def pinned(request: Request):
+            if not self._bearer(request.headers) or self.pinned is None:
+                return Response(status_code=401)
+            return JSONResponse({'text': self.pinned()})
+
         async def traces(request: Request):
             from app.llm import pi_trace
 
@@ -202,6 +210,7 @@ class _Server:
             return JSONResponse({}, status_code=200 if status < 300 else status)
 
         routes: list[Any] = [Route(TURN_PATH, turn, methods=['POST']),
+                             Route(PINNED_PATH, pinned, methods=['POST']),
                              Route(TRACE_PATH + '/api/public/otel/v1/traces', traces,
                                    methods=['POST'])]
         manager = None
@@ -410,6 +419,13 @@ class ChatPi(Runnable):
     config_dir: Path | None = None
     # The ID of a session in config_dir to continue.
     resume: str | None = None
+    # What the model re-reads after each summary Pi makes of its history (such as the
+    # task's inputs, which the summary replaces with the rest), asked for anew for each
+    # summary; None adds nothing.
+    pinned: Callable[[], str] | None = None
+    # What Pi's summaries of the history keep, beside what Pi's own summary asks for; None
+    # leaves Pi's summary as it is.
+    compaction_prompt: str | None = None
     # The application conversation whose turns resume one native session, saved between
     # turns to the shared storage (app.llm.saved_conversations). Without the storage, or
     # with a config_dir of its own, every session starts anew.
@@ -592,7 +608,8 @@ class ChatPi(Runnable):
                      '--tools', f'{TOOL_PREFIX}*,{CODEMODE_TOOL}'] if tools
                     else ['--no-tools'])
         config: dict[str, Any] = {'server': TOOL_SERVER, 'tools': bool(tools),
-                                  'toolTimeout': MCP_TOOL_TIMEOUT}
+                                  'toolTimeout': MCP_TOOL_TIMEOUT,
+                                  'pinned': self.pinned is not None}
         token = secrets.token_urlsafe(32)
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith('LANGFUSE_')}
@@ -619,7 +636,7 @@ class ChatPi(Runnable):
         trace = native_trace_parent()
         plugin = await run_sync(langfuse_plugin) if trace is not None else None
         server = _Server(token, tools, lambda: self._until is not None and self._until(),
-                         self._decide, trace if plugin else None)
+                         self._decide, trace if plugin else None, self.pinned)
         url = await stack.enter_async_context(server.serve())
         config['url'] = url
         if trace is not None and plugin is not None:
@@ -640,6 +657,10 @@ class ChatPi(Runnable):
             system_prompt += CODEMODE_GUIDANCE
         await run_sync(system_file.write_text, system_prompt, encoding='utf-8')
         config['systemPrompt'] = str(system_file)
+        if self.compaction_prompt:
+            compaction_file = system_dir / 'compaction-prompt.md'
+            await run_sync(compaction_file.write_text, self.compaction_prompt, encoding='utf-8')
+            config['compactionPrompt'] = str(compaction_file)
         environment[CONFIG_ENV] = json.dumps(config)
         process = await asyncio.create_subprocess_exec(
             *command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,

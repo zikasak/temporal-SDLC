@@ -21,6 +21,7 @@ from langchain_core.messages import (
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool, tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
+import yaml
 
 from app.asyncio_utils import async_context, run_sync
 from app.llm.factory import create_adapter
@@ -143,8 +144,15 @@ an output as truncated or incomplete because of these markers.
 NOTE = 'note'
 NOTE_CHARS = 1000
 CHECKPOINT_NOTICE = ('[Checkpoint] Older tool calls and their results were removed to save '
-                     'context. Files on disk are the source of truth: re-read the regions '
-                     'you need before changing them.')
+                     'context. Trust the facts the checkpoint and your notes record, and do '
+                     'not explore again what they cover. Re-read a file only right before '
+                     'you change it: files on disk are the source of truth for their content.')
+# What a native session (Pi) re-reads after each compaction of its history, after the
+# summary: its inputs are compacted with the rest of the conversation otherwise.
+PINNED_INPUTS = 'The task\'s inputs, unchanged:'
+# The OpenAPI document contract_schema reads by default, as the contract index names it.
+OPENAPI_CONTRACT = 'openapi.yaml'
+HTTP_METHODS = ('get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace')
 # A run that asked the user something exits with this code once it has saved where it
 # stopped, beside its project: the host keeps the workspace and starts a new container
 # from it, with the answers, once they arrive.
@@ -405,10 +413,81 @@ def workspace_tools(root: Path, contracts: Path | None = None,
         return search_lines(regex, workspace_path(name, contracts, 'contracts directory'),
                             base=contracts)
 
-    for item in (read_contract, search_contracts):
+    @tool
+    def contract_schema(name: str, contract: str = OPENAPI_CONTRACT) -> str:
+        """Show an operation or a schema of an OpenAPI contract file with every `$ref`
+        resolved, in one call instead of reading the file around it.
+
+        `name` is an `operationId` (its method, path, parameters, request body and
+        responses) or a name under `components.schemas` (that schema).
+        """
+        target = workspace_path(contract, contracts, 'contracts directory')
+        document = yaml.safe_load(target.read_text())
+        text = yaml.safe_dump(resolved_definition(document, name), sort_keys=False,
+                              allow_unicode=True, width=120)
+        if len(text) > READ_CHARS:
+            text = (text[:READ_CHARS] + f'\n[Truncated at {READ_CHARS} characters; ask for '
+                    'a nested schema by its name, or read the rest with read_contract.]')
+        return text
+
+    for item in (read_contract, search_contracts, contract_schema):
         assert isinstance(item, StructuredTool) and item.func is not None  # @tool of a function
         item.coroutine = partial(run_sync, item.func)
-    return [*tools, read_contract, search_contracts]
+    return [*tools, read_contract, search_contracts, contract_schema]
+
+
+def resolved_definition(document: Any, name: str) -> dict[str, Any]:
+    """The operation whose operationId is `name`, else the schema of that name, of the
+    OpenAPI `document`, with its local `$ref`s replaced by what they point to. A `$ref`
+    met again inside itself stays a `$ref`, marked as recursive."""
+    if not isinstance(document, dict):
+        raise ValueError('The contract file is no OpenAPI document')
+
+    def pointed(reference: str) -> Any:
+        if not reference.startswith('#/'):
+            raise ValueError(f'Only local references can be resolved: {reference}')
+        value: Any = document
+        for part in reference[2:].split('/'):
+            part = part.replace('~1', '/').replace('~0', '~')
+            if not isinstance(value, dict) or part not in value:
+                raise ValueError(f'The contract has no {reference}')
+            value = value[part]
+        return value
+
+    def resolve(value: Any, seen: tuple[str, ...]) -> Any:
+        if isinstance(value, list):
+            return [resolve(item, seen) for item in value]
+        if not isinstance(value, dict):
+            return value
+        reference = value.get('$ref')
+        if isinstance(reference, str):
+            if reference in seen:
+                return {'$ref': reference, 'recursive': True}
+            target = resolve(pointed(reference), (*seen, reference))
+            siblings = {key: resolve(item, seen) for key, item in value.items() if key != '$ref'}
+            return {**target, **siblings} if isinstance(target, dict) else target
+        return {key: resolve(item, seen) for key, item in value.items()}
+
+    for path, item in (document.get('paths') or {}).items():
+        if not isinstance(item, dict):
+            continue
+        shared = item.get('parameters')
+        for method, operation in item.items():
+            if (method in HTTP_METHODS and isinstance(operation, dict)
+                    and operation.get('operationId') == name):
+                found: dict[str, Any] = {'operationId': name, 'method': method.upper(),
+                                         'path': path}
+                if shared:
+                    found['parameters'] = [*shared, *(operation.get('parameters') or [])]
+                found.update((key, value) for key, value in operation.items()
+                             if key not in {'operationId', *found})
+                return resolve(found, ())
+    schemas = (document.get('components') or {}).get('schemas') or {}
+    if name in schemas:
+        reference = f'#/components/schemas/{name}'
+        return {name: resolve(schemas[name], (reference,))}
+    raise ValueError(f'No operationId or schema named {name!r}; find names with '
+                     'search_contracts')
 
 
 def _end_session(pid: int) -> None:
@@ -476,9 +555,10 @@ def ask_user_tool() -> BaseTool:
 
 def note_tool(notes: list[str]) -> BaseTool:
     def note(text: str) -> str:
-        """Record a conclusion you must not lose, such as a suspected or confirmed problem
-        or a region you finished. Older tool results are removed as the context fills;
-        your notes are kept word for word. Call it alongside your next tool calls."""
+        """Record a conclusion or a fact you must not lose, such as a decision, a suspected
+        or confirmed problem, a fact you will need again with its file and line, or a
+        region you finished. Older tool results are removed as the context fills; your
+        notes are kept word for word. Call it alongside your next tool calls."""
         notes.append(text.strip()[:NOTE_CHARS])
         return 'Noted.'
 
@@ -671,10 +751,18 @@ async def _run_native(profile: AgentProfile, provider, agent: str,
         pending['questions'] = normalize_questions(questions)
         return 'The run is paused. The user will answer in the next message.'
 
+    # Kept across a pause or a stop, as the run's own state.
+    working: list[str] = list(state.get('working', [])) if state else []
     tools = [*(await run_sync(workspace_tools, profile.root, profile.contracts, profile.build_dirs)),
              StructuredTool.from_function(ask_user, name=ASK_USER, description=DESCRIPTION,
                                           args_schema=AskUserInput),
-             *([note_tool([])] if profile.working_notes else [])]
+             *([note_tool(working)] if profile.working_notes else [])]
+    if hasattr(provider, 'pinned'):
+        # Pi compacts the whole conversation, the task's inputs too: it re-reads them, and
+        # the notes so far, after each summary, which follows the stage's checkpoint prompt
+        # when it has one.
+        provider.pinned = partial(_pinned, profile, working)
+        provider.compaction_prompt = profile.checkpoint_prompt
     provider.cwd = profile.root
     provider.config_dir = directory / f'.{agent}-native'
     provider.resume = state['session_id'] if state else None
@@ -709,7 +797,7 @@ async def _run_native(profile: AgentProfile, provider, agent: str,
     resumable.append(lambda: {
         # Turns are counted as each session ends: one stopped mid-way may count again.
         'adapter': agent, 'turns': max(1, turns - provider.turns_used), 'nudges': nudges,
-        'feedback': feedback,
+        'feedback': feedback, 'working': list(working),
         'session_id': getattr(provider, 'resumable_session', None) or provider.session_id})
     try:
         while True:
@@ -732,7 +820,8 @@ async def _run_native(profile: AgentProfile, provider, agent: str,
                 turns -= provider.turns_used
                 await run_sync(_stop_for_limit, directory, {
                     'adapter': agent, 'session_id': provider.session_id,
-                    'turns': turns, 'nudges': nudges, 'feedback': feedback}, ProviderLimit(exc))
+                    'turns': turns, 'nudges': nudges, 'feedback': feedback,
+                    'working': list(working)}, ProviderLimit(exc))
                 return LIMITED
             turns -= provider.turns_used
             if pending:
@@ -746,6 +835,7 @@ async def _run_native(profile: AgentProfile, provider, agent: str,
                         'turns': turns,
                         'nudges': nudges,
                         'feedback': feedback,
+                        'working': list(working),
                     },
                 )
                 await run_sync(answers_file.unlink, missing_ok=True)
@@ -947,6 +1037,13 @@ async def _run_with_provider(profile: AgentProfile, provider, compaction_tokens:
             'nudges': nudges}, exc)
         return LIMITED
     return DONE
+
+
+def _pinned(profile: AgentProfile, working: Sequence[str]) -> str:
+    """What a native session re-reads after a summary of its history: the notice, the
+    task's inputs as they were given and the notes so far."""
+    inputs = '\n\n'.join(profile.initial_messages)
+    return f'{CHECKPOINT_NOTICE}{_noted(working)}\n\n{PINNED_INPUTS}\n{inputs}'
 
 
 def _noted(working: Sequence[str]) -> str:

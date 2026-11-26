@@ -61,6 +61,13 @@ the root Dockerfile and contract-tests/README.md to see what the running service
 available. Locate code with list_files and search_files and read only the relevant line
 ranges with read_file. Do not run the service or the tests.
 
+Record with the note tool, as you go, each route you decide and each fact you will need
+again, with its file and line: the element or section a requirement is about, the client's
+@media breakpoints, the path below which it calls the API, the operations each page calls,
+the endpoints and handlers that set up and observe a requirement. Older tool results are
+removed as the context fills; your notes are kept word for word, so never read again what
+they record.
+
 {component}
 Finish by writing routes.json in /workspace/routing with write_file, containing exactly
 this JSON object, with one entry for every requirement of the brief and no other:
@@ -197,6 +204,12 @@ is on, plus the other side as a guard only when the fix could move the bug there
 element the page lacks, such as a role or a data-testid on an element it already renders,
 goes in the page's `added`: the change adds it first, with no other change.
 
+When the brief says the change is presentation-only (its content, data and API stay as
+they are), decide between `component` and `browser` first, from the client's code and CSS:
+the HTTP API cannot show it. Read the API contract then only to write the page's fixtures,
+and, when you have the contract_schema tool, take each response's shape from it rather than
+reading the contract around it.
+
 """
 
 
@@ -245,6 +258,28 @@ def prompt(language: dict) -> str:
                              if browser else '')))
 
 
+# What the summary of the router's history keeps once its context fills (see
+# app.agent_workflows.runtime.CHECKPOINT_PROMPT), so it goes on without reading again.
+CHECKPOINT_PROMPT = """You keep the working notes of an agent that routes the requirements
+of a brief: it reads the repository and the contracts, and writes routes.json and the
+contracts its routes need, never code. The oldest part of its tool history is about to be
+removed from its context. Write the checkpoint it will continue from, merging any previous
+checkpoint with the history below, so that it never reads again what it has already read.
+Use these sections:
+Routes: each requirement ID of the brief with its route, or `undecided`, and the evidence.
+Facts found: what the code and the contracts showed, each with its file and line numbers,
+such as the file and line of each element or section a requirement is about (a
+`<section aria-label=…>` or a heading), the client's @media breakpoints, the path below
+which it calls the API, its pages' entries and the operations each page calls, the endpoints
+and handlers that set up and observe a requirement, and the module, symbols and signatures
+of a seam.
+Written: the files written so far (routes.json, stubs, page contract, fixtures) and whether
+their checks passed.
+Next step: the single next action, then what remains, in order.
+Unresolved errors: exact messages of failed checks not yet fixed.
+Quote short facts (names, lines, values), not whole code. Be specific and concise. Record
+only what the history shows; never guess.
+"""
 # What a module written in path form may end with: a stub's or a source file's suffix.
 MODULE_SUFFIXES = ('.pyi', '.py', '.d.ts', '.tsx', '.ts', '.java')
 # How many stubbed modules a message to the agent lists.
@@ -419,6 +454,7 @@ async def main() -> None:
         initial_messages=[context],
         max_turns_env='ROUTING_MAX_TURNS', validate_completion=validate_completion,
         completion_feedback=COMPLETION_FEEDBACK, final_validation=validate_final,
+        checkpoint_prompt=CHECKPOINT_PROMPT, working_notes=True,
         completion_message='Routing completed',
         exhaustion_message='Routing exceeded the tool-turn limit',
         contracts=CONTRACTS if await run_sync(CONTRACTS.is_dir) else None,
