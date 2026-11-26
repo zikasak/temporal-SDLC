@@ -395,7 +395,8 @@ class TestWipFormatIsShared:
             """Mask the stage and status words, which are parameters of the shared template."""
             return re.sub(r"\S+ stage \([^)]*\)", "<stage> (<status>)", text)
 
-        before, after = template(before), template(after)
+        # surrounding whitespace is not part of the instructions
+        before, after = template(before).strip(), template(after).strip()
 
         def update() -> None:
             (remote.workspace.checkout / "notes.md").write_text(f"notes {MARKER}\n")
@@ -409,7 +410,7 @@ class TestWipFormatIsShared:
             "the published commit's message was not written by the LLM"
         published_prompt = "\n".join(llm.instances[-1].prompts)
         assert MARKER in published_prompt, "the published prompt does not hold the commit's diff"
-        published_prompt = template(published_prompt)
+        published_prompt = template(published_prompt).strip()
         assert published_prompt.startswith(before) and published_prompt.endswith(after), (
             "published commits are not written from the same prompt as wip/ commits: "
             f"wip/ instructions {before!r} ... {after!r}, published prompt {published_prompt!r}")

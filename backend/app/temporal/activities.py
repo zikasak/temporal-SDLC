@@ -295,7 +295,10 @@ async def _commit_diff(target: Path, before: dict[str, bytes | None] | None) -> 
         patch = await git("diff", "--cached", "--no-color", "--no-ext-diff", "--unified=1",
                           cwd=target)
         text = f"{stat}\n\n{patch}" if stat else ""
-    return text[:work_refs.DIFF_CHARS]
+    text = text[:work_refs.DIFF_CHARS]
+    # Like the diffs of the wip/ commits, the diff ends its line, so that the prompt
+    # around it is the same.
+    return text if not text.strip() or text.endswith("\n") else text + "\n"
 
 
 async def _commit_message(target: Path, before: dict[str, bytes | None] | None,
