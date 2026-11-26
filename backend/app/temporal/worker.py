@@ -42,7 +42,9 @@ with workflow.unsafe.imports_passed_through():
         publish_documentation,
         publish_onboarding,
         publish_onboarding_architecture,
+        publish_base_merge,
         publish_repository,
+        pull_request_conflicts,
         pull_request_state,
         read_repository_contract,
         read_requirements_document,
@@ -91,7 +93,7 @@ async def main():
             revise_onboarding_architecture,
             classify_mention, answer_mention, reply_to_mention,
             record_new_mention, save_mention, mention_body,
-            pull_request_state, commit_checks, pull_request_checks, ci_failure_report, comment_pull_request,
+            pull_request_state, pull_request_conflicts, publish_base_merge, commit_checks, pull_request_checks, ci_failure_report, comment_pull_request,
             name_task_flow, review_requirements,
         ],
     )

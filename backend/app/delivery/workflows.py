@@ -10,7 +10,7 @@ from app.delivery.flow.baseline import Baseline
 from app.delivery.flow.change import Change
 from app.delivery.flow.ci import CiWatch
 from app.delivery.flow.mention_rounds import MentionRounds
-from app.delivery.flow.merge_conflicts import MergeConflicts
+from app.delivery.flow.merge_conflicts import MergeConflicts, is_base_merge
 from app.delivery.flow.publication import Publication
 from app.delivery.flow.review import ReviewRounds
 from app.delivery.flow.stages import RESTORE_KEPT_PATCH, Stages, restore_finding
@@ -106,6 +106,15 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, MergeCon
         # round, and those this run's push met, which a round takes in next.
         self._merge_round: dict[str, Any] | None = state.merge_fix
         self._push_conflict: dict[str, Any] | None = None
+        # Whether this run's merge fix round merges the base branch into the pull request
+        # branch, the merge commit it pushed, or why it pushed none; whether the pull
+        # request's remaining conflicts with its base branch were said in it, once no
+        # round may start; and whether GitHub reported that it may conflict.
+        self._base_round = is_base_merge(state)
+        self._base_merged = ''
+        self._base_merge_error: str | None = None
+        self._base_conflict_told = False
+        self._conflict_requested = False
         self._init_flags()
         self._init_pending()
 
@@ -131,7 +140,9 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, MergeCon
         # A decision of the user's, such as accepting open findings, is recorded as it
         # is: nothing runs and nothing is pushed.
         if not self.state.record_only:
-            if self.state.mention is None:
+            if self.state.mention is None and self._base_round:
+                await self._base_merge()
+            elif self.state.mention is None:
                 await self._deliver()
                 if self._ci_round is not None:
                     await self._ci_fix_finished()

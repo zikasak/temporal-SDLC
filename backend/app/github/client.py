@@ -399,6 +399,34 @@ async def get_pull_request_state(token: str, full_name: str,
             "author": author if isinstance(author, str) else None}
 
 
+async def get_pull_request_mergeable(token: str, full_name: str,
+                                     number: int) -> dict[str, Any] | None:
+    """How the pull request stands with its base branch: {'state', 'merged', 'mergeable'
+    (true, false, or None while GitHub still computes it), 'mergeable_state', 'base' (the
+    base branch's name), 'head' (the head branch's name)}. None when it is gone."""
+    validate_selection(full_name, "main")
+    try:
+        data, _ = await _request("GET", token, f"{_repo_path(full_name)}/pulls/{number}")
+    except GitHubError as exc:
+        if exc.status_code == 404:
+            return None
+        raise
+    if not isinstance(data, dict) or not isinstance(data.get("state"), str):
+        raise _invalid_response()
+    base = data.get("base")
+    head = data.get("head")
+    base_ref = base.get("ref") if isinstance(base, dict) else None
+    head_ref = head.get("ref") if isinstance(head, dict) else None
+    if not isinstance(base_ref, str) or not base_ref:
+        raise _invalid_response()
+    mergeable = data.get("mergeable")
+    mergeable_state = data.get("mergeable_state")
+    return {"state": data["state"], "merged": data.get("merged") is True,
+            "mergeable": mergeable if isinstance(mergeable, bool) else None,
+            "mergeable_state": mergeable_state if isinstance(mergeable_state, str) else None,
+            "base": base_ref, "head": head_ref if isinstance(head_ref, str) else None}
+
+
 def _login(value: Any) -> str | None:
     login = value.get("login") if isinstance(value, dict) else None
     return login if isinstance(login, str) and login else None

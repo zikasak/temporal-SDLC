@@ -214,7 +214,8 @@ async def receive_event(
     try:
         acted = await webhooks.handle(connection, (x_github_event or "").strip() or None,
                                       delivery_id, body, hand_over,
-                                      delivery_service.pull_request_closed)
+                                      delivery_service.pull_request_closed,
+                                      delivery_service.pull_request_conflicted)
     except webhooks.InvalidEvent as exc:
         raise HTTPException(422, str(exc)) from None
     except webhooks.AlreadyHandled as exc:

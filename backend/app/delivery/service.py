@@ -967,6 +967,21 @@ async def pull_request_closed(session_id: str, number: int, merged: bool) -> boo
     return True
 
 
+async def pull_request_conflicted(session_id: str, number: int) -> bool:
+    """Tell the session's delivery that its pull request `number` changed so that it may
+    conflict with its base branch, so that it checks now; false when it has no delivery
+    that runs."""
+    client = await connect_temporal()
+    try:
+        await client.get_workflow_handle(delivery_id(session_id)).signal(
+            'pull_request_conflicted', args=[number])
+    except RPCError as exc:
+        if exc.status != RPCStatusCode.NOT_FOUND:
+            raise
+        return False
+    return True
+
+
 async def check_waiting_pull_requests() -> int:
     """Ask every running delivery to check its pull request now, such as when the workers
     start: a delivery that began to wait before deliveries checked their pull request

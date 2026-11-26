@@ -210,13 +210,57 @@ def parse_closed_pull_request(payload: dict[str, Any]) -> ClosedPullRequest | No
     return ClosedPullRequest(full_name, number, merged)
 
 
+# The pull_request actions after which the pull request may conflict with its base
+# branch: its head or its base changed, or it was opened again.
+CONFLICT_ACTIONS = frozenset({'opened', 'reopened', 'synchronize', 'edited'})
+
+
+def parse_changed_pull_request(payload: dict[str, Any]) -> tuple[str, int] | None:
+    """The repository and number of the open pull request a pull_request delivery reports
+    changed so that it may now conflict with its base branch; None for other actions."""
+    if payload.get('action') not in CONFLICT_ACTIONS:
+        return None
+    pull, repository = payload.get('pull_request'), payload.get('repository')
+    if not isinstance(pull, dict) or not isinstance(repository, dict):
+        # Nothing to check, as such events always were.
+        return None
+    full_name, number = repository.get('full_name'), pull.get('number')
+    if (not isinstance(full_name, str) or not client.NAME_PATTERN.fullmatch(full_name)
+            or type(number) is not int or number <= 0):
+        return None
+    if pull.get('state') not in (None, 'open'):
+        return None
+    return full_name, number
+
+
+async def _pull_request_changed(delivery_id: str | None, changed: tuple[str, int],
+                                report_conflicted) -> bool:
+    """Tell the delivery whose pull request changed to check it for conflicts with its
+    base branch; true when one was told."""
+    full_name, number = changed
+    session_id = await storage.pull_request_session(full_name, number)
+    told = False
+    if session_id is not None:
+        told = bool(await report_conflicted(session_id, number))
+        logger.info('Pull request %s#%d changed; delivery of session %s %s', full_name,
+                    number, session_id, 'told' if told else 'not waiting')
+    await _record_ignored(delivery_id)
+    return told
+
+
 async def _pull_request_event(delivery_id: str | None, payload: dict[str, Any],
-                              report_closed) -> bool:
+                              report_closed, report_conflicted=None) -> bool:
     """Tell the delivery whose pull request was merged or closed, so that it and its flow
     close; true when one was told. `report_closed(session_id, number, merged)` returns
-    false when the session has no delivery that waits for it."""
+    false when the session has no delivery that waits for it. A pull request that changed
+    so that it may conflict with its base branch is passed on with
+    `report_conflicted(session_id, number)`."""
     if delivery_id and await storage.delivery_handled(delivery_id):
         raise AlreadyHandled('This delivery was already handled.')
+    if report_conflicted is not None:
+        changed = parse_changed_pull_request(payload)
+        if changed is not None:
+            return await _pull_request_changed(delivery_id, changed, report_conflicted)
     closed = parse_closed_pull_request(payload)
     if closed is None or report_closed is None:
         await _record_ignored(delivery_id)
@@ -236,7 +280,8 @@ async def _pull_request_event(delivery_id: str | None, payload: dict[str, Any],
 
 
 async def handle(connection: dict[str, Any], event: str | None, delivery_id: str | None,
-                 payload: dict[str, Any], hand_over, report_closed=None) -> bool:
+                 payload: dict[str, Any], hand_over, report_closed=None,
+                 report_conflicted=None) -> bool:
     """Act on a correctly signed delivery: true when it was accepted and acted on, false
     when it is ignored. `hand_over(session_id, mention)` gives a mention to its delivery,
     returns false when the session has none and raises AlreadyHandled when the delivery
@@ -254,9 +299,12 @@ async def handle(connection: dict[str, Any], event: str | None, delivery_id: str
     later fix request never overtakes an earlier one.
 
     A pull_request delivery that reports a pull request of a delivery closed, merged or
-    not, is passed on with `report_closed(session_id, number, merged)`."""
+    not, is passed on with `report_closed(session_id, number, merged)`; one that reports a
+    pull request of a delivery opened, reopened, edited or with new commits, after which
+    it may conflict with its base branch, with `report_conflicted(session_id, number)`."""
     if event == PULL_REQUEST_EVENT:
-        return await _pull_request_event(delivery_id, payload, report_closed)
+        return await _pull_request_event(delivery_id, payload, report_closed,
+                                         report_conflicted)
     if delivery_id:
         pending = await storage.pending_delivery(delivery_id)
         if pending is not None:

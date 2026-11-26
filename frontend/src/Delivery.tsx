@@ -1,5 +1,5 @@
 import { useState, type FormEvent, type ReactNode } from "react";
-import { repositoryPublication, type RepositoryPublication, type RepositorySelection } from "./github";
+import { repositoryPublication, type BaseMerge, type RepositoryPublication, type RepositorySelection } from "./github";
 import { QuestionField, choiceAnswer, noChoice, questionList, type Choice, type Question } from "./Questions";
 import { isObject } from "./api";
 import { flowStepsLink } from "./url";
@@ -1006,6 +1006,28 @@ function Baseline({ progress, retrying, disabled, onRetry }: {
 }
 
 /** The branch a delivery pushed, or why it pushed none. */
+/** The automatic fix round that merges the base branch into the pull request branch. */
+function BaseMergeRound({ merge }: { merge: BaseMerge }) {
+  const files = merge.files.length > 0 ? ` in ${merge.files.slice(0, 20).join(", ")}${merge.files.length > 20 ? ", …" : ""}` : "";
+  const round = `Automatic fix round ${merge.round} of ${merge.limit}`;
+  if (merge.status === "running") {
+    return <p role="status">
+      The pull request conflicts with its base branch <code>{merge.base}</code>{files}. {round} is merging{" "}
+      <code>{merge.base}</code> into it…
+    </p>;
+  }
+  if (merge.status === "completed") {
+    return <p className="verification-outcome verification-passed" role="status">
+      {round} merged <code>{merge.base}</code> into the pull request branch
+      {merge.commit && <> at <code>{merge.commit.slice(0, 7)}</code></>}.
+    </p>;
+  }
+  return <p className="verification-outcome verification-failed" role="status">
+    {round} for the conflicts with <code>{merge.base}</code>{files} ended without a push of the merge
+    {merge.error ? `: ${merge.error}` : "."}
+  </p>;
+}
+
 function Publication({ progress, documentation, retrying, disabled, onRetry }: {
   progress: DeliveryProgress;
   documentation: boolean;
@@ -1034,6 +1056,7 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
       Pushed to <a href={publication.url} target="_blank" rel="noreferrer">{publication.branch}</a>
       {" "}at <code>{publication.commit.slice(0, 7)}</code>
     </p>}
+    {publication?.base_merge && <BaseMergeRound merge={publication.base_merge} />}
     {publication && !publication.verified && <p>
       This branch is not verified: nothing checked the change. Review it before merging.
     </p>}

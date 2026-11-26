@@ -1525,5 +1525,61 @@
     "id": "FR-213",
     "priority": "should",
     "title": "Delivery page notes CI commits pushed outside the delivery"
+  },
+  {
+    "category": "functional",
+    "description": "Today, when the base (default) branch moves on after a delivery has opened its pull request and GitHub shows the pull request as having conflicts with the base branch, the platform does not detect it and does nothing: the delivery keeps waiting and the pull request cannot be merged until someone resolves the conflict by hand. Only conflicts between the delivery's push and other commits on its own pull request branch are handled today.",
+    "id": "FR-214",
+    "priority": "must",
+    "rationale": "User: when a PR can't be merged due to a merge conflict, the platform should resolve it. Code: the GitHub client never reads the PR's mergeable state; merge_conflicts.py covers only push conflicts on the PR branch.",
+    "title": "Problem: PR left in conflict with its base branch"
+  },
+  {
+    "category": "functional",
+    "description": "When a waiting delivery's open pull request has conflicts with its base branch, the platform merges the base branch into the pull request branch: a fix round settles the conflicting files so they keep what the delivery does and take in the base branch's changes, and the result is pushed to the pull request branch as a merge of the base branch. For new service, API change and bugfix deliveries the fix round is followed by verification and code review before the push; for a documentation-only delivery the merge is pushed without verification or code review, as its original publish was.",
+    "id": "FR-215",
+    "priority": "must",
+    "rationale": "User chose merge of the base branch with a fix round, then push. Resolving C-1: deliveries without verification or review push the merge without them, as their original publish did.",
+    "title": "Resolve base-branch conflicts by merging in a fix round"
+  },
+  {
+    "category": "functional",
+    "description": "The platform detects that a delivery's pull request has conflicts with its base branch both from GitHub pull_request webhook events and from the existing periodic check of the pull request's state that runs while the delivery waits after its push.",
+    "id": "FR-216",
+    "priority": "must",
+    "rationale": "User chose webhook events and the existing periodic PR state check.",
+    "title": "Detect base-branch conflicts by webhook and periodic check"
+  },
+  {
+    "category": "functional",
+    "description": "Base-branch merge fix rounds count towards the existing limit of 2 automatic merge fix rounds in a row (MAX_MERGE_FIX_ROUNDS); once it is reached and the pull request still has conflicts with its base branch, no further round starts on its own, the app comments in the pull request that the conflict remains, and the delivery waits for the user.",
+    "id": "FR-217",
+    "priority": "must",
+    "rationale": "User chose to reuse today's limit of 2 automatic merge rounds, then comment and wait.",
+    "title": "Base-merge rounds share the limit of 2 automatic merge rounds"
+  },
+  {
+    "category": "functional",
+    "description": "When a base-branch merge fix round starts, the app comments in the pull request naming the conflicting files and the round number out of the limit, and when it ends it comments again with the outcome (the merge commit pushed, or what failed); the delivery progress shows the round and its outcome.",
+    "id": "FR-218",
+    "priority": "must",
+    "rationale": "User chose PR comments at start and with the outcome, like today's merge fix rounds, plus the delivery progress.",
+    "title": "Base-merge rounds reported in the PR and delivery progress"
+  },
+  {
+    "category": "functional",
+    "description": "An onboarding's open pull request that has conflicts with its base branch is detected and resolved in the same way as a delivery's: a fix round, a pushed merge of the base branch, the same round limit and the same pull request comments. For an onboarding that produces the full contract the fix round is followed by verification and code review; for an onboarding that adds only contracts/architecture.md the merge is pushed without contract tests, verification or code review, as its original publish was.",
+    "id": "FR-219",
+    "priority": "must",
+    "rationale": "User's acceptance criteria include onboarding pull requests. Resolving C-1: architecture-only onboardings push the merge without verification or review.",
+    "title": "Onboarding pull requests get the same base-merge handling"
+  },
+  {
+    "category": "functional",
+    "description": "A test shows that when a waiting delivery's pull request becomes unmergeable because of conflicts with its base branch, a fix round runs and pushes to the pull request branch a merge commit that has the base branch's tip as a parent, after which GitHub reports the pull request as mergeable; a second test shows the same for an onboarding's pull request.",
+    "id": "FR-220",
+    "priority": "must",
+    "rationale": "User's acceptance criteria.",
+    "title": "Acceptance: conflicting PR becomes mergeable"
   }
 ]
