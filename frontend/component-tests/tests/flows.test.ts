@@ -21,7 +21,12 @@ function flowOf(overrides: Partial<FlowProp>): FlowProp {
     close_time: null,
     repository: null,
     branch: 'main',
-    onboarding_id: null,
+    name: null,
+    origin: null,
+    linked: false,
+    // A flow from before the backend reported its flags: they are read from its session.
+    waiting_for_user: null,
+    unresolved_findings: null,
     ...overrides,
   };
 }
@@ -208,7 +213,6 @@ describe('TopLevelFlow with open review findings', () => {
         workflow_type: 'OnboardingWorkflow',
         status: 'completed',
         close_time: '2026-11-02T10:00:00Z',
-        onboarding_id: 'onb-1',
       }),
       vi.fn(),
     );
