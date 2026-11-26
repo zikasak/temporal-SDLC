@@ -11,6 +11,7 @@ records the message it is given; the test reads the message of that push.
 from __future__ import annotations
 
 import inspect
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -381,13 +382,20 @@ class TestWipFormatIsShared:
         from app.agent_workflows.host import _work_message
 
         diff = f"diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-a\n+b {MARKER}\n"
-        wip = await _work_message("implementation", "implementation", "passed", diff)
+        # the stage and status are template parameters: ask with those a publication uses
+        wip = await _work_message("implementation", "publication", "verified", diff)
         assert wip, "the wip/ message call returned no message"
         wip_prompt = "\n".join(llm.instances[-1].prompts)
         assert diff.strip() in wip_prompt, "the wip/ prompt does not hold the diff it was given"
         # the instructions around the diff, which the published commit's prompt must share
         before, _, after = wip_prompt.partition(diff.strip())
         assert (before + after).strip(), "the wip/ prompt holds no instructions besides the diff"
+
+        def template(text: str) -> str:
+            """Mask the stage and status words, which are parameters of the shared template."""
+            return re.sub(r"\S+ stage \([^)]*\)", "<stage> (<status>)", text)
+
+        before, after = template(before), template(after)
 
         def update() -> None:
             (remote.workspace.checkout / "notes.md").write_text(f"notes {MARKER}\n")
@@ -401,6 +409,7 @@ class TestWipFormatIsShared:
             "the published commit's message was not written by the LLM"
         published_prompt = "\n".join(llm.instances[-1].prompts)
         assert MARKER in published_prompt, "the published prompt does not hold the commit's diff"
+        published_prompt = template(published_prompt)
         assert published_prompt.startswith(before) and published_prompt.endswith(after), (
             "published commits are not written from the same prompt as wip/ commits: "
             f"wip/ instructions {before!r} ... {after!r}, published prompt {published_prompt!r}")
@@ -547,6 +556,9 @@ class TestOtherPartsOfTheMessageAreKept:
         plain_message = remote.message(plain)
 
         other = Remote(tmp_path / "with-components")
+        # the routed component contract of the service part, read from workspace.root
+        (other.workspace.root / "routing" / "components").mkdir(parents=True, exist_ok=True)
+        other.workspace.component_tests.mkdir(parents=True, exist_ok=True)
         (other.workspace.component_tests / "test_widgets_component.py").write_text(
             "def test_component():\n    pass\n")
         components = {"files": ["test_widgets_component.py"], "tests": 1, "passed": True}
