@@ -206,6 +206,17 @@ and an LLM, so they are not tested. `tests/test_agent_answers.py` covers the ans
 `AgentAnswersInput` body (`workflow_id` string, `answers` list of strings; 422 otherwise,
 assumed to be checked before the session lookup like other input) and 404 for unknown sessions.
 
+## CI of the pull request's head commit (FR-3, FR-210 to FR-213)
+
+The `ci` field (`CiChecks`: `commit`, `status`, `since`, `checks`, `fix_round`,
+`pushed_outside`) appears only in the delivery progress of the requirements, API design and
+onboarding session responses, and only for a delivery that has pushed and opened a pull request.
+That needs GitHub, Temporal and an LLM, which the self-contained service image does not have, and
+the head commit's author, the grace period and the timeout cannot be set up over HTTP. So these
+requirements are not tested, and no test is written that would only check its own fixtures. The
+existing tests are unaffected: this change adds a response field and no endpoint, parameter or
+status code.
+
 ## Requirements review, settings and the `origin` filter
 
 - `tests/test_requirements_review.py` (FR-144 to FR-147, FR-153, FR-157, FR-158, FR-168, FR-169):
