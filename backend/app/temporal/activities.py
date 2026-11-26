@@ -648,6 +648,53 @@ async def pull_request_state(full_name: str, number: int) -> dict[str, Any]:
 
 
 @activity.defn
+async def pull_request_conflicts(full_name: str, number: int) -> dict[str, Any]:
+    """Activity 'pull_request_conflicts' (task queue of the delivery, like the other
+    activities of the delivery): how open pull request `number` of repository `full_name`
+    ('owner/name') stands with its base branch on GitHub, as {'conflicting': bool,
+    'base': base branch name, 'base_commit': tip commit of the base branch, 'files':
+    [paths that conflict], 'changes': text of what the base branch changed in them}.
+    A waiting delivery or onboarding (with a pull request and a repository) runs it, args
+    [full_name, number], in its periodic check every PULL_REQUEST_CHECK_INTERVAL, right
+    after 'pull_request_state' found the pull request open; a failed run changes nothing.
+    It also runs when the signal 'pull_request_conflicted' arrives (see
+    PullRequestWait.pull_request_conflicted). A result with conflicting true starts a base
+    merge fix round (see publish_base_merge) unless one is already running or queued for
+    that pull request, however many signals and checks report it."""
+    return {'conflicting': False, 'base': '', 'base_commit': '', 'files': [], 'changes': ''}
+
+
+@activity.defn
+async def publish_base_merge(
+    session_id: str, repository: Any, base_commit: str, files: list[str],
+) -> Any:
+    """Activity 'publish_base_merge': push the session's sources, as the base merge fix
+    round left them, to the pull request branch as a merge commit that has `base_commit`
+    (the base branch's tip) and the branch's own tip as parents; afterwards GitHub reports
+    the pull request mergeable. Args [session_id, repository, base_commit, files]; returns
+    the publication {'branch', 'commit', 'url', 'verified', 'ignored', 'ignored_count'}.
+    Fails with an ApplicationError (non-retryable) when it cannot push.
+
+    How a delivery or onboarding workflow uses it after 'pull_request_conflicts' reported
+    conflicts (round number n counts with the push-conflict rounds towards
+    MAX_MERGE_FIX_ROUNDS = 2 in a row, state.merge_fix = {'commit': base_commit, 'files',
+    'round': n}):
+    - It runs activity 'comment_pull_request' (args [full_name, number, text] -> comment
+      URL) with a text naming the conflicting files and 'round n of 2', then the fix round
+      (the delivery's usual agent and, for new service, API change and bugfix deliveries
+      and onboardings producing the full contract, verification and code review), then
+      this activity, then 'comment_pull_request' again with the outcome (the merge commit
+      pushed, or what failed).
+    - A documentation-only delivery pushes the merge right after its fix round, and an
+      architecture-only onboarding runs no agent: it calls this activity right away; both
+      without contract tests, verification or code review.
+    - When round 2 has ended and the pull request still conflicts, no round starts; it
+      comments once that the conflict remains and keeps waiting for the user.
+    The round and its outcome show in the progress the 'get_state' query reports."""
+    raise ApplicationError("Merging the base branch is not available.", non_retryable=True)
+
+
+@activity.defn
 @trace_activity('read-repository-contract', feature='repository', input_parameter='session_id')
 async def read_repository_contract(session_id: str) -> RepositoryContract:
     """The contract the session's repository was published with, which a task that

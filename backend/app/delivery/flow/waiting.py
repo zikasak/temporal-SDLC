@@ -43,6 +43,14 @@ class PullRequestWait(FlowBase):
                                  'merged' if merged else 'closed without merging')
 
     @workflow.signal
+    def pull_request_conflicted(self, number: int) -> None:
+        """Signal 'pull_request_conflicted', arg [number]: GitHub reported (a pull_request
+        webhook event) that pull request `number` may conflict with its base branch. A
+        waiting delivery or onboarding whose pull request it is runs the activity
+        'pull_request_conflicts' at once instead of at the next check interval; a signal
+        about another pull request, or while no pull request exists, changes nothing."""
+
+    @workflow.signal
     def check_pull_request(self) -> None:
         """Check the pull request's state now rather than at the next interval, such as
         when the workers start; a run that began to wait before deliveries checked their
