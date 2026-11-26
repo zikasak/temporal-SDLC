@@ -63,8 +63,9 @@ base branch's versions, so a change of the base branch you leave out is lost. Wh
 changed the same lines, combine them; where they contradict, keep the behaviour this
 delivery's contract asks for. The paths are the repository's: the service's files are
 where the repository has them, and contract-tests/ is the contract test suite. Files
-under contracts/ are written from the delivery's contract and keep its version. What the
-base branch changed in these files, from where the histories parted:
+under contracts/ are written from the delivery's contract; the merge combines them with
+the base branch's contract, keeping both sides' requirements, API and architecture. What
+the base branch changed in these files, from where the histories parted:
 
 {changes}"""
 BASE_MERGE_STARTED = ('This pull request conflicts with its base branch `{base}` in {files}. '
@@ -73,7 +74,8 @@ BASE_MERGE_STARTED = ('This pull request conflicts with its base branch `{base}`
 BASE_MERGE_STEPS_FULL = ('the changes, then verification and code review, then the push of '
                          'the merge')
 BASE_MERGE_STEPS_DOCS = 'the changes, then the push of the merge'
-BASE_MERGE_STEPS_ARCHITECTURE = 'the push of the merge, keeping the architecture as it is'
+BASE_MERGE_STEPS_ARCHITECTURE = ("the push of the merge, combining the architecture with "
+                                 "the base branch's")
 BASE_MERGE_REMAINS = ('This pull request still conflicts with its base branch `{base}` in '
                       '{files}. {reason} Merge `{base}` into the branch by hand, or mention '
                       'the app with what to do.')
@@ -253,12 +255,9 @@ class MergeConflicts(FlowBase):
                  else BASE_MERGE_STEPS_FULL)
         workflow.logger.info('Pull request conflicts with %s; base merge round %d',
                              base, round_)
-        await self._ci_comment(BASE_MERGE_STARTED.format(
-            base=base, files=named, round=round_, limit=MAX_MERGE_FIX_ROUNDS, steps=steps))
-        if self._next is not None or not self.state.waiting:
-            # The user's decision or a fix request came first; it pushes onto the same
-            # branch, and a later check finds whether the conflict remains.
-            return
+        # The round is decided on and queued before the comment saying it started is
+        # posted: a decision or fix request arriving meanwhile is queued behind it, so
+        # the comment never announces a round that does not run.
         progress = self.progress
         progress.agent_questions = []
         progress.review_error = None
@@ -280,6 +279,8 @@ class MergeConflicts(FlowBase):
         self.state.retry_stage = None
         self.state.record_only = False
         self._next = self.state
+        await self._ci_comment(BASE_MERGE_STARTED.format(
+            base=base, files=named, round=round_, limit=MAX_MERGE_FIX_ROUNDS, steps=steps))
 
     def _base_merge_record(self, merge: dict[str, Any]) -> None:
         """Show the base merge round and how it stands in the delivery's progress, with
@@ -298,7 +299,9 @@ class MergeConflicts(FlowBase):
         files, followed for code by verification, code review and the push of the
         sources; then the base branch is merged into the pull request branch with the
         conflicting files as the round left them. Documentation skips the check, and an
-        architecture-only onboarding runs no agent: its merge keeps its architecture."""
+        architecture-only onboarding runs no agent: its merge combines its architecture
+        with the base branch's contract. The merge combines the contract files of both
+        sides, and later pushes of the sources keep what it brought in."""
         fix = self.state.merge_fix
         assert fix is not None  # only a base merge round runs one
         if self.spec.architecture_only:
@@ -357,7 +360,12 @@ class MergeConflicts(FlowBase):
                 'completed' if self.progress.publication else 'error')
             return
         merge = (self.progress.publication or {}).get('base_merge')
-        self.progress.publication = {**(self.progress.publication or {}), **result}
+        earlier = self.progress.publication or {}
+        # The merge changes nothing about how the delivery's own work was checked: an
+        # unverified push stays unverified, with its findings.
+        self.progress.publication = {
+            **earlier, **result,
+            **({'verified': earlier['verified']} if 'verified' in earlier else {})}
         if isinstance(merge, dict):
             self._base_merge_record(merge)
         self.progress.publication_status = 'completed'

@@ -23,8 +23,8 @@ from app.api_design.prompt import api_turn_messages
 from app.conversations.models import ConversationMessage
 from app.config import GENERATED_CODE_DIR
 from app.delivery.contract import (
-    ContractError, RepositoryContract, read_contract, read_service_contract, write_architecture,
-    write_contract,
+    ContractError, RepositoryContract, merge_contracts, read_contract, read_service_contract,
+    write_architecture, write_contract,
 )
 from app.documentation.activities import is_documentation_file
 from app.documents import (
@@ -357,6 +357,9 @@ async def _publish(workspace: SessionWorkspace, session_id: str,
         with_git = await run_sync(_git_diffable, target)
         before = None if with_git else await run_sync(_tree_snapshot, target)
         await run_sync(update)
+        # The sources were written as they were made, which may be before the base
+        # branch was merged into the branch: what that merge brought in stays.
+        await repository_checkout.keep_base_merge(target, merge_contracts)
         written = await _commit_message(target, before, verified)
         result = await repository_checkout.push(
             target, repository, token,
@@ -766,7 +769,7 @@ async def publish_base_merge(
     try:
         result = await repository_checkout.merge_base_branch(
             target, selection, token, branches=branches, base_commit=base_commit,
-            resolve=resolve, message=message,
+            resolve=resolve, message=message, combine=merge_contracts,
             author=(bot, f"{connection['bot_user_id']}+{bot}@users.noreply.github.com"))
     except (repository_checkout.CheckoutError, GitHubError, OSError) as exc:
         activity.logger.warning("Could not push the base merge of %s: %s",
