@@ -58,6 +58,15 @@ docstrings of the symbols you add).
   behaviour, using edit_file; the contract is rejected while one is left. Hand-write
   only the symbols a seam lists in `added` or `added_elsewhere`, which the code does
   not have yet.
+- Write `routes.json` before running `make_stub.py --check`, because `--check` reads
+  `routes.json` and checks every `component` route's seam symbols too, including a
+  published symbol that was earlier stubbed only as a collaborator. Because a published
+  statement cannot be edited, stub any collaborators a published seam symbol reaches in
+  their own modules or as re-exports (new top-level statements, such as
+  `from app.config import GENERATED_CODE_DIR as GENERATED_CODE_DIR` or
+  `make_stub.py <module> _workspace`), and name any pure helper that runs as it is—along
+  with any implicit directory, environment, or state preconditions—in the route's
+  `reason`.
 - Check the contract before you finish, from /workspace/routing:
   pip install --user {mypy} and the requirements files, then
   PYTHONPATH=repository/<source_root> MYPYPATH=components python -m mypy.stubtest
@@ -69,7 +78,8 @@ docstrings of the symbols you add).
   the requirement's behaviour reaches (python {tools}/make_stub.py <module> <name>, in
   the module that uses it, also for a name that module imports, such as a directory
   constant or a function a test replaces), or name it in the docstring of the symbol
-  that reaches it, saying it runs as it is."""
+  that reaches it (or the route's `reason` for a published symbol), saying it runs as
+  it is."""
 
 
 def _module(path: Path) -> str:

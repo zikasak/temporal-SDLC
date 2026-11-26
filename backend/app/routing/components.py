@@ -176,7 +176,8 @@ def stub_modules(contract: ComponentContract, components: Path) -> list[str]:
 
 def _context(contract: ComponentContract, repository: Path, components: Path,
              context: Path) -> None:
-    shutil.copytree(contract.conformance, context)
+    shutil.copytree(contract.conformance, context,
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     copy_regular_files(repository, context / 'repository', include=lambda relative: True)
     # Validated already: regular files only.
     shutil.copytree(components, context / 'components')

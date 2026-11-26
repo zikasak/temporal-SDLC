@@ -25,6 +25,7 @@ from app.config import GENERATED_CODE_DIR
 from app.github.checkout import CHECKOUT_DIR, COMPONENTS_DIR
 from app.implementation.activities import EXCLUDED
 from app.languages import RUNTIME_FILE, TOOLS_DIR, Language
+from app.languages.python.component_contract.make_stub import UNSTUBBED_ADVICE, unstubbed
 from app.requirements.document import without_repeated_tables
 from app.review.activities import record_baseline
 from app.routing.agent import ROUTES
@@ -243,6 +244,24 @@ async def _publish_part(part: ComponentPart, session_dir: Path, output: Path,
                            f'{read["runtime"].get("project")}, not the part\'s directory '
                            f'{part.root}')
     check_seams(routes, read['modules'])
+    if part.is_service and part.language.name == 'python':
+        seams: set[tuple[str, str]] = set()
+        reasons: dict[tuple[str, str], str] = {}
+        for route in routes.values():
+            if route.get('route') != 'component':
+                continue
+            seam = route.get('seam') or {}
+            module = seam.get('module')
+            reason = str(route.get('reason') or '')
+            for symbol in seam.get('symbols') or ():
+                key = (module, symbol)
+                seams.add(key)
+                if reason:
+                    reasons[key] = f'{reasons[key]}\n{reason}' if key in reasons else reason
+        missing = unstubbed(repository, clean, read['runtime']['source_root'],
+                            seams=seams, reasons=reasons)
+        if missing:
+            raise RuntimeError('\n'.join(missing) + '\n' + UNSTUBBED_ADVICE)
     added = added_seams(routes)
     if added:
         # Symbols the change adds first cannot match the code yet: the whole contract is

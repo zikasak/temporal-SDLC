@@ -472,3 +472,62 @@ def test_a_changed_published_statement_is_named_to_the_agent_and_by_the_host(tmp
     stub.write_text(published + '\nfrom typing import Final\n\nSUBJECT: Final = "Change"\n')
     assert _make_stub(tmp_path, '--check').returncode == 0
     read()
+
+
+def test_a_published_symbol_routed_as_a_seam_has_its_collaborators_checked(tmp_path):
+    published = (
+        'async def publish(session_id: str) -> str:\n'
+        '    """Push the session branch."""\n    ...\n\n\n'
+        'async def other(session_id: str) -> str:\n'
+        '    """Another published collaborator."""\n    ...\n'
+    )
+    _write(tmp_path, {
+        'repository/app/__init__.py': '',
+        'repository/app/config.py': (
+            'import os\nfrom pathlib import Path\n\n'
+            'DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))\n'
+        ),
+        'repository/app/workspace.py': (
+            'from dataclasses import dataclass\nfrom pathlib import Path\n\n\n'
+            '@dataclass(frozen=True)\nclass SessionWorkspace:\n    root: Path\n\n'
+            '    @classmethod\n    def of(cls, base: Path, session_id: str) -> "SessionWorkspace":\n'
+            '        return cls(base / session_id)\n'
+        ),
+        'repository/app/helpers.py': 'def branch_name(session_id: str) -> str:\n    return f"b/{session_id}"\n',
+        'repository/app/activities.py': (
+            'from app.config import DATA_DIR\n'
+            'from app.helpers import branch_name\n'
+            'from app.workspace import SessionWorkspace\n\n\n'
+            'async def publish(session_id: str) -> str:\n'
+            '    ws = SessionWorkspace.of(DATA_DIR, session_id)\n'
+            '    return f"{ws.root}:{branch_name(session_id)}"\n\n\n'
+            'async def other(session_id: str) -> str:\n'
+            '    return branch_name(session_id)\n'
+        ),
+        'repository/contracts/components/app/activities.pyi': published,
+        'components/app/activities.pyi': published,
+        'routes.json': json.dumps({'routes': [
+            {'requirement_id': 'FR-1', 'route': 'component',
+             'reason': 'Call publish.',
+             'seam': {'module': 'app.activities', 'symbols': ['publish']}},
+        ]}),
+    })
+    check = _make_stub(tmp_path, '--check')
+    assert check.returncode == 1
+    # Only the promoted seam `publish` is checked; the unrouted published `other` is not.
+    assert 'app.activities.publish reaches ' in check.stderr
+    assert 'app.activities.other' not in check.stderr
+    assert 'app.activities.DATA_DIR' in check.stderr
+    assert 'app.activities.SessionWorkspace' in check.stderr
+    assert 'app.activities.branch_name' in check.stderr
+
+    # Stubbing the collaborators as new top-level statements keeps the published statement
+    # intact, and naming the pure helper in the route reason satisfies --check.
+    assert _make_stub(tmp_path, 'app.activities', 'DATA_DIR', 'SessionWorkspace').returncode == 0
+    (tmp_path / 'routes.json').write_text(json.dumps({'routes': [
+        {'requirement_id': 'FR-1', 'route': 'component',
+         'reason': 'Call publish with DATA_DIR/session_id; branch_name runs as it is.',
+         'seam': {'module': 'app.activities', 'symbols': ['publish']}},
+    ]}))
+    ok = _make_stub(tmp_path, '--check')
+    assert ok.returncode == 0, ok.stderr

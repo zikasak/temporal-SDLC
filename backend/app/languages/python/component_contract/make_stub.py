@@ -20,17 +20,20 @@ class of the published stub, which may not change.
 checks instead that every statement of the published stubs (repository/contracts/components)
 is still in components/ exactly as published, as the host checks the contract: an import
 line or a docstring of a published statement is part of it. It also follows the code of
-each documented function of the stubs that the published stubs do not hold, and names the
+each documented function of the stubs that the published stubs do not hold (and every
+published symbol named as a seam in `--routes` / `routes.json`), and names the
 collaborators it reaches that no stub declares: functions of the repository, classes with
 behaviour it builds, and constants computed at import from the environment or the
 repository's code (a name the code imports is declared in the stub of its own module, where
-a test replaces it). A collaborator the function's docstring names is taken as left to
-run as it is. It exits 1 naming each statement that was changed or removed and each
-collaborator left out. Stubbing a symbol reports its collaborators the same way, and a
-symbol the module imports by name is stubbed as its re-export.
+a test replaces it). A collaborator the function's docstring (or, for a published seam
+symbol, the route's `reason`) names is taken as left to run as it is. It exits 1 naming
+each statement that was changed or removed and each collaborator left out. Stubbing a
+symbol reports its collaborators the same way, and a symbol the module imports by name is
+stubbed as its re-export.
 
 Options: --repository (default repository), --components (default components),
---source-root (default the `source_root` of components/runtime.json, else `.`).
+--source-root (default the `source_root` of components/runtime.json, else `.`),
+--routes (default routes.json when present, used by --check).
 """
 import argparse
 import ast
@@ -554,7 +557,10 @@ class Reach:
                     pass
                 elif not walker._attribute(source, root.id, chain, id(item) in called,
                                            found):
-                    self.visit(root)
+                    if len(chain) == 1 and id(item) in called:
+                        walker._name(source, root.id, True, declared, seen, found)
+                    else:
+                        self.visit(root)
 
         for statement in node.body:
             Visitor().visit(statement)
@@ -655,11 +661,81 @@ class Reach:
         return _module_path(self.root, module) is not None
 
 
+def _normalize_module(name: str) -> str:
+    """Normalize a path-form module name (e.g. 'app/foo.py') to dotted form."""
+    key = name.strip().replace('\\', '/')
+    if '/' not in key:
+        return key
+    while key.startswith('./'):
+        key = key[2:]
+    key = key.strip('/')
+    for suffix in ('.pyi', '.py'):
+        if key.endswith(suffix) and len(key) > len(suffix):
+            key = key[:-len(suffix)]
+            break
+    key = key.replace('/', '.')
+    return key[:-len('.__init__')] if key.endswith('.__init__') else key
+
+
+def _route_seams(routes_file: Path) -> tuple[set[tuple[str, str]], dict[tuple[str, str], str]]:
+    """Service seam symbols and their route reasons from `routes_file`, if readable."""
+    if not routes_file.is_file() or routes_file.is_symlink():
+        return set(), {}
+    try:
+        data = json.loads(routes_file.read_text(encoding='utf-8'))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return set(), {}
+    items = data.get('routes') if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return set(), {}
+    seams: set[tuple[str, str]] = set()
+    reasons: dict[tuple[str, str], str] = {}
+    for item in items:
+        if not isinstance(item, dict) or item.get('route') != 'component':
+            continue
+        seam = item.get('seam')
+        if not isinstance(seam, dict) or seam.get('part') is not None:
+            continue
+        module = seam.get('module')
+        symbols = seam.get('symbols')
+        if not isinstance(module, str) or not isinstance(symbols, list):
+            continue
+        dotted = _normalize_module(module)
+        reason = item.get('reason') if isinstance(item.get('reason'), str) else ''
+        for symbol in symbols:
+            if isinstance(symbol, str) and symbol.strip():
+                key = (dotted, symbol.strip())
+                seams.add(key)
+                if reason:
+                    reasons[key] = f'{reasons[key]}\n{reason}' if key in reasons else reason
+    return seams, reasons
+
+
+def _seam_match(module: str, qualified: str, seams: set[tuple[str, str]] | None) -> bool:
+    if not seams:
+        return False
+    klass = qualified.rpartition('.')[0]
+    return (module, qualified) in seams or bool(klass and (module, klass) in seams)
+
+
+def _seam_reason(module: str, qualified: str, reasons: dict[tuple[str, str], str] | None) -> str:
+    if not reasons:
+        return ''
+    parts = [reasons.get((module, qualified), '')]
+    klass = qualified.rpartition('.')[0]
+    if klass:
+        parts.append(reasons.get((module, klass), ''))
+    return '\n'.join(part for part in parts if part)
+
+
 def unstubbed(repository: Path, components: Path, source_root: str,
-              only: set[tuple[str, str]] | None = None) -> list[str]:
+              only: set[tuple[str, str]] | None = None,
+              seams: set[tuple[str, str]] | None = None,
+              reasons: dict[tuple[str, str], str] | None = None) -> list[str]:
     """For each documented function of the stubs in `components` that the published stubs
-    do not hold (or each of `only`, as (module, qualified name)), the collaborators its
-    code reaches that no stub declares and its docstring does not name."""
+    do not hold, plus any published symbol named in `only` or `seams` (promoted seams),
+    the collaborators its code reaches that no stub declares and its docstring (or route
+    reason, for a published seam) does not name."""
     reach = Reach(repository / source_root, components)
     problems: list[str] = []
     for stub in sorted(components.rglob('*.pyi')) if components.is_dir() else []:
@@ -672,9 +748,16 @@ def unstubbed(repository: Path, components: Path, source_root: str,
         kept = (_qualified(ast.parse(published.read_text(encoding='utf-8')).body)
                 if published.is_file() else set())
         for qualified, node in _documented(tree.body):
-            if qualified in kept or only is not None and (module, qualified) not in only:
+            if only is not None:
+                if (module, qualified) not in only:
+                    continue
+            elif qualified in kept and not _seam_match(module, qualified, seams):
                 continue
             docstring = ast.get_docstring(node) or ''
+            if qualified in kept:
+                extra = _seam_reason(module, qualified, reasons)
+                if extra:
+                    docstring = f'{docstring}\n{extra}'
             missing = [name for name in reach.of(module, qualified)
                        if not re.search(rf'\b{re.escape(name.rpartition(".")[2])}\b',
                                         docstring)]
@@ -865,6 +948,7 @@ def main() -> int:
     parser.add_argument('--repository', default='repository', type=Path)
     parser.add_argument('--components', default='components', type=Path)
     parser.add_argument('--source-root')
+    parser.add_argument('--routes', default='routes.json', type=Path)
     arguments = parser.parse_args()
     source_root = arguments.source_root
     if source_root is None:
@@ -882,7 +966,9 @@ def main() -> int:
                   'import as a statement of its own (`from typing import Final`), never by '
                   'editing a published one, and state new behaviour in the docstrings of the '
                   'symbols you add, not in a published docstring.', file=sys.stderr)
-        missing = unstubbed(arguments.repository, arguments.components, source_root)
+        seams, reasons = _route_seams(arguments.routes)
+        missing = unstubbed(arguments.repository, arguments.components, source_root,
+                            seams=seams, reasons=reasons)
         for problem in missing:
             print(f'make_stub: {problem}', file=sys.stderr)
         if missing:

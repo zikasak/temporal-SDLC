@@ -810,3 +810,81 @@ def test_a_mismatch_names_the_differing_symbols_first_and_what_a_stub_lacks_befo
     assert '__match_args__' not in message
     # Output of no known format is kept, its end when too long.
     assert describe_differences('x' * 5000 + 'the end').endswith('the end')
+
+
+def test_validate_completion_rejects_placeholder_and_unstubbed_collaborators(tmp_path):
+    import shutil
+    from app.languages.python.components import MAKE_STUB, STUB_PLACEHOLDER
+    from app.routing import agent
+
+    routing = tmp_path / 'routing'
+    tools = tmp_path / 'tools'
+    tools.mkdir()
+    shutil.copy2(MAKE_STUB, tools / 'make_stub.py')
+    for path, text in {
+        'repository/src/service/store.py': 'def save(name: str) -> None:\n    pass\n',
+        'repository/src/service/rooms.py': (
+            'from service.store import save\n\n\n'
+            'class Rooms:\n'
+            '    def close(self, room: str) -> None:\n'
+            '        save(room)\n'
+        ),
+        'components/runtime.json': json.dumps(RUNTIME),
+        'components/service/rooms.pyi': (
+            'class Rooms:\n'
+            '    def close(self, room: str) -> None:\n'
+            f'        """{STUB_PLACEHOLDER}"""\n        ...\n'
+        ),
+        'routes.json': json.dumps({'routes': [
+            {'requirement_id': 'FR-3', 'route': 'component', 'reason': 'Close it.',
+             'seam': {'module': 'service.rooms', 'symbols': ['Rooms.close']}},
+        ]}),
+    }.items():
+        (routing / path).parent.mkdir(parents=True, exist_ok=True)
+        (routing / path).write_text(text)
+
+    with pytest.raises(RuntimeError, match='placeholder docstrings'):
+        agent.validate_completion(routing)
+
+    stub = routing / 'components/service/rooms.pyi'
+    stub.write_text(stub.read_text().replace(STUB_PLACEHOLDER, 'Closes the room.'))
+    with pytest.raises(RuntimeError, match='service.rooms.save'):
+        agent.validate_completion(routing)
+
+    stub.write_text('from service.store import save as save\n' + stub.read_text())
+    (routing / 'components/service/store.pyi').write_text(
+        'def save(name: str) -> None:\n    """Saves the room."""\n    ...\n')
+    agent.validate_completion(routing)
+
+
+async def test_host_rejects_a_promoted_python_seam_with_unstubbed_collaborators(
+        python_session, monkeypatch):
+    published = (
+        'class Rooms:\n'
+        '    def close(self, room: str, merged: bool) -> None:\n'
+        '        """Closes the room."""\n        ...\n'
+    )
+    for path, text in {
+        'repository/src/service/store.py': 'def save(room: str) -> None:\n    pass\n',
+        'repository/src/service/rooms.py': (
+            'from service.store import save\n\n\n'
+            'class Rooms:\n'
+            '    def close(self, room: str, merged: bool) -> None:\n'
+            '        save(room)\n'
+        ),
+        'repository/contracts/components/runtime.json': json.dumps(RUNTIME),
+        'repository/contracts/components/service/rooms.pyi': published,
+    }.items():
+        (python_session / path).parent.mkdir(parents=True, exist_ok=True)
+        (python_session / path).write_text(text)
+    routes = {'routes': [
+        ROUTES['routes'][0],
+        {'requirement_id': 'FR-3', 'route': 'component', 'reason': 'Close it.',
+         'seam': {'module': 'service.rooms', 'symbols': ['Rooms.close']}},
+    ]}
+    fake_component_docker(monkeypatch, {'runtime.json': json.dumps(RUNTIME),
+                                        'service/rooms.pyi': published}, [], routes=routes)
+    with pytest.raises(ApplicationError, match='service.rooms.Rooms.close reaches '
+                                               'service.rooms.save'):
+        await ActivityEnvironment().run(activities.route_requirements, 'session', PYTHON_CONTEXT)
+    assert not (python_session / 'routing/components').exists()
