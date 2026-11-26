@@ -731,11 +731,15 @@ def _seam_reason(module: str, qualified: str, reasons: dict[tuple[str, str], str
 def unstubbed(repository: Path, components: Path, source_root: str,
               only: set[tuple[str, str]] | None = None,
               seams: set[tuple[str, str]] | None = None,
-              reasons: dict[tuple[str, str], str] | None = None) -> list[str]:
+              reasons: dict[tuple[str, str], str] | None = None,
+              published: Path | None = None) -> list[str]:
     """For each documented function of the stubs in `components` that the published stubs
     do not hold, plus any published symbol named in `only` or `seams` (promoted seams),
     the collaborators its code reaches that no stub declares and its docstring (or route
-    reason, for a published seam) does not name."""
+    reason, for a published seam) does not name. The published stubs are read from
+    `published`, by default `repository`/contracts/components: a caller whose
+    `repository` is a copy without contracts/ (the host's baseline) passes the checkout's."""
+    published_root = repository / PUBLISHED if published is None else published
     reach = Reach(repository / source_root, components)
     problems: list[str] = []
     for stub in sorted(components.rglob('*.pyi')) if components.is_dir() else []:
@@ -744,9 +748,9 @@ def unstubbed(repository: Path, components: Path, source_root: str,
             tree = ast.parse(stub.read_text(encoding='utf-8'))
         except (SyntaxError, UnicodeDecodeError):
             continue
-        published = repository / PUBLISHED / stub.relative_to(components)
-        kept = (_qualified(ast.parse(published.read_text(encoding='utf-8')).body)
-                if published.is_file() else set())
+        published_stub = published_root / stub.relative_to(components)
+        kept = (_qualified(ast.parse(published_stub.read_text(encoding='utf-8')).body)
+                if published_stub.is_file() else set())
         for qualified, node in _documented(tree.body):
             if only is not None:
                 if (module, qualified) not in only:

@@ -888,3 +888,42 @@ async def test_host_rejects_a_promoted_python_seam_with_unstubbed_collaborators(
                                                'service.rooms.save'):
         await ActivityEnvironment().run(activities.route_requirements, 'session', PYTHON_CONTEXT)
     assert not (python_session / 'routing/components').exists()
+
+
+async def test_host_leaves_unrouted_published_symbols_to_the_published_contract(
+        python_session, monkeypatch):
+    # The host checks from its baseline copy, which holds no contracts/: the published
+    # stubs are read from the checkout, so a published symbol no route names is not
+    # taken for a new one and held to the collaborators it reaches.
+    published = (
+        'class Rooms:\n'
+        '    def close(self, room: str, merged: bool) -> None:\n'
+        '        """Closes the room."""\n        ...\n\n'
+        '    def state(self, room: str) -> str:\n'
+        '        """The state of the room."""\n        ...\n'
+    )
+    for path, text in {
+        'repository/src/service/store.py': 'def save(room: str) -> None:\n    pass\n',
+        'repository/src/service/rooms.py': (
+            'from service.store import save\n\n\n'
+            'class Rooms:\n'
+            '    def close(self, room: str, merged: bool) -> None:\n'
+            '        save(room)\n\n'
+            '    def state(self, room: str) -> str:\n'
+            '        return "closed"\n'
+        ),
+        'repository/contracts/components/runtime.json': json.dumps(RUNTIME),
+        'repository/contracts/components/service/rooms.pyi': published,
+    }.items():
+        (python_session / path).parent.mkdir(parents=True, exist_ok=True)
+        (python_session / path).write_text(text)
+    routes = {'routes': [
+        ROUTES['routes'][0],
+        {'requirement_id': 'FR-3', 'route': 'component', 'reason': 'Read the state.',
+         'seam': {'module': 'service.rooms', 'symbols': ['Rooms.state']}},
+    ]}
+    fake_component_docker(monkeypatch, {'runtime.json': json.dumps(RUNTIME),
+                                        'service/rooms.pyi': published}, [], routes=routes)
+    result = await ActivityEnvironment().run(activities.route_requirements, 'session',
+                                             PYTHON_CONTEXT)
+    assert result['routes']['FR-3']['route'] == 'component'
