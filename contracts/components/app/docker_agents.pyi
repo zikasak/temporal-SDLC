@@ -19,8 +19,7 @@ async def docker(*args: str, timeout: int=1800, env: dict | None=None, stdin: An
     ('image', 'inspect', '--format', '{{.Id}}', <tag>), which the fake answers with a
     string when the image exists locally and with a RuntimeError when it does not;
     ('create', '--name', <container name>, ..., <tag>, ...); 'cp', 'start', 'wait' (the
-    fake returns '0'), 'logs', 'rm'. The helpers async_context, run_sync and
-    _archive_workspace run as they are."""
+    fake returns '0'), 'logs', 'rm'."""
     ...
 async def run_tool(role: str, session_id: str, workspace: Path, command: str, report: str, log_path: Path, *, image_build: AgentImageBuild, workdir: str='review', timeout: int=600) -> str:
     """Run a trusted command in the role's agent image and return its report; the report
@@ -33,13 +32,12 @@ async def run_tool(role: str, session_id: str, workspace: Path, command: str, re
     is made and the container is created from that tag; otherwise it is built first. The
     container's '--name' is '<role with _ as ->-tool-<sha256 hex of session_id>-<unique
     suffix>' so it can be traced to its session and two runs never share a name. Images
-    under the old per-session tag are never removed (no 'rmi' or 'image rm') or used.
-    async_context, run_sync and _archive_workspace run as they are."""
+    under the old per-session tag are never removed (no 'rmi' or 'image rm') or used."""
     ...
 async def run_script(role: str, session_id: str, workspace: Path, command: str, log_path: Path, *, image_build: AgentImageBuild, workdir: str, timeout: int) -> int | None:
     """Run a trusted script in the role's agent image; returns its exit status (the fake
     docker's 'wait' output). The image tag is formed, reused or built, and old images are
-    left alone (async_context, run_sync and _archive_workspace run as they are), exactly as for run_tool. The container's '--name' is
+    left alone, exactly as for run_tool. The container's '--name' is
     '<role with _ as ->-script-<sha256 hex of session_id>-<unique suffix>'. The 'logs'
     call is made through a real subprocess of the docker CLI and a test must make it
     harmless, for example by putting a fake 'docker' executable first on PATH."""
