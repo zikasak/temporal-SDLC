@@ -159,15 +159,26 @@ services:
     depends_on:
       pi-credentials-init:
         condition: service_completed_successfully
+    environment:
+      # Private addresses agent containers may still reach, such as an LLM provider on
+      # the LAN: comma- or space-separated `address:port` (TCP), e.g. 192.168.1.191:1234.
+      SANDBOX_ALLOWED_PRIVATE: ${SANDBOX_ALLOWED_PRIVATE:-}
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
         # Agent, build and generated-service containers get the internet but no private
-        # address: not the other services, the host or a cloud metadata endpoint. Remove
-        # a range here if the LLM provider lives in it. dockerd keeps this chain.
+        # address: not the other services, the host or a cloud metadata endpoint, except
+        # the address:port pairs of SANDBOX_ALLOWED_PRIVATE. dockerd keeps this chain.
         iptables -N DOCKER-USER 2>/dev/null || iptables -F DOCKER-USER
         iptables -A DOCKER-USER -o docker0 -j RETURN
         iptables -A DOCKER-USER -o br-+ -j RETURN
+        for target in $$(echo "$$SANDBOX_ALLOWED_PRIVATE" | tr ',' ' '); do
+          case "$$target" in
+            *:*) ;;
+            *) echo "SANDBOX_ALLOWED_PRIVATE: $$target is not address:port" >&2; exit 1 ;;
+          esac
+          iptables -A DOCKER-USER -d "$${target%:*}" -p tcp --dport "$${target##*:}" -j RETURN
+        done
         iptables -A DOCKER-USER -d 10.0.0.0/8 -j REJECT
         iptables -A DOCKER-USER -d 172.16.0.0/12 -j REJECT
         iptables -A DOCKER-USER -d 192.168.0.0/16 -j REJECT
