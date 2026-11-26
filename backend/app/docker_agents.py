@@ -1,6 +1,7 @@
 """Host-side Docker lifecycle for isolated coding agents; never mounted in agents."""
 
 import asyncio
+import fnmatch
 import hashlib
 import json
 import logging
@@ -574,12 +575,156 @@ async def keep_activity_alive(message: str):
         await asyncio.gather(pulse, return_exceptions=True)
 
 
-def _agent_image(role: str, session_id: str) -> str:
-    digest = hashlib.sha256(session_id.encode()).hexdigest()[:16]
-    return f"temporal-{role.replace('_', '-')}-agent:{digest}"
+def _session_hash(session_id: str) -> str:
+    return hashlib.sha256(session_id.encode()).hexdigest()
+
+
+def _container_name(role: str, session_id: str, kind: str | None = None) -> str:
+    """`<role>[-<kind>]-<sha256 of the session ID>-<unique suffix>`: traceable to its
+    session, and never shared by two runs."""
+    parts = [role.replace('_', '-'), *([kind] if kind else []), _session_hash(session_id),
+             uuid.uuid4().hex]
+    return '-'.join(parts)
+
+
+def _ignore_patterns(image_build: AgentImageBuild) -> tuple[bytes, list[tuple[bool, list[str]]]]:
+    """The .dockerignore Docker applies to the build (`<Dockerfile>.dockerignore` beside
+    the Dockerfile first, else the context's), as its bytes and its parsed patterns."""
+    for candidate in (image_build.dockerfile.parent / (image_build.dockerfile.name + '.dockerignore'),
+                      image_build.context / '.dockerignore'):
+        try:
+            content = candidate.read_bytes()
+        except OSError:
+            continue
+        patterns: list[tuple[bool, list[str]]] = []
+        for line in content.decode('utf-8', 'replace').splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            negated = line.startswith('!')
+            if negated:
+                line = line[1:].strip()
+            segments = [s for s in os.path.normpath(line).replace('\\', '/').split('/')
+                        if s and s != '.']
+            if segments:
+                patterns.append((negated, segments))
+        return content, patterns
+    return b'', []
+
+
+def _segments_match(pattern: list[str], path: list[str]) -> bool:
+    if not pattern:
+        return not path
+    head = pattern[0]
+    if head == '**':
+        return any(_segments_match(pattern[1:], path[index:]) for index in range(len(path) + 1))
+    return bool(path) and _segment_match(head, path[0]) and _segments_match(pattern[1:], path[1:])
+
+
+def _segment_match(pattern: str, name: str) -> bool:
+    return fnmatch.fnmatchcase(name, pattern)
+
+
+def _ignored(patterns: list[tuple[bool, list[str]]], path: list[str]) -> bool:
+    """Whether Docker leaves `path` out of the context: the last pattern matching it or
+    one of its parent directories decides."""
+    excluded = False
+    for negated, pattern in patterns:
+        if any(_segments_match(pattern, path[:length]) for length in range(1, len(path) + 1)):
+            excluded = not negated
+    return excluded
+
+
+def _could_include_below(patterns: list[tuple[bool, list[str]]], directory: list[str]) -> bool:
+    """Whether a negated pattern could take back a path inside excluded `directory`."""
+    for negated, pattern in patterns:
+        if not negated:
+            continue
+        for index, segment in enumerate(directory):
+            if index >= len(pattern):
+                break
+            if pattern[index] == '**':
+                return True
+            if not _segment_match(pattern[index], segment):
+                break
+        else:
+            return True
+    return False
+
+
+def _build_inputs_digest(image_build: AgentImageBuild) -> str:
+    """A hash of an image's build inputs: the Dockerfile's contents, the contents of the
+    files of the build context Docker sends and the build args."""
+    digest = hashlib.sha256()
+
+    def add(kind: bytes, *values: bytes) -> None:
+        digest.update(kind)
+        for value in values:
+            digest.update(len(value).to_bytes(8, 'big'))
+            digest.update(value)
+
+    try:
+        add(b'dockerfile', image_build.dockerfile.read_bytes())
+    except OSError:
+        add(b'no-dockerfile')
+    for key, value in sorted(image_build.build_args.items()):
+        add(b'arg', key.encode(), value.encode())
+    ignore, patterns = _ignore_patterns(image_build)
+    add(b'ignore', ignore)
+    context = image_build.context
+    for root, directories, files in os.walk(context, followlinks=False):
+        relative_root = Path(root).relative_to(context).parts
+        kept = []
+        for directory in sorted(directories):
+            path = [*relative_root, directory]
+            full = Path(root) / directory
+            if full.is_symlink():
+                files.append(directory)
+            elif not (_ignored(patterns, path) and not _could_include_below(patterns, path)):
+                kept.append(directory)
+        directories[:] = kept
+        for name in sorted(files):
+            path = [*relative_root, name]
+            if _ignored(patterns, path):
+                continue
+            full = Path(root) / name
+            relative = '/'.join(path).encode()
+            try:
+                if full.is_symlink():
+                    add(b'link', relative, os.readlink(full).encode())
+                elif full.is_file():
+                    mode = b'x' if os.access(full, os.X_OK) else b'-'
+                    file_digest = hashlib.sha256()
+                    with full.open('rb') as stream:
+                        while chunk := stream.read(1024 * 1024):
+                            file_digest.update(chunk)
+                    add(b'file', relative, mode, file_digest.digest())
+            except OSError:
+                # Gone while it was read: nothing Docker would send either.
+                continue
+    return digest.hexdigest()[:16]
+
+
+async def _agent_image(role: str, image_build: AgentImageBuild) -> str:
+    """The tag of the role's image: the role and a hash of its build inputs, shared by
+    every session with the same inputs."""
+    digest = await run_sync(_build_inputs_digest, image_build)
+    return f"{role.replace('_', '-')}-agent:{digest}"
+
+
+async def _image_exists(tag: str) -> bool:
+    try:
+        output = await docker('image', 'inspect', '--format', '{{.Id}}', tag, timeout=60)
+    except Exception:
+        return False
+    return bool(output.strip())
 
 
 async def _build_image(image_build: AgentImageBuild, tag: str, log_path: Path) -> None:
+    """Build the image under `tag` unless it already exists locally."""
+    if await _image_exists(tag):
+        logger.info('Reusing agent image %s', tag)
+        return
     build_args = ['build', '-t', tag, '-f', str(image_build.dockerfile)]
     for key, value in image_build.build_args.items():
         build_args.extend(['--build-arg', f'{key}={value}'])
@@ -595,8 +740,8 @@ async def run_tool(role: str, session_id: str, workspace: Path, command: str, re
     """Run a trusted shell command in the role's agent image over a copy of `workspace`,
     in /workspace/<workdir>, without a network or any credential, and return the report
     it wrote to the file `report` (given to it as $REPORT)."""
-    name = f"{role.replace('_', '-')}-tool-{uuid.uuid4().hex}"
-    image = _agent_image(role, session_id)
+    name = _container_name(role, session_id, 'tool')
+    image = await _agent_image(role, image_build)
     await _build_image(image_build, image, log_path.parent / 'agent-build.log')
     try:
         await docker(
@@ -639,8 +784,8 @@ async def run_script(role: str, session_id: str, workspace: Path, command: str,
     in /workspace/<workdir>, with a network (to install dependencies) but no credential, no
     host mount and no Docker. Its output, redacted, goes to `log_path`; returns its exit
     status, or None when it ran out of `timeout` seconds."""
-    name = f"{role.replace('_', '-')}-script-{uuid.uuid4().hex}"
-    image = _agent_image(role, session_id)
+    name = _container_name(role, session_id, 'script')
+    image = await _agent_image(role, image_build)
     await _build_image(image_build, image, log_path.parent / 'agent-build.log')
     try:
         await docker(
@@ -740,8 +885,8 @@ async def run_agent(role: str, session_id: str, workspace: Path,
     selected. An agent that asks the user something raises AgentPaused once its whole
     workspace is kept in `paused`; any other end discards what was kept there."""
     label = role.replace('_', '-')
-    name = f'{label}-{uuid.uuid4().hex}'
-    agent_image = _agent_image(role, session_id)
+    name = _container_name(role, session_id)
+    agent_image = await _agent_image(role, image_build)
     settings = await get_workflow_settings(cast(WorkflowType, role))
     # The snapshot travels as input alongside the workspace, never as host selector env vars.
     await run_sync((workspace / SETTINGS_FILENAME).write_text, settings.model_dump_json())

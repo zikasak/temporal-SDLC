@@ -1356,11 +1356,43 @@
   },
   {
     "category": "functional",
-    "description": "Today, a delivery's routing fails with \"It could not be decided which tests can prove the acceptance criteria. The seam of requirement FR-197 names a module the component contract has no stub of: app/docker_agents\" when the routing agent names a component seam's module in path form (app/docker_agents) while the component contract stubs that module under its dotted name (app.docker_agents); check_seams in backend/app/routing/components.py compares the two names literally, so the delivery stops with routing_status \"error\" and no tests are written.",
+    "description": "Today every agent, tool and script run builds and tags its image as temporal-<role>-agent:<first 16 hex digits of sha256(session ID)> (_agent_image in backend/app/docker_agents.py), so each session gets its own image even though the image holds no session data: the requirements, API design and workspace are copied into the container at run time.",
     "id": "FR-197",
     "priority": "must",
-    "rationale": "User report of the routing error. Code: read_seam (app/routing/models.py) keeps the module name as written; check_seams looks it up among the stubbed modules' dotted names.",
-    "title": "Problem: routing fails when a seam names its module as a path"
+    "rationale": "User: the image is built per session but contains no session data; it should use the same image.",
+    "title": "Problem: an agent image is built for each session"
+  },
+  {
+    "category": "technical",
+    "description": "An agent image's tag is formed from the role plus a hash of its build inputs (the Dockerfile's contents, the contents of the build context's files and the build args) and does not depend on the session ID, so runs of any sessions with identical build inputs use the same image tag, and a change to any of these inputs gives a different tag.",
+    "id": "TR-9",
+    "priority": "must",
+    "rationale": "User chose: role plus a hash of the Dockerfile, the context files' contents and the build args.",
+    "title": "Image tag from role and build inputs"
+  },
+  {
+    "category": "technical",
+    "description": "Agent, tool and script containers are named from the role, the hash of the session ID and a unique suffix (for example <role>-<sha256-of-session-id>-<uuid>, with the tool/script kind kept in the name as today), so a container can be traced to its session and two runs never share a name.",
+    "id": "TR-10",
+    "priority": "must",
+    "rationale": "User chose: role plus session hash plus a unique suffix.",
+    "title": "Session in the container name"
+  },
+  {
+    "category": "technical",
+    "description": "When an image with the computed tag already exists locally, an agent, tool or script run does not run docker build and uses the existing image.",
+    "id": "TR-11",
+    "priority": "must",
+    "rationale": "User chose: skip the build and use the existing image.",
+    "title": "Reuse an existing image"
+  },
+  {
+    "category": "technical",
+    "description": "Images already built under the old per-session tags are neither removed nor used by the change; removing them is left to the operator.",
+    "id": "TR-12",
+    "priority": "must",
+    "rationale": "User chose: leave them for the operator to prune.",
+    "title": "Old per-session images left in place"
   },
   {
     "category": "functional",
