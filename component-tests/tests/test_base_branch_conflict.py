@@ -106,8 +106,10 @@ def always_conflicting(gh: GitHub) -> bool:
 
 
 @asynccontextmanager
-async def waiting(env: WorkflowEnvironment, gh: GitHub) -> AsyncIterator[WorkflowHandle[Any, Any]]:
-    state = waiting_onboarding()
+async def waiting(
+    env: WorkflowEnvironment, gh: GitHub, state: DeliveryState | None = None,
+) -> AsyncIterator[WorkflowHandle[Any, Any]]:
+    state = state if state is not None else waiting_onboarding()
     queue = unique_queue()
     worker = make_worker(env.client, queue, [DeliveryWorkflow], gh.activities())
     async with worker:
@@ -137,7 +139,51 @@ async def advance_until(
         pytest.fail(f"timed out: {what}")
 
 
+async def wait_state(
+    handle: WorkflowHandle[Any, Any], condition: Callable[[DeliveryState], bool], what: str,
+    timeout: float = 5.0,
+) -> DeliveryState:
+    """Poll the get_state query (bounded) until `condition` holds of it; fail saying `what`."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        state = await handle.query(DeliveryWorkflow.get_state)
+        if condition(state):
+            return state
+        if loop.time() > deadline:
+            pytest.fail(f"timed out: {what}")
+        await asyncio.sleep(0.05)
+
+
 class TestConflictFoundBySignal:
+    async def test_waiting_delivery_starts_a_round_on_a_conflict(
+        self, skipping_env: WorkflowEnvironment,
+    ) -> None:
+        # requirement: FR-214, FR-215, FR-216, FR-218, FR-220
+        # A waiting api_change delivery: only what comes before its agent stage is observed
+        # (the agent, verification and review activities are not stubbed).
+        gh = GitHub(conflicting_until_merged)
+        state = delivery_state(SESSION, number=NUMBER, language="python")
+        async with waiting(skipping_env, gh, state) as handle:
+            await handle.signal("pull_request_conflicted", NUMBER)
+            await wait_until(lambda: len(gh.comments) >= 1,
+                             "no start comment was posted for the conflicting pull request")
+            assert gh.conflict_calls[0] == ("acme/widgets", NUMBER)
+            full_name, number, start = gh.comments[0]
+            assert (full_name, number) == ("acme/widgets", NUMBER)
+            for path in FILES:
+                assert path in start
+            assert "round 1 of 2" in start.lower()
+            running = await wait_state(
+                handle, lambda s: s.merge_fix is not None,
+                "the progress state did not show the base merge round",
+            )
+            assert running.merge_fix is not None
+            assert running.merge_fix["commit"] == BASE_TIP
+            assert running.merge_fix["files"] == FILES
+            assert running.merge_fix["round"] == 1
+
+
     async def test_signal_runs_a_round_that_pushes_the_merge_of_the_base_tip(
         self, skipping_env: WorkflowEnvironment,
     ) -> None:
@@ -196,13 +242,21 @@ class TestConflictFoundByThePeriodicCheck:
             await bounded(gh.merge_started.wait(), "the round did not reach its push")
             await handle.signal("pull_request_conflicted", NUMBER)
             await handle.signal("pull_request_conflicted", NUMBER)
-            await skipping_env.sleep(PULL_REQUEST_CHECK_INTERVAL + SLACK)
+            # No workflow time passes while the push is held (it could time the attempt out).
             await asyncio.sleep(0.5)
-            assert len(gh.merges) == 1, "a round already running must not be started again"
+            starts = [t for t in gh.texts() if "round" in t.lower()]
+            assert len(starts) == 1 and "round 1 of 2" in starts[0].lower(), (
+                "a round already running must not be started again")
             gh.merge_gate.set()
             await wait_until(lambda: len(gh.comments) >= 2, "the round did not comment its outcome")
-            await asyncio.sleep(0.5)
-            assert len(gh.merges) == 1
+            # The round has ended and the pull request no longer conflicts: later checks
+            # and signals start no further round.
+            await handle.signal("pull_request_conflicted", NUMBER)
+            for _ in range(2):
+                await skipping_env.sleep(PULL_REQUEST_CHECK_INTERVAL + SLACK)
+                await asyncio.sleep(0.3)
+            assert not any("round 2" in t.lower() for t in gh.texts())
+            assert len(gh.comments) == 2
 
 
 class TestRoundReporting:
@@ -234,7 +288,18 @@ class TestRoundReporting:
             full_name, number, outcome = gh.comments[1]
             assert (full_name, number) == ("acme/widgets", NUMBER)
             assert outcome != start
+            # The outcome comment identifies the merge commit that was pushed.
+            assert "ccccccc" in outcome
             assert len(gh.comments) == 2
+
+            # The progress shows the outcome: the pushed merge is the delivery's publication
+            # and the round is over.
+            ended = await wait_state(
+                handle, lambda s: s.merge_fix is None,
+                "the progress state still showed the base merge round after it ended",
+            )
+            assert ended.progress.publication is not None
+            assert ended.progress.publication["commit"] == "c" * 40
 
 
 class TestRoundLimit:
@@ -245,10 +310,11 @@ class TestRoundLimit:
         gh = GitHub(always_conflicting)
         async with waiting(skipping_env, gh) as handle:
             await handle.signal("pull_request_conflicted", NUMBER)
+            # Comments in order: start 1, outcome 1, start 2, outcome 2, then the one comment
+            # that the conflict remains.
             await advance_until(
-                skipping_env,
-                lambda: len(gh.merges) >= 2 and any("remain" in t.lower() for t in gh.texts()),
-                "two rounds did not run and then comment that the conflict remains",
+                skipping_env, lambda: len(gh.comments) >= 5,
+                "two rounds did not run and then comment once more that the conflict remains",
             )
             await handle.signal("pull_request_conflicted", NUMBER)
             for _ in range(3):
@@ -257,10 +323,12 @@ class TestRoundLimit:
 
             assert len(gh.merges) == 2, "no third automatic round may start"
             texts = gh.texts()
-            assert any("round 1 of 2" in t.lower() for t in texts)
-            assert any("round 2 of 2" in t.lower() for t in texts)
+            assert len(texts) == 5, "after the limit comment nothing more may be commented"
+            assert "round 1 of 2" in texts[0].lower()
+            assert "round 2 of 2" in texts[2].lower()
             assert not any("round 3" in t.lower() for t in texts)
-            assert len([t for t in texts if "remain" in t.lower()]) == 1
+            for path in FILES:
+                assert path in texts[0] and path in texts[2]
             assert (await handle.describe()).status == WorkflowExecutionStatus.RUNNING
 
 
