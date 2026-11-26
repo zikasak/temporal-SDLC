@@ -349,10 +349,15 @@ async def _run_stage(stage: StageSpec, session_id: str, context: dict[str, Any],
                 raise
 
 
+# How much of an error the status of a stage's saved work keeps: enough for the tests
+# or files an error names after its explanation.
+STATUS_CHARS = 500
+
+
 def _first_line(exc: BaseException) -> str:
     text = next((line.strip() for line in str(exc).splitlines() if line.strip()),
                 type(exc).__name__)
-    return text[:200]
+    return text[:STATUS_CHARS]
 
 
 async def _publish_output(stage: StageSpec, session_id: str, session_dir: Path,

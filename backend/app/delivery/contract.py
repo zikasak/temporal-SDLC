@@ -14,7 +14,7 @@ from app.architecture.models import (
     normalize_structure,
     render_architecture_json,
 )
-from app.github.checkout import COMPONENTS_DIR, CONTRACTS_DIR
+from app.github.checkout import COMPONENTS_DIR, CONTRACT_PARTS_DIR, CONTRACTS_DIR
 from app.requirements.document import render_requirements_markdown, requirements_narrative
 from app.requirements.models import CATEGORY_PREFIXES, Requirement
 
@@ -80,8 +80,10 @@ def write_architecture(repository: Path, architecture: str,
 
 def write_contract(repository: Path, contract: RepositoryContract) -> None:
     """Make the repository's contract directory exactly this contract. Its component
-    contract (`components/`) is not part of it and stays as the repository has it: a
-    delivery with component tests replaces it on its own."""
+    contract (`components/`) and the contracts of its other parts (`parts/`, their stubs
+    and page contracts) are not part of it and stay as the repository has them: a
+    delivery with routes to them replaces them on its own, and the repository's tests
+    of those parts need them as they were published."""
     directory = repository / CONTRACTS_DIR
     # The architecture of a contract that carries none is kept as the repository has it.
     kept = {}
@@ -93,7 +95,7 @@ def write_contract(repository: Path, contract: RepositoryContract) -> None:
         for item in directory.iterdir():
             if item.is_symlink() or not item.is_dir():
                 item.unlink()
-            elif item.name != COMPONENTS_DIR:
+            elif item.name not in (COMPONENTS_DIR, CONTRACT_PARTS_DIR):
                 shutil.rmtree(item)
     elif directory.exists() or directory.is_symlink():
         directory.unlink()

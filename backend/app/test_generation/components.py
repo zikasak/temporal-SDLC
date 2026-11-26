@@ -14,6 +14,7 @@ import shutil
 import uuid
 from fnmatch import fnmatchcase
 from functools import partial
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -458,11 +459,14 @@ async def build_runner(language: Language, session_dir: Path, tests: Path,
     return first
 
 
-def check_viewports(suite: ComponentSuite, parts: list[ComponentPart], session_dir: Path,
-                    clean: Path) -> None:
-    """Every browser test is tagged only with viewports of its part's page contract: one
-    with another tag would run in no viewport, so it cannot be tracked."""
+def _unknown_viewports(suite: ComponentSuite, parts: list[ComponentPart], session_dir: Path,
+                       cases_of: Callable[[SuiteMember], Iterable[str]]
+                       ) -> list[tuple[ComponentPart, list[str], list[str]]]:
+    """For each browser member whose tests (`cases_of`, by the member's own identities)
+    are tagged with a viewport its part's page contract does not have: the part, the
+    contract's viewports and those tests, by the suite's identities."""
     by_key = {part.key: part for part in parts}
+    found = []
     for member in suite_members(suite):
         part = by_key.get(member.name)
         if not member.browser or part is None:
@@ -475,20 +479,61 @@ def check_viewports(suite: ComponentSuite, parts: list[ComponentPart], session_d
                                    'are unavailable', non_retryable=True) from exc
         assert isinstance(member.suite, BrowserSuite)  # a browser member's suite
         viewport_of = member.suite.viewport_of
-        unknown = sorted({f'{member.prefix}{case} (@{viewport})'
-                          for case in member.suite.test_cases(clean / member.directory)
-                          if (viewport := viewport_of(case)) not in viewports})
+        unknown = sorted({f'{member.prefix}{case}' for case in cases_of(member)
+                          if viewport_of(case) not in viewports})
         if unknown:
-            raise RuntimeError(
-                'Test generation wrote browser tests that cannot be tracked: they are tagged '
-                f'with a viewport the page contract of part {part.name} does not have '
-                f'({", ".join(sorted(viewports))}): {"; ".join(unknown[:MAX_NAMED_TESTS])}')
+            found.append((part, sorted(viewports), unknown))
+    return found
+
+
+def _frozen_of(frozen: Mapping[str, str]) -> Callable[[SuiteMember], list[str]]:
+    """The frozen tests of a member, by its own identities."""
+    return lambda member: [case.removeprefix(member.prefix) for case in frozen
+                           if case.startswith(member.prefix)]
+
+
+def _repository_error(part: ComponentPart, viewports: list[str], unknown: list[str]
+                      ) -> ApplicationError:
+    return ApplicationError(
+        f'The repository\'s browser tests of part {part.name}, which the change may not '
+        f'alter, are tagged with viewports its page contract does not have: '
+        f'{"; ".join(unknown[:MAX_NAMED_TESTS])} (the contract has {", ".join(viewports)}). '
+        f'Restore the viewports they use in {part.published_dir()}/{VIEWPORTS_FILE}.',
+        non_retryable=True)
+
+
+def check_frozen_viewports(suite: ComponentSuite, parts: list[ComponentPart],
+                           session_dir: Path, frozen: Mapping[str, str]) -> None:
+    """Before the author runs: the tests it must leave as they are run in viewports of
+    their part's page contract. Otherwise no output of the author could be published, as
+    the repository, not the author, is wrong."""
+    for part, viewports, unknown in _unknown_viewports(suite, parts, session_dir,
+                                                       _frozen_of(frozen)):
+        raise _repository_error(part, viewports, unknown)
+
+
+def check_viewports(suite: ComponentSuite, parts: list[ComponentPart], session_dir: Path,
+                    clean: Path, frozen: Mapping[str, str] | None = None) -> None:
+    """Every browser test is tagged only with viewports of its part's page contract: one
+    with another tag would run in no viewport, so it cannot be tracked. The tests the
+    author had to leave as they are (`frozen`) are the repository's fault, not its."""
+    frozen = frozen or {}
+    for part, viewports, unknown in _unknown_viewports(
+            suite, parts, session_dir,
+            lambda member: member.suite.test_cases(clean / member.directory)):
+        own = [case for case in unknown if case not in frozen]
+        if not own:
+            raise _repository_error(part, viewports, unknown)
+        raise RuntimeError(
+            f'Browser tests that test generation wrote for part {part.name} cannot be '
+            f'tracked: {"; ".join(own[:MAX_NAMED_TESTS])} are tagged with a viewport its '
+            f'page contract does not have (it has {", ".join(viewports)})')
 
 
 def _validate(suite: ComponentSuite, parts: list[ComponentPart], session_dir: Path,
               frozen: dict[str, str], must_add: bool, clean: Path) -> None:
     validate_output(suite, frozen, must_add, clean)
-    check_viewports(suite, parts, session_dir, clean)
+    check_viewports(suite, parts, session_dir, clean, frozen)
 
 
 def stage(language: Language, parts: list[ComponentPart], suite: ComponentSuite,
@@ -575,6 +620,8 @@ async def generate_component_tests(session_id: str, context: dict[str, Any]) -> 
                                    session_dir, context)
     frozen = await run_sync(frozen_tests, suite, repository,
                             session_dir / ARTIFACT_DIR / 'suite', repair)
+    # No author can fix tests it may not change: the run is not started for nothing.
+    await run_sync(check_frozen_viewports, suite, parts, session_dir, frozen)
     # A change that added its seam first is run against the code with the seam.
     prepared = session_dir / SEAM_DIR / 'service' if context.get('seam_prepared') else None
     if prepared and not await run_sync(prepared.is_dir):

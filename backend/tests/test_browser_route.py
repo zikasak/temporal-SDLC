@@ -613,10 +613,33 @@ async def test_a_browser_test_tagged_with_a_viewport_the_contract_lacks_is_refus
     fake_docker(monkeypatch, {**AUTHOR, 'browser/frontend/tests/popup.spec.ts':
                               POPUP_TEST.replace("'@narrow'", "'@tablet'")}, {}, [])
     with pytest.raises(RuntimeError, match=re.escape(
-            'tagged with a viewport the page contract of part frontend does not have '
-            '(desktop, narrow): frontend~browser:tests/popup.spec.ts#tablet')):
+            'Browser tests that test generation wrote for part frontend cannot be tracked: '
+            'frontend~browser:tests/popup.spec.ts#tablet > the requirement popup > is fully '
+            'visible are tagged with a viewport its page contract does not have (it has '
+            'desktop, narrow)')):
         await ActivityEnvironment().run(components.generate_component_tests, 'session',
                                         CONTEXT)
+
+
+async def test_repository_browser_tests_the_contract_cannot_run_stop_before_the_author(
+        session, monkeypatch):
+    """The author may not change the repository's tests, so one tagged with a viewport the
+    page contract lacks fails the stage at once, naming the repository as the cause."""
+    from temporalio.exceptions import ApplicationError
+    write(session, {'repository-tests/components/browser/frontend/tests/old.spec.ts':
+                    POPUP_TEST.replace("'@narrow'", "'@tablet'")})
+    calls: list = []
+    fake_docker(monkeypatch, AUTHOR, {}, calls)
+    with pytest.raises(ApplicationError) as raised:
+        await ActivityEnvironment().run(components.generate_component_tests, 'session',
+                                        {**CONTEXT, 'repository': {'full_name': 'o/r'}})
+    assert raised.value.non_retryable
+    assert raised.value.message.startswith(
+        "The repository's browser tests of part frontend, which the change may not alter, "
+        'are tagged with viewports its page contract does not have: '
+        'frontend~browser:tests/old.spec.ts#tablet > the requirement popup > is fully visible')
+    assert 'contracts/parts/frontend/browser/viewports.json' in raised.value.message
+    assert calls == []
 
 
 def report(cases: list[tuple[str, str, str | None]]) -> bytes:
@@ -865,6 +888,47 @@ async def test_the_routing_keeps_the_checked_page_contract_with_the_apis_operati
                                            'route names the viewports tablet'):
         await routing.publish_components(PYTHON, session_dir, output, routes, work,
                                          artifact_dir, [SERVICE, FRONTEND, BROWSER], DOCUMENT)
+
+
+async def test_the_routing_keeps_the_viewports_of_the_repositorys_browser_tests(
+        tmp_path, monkeypatch):
+    """The repository's browser tests are written against its published page contract: a
+    routing without it, or whose contract lacks a viewport they use, is refused."""
+    session_dir = tmp_path / 'session'
+    write(session_dir, {'repository/Dockerfile': 'FROM python:3.12-slim',
+                        'repository/frontend/browser-tests/tests/old.spec.ts': POPUP_TEST})
+    output = tmp_path / 'output'
+    write(output / 'parts/frontend/browser', contract_files(viewports={
+        'desktop': VIEWPORTS['desktop']}))
+
+    async def check_page_conformance(*args):
+        pass
+
+    monkeypatch.setattr(routing, 'check_page_conformance', check_page_conformance)
+    routes = {'FR-171': {'route': 'browser', 'reason': 'Cut off.',
+                         'page': {**PAGE, 'viewports': ['desktop']}}}
+
+    async def publish(name: str):
+        (tmp_path / name).mkdir()
+        return await routing.publish_components(
+            PYTHON, session_dir, output, routes, tmp_path / name, session_dir / 'routing',
+            [SERVICE, FRONTEND, BROWSER], DOCUMENT)
+
+    with pytest.raises(RuntimeError, match=re.escape(
+            'The repository has browser tests in frontend/browser-tests/ but no published '
+            'page contract in contracts/parts/frontend/browser/')):
+        await publish('work-0')
+    # Published without the viewport the tests use, as no published contract may be.
+    write(session_dir / 'repository/contracts/parts/frontend/browser', contract_files(
+        viewports={'desktop': VIEWPORTS['desktop']}))
+    with pytest.raises(RuntimeError, match=re.escape(
+            "The repository's browser tests in frontend/browser-tests/ are tagged with "
+            'viewports viewports.json does not have: narrow (tests/old.spec.ts#narrow > the '
+            'requirement popup > is fully visible)')):
+        await publish('work-1')
+    write(session_dir / 'repository/contracts/parts/frontend/browser', contract_files())
+    write(output / 'parts/frontend/browser', contract_files())
+    assert await publish('work-2') == ['frontend~browser']
 
 
 def test_a_malformed_api_contract_is_the_routings_own_error(tmp_path):

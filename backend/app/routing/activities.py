@@ -24,14 +24,14 @@ from app.agent_workflows.host import (
 from app.config import GENERATED_CODE_DIR
 from app.github.checkout import CHECKOUT_DIR, COMPONENTS_DIR
 from app.implementation.activities import EXCLUDED
-from app.languages import RUNTIME_FILE, TOOLS_DIR, Language
+from app.languages import RUNTIME_FILE, TOOLS_DIR, BrowserSuite, Language
 from app.languages.python.component_contract.make_stub import UNSTUBBED_ADVICE, unstubbed
 from app.requirements.document import without_repeated_tables
 from app.review.activities import record_baseline
 from app.routing.agent import ROUTES
 from app.api_design.openapi import render_openapi
 from app.routing.browser import (
-    OPERATIONS_FILE, absent_elements, check_page_conformance, check_page_routes,
+    OPERATIONS_FILE, PAGES_FILE, VIEWPORTS_FILE, absent_elements, check_page_conformance, check_page_routes,
     operations_list, read_document, read_page_contract,
 )
 from app.routing.components import (
@@ -200,6 +200,55 @@ def _part_routes(part: ComponentPart, routes: dict[str, dict[str, Any]]) -> dict
             and route['seam'].get('part', SERVICE_PART) == part.name}
 
 
+# How many of the repository's browser tests an error names.
+NAMED_TESTS = 5
+
+
+def repository_viewports(part: ComponentPart, checkout: Path) -> dict[str, list[str]]:
+    """The viewports the repository's browser tests of a part are tagged with, each with
+    the tests tagged with it."""
+    suite = part.suite
+    tests = checkout / part.tests_dir()
+    if not isinstance(suite, BrowserSuite) or tests.is_symlink() or not tests.is_dir():
+        return {}
+    tagged: dict[str, list[str]] = {}
+    for case in sorted(suite.test_cases(tests)):
+        viewport = suite.viewport_of(case)
+        if viewport is not None:
+            tagged.setdefault(viewport, []).append(case)
+    return tagged
+
+
+def check_published_pages(part: ComponentPart, checkout: Path) -> None:
+    """The repository's browser tests of a part are written against its published page
+    contract: without it, a new one would not hold the viewports, pages and fixtures they
+    use, and they could no longer be tracked or run. Raises PageContractError."""
+    tagged = repository_viewports(part, checkout)
+    published = checkout / part.published_dir()
+    if tagged and not (published / PAGES_FILE).is_file():
+        raise PageContractError(
+            f'The repository has browser tests in {part.tests_dir()}/ but no published page '
+            f'contract in {part.published_dir()}/ (an earlier delivery may have removed '
+            'it): restore it from the repository\'s history, as it was when those tests were '
+            'written')
+
+
+def check_repository_viewports(part: ComponentPart, checkout: Path,
+                               viewports: dict[str, Any]) -> None:
+    """Every viewport the repository's browser tests of a part are tagged with is in its
+    page contract: a test tagged with another runs in none and cannot be tracked. Raises
+    PageContractError."""
+    missing = {name: cases for name, cases in repository_viewports(part, checkout).items()
+               if name not in viewports}
+    if missing:
+        named = [case for cases in missing.values() for case in cases][:NAMED_TESTS]
+        raise PageContractError(
+            f'The repository\'s browser tests in {part.tests_dir()}/ are tagged with '
+            f'viewports {VIEWPORTS_FILE} does not have: {", ".join(sorted(missing))} '
+            f'({"; ".join(named)}); restore them in '
+            f'{part.published_dir()}/{VIEWPORTS_FILE}')
+
+
 async def _publish_pages(part: ComponentPart, session_dir: Path, output: Path,
                          routes: dict[str, dict[str, Any]], repository: Path, work: Path,
                          artifact_dir: Path, document: dict[str, Any] | None) -> None:
@@ -212,10 +261,13 @@ async def _publish_pages(part: ComponentPart, session_dir: Path, output: Path,
     # then say of any operation it names.
     document = document or {'paths': {}}
     clean = work / part.contract_dir()
+    checkout = session_dir / CHECKOUT_DIR
     try:
+        await run_sync(check_published_pages, part, checkout)
         read = await run_sync(read_page_contract, output / part.contract_dir(),
-                              session_dir / CHECKOUT_DIR / part.published_dir(), document, clean)
+                              checkout / part.published_dir(), document, clean)
         check_page_routes(routes, read)
+        await run_sync(check_repository_viewports, part, checkout, read['viewports'])
     except PageContractError as exc:
         raise RuntimeError(str(exc)) from exc
     operations = operations_list(document)
