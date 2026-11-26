@@ -176,6 +176,7 @@ type CiChecks = {
   failed: { name: string; url: string | null }[];
   error: string | null;
   fix_round: number;
+  pushed_outside: boolean;
 };
 
 function ciChecks(value: unknown): CiChecks | null {
@@ -194,6 +195,7 @@ function ciChecks(value: unknown): CiChecks | null {
   return {
     commit: item.commit, status: item.status as CiStatus, failed, error: text(item.error),
     fix_round: typeof item.fix_round === "number" ? item.fix_round : 0,
+    pushed_outside: item.pushed_outside === true,
   };
 }
 
@@ -1058,6 +1060,7 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
       className={`verification-outcome ${progress.ci.status === "passed" ? "verification-passed" : progress.ci.status === "failed" ? "verification-failed" : ""}`}
       role="status">
       {ciText[progress.ci.status]} <code>{progress.ci.commit.slice(0, 12)}</code>
+      {progress.ci.pushed_outside && <> (pushed outside the delivery)</>}
       {progress.ci.fix_round > 0 && <> (pushed by automatic fix round {progress.ci.fix_round})</>}
       {progress.ci.failed.length > 0 && <> Failed:{" "}
         {progress.ci.failed.map((check, index) => <span key={index}>

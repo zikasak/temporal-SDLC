@@ -81,6 +81,48 @@ async def commit_checks(full_name: str, commit: str) -> dict[str, Any]:
     return summarize_checks(runs, complete)
 
 
+def pushed_outside(head: dict[str, Any], own_commit: str, bot: str) -> bool:
+    """Whether someone other than the delivery pushed the pull request's head commit:
+    not the delivery's own pushed commit, and its GitHub author or committer is not the
+    GitHub App's bot account."""
+    if head['sha'] == own_commit:
+        return False
+    return head.get('author') != bot or head.get('committer') != bot
+
+
+def _checks_error(exc: GitHubError, full_name: str, commit: str) -> ApplicationError:
+    activity.logger.warning('Could not read the checks of %s@%s: %s', full_name,
+                            commit[:12], exc)
+    if exc.status_code == 403:
+        return ApplicationError(CHECKS_DENIED, type=CHECKS_UNAVAILABLE, non_retryable=True)
+    # The waiting delivery reads them again at its next interval.
+    return ApplicationError(str(exc), type='ChecksError', non_retryable=True)
+
+
+@activity.defn
+async def pull_request_checks(full_name: str, number: int, commit: str) -> dict[str, Any]:
+    """Activity 'pull_request_checks': the GitHub checks of the current head commit of
+    pull request `number` of `full_name`, as summarize_checks says, with `commit`, that
+    head's SHA, and `pushed_outside`, whether someone other than the delivery pushed it.
+    `commit` is the delivery's own pushed commit, whose checks are read when the pull
+    request is gone. Raises a non-retryable CHECKS_UNAVAILABLE error when the GitHub App
+    may not read them."""
+    token, connection = await _github_token()
+    bot = f"{connection['app_slug']}[bot]"
+    try:
+        head = await github_client.get_pull_request_head(token, full_name, number)
+    except GitHubError as exc:
+        raise _checks_error(exc, full_name, commit) from exc
+    if head is None:
+        head = {'sha': commit, 'author': bot, 'committer': bot}
+    try:
+        runs, complete = await github_client.list_check_runs(token, full_name, head['sha'])
+    except GitHubError as exc:
+        raise _checks_error(exc, full_name, head['sha']) from exc
+    return {**summarize_checks(runs, complete), 'commit': head['sha'],
+            'pushed_outside': pushed_outside(head, commit, bot)}
+
+
 def log_excerpt(log: str, limit: int = LOG_CHARS) -> str:
     """The end of a failed job's log up to the step that failed, without GitHub's
     timestamps, colours and post-job steps."""

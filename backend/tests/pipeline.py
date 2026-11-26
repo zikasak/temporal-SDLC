@@ -276,6 +276,14 @@ class FakeStages:
             raise answer
         return answer
 
+    @activity.defn(name="pull_request_checks")
+    async def pull_request_checks(self, full_name: str, number: int,
+                                  commit: str) -> dict[str, Any]:
+        """As commit_checks, of the pull request's head: the delivery's own commit, or
+        the `commit` an answer names, with its `pushed_outside`."""
+        answer = await self.commit_checks(full_name, commit)
+        return {'commit': commit, 'pushed_outside': False, **answer}
+
     @activity.defn(name="ci_failure_report")
     async def ci_failure_report(self, full_name: str, commit: str,
                                 checks: list[dict[str, Any]]) -> str:
