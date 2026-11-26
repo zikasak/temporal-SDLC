@@ -109,34 +109,6 @@ class CiChecks(TypedDict):
     pushed_outside: NotRequired[bool]
 
 
-BaseMergeStatus = Literal['running', 'completed', 'failed', 'stopped']
-
-
-class BaseMergeRound(TypedDict):
-    """One automatic fix round of a pull request that conflicts with its base branch, as
-    the delivery progress shows it, kept after the round ends: `round` of `limit`
-    (MAX_MERGE_FIX_ROUNDS), the `base` branch and its tip `base_commit`, the conflicting
-    `files`, its `status` (running, completed once the merge commit `merge_commit` was
-    pushed, failed with `error` saying why, or stopped when no round could start, such as
-    once the limit of rounds in a row was reached, `error` saying why), and when it
-    `started_at` and `finished_at` (ISO 8601)."""
-
-    round: int
-    limit: int
-    base: str
-    base_commit: str
-    files: list[str]
-    status: BaseMergeStatus
-    merge_commit: str | None
-    error: str | None
-    started_at: str
-    finished_at: str | None
-
-
-# How many base merge rounds the delivery progress keeps, the latest ones.
-KEPT_BASE_MERGES = 20
-
-
 def with_ci_defaults(progress: 'DeliveryProgress') -> 'DeliveryProgress':
     """The progress with the fields its CI lacks when it was recorded before they were."""
     if progress.ci is not None and 'pushed_outside' not in progress.ci:
@@ -327,10 +299,6 @@ class DeliveryProgress:
     existing_code_changed: bool = False
     # The repository's CI on the last pushed commit, watched while the delivery waits.
     ci: CiChecks | None = None
-    # The automatic fix rounds of a pull request that conflicts with its base branch,
-    # oldest first, the latest KEPT_BASE_MERGES: each with its number out of the limit,
-    # the conflicting files, its status and its outcome.
-    base_merges: list[BaseMergeRound] = field(default_factory=list)
     # The new top-level flows that fix rounds started after this delivery's flow closed,
     # oldest first; reported by the session API, not kept by the workflow.
     fix_flow_ids: list[str] = field(default_factory=list)
@@ -826,10 +794,6 @@ def interrupted(state: DeliveryState) -> DeliveryState:
         # So is a stopped merge fix: retrying the push starts one again.
         state.merge_fix = None
         state.instructions = None
-    for entry in progress.base_merges:
-        if entry['status'] == 'running':
-            entry['status'] = 'failed'
-            entry['error'] = STOPPED
     if state.mention is not None:
         if state.spec.kind == 'docs' and state.instructions:
             # The stopped fix is what retrying the documentation stage carries out.

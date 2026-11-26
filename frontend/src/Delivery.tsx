@@ -1,5 +1,5 @@
 import { useState, type FormEvent, type ReactNode } from "react";
-import { repositoryPublication, type RepositoryPublication, type RepositorySelection } from "./github";
+import { repositoryPublication, type BaseMerge, type RepositoryPublication, type RepositorySelection } from "./github";
 import { QuestionField, choiceAnswer, noChoice, questionList, type Choice, type Question } from "./Questions";
 import { isObject } from "./api";
 import { flowStepsLink } from "./url";
@@ -164,49 +164,8 @@ export type DeliveryProgress = {
   existing_code_changed: boolean;
   // The repository's CI on the last pushed commit.
   ci: CiChecks | null;
-  // The automatic fix rounds of a pull request that conflicts with its base branch, oldest first.
-  base_merges: BaseMergeRound[];
   // The new top-level flows that fix rounds started after the flow closed, oldest first.
   fix_flow_ids: string[];
-};
-
-const baseMergeStatuses = ["running", "completed", "failed", "stopped"] as const;
-type BaseMergeStatus = typeof baseMergeStatuses[number];
-type BaseMergeRound = {
-  round: number;
-  limit: number;
-  base: string;
-  base_commit: string;
-  files: string[];
-  status: BaseMergeStatus;
-  merge_commit: string | null;
-  error: string | null;
-};
-
-function baseMergeRounds(value: unknown): BaseMergeRound[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((entry) => {
-    if (!entry || typeof entry !== "object") return [];
-    const item = entry as Record<string, unknown>;
-    if (typeof item.round !== "number" || !baseMergeStatuses.includes(item.status as BaseMergeStatus)) return [];
-    return [{
-      round: item.round,
-      limit: typeof item.limit === "number" ? item.limit : 2,
-      base: typeof item.base === "string" ? item.base : "the base branch",
-      base_commit: typeof item.base_commit === "string" ? item.base_commit : "",
-      files: Array.isArray(item.files) ? item.files.filter((file): file is string => typeof file === "string") : [],
-      status: item.status as BaseMergeStatus,
-      merge_commit: text(item.merge_commit),
-      error: text(item.error),
-    }];
-  });
-}
-
-const baseMergeText: Record<BaseMergeStatus, string> = {
-  running: "running",
-  completed: "merge commit pushed",
-  failed: "ended without a push",
-  stopped: "not started",
 };
 
 const ciStatuses = ["pending", "passed", "failed", "inconclusive", "none", "timed_out", "unavailable"] as const;
@@ -534,7 +493,6 @@ export function deliveryProgress(value: Record<string, unknown>, repository: Rep
     mentions: pullRequestMentions(value.mentions),
     existing_code_changed: value.existing_code_changed === true,
     ci: ciChecks(value.ci),
-    base_merges: baseMergeRounds(value.base_merges),
     fix_flow_ids: Array.isArray(value.fix_flow_ids)
       ? value.fix_flow_ids.filter((item): item is string => typeof item === "string" && item !== "")
       : [],
@@ -1048,6 +1006,28 @@ function Baseline({ progress, retrying, disabled, onRetry }: {
 }
 
 /** The branch a delivery pushed, or why it pushed none. */
+/** The automatic fix round that merges the base branch into the pull request branch. */
+function BaseMergeRound({ merge }: { merge: BaseMerge }) {
+  const files = merge.files.length > 0 ? ` in ${merge.files.slice(0, 20).join(", ")}${merge.files.length > 20 ? ", …" : ""}` : "";
+  const round = `Automatic fix round ${merge.round} of ${merge.limit}`;
+  if (merge.status === "running") {
+    return <p role="status">
+      The pull request conflicts with its base branch <code>{merge.base}</code>{files}. {round} is merging{" "}
+      <code>{merge.base}</code> into it…
+    </p>;
+  }
+  if (merge.status === "completed") {
+    return <p className="verification-outcome verification-passed" role="status">
+      {round} merged <code>{merge.base}</code> into the pull request branch
+      {merge.commit && <> at <code>{merge.commit.slice(0, 7)}</code></>}.
+    </p>;
+  }
+  return <p className="verification-outcome verification-failed" role="status">
+    {round} for the conflicts with <code>{merge.base}</code>{files} ended without a push of the merge
+    {merge.error ? `: ${merge.error}` : "."}
+  </p>;
+}
+
 function Publication({ progress, documentation, retrying, disabled, onRetry }: {
   progress: DeliveryProgress;
   documentation: boolean;
@@ -1076,6 +1056,7 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
       Pushed to <a href={publication.url} target="_blank" rel="noreferrer">{publication.branch}</a>
       {" "}at <code>{publication.commit.slice(0, 7)}</code>
     </p>}
+    {publication?.base_merge && <BaseMergeRound merge={publication.base_merge} />}
     {publication && !publication.verified && <p>
       This branch is not verified: nothing checked the change. Review it before merging.
     </p>}
@@ -1126,22 +1107,6 @@ function Publication({ progress, documentation, retrying, disabled, onRetry }: {
         {retrying === "repository" ? "Pushing again…" : "Push again and rewrite the pull request text"}
       </button>}
     </div>}
-    {progress.base_merges.length > 0 && <section aria-label="Conflicts with the base branch">
-      <h3>Conflicts with the base branch</h3>
-      <ul>
-        {progress.base_merges.map((merge, index) => <li key={index}>
-          {merge.status === "stopped" ? "Automatic fix round" : `Automatic fix round ${merge.round} of ${merge.limit}`}
-          {" "}merging <code>{merge.base}</code>
-          {merge.base_commit && <> (<code>{merge.base_commit.slice(0, 12)}</code>)</>}: {baseMergeText[merge.status]}
-          {merge.merge_commit && <> — <code>{merge.merge_commit.slice(0, 12)}</code></>}
-          {merge.files.length > 0 && <p>
-            Conflicting files: {merge.files.slice(0, 20).join(", ")}
-            {merge.files.length > 20 && ` and ${merge.files.length - 20} more`}
-          </p>}
-          {merge.error && <p role={merge.status === "failed" ? "alert" : undefined}>{merge.error}</p>}
-        </li>)}
-      </ul>
-    </section>}
     {progress.mentions.length > 0 && <section aria-label="Mentions in the pull request">
       <h3>Mentions in the pull request</h3>
       <ul>

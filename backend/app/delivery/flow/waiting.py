@@ -75,12 +75,11 @@ class PullRequestWait(FlowBase):
         return bool(pull and pull.get('number') and repository
                     and repository.get('full_name'))
 
-    async def _check_pull_request(self) -> bool:
-        """Ask GitHub how the pull request stands; a failed check changes nothing. True
-        when it was found open."""
+    async def _check_pull_request(self) -> None:
+        """Ask GitHub how the pull request stands; a failed check changes nothing."""
         pull, repository = self.progress.pull_request, self.spec.repository
         if not self._checks_pull_request() or pull is None or repository is None:
-            return False
+            return
         number = pull['number']
         try:
             current = await workflow.execute_activity(
@@ -91,15 +90,18 @@ class PullRequestWait(FlowBase):
             )
         except ActivityError as exc:
             workflow.logger.warning('Pull request state not read: %s', exc.cause or exc)
-            return False
+            return
         if not isinstance(current, dict):
-            return False
+            return
         merged = current.get('merged') is True
         if (merged or current.get('state') == 'closed') and self._closed is None:
             workflow.logger.info('Pull request #%d found %s', number,
                                  'merged' if merged else 'closed without merging')
             self._closed = (number, merged)
-        return not merged and current.get('state') == 'open'
+        elif current.get('state') == 'open' and not merged:
+            # An open pull request may conflict with its base branch, which moved on.
+            self._conflict_requested = False
+            await self._check_base_conflicts()
 
     async def _wait_for_pull_request(self) -> bool:
         """Wait for the user's next decision, a mention's fix round or the end of the
@@ -171,13 +173,13 @@ class PullRequestWait(FlowBase):
                 pass
             if self._next is not None or self._closing() is not None:
                 continue
-            merging = False
             if self._conflict_requested:
                 # GitHub reported that the pull request may conflict with its base branch.
                 self._conflict_requested = False
                 if workflow.now() < deadline:
-                    merging = await self._check_conflicts()
-            elif watching:
+                    await self._check_base_conflicts()
+                continue
+            if watching:
                 if self._check_requested:
                     # A requested check reads the CI too.
                     next_ci = workflow.now()
@@ -185,19 +187,13 @@ class PullRequestWait(FlowBase):
                                              and workflow.now() >= next_pull_request):
                     self._check_requested = False
                     next_pull_request = workflow.now() + PULL_REQUEST_CHECK_INTERVAL
-                    if workflow.now() < deadline and await self._check_pull_request():
-                        merging = await self._check_conflicts()
-            elif self._check_requested or checking:
+                    if workflow.now() < deadline:
+                        await self._check_pull_request()
+                continue
+            if self._check_requested or checking:
                 self._check_requested = False
-                if workflow.now() < deadline and await self._check_pull_request():
-                    merging = await self._check_conflicts()
-            if merging:
-                # A base merge fix round ran: the CI of what it pushed is watched, and
-                # the delivery waits for the user anew.
-                watching = self._ci_watching()
-                next_ci = workflow.now()
-                next_pull_request = workflow.now() + PULL_REQUEST_CHECK_INTERVAL
-                deadline = workflow.now() + TASK_IDLE_TIMEOUT
+                if workflow.now() < deadline:
+                    await self._check_pull_request()
 
     def _is_follow_up(self) -> bool:
         """Whether this delivery is a flow that carries on a closed one."""

@@ -14,11 +14,9 @@ import shutil
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
 
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.host import copy_file
-from app.github import contract_merge
 from app.github.client import validate_selection
 from app.github.models import RepositoryCheckout, RepositoryPublication, RepositorySelection
 
@@ -298,192 +296,6 @@ async def _merge_remote(target: Path, token: str, branch: str, author: tuple[str
         else changes[:CONFLICT_CHARS] + '\n… (the diff goes on)') from failure
 
 
-async def current_branch(target: Path) -> str | None:
-    """The branch the working copy has checked out; None when detached or unavailable."""
-    if not await run_sync((target / '.git').is_dir):
-        return None
-    try:
-        name = await _git('symbolic-ref', '--quiet', '--short', 'HEAD', cwd=target)
-    except CheckoutError:
-        return None
-    return name or None
-
-
-async def remote_branch_exists(target: Path, token: str, branch: str) -> bool:
-    """Whether the repository on GitHub has `branch`."""
-    found = await _git('ls-remote', '--heads', 'origin', f'refs/heads/{branch}', cwd=target,
-                       token=token)
-    return bool(found.strip())
-
-
-async def _git_bytes(*args: str, cwd: Path) -> bytes | None:
-    """The raw output of a local git command; None when it fails."""
-    process = await asyncio.create_subprocess_exec(
-        'git', *args, cwd=cwd, env=_environment(None), stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-    )
-    try:
-        output, _ = await asyncio.wait_for(process.communicate(), GIT_TIMEOUT)
-    except BaseException:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
-        raise
-    return None if process.returncode else output
-
-
-async def _union_merge(target: Path, base: str, ours: str, theirs: str) -> str:
-    """The merge of three texts that keeps the lines both sides added."""
-    with tempfile.TemporaryDirectory() as directory:
-        paths = []
-        for name, text in (('ours', ours), ('base', base), ('theirs', theirs)):
-            path = Path(directory) / name
-            await run_sync(path.write_text, text)
-            paths.append(str(path))
-        merged = await _git_bytes('merge-file', '--union', '-p', *paths, cwd=target)
-    if merged is None:
-        raise CheckoutError('The contract files could not be merged.')
-    return merged.decode('utf-8', 'replace')
-
-
-async def _merge_contract_files(target: Path, base_commit: str,
-                                conflicts: list[str]) -> set[str]:
-    """Settle the conflicting files of the repository's contract (contracts/, without
-    its component and part contracts) in a merge of `base_commit` into HEAD by merging
-    both sides' contracts by their content, and write the files rendered from them; the
-    conflicting paths settled."""
-    names = {path.split('/', 1)[1] for path in conflicts
-             if path.startswith(f'{CONTRACTS_DIR}/') and path.count('/') == 1}
-    if not names:
-        return set()
-    parted = await _git_bytes('merge-base', 'HEAD', base_commit, cwd=target)
-    revisions = (parted.decode().strip() if parted else None, 'HEAD', base_commit)
-    versions: dict[str, contract_merge.Versions] = {}
-    for name in {*names, *contract_merge.CONTRACT_FILES}:
-        texts: list[str | None] = []
-        for revision in revisions:
-            shown = (await _git_bytes('show', f'{revision}:{CONTRACTS_DIR}/{name}', cwd=target)
-                     if revision else None)
-            texts.append(None if shown is None else shown.decode('utf-8', 'replace'))
-        versions[name] = (texts[0], texts[1], texts[2])
-
-    async def merge_text(base: str, ours: str, theirs: str) -> str:
-        return await _union_merge(target, base, ours, theirs)
-
-    merged = await contract_merge.merge_contract(versions, names, merge_text)
-    directory = target / CONTRACTS_DIR
-    for name, text in merged.items():
-        path = f'{CONTRACTS_DIR}/{name}'
-        if text is None:
-            await _git('rm', '--quiet', '--force', '--ignore-unmatch', '--', path,
-                       cwd=target)
-            continue
-        await run_sync(directory.mkdir, exist_ok=True)
-        await run_sync((directory / name).write_text, text)
-        await _git('add', '--', path, cwd=target)
-    return {f'{CONTRACTS_DIR}/{name}' for name in names if name in merged}
-
-
-async def merge_base_commit(target: Path, repository: RepositorySelection, token: str, *,
-                            branch: str, base_commit: str, message: str,
-                            author: tuple[str, str],
-                            verified: bool = True) -> RepositoryPublication:
-    """Merge `base_commit`, the tip of a pull request's base branch, into the remote
-    `branch` and push the merge, never forcing. The merge commit has the branch's tip and
-    `base_commit` as parents; files that conflict are taken as the branch has them, as a
-    fix round made them take in the base branch's changes, except the contract's own
-    (contracts/), which are merged by their content so that both sides' requirements,
-    API and architecture are kept. Raises CheckoutError when the
-    merge cannot be made or pushed, such as when the branch moved meanwhile."""
-    validate_selection(repository['full_name'], branch)
-    if not re.fullmatch(r'[0-9a-f]{40,64}', base_commit):
-        raise CheckoutError('Invalid commit')
-    if not await run_sync((target / '.git').is_dir):
-        raise CheckoutError('The repository checkout is unavailable')
-    shallow = await _git('rev-parse', '--is-shallow-repository', cwd=target) == 'true'
-    await _git('fetch', '--quiet', '--no-tags', *(['--unshallow'] if shallow else []),
-               'origin', f'refs/heads/{branch}', cwd=target, token=token)
-    tip = await _git('rev-parse', 'FETCH_HEAD', cwd=target)
-    await _git('checkout', '--quiet', '--force', '-B', branch, tip, cwd=target)
-    try:
-        await _git('fetch', '--quiet', '--no-tags', 'origin', base_commit, cwd=target,
-                   token=token)
-    except CheckoutError:
-        # Fetching by commit may be refused; the selected branch then brings it.
-        await _git('fetch', '--quiet', '--no-tags', 'origin',
-                   f'refs/heads/{repository["branch"]}', cwd=target, token=token)
-    try:
-        await _git('cat-file', '-e', f'{base_commit}^{{commit}}', cwd=target)
-    except CheckoutError as exc:
-        raise CheckoutError(
-            f'The base branch commit {base_commit[:12]} could not be fetched.') from exc
-    try:
-        await _git(*_author(author), 'merge', '--quiet', '--no-ff', '--no-edit',
-                   '--no-verify', '-m', message, base_commit, cwd=target)
-    except CheckoutError as exc:
-        conflicts = [path for path in (await _git(
-            'diff', '--name-only', '-z', '--diff-filter=U', cwd=target)).split('\0') if path]
-        if not conflicts:
-            try:
-                await _git('merge', '--abort', cwd=target)
-            except CheckoutError:
-                pass  # Nothing was merged.
-            raise CheckoutError(
-                f'The base branch could not be merged into {branch}: '
-                f'{str(exc)[-500:]}') from exc
-        # The contract is merged by its content, so the base branch's requirements and
-        # API changes are kept beside the delivery's.
-        settled = await _merge_contract_files(target, base_commit, conflicts)
-        for path in conflicts:
-            if path in settled:
-                continue
-            try:
-                await _git('cat-file', '-e', f'HEAD:{path}', cwd=target)
-            except CheckoutError:
-                await _git('rm', '--quiet', '--', path, cwd=target)
-            else:
-                await _git('checkout', 'HEAD', '--', path, cwd=target)
-        await _git(*_author(author), 'commit', '--quiet', '--no-edit', '--no-verify',
-                   cwd=target)
-    try:
-        await _git('push', '--quiet', 'origin', f'HEAD:refs/heads/{branch}', cwd=target,
-                   token=token)
-    except CheckoutError as exc:
-        if '[rejected]' in str(exc):
-            raise CheckoutError(
-                f'The branch {branch} on GitHub moved while the base branch was merged '
-                'into it.') from exc
-        raise
-    commit = await _git('rev-parse', 'HEAD', cwd=target)
-    return {'branch': branch, 'commit': commit,
-            'url': f'{repository["html_url"]}/tree/{branch}', 'verified': verified,
-            'ignored': [], 'ignored_count': 0}
-
-
-async def merge_changes(target: Path) -> dict[str, Any]:
-    """What the merge commit at HEAD of the working copy took in from the branch it
-    merged: {'parent': the commit it was merged into (its first parent), 'parent_files':
-    every path of that commit, 'changed': the paths the merge changed relative to it,
-    'contract': {name: text} of the top-level files of contracts/ in that commit}."""
-    parent = (await _git('rev-parse', 'HEAD^1', cwd=target)).strip()
-    listed = await _git_bytes('ls-tree', '-r', '--name-only', '-z', parent, cwd=target)
-    changed = await _git_bytes('diff', '--name-only', '--no-renames', '-z', parent, 'HEAD',
-                               cwd=target)
-    if listed is None or changed is None:
-        raise CheckoutError('The changes of the merge could not be read.')
-    parent_files = [item for item in listed.decode('utf-8', 'replace').split('\0') if item]
-    contract: dict[str, str] = {}
-    for path in parent_files:
-        if path.startswith(f'{CONTRACTS_DIR}/') and path.count('/') == 1:
-            shown = await _git_bytes('show', f'{parent}:{path}', cwd=target)
-            if shown is not None:
-                contract[path.split('/', 1)[1]] = shown.decode('utf-8', 'replace')
-    return {'parent': parent, 'parent_files': parent_files,
-            'changed': [item for item in changed.decode('utf-8', 'replace').split('\0')
-                        if item],
-            'contract': contract}
-
-
 def replace_files(source: Path, target: Path, include: Callable[[Path], bool]) -> None:
     """Make the included files under `target` exactly those of `source`.
 
@@ -549,3 +361,136 @@ async def push(target: Path, repository: RepositorySelection, token: str, *, bra
     return {'branch': branch, 'commit': commit,
             'url': f'{repository["html_url"]}/tree/{branch}', 'verified': verified,
             'ignored': ignored[:LISTED_IGNORED], 'ignored_count': len(ignored)}
+
+
+async def _git_code(*args: str, cwd: Path, token: str | None = None) -> tuple[int, str]:
+    """Run git and return its exit code with its output, as _git would report it."""
+    try:
+        return 0, await _git(*args, cwd=cwd, token=token)
+    except CheckoutError as exc:
+        return 1, str(exc)
+
+
+def _changes_text(changes: str) -> str:
+    return (changes if len(changes) <= CONFLICT_CHARS
+            else changes[:CONFLICT_CHARS] + '\n… (the diff goes on)')
+
+
+async def base_conflicts(work: Path, full_name: str, token: str, number: int,
+                         base: str) -> dict[str, object]:
+    """How pull request `number` of `full_name` merges with its base branch `base` as both
+    are now on GitHub, worked out in the empty directory `work`: {'conflicting',
+    'base_commit' (the base branch's tip), 'files' (the conflicting paths), 'changes'
+    (what the base branch changed in them since the histories parted)}. Raises
+    CheckoutError when they cannot be read or merged at all."""
+    validate_selection(full_name, base)
+    await _git('init', '--quiet', '--bare', str(work), cwd=work.parent)
+    await _git('fetch', '--quiet', '--no-tags', f'{GITHUB_URL}{full_name}.git',
+               f'+refs/heads/{base}:refs/sdlc/base',
+               f'+refs/pull/{number}/head:refs/sdlc/head', cwd=work, token=token)
+    base_commit = await _git('rev-parse', 'refs/sdlc/base', cwd=work)
+    process = await asyncio.create_subprocess_exec(
+        'git', 'merge-tree', '--write-tree', '--name-only', '--no-messages', '-z',
+        'refs/sdlc/head', 'refs/sdlc/base', cwd=work, env=_environment(None),
+        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE)
+    try:
+        output, errors = await asyncio.wait_for(process.communicate(), GIT_TIMEOUT)
+    except BaseException:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        raise
+    if process.returncode == 0:
+        return {'conflicting': False, 'base_commit': base_commit, 'files': [], 'changes': ''}
+    if process.returncode != 1:
+        text = errors.decode('utf-8', 'replace').strip()
+        raise CheckoutError(f'git merge-tree failed: {text[-OUTPUT_CHARS:]}')
+    # The tree written, then each conflicting path once.
+    entries = [item for item in output.decode('utf-8', 'replace').split('\0') if item]
+    files = list(dict.fromkeys(entries[1:]))
+    changes = ''
+    if files:
+        merge_base = await _git('merge-base', 'refs/sdlc/head', 'refs/sdlc/base', cwd=work)
+        changes = await _git('diff', '--no-color', '--no-ext-diff', merge_base,
+                             'refs/sdlc/base', '--', *files, cwd=work)
+    return {'conflicting': True, 'base_commit': base_commit, 'files': files,
+            'changes': _changes_text(changes)}
+
+
+async def merge_base_branch(target: Path, repository: RepositorySelection, token: str, *,
+                            branches: list[str], base_commit: str,
+                            resolve: Callable[[str], Path | None], message: str,
+                            author: tuple[str, str],
+                            verified: bool = True) -> RepositoryPublication:
+    """Merge `base_commit`, the base branch's tip, into the pull request branch on GitHub,
+    the first of `branches` that exists there, and push the merge commit, whose parents
+    are the branch's tip and `base_commit`. Each conflicting path is taken from the file
+    `resolve(path)` names, as the fix round left it, or else as the branch has it. A
+    branch already holding `base_commit` is left as it is. Never forces: a branch that
+    moved meanwhile fails the push with CheckoutError."""
+    if not re.fullmatch(r'[0-9a-f]{40,64}', base_commit):
+        raise CheckoutError('Invalid base commit')
+    if not await run_sync((target / '.git').is_dir):
+        raise CheckoutError('The repository checkout is unavailable')
+    shallow = await _git('rev-parse', '--is-shallow-repository', cwd=target) == 'true'
+    branch = None
+    for candidate in branches:
+        validate_selection(repository['full_name'], candidate)
+        code, _ = await _git_code(
+            'fetch', '--quiet', '--no-tags', *(['--unshallow'] if shallow else []),
+            'origin', f'+refs/heads/{candidate}:refs/remotes/origin/{candidate}',
+            cwd=target, token=token)
+        if code == 0:
+            branch = candidate
+            break
+    if branch is None:
+        raise CheckoutError('The pull request branch was not found on GitHub.')
+    head = await _git('rev-parse', f'refs/remotes/origin/{branch}', cwd=target)
+    await _git('fetch', '--quiet', '--no-tags', 'origin', base_commit, cwd=target,
+               token=token)
+    # The working copy is the session's own: what it holds is written again from the
+    # sources by every push, so it starts from the branch as GitHub has it.
+    await _git('reset', '--quiet', '--hard', cwd=target)
+    await _git('clean', '--quiet', '-fd', cwd=target)
+    await _git('checkout', '--quiet', '-f', '-B', branch, head, cwd=target)
+    url = f'{repository["html_url"]}/tree/{branch}'
+    code, _ = await _git_code('merge-base', '--is-ancestor', base_commit, 'HEAD', cwd=target)
+    if code == 0:
+        # The base branch was merged already, such as by hand.
+        return {'branch': branch, 'commit': head, 'url': url, 'verified': verified,
+                'ignored': [], 'ignored_count': 0}
+    code, failure = await _git_code(*_author(author), 'merge', '--quiet', '--no-ff',
+                                    '--no-commit', '--no-verify', base_commit, cwd=target)
+    conflicts = [path for path in (await _git(
+        'diff', '--name-only', '-z', '--diff-filter=U', cwd=target)).split('\0') if path]
+    if code and not conflicts:
+        try:
+            await _git('merge', '--abort', cwd=target)
+        except CheckoutError:
+            pass
+        raise CheckoutError(f'The base branch cannot be merged: {failure[-500:]}')
+    root = target.resolve()
+    for path in conflicts:
+        source = None if path.startswith(f'{CONTRACTS_DIR}/') else resolve(path)
+        destination = target / path
+        if (source is not None and await run_sync(source.is_file)
+                and destination.resolve().is_relative_to(root)):
+            await run_sync(destination.parent.mkdir, parents=True, exist_ok=True)
+            await run_sync(copy_file, source, destination)
+            await _git('add', '--', path, cwd=target)
+            continue
+        # As the pull request branch has it, or removed where the branch removed it.
+        code, _ = await _git_code('cat-file', '-e', f'HEAD:{path}', cwd=target)
+        if code:
+            await _git('rm', '--quiet', '--force', '--', path, cwd=target)
+        else:
+            await _git('checkout', 'HEAD', '--', path, cwd=target)
+            await _git('add', '--', path, cwd=target)
+    await _git(*_author(author), 'commit', '--quiet', '--no-verify', '-m', message,
+               cwd=target)
+    await _git('push', '--quiet', 'origin', f'HEAD:refs/heads/{branch}', cwd=target,
+               token=token)
+    commit = await _git('rev-parse', 'HEAD', cwd=target)
+    return {'branch': branch, 'commit': commit, 'url': url, 'verified': verified,
+            'ignored': [], 'ignored_count': 0}

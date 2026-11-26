@@ -399,78 +399,32 @@ async def get_pull_request_state(token: str, full_name: str,
             "author": author if isinstance(author, str) else None}
 
 
-# How many characters of what the base branch changed in conflicting files are returned.
-CONFLICT_CHANGES_CHARS = 60000
-# How many conflicting paths are returned at most.
-CONFLICT_FILES = 200
-
-
-def _changed_files(data: Any) -> list[dict[str, Any]]:
-    files = data.get("files") if isinstance(data, dict) else None
-    return [item for item in files or [] if isinstance(item, dict)
-            and isinstance(item.get("filename"), str)]
-
-
-async def get_pull_request_conflicts(token: str, full_name: str,
+async def get_pull_request_mergeable(token: str, full_name: str,
                                      number: int) -> dict[str, Any] | None:
-    """How the open pull request stands with its base branch: {'conflicting', 'base',
-    'base_commit', 'files', 'changes'}. GitHub computes mergeability in the background;
-    while it has not, the pull request counts as not conflicting, with 'pending' true.
-    The files are those
-    both the pull request and the base branch changed since they parted, and `changes`
-    what the base branch changed in them. None when the pull request is gone."""
+    """How the pull request stands with its base branch: {'state', 'merged', 'mergeable'
+    (true, false, or None while GitHub still computes it), 'mergeable_state', 'base' (the
+    base branch's name), 'head' (the head branch's name)}. None when it is gone."""
     validate_selection(full_name, "main")
-    path = _repo_path(full_name)
     try:
-        data, _ = await _request("GET", token, f"{path}/pulls/{number}")
+        data, _ = await _request("GET", token, f"{_repo_path(full_name)}/pulls/{number}")
     except GitHubError as exc:
         if exc.status_code == 404:
             return None
         raise
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or not isinstance(data.get("state"), str):
         raise _invalid_response()
-    base = data.get("base") if isinstance(data.get("base"), dict) else {}
-    head = data.get("head") if isinstance(data.get("head"), dict) else {}
-    base_ref, head_sha = base.get("ref"), head.get("sha")
+    base = data.get("base")
+    head = data.get("head")
+    base_ref = base.get("ref") if isinstance(base, dict) else None
+    head_ref = head.get("ref") if isinstance(head, dict) else None
     if not isinstance(base_ref, str) or not base_ref:
         raise _invalid_response()
-    conflicting = (data.get("state") == "open" and data.get("mergeable") is False
-                   and data.get("mergeable_state") in (None, "dirty"))
-    result: dict[str, Any] = {"conflicting": conflicting, "base": base_ref,
-                              "base_commit": "", "files": [], "changes": ""}
-    if data.get("state") == "open" and data.get("mergeable") is None:
-        # Not computed yet: not known to merge cleanly either.
-        result["pending"] = True
-    if not conflicting or not isinstance(head_sha, str) or not COMMIT_PATTERN.fullmatch(head_sha):
-        return result
-    compared, _ = await _request(
-        "GET", token, f"{path}/compare/{quote(base_ref, safe='')}...{head_sha}")
-    if not isinstance(compared, dict):
-        raise _invalid_response()
-    tip = compared.get("base_commit") if isinstance(compared.get("base_commit"), dict) else {}
-    parted = (compared.get("merge_base_commit")
-              if isinstance(compared.get("merge_base_commit"), dict) else {})
-    tip_sha, parted_sha = tip.get("sha"), parted.get("sha")
-    if not isinstance(tip_sha, str) or not COMMIT_PATTERN.fullmatch(tip_sha):
-        raise _invalid_response()
-    result["base_commit"] = tip_sha
-    ours = {item["filename"] for item in _changed_files(compared)}
-    if not isinstance(parted_sha, str) or not COMMIT_PATTERN.fullmatch(parted_sha):
-        return result
-    theirs_data, _ = await _request("GET", token, f"{path}/compare/{parted_sha}...{tip_sha}")
-    theirs = _changed_files(theirs_data)
-    both = [item for item in theirs if item["filename"] in ours
-            or item.get("previous_filename") in ours]
-    # Without a file both changed, such as with a rename GitHub does not list, the base
-    # branch's changes are what the round has to take in.
-    listed = (both or theirs)[:CONFLICT_FILES]
-    result["files"] = [item["filename"] for item in listed]
-    changes = "\n".join(
-        f"--- {item['filename']}\n{item.get('patch') or '(no textual diff)'}"
-        for item in listed)
-    result["changes"] = (changes if len(changes) <= CONFLICT_CHANGES_CHARS
-                         else changes[:CONFLICT_CHANGES_CHARS] + "\n… (the diff goes on)")
-    return result
+    mergeable = data.get("mergeable")
+    mergeable_state = data.get("mergeable_state")
+    return {"state": data["state"], "merged": data.get("merged") is True,
+            "mergeable": mergeable if isinstance(mergeable, bool) else None,
+            "mergeable_state": mergeable_state if isinstance(mergeable_state, str) else None,
+            "base": base_ref, "head": head_ref if isinstance(head_ref, str) else None}
 
 
 def _login(value: Any) -> str | None:

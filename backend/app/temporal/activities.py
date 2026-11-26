@@ -1,6 +1,7 @@
 import difflib
 import re
 import shutil
+import tempfile
 import time
 from collections.abc import Callable
 from functools import partial
@@ -41,8 +42,6 @@ from app.documents import (
 )
 from app.delivery.pull_request import PullRequestText
 from app.delivery.workspace import SessionWorkspace
-from app.delivery.base_merge_sources import (
-    keep_merged_contract, record_merged_contract, refresh_sources)
 from app.delivery.pull_request import describe as pull_request_description
 from app.github import checkout as repository_checkout
 from app.github import client as github_client
@@ -232,6 +231,8 @@ def _workspace(session_id: str) -> SessionWorkspace:
 
 
 UNVERIFIED_MARKER = " (unverified)"
+# How many conflicting files the message of a base merge commit names.
+LISTED_CONFLICTS = 20
 # Files larger than this are named in a published commit's diff but not compared.
 DIFF_FILE_BYTES = 512 * 1024
 
@@ -446,8 +447,6 @@ async def publish_repository_from(
             repository_checkout.replace_files(suite, target / repository_checkout.TESTS_DIR,
                                               lambda relative: True)
         write_contract(target, contract)
-        # A base branch merged into the pull request keeps its part of the contract.
-        keep_merged_contract(workspace, target)
         for own, destination, published, stubs, stubs_destination in pushed:
             # Only what the part's suite publishes: any other file the repository keeps
             # beside it was never shown to the author, as with the service's files.
@@ -507,8 +506,6 @@ async def publish_onboarding_from(
         repository_checkout.replace_files(suite, target / repository_checkout.TESTS_DIR,
                                           lambda relative: True)
         write_contract(target, contract)
-        # A base branch merged into the pull request keeps its part of the contract.
-        keep_merged_contract(workspace, target)
 
     branch = onboarding_branch(repository['branch'], session_id)
     details = CODE_CHANGED_NOTE if code_changed else ""
@@ -540,13 +537,9 @@ async def publish_onboarding_architecture(
     if not architecture:
         raise ApplicationError("The onboarding has no architecture to push.",
                                non_retryable=True)
-    def update() -> None:
-        write_architecture(target, architecture, structure)
-        # A base branch merged into the pull request keeps its part of the architecture.
-        keep_merged_contract(workspace, target)
-
     result = await _publish(
-        workspace, session_id, repository, ARCHITECTURE_SUBJECT, update,
+        workspace, session_id, repository, ARCHITECTURE_SUBJECT,
+        lambda: write_architecture(target, architecture, structure),
         branch=onboarding_branch(repository['branch'], session_id))
     return {**result, 'findings': [], 'findings_count': 0}
 
@@ -673,18 +666,36 @@ async def pull_request_conflicts(full_name: str, number: int) -> dict[str, Any]:
     that pull request, however many signals and checks report it."""
     token, _ = await _github_token()
     try:
-        current = await github_client.get_pull_request_conflicts(token, full_name, number)
+        current = await github_client.get_pull_request_mergeable(token, full_name, number)
     except GitHubError as exc:
-        activity.logger.warning("Could not read how pull request #%s of %s merges: %s",
+        activity.logger.warning("Could not read pull request #%s of %s: %s",
                                 number, full_name, exc)
-        # The waiting delivery checks again at its next interval.
         raise ApplicationError(str(exc), type='PullRequestError',
                                non_retryable=True) from exc
     if current is None:
-        raise ApplicationError(
-            f"Pull request #{number} of {full_name} was not found.",
-            type='PullRequestError', non_retryable=True)
-    return current
+        raise ApplicationError(f"Pull request #{number} of {full_name} was not found.",
+                               type='PullRequestError', non_retryable=True)
+    base = current['base']
+    if current['state'] != 'open' or current['merged'] or current['mergeable'] is True:
+        # Only an open pull request GitHub cannot merge, or has not decided about yet,
+        # is worked out here.
+        return {'conflicting': False, 'base': base, 'base_commit': '', 'files': [],
+                'changes': ''}
+    try:
+        temporary = Path(await run_sync(tempfile.mkdtemp))
+        try:
+            found = await repository_checkout.base_conflicts(
+                temporary / 'merge', full_name, token, number, base)
+        finally:
+            await run_sync(partial(shutil.rmtree, temporary, ignore_errors=True))
+    except (repository_checkout.CheckoutError, OSError) as exc:
+        activity.logger.warning("Could not merge pull request #%s of %s with %s: %s",
+                                number, full_name, base, exc)
+        raise ApplicationError(str(exc)) from exc
+    activity.logger.info("Pull request #%s of %s %s %s", number, full_name,
+                         'conflicts with' if found['conflicting'] else 'merges cleanly into',
+                         base)
+    return {**found, 'base': base}
 
 
 @activity.defn
@@ -716,58 +727,54 @@ async def publish_base_merge(
     The round and its outcome show in the progress the 'get_state' query reports."""
     workspace = _workspace(session_id)
     target = workspace.checkout
+    if not await run_sync(target.is_dir):
+        raise ApplicationError("The repository checkout is unavailable.", non_retryable=True)
+    selection = cast(RepositorySelection, repository)
     token, connection = await _github_token()
     bot = f"{connection['app_slug']}[bot]"
-    named = ', '.join(files[:LISTED_CONFLICTS]) + (
-        f' and {len(files) - LISTED_CONFLICTS} more files'
-        if len(files) > LISTED_CONFLICTS else '')
+    branches = [repository_checkout.publication_branch(session_id),
+                onboarding_branch(selection['branch'], session_id)]
     try:
-        branch = await repository_checkout.current_branch(target)
-        if branch is None or branch == repository['branch']:
-            # The working copy was cloned again since its push: the pull request's
-            # branch is the session's publication or onboarding branch on GitHub.
-            branch = None
-            for candidate in (repository_checkout.publication_branch(session_id),
-                              onboarding_branch(repository['branch'], session_id)):
-                if await repository_checkout.remote_branch_exists(target, token, candidate):
-                    branch = candidate
-                    break
-        if branch is None:
-            raise repository_checkout.CheckoutError(
-                'The pull request branch of this session was not found.')
-        message = (f'Merge the base branch at {base_commit[:12]} into {branch}\n\n'
-                   + (f'The conflicts in {named} are settled as the automatic fix round '
-                      'left these files.\n\n' if files else '')
-                   + f'Generated by session {session_id}.')
-        result = await repository_checkout.merge_base_commit(
-            target, repository, token, branch=branch, base_commit=base_commit,
-            message=message,
+        current = await repository_checkout._git(
+            'rev-parse', '--abbrev-ref', 'HEAD', cwd=target)
+    except repository_checkout.CheckoutError:
+        current = ''
+    if current in branches:
+        # The branch this session pushed last.
+        branches.remove(current)
+        branches.insert(0, current)
+    written = workspace.documentation
+
+    def resolve(path: str) -> Path | None:
+        # Documentation its author settled; anything else the push of the round's
+        # sources already put on the branch, which the merge keeps.
+        candidate = written / path
+        try:
+            inside = candidate.resolve().is_relative_to(written.resolve())
+        except OSError:
+            return None
+        return candidate if inside else None
+
+    named = ", ".join(files[:LISTED_CONFLICTS]) + (
+        f" and {len(files) - LISTED_CONFLICTS} more files"
+        if len(files) > LISTED_CONFLICTS else "")
+    message = (f"Merge the base branch into the pull request branch\n\n"
+               f"Merged {base_commit} of the base branch; the conflicts"
+               + (f" in {named}" if named else "")
+               + " were settled by an automatic fix round."
+               + f"\n\nGenerated by session {session_id}.")
+    try:
+        result = await repository_checkout.merge_base_branch(
+            target, selection, token, branches=branches, base_commit=base_commit,
+            resolve=resolve, message=message,
             author=(bot, f"{connection['bot_user_id']}+{bot}@users.noreply.github.com"))
-    except (repository_checkout.CheckoutError, GitHubError) as exc:
-        activity.logger.warning("Could not merge the base branch of %s: %s",
-                                repository["full_name"], exc)
-        raise ApplicationError(str(exc), type='BaseMergeError', non_retryable=True) from exc
-    activity.logger.info("Merged %s into %s of %s (%s)", base_commit[:12], result["branch"],
-                         repository["full_name"], result["commit"])
-    # Later pushes of the session are built from its sources and its contract, not from
-    # the checkout: they take in what the merge brought, so they keep the base branch's
-    # changes rather than take them out again.
-    try:
-        changes = await repository_checkout.merge_changes(target)
-        refreshed = await run_sync(refresh_sources, workspace, changes['changed'],
-                                   changes['parent_files'])
-        await run_sync(record_merged_contract, workspace, changes['contract'])
-    except (repository_checkout.CheckoutError, OSError) as exc:
-        activity.logger.error("The sources of session %s could not take in the merge of "
-                              "%s: %s", session_id, base_commit[:12], exc)
-    else:
-        activity.logger.info("Session %s took in %d files of the merge", session_id,
-                             len(refreshed))
+    except (repository_checkout.CheckoutError, GitHubError, OSError) as exc:
+        activity.logger.warning("Could not push the base merge of %s: %s",
+                                selection["full_name"], exc)
+        raise ApplicationError(str(exc), non_retryable=True) from exc
+    activity.logger.info("Merged %s into %s of %s (%s)", base_commit, result["branch"],
+                         selection["full_name"], result["commit"])
     return result
-
-
-# How many conflicting files a base merge commit's message names.
-LISTED_CONFLICTS = 20
 
 
 @activity.defn
