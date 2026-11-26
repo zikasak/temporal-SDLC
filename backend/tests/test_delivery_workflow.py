@@ -197,7 +197,8 @@ async def workers(env, monkeypatch):
                     activities.checkout_repository, activities.update_repository_checkout,
                     activities.publish_repository, activities.publish_documentation,
                     activities.write_pull_request_text, activities.open_pull_request,
-                    activities.commit_checks, activities.ci_failure_report,
+                    activities.commit_checks, activities.pull_request_checks,
+                    activities.ci_failure_report,
                     activities.comment_pull_request,
                     activities.architecture_turn, activities.write_architecture_document,
                     activities.api_design_turn, activities.write_openapi_document],
@@ -2080,7 +2081,7 @@ async def test_failed_ci_is_fixed_by_a_round_of_its_own_from_the_failed_logs(
         'commit': PUSHED, 'status': 'passed', 'since': state.progress.ci['since'],
         'checks': [{'name': 'Backend tests', 'status': 'completed', 'conclusion': 'success',
                     'url': JOB_URL}],
-        'error': None, 'fix_round': 1}
+        'error': None, 'fix_round': 1, 'pushed_outside': False}
     assert state.ci_fixes == 0 and state.ci_fix is None and state.instructions is None
     assert worker.comments == [
         f'CI failed on commit `{PUSHED[:12]}`: [Backend tests]({JOB_URL}). Started automatic '
@@ -2180,3 +2181,21 @@ async def test_ci_the_app_may_not_read_is_reported_in_the_progress(
                                  'the unreadable CI was never reported')
     assert state.progress.ci['error'] == CHECKS_DENIED
     assert worker.comments == [] and len(worker.published) == 1
+
+
+OUTSIDE = "6" * 40
+
+
+async def test_ci_of_a_commit_pushed_outside_the_delivery_is_only_reported(
+        env, worker, repository_selection):
+    # Someone else pushed to the pull request before its CI was first read, and that
+    # head commit's checks fail.
+    worker.ci_results = [{**FAILED_CI, "commit": OUTSIDE, "pushed_outside": True}]
+    session_id = await ci_delivery(env, worker, repository_selection)
+    state = await delivery_until(env, session_id, ci_is('failed'),
+                                 'the outside commit\'s CI was never reported')
+    ci = state.progress.ci
+    assert ci['commit'] == OUTSIDE and ci['pushed_outside'] is True and ci['fix_round'] == 0
+    # No automatic fix round and no comment about it.
+    assert worker.comments == [] and len(worker.published) == 1
+    assert state.ci_fixes == 0 and state.ci_fix is None and not worker.repairs

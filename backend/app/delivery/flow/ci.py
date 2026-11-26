@@ -25,6 +25,10 @@ JUDGED_CI_PATCH = 'judged-ci-rounds'
 # Marks the workflow code that counts the failed tests of the CI's logs, not their error
 # lines, for that decision (app.verification.checks.failure_outcome).
 CI_FAILED_TESTS_PATCH = 'ci-failed-tests'
+# Marks the workflow code that watches the CI of the pull request's current head commit,
+# which someone other than the delivery may have pushed, rather than of the delivery's
+# own pushed commit (the `pull_request_checks` activity).
+CI_HEAD_PATCH = 'ci-pull-request-head'
 CI_FIX_INSTRUCTIONS = """The repository's CI failed on the commit this delivery pushed
 ({commit}). Its checks run what this pipeline's verification does not, such as the
 repository's own unit tests and builds, so the tests you can run do not show these
@@ -65,14 +69,51 @@ class CiWatch(FlowBase):
             self.progress.ci = CiChecks(
                 commit=publication['commit'], status='pending',
                 since=workflow.now().isoformat(), checks=[], error=None,
-                fix_round=fix['round'] if fix else 0)
+                fix_round=fix['round'] if fix else 0, pushed_outside=False)
         return self._ci_pending()
 
     def _ci_pending(self) -> bool:
         ci = self.progress.ci
         publication = self.progress.publication
+        # The watch may have moved to a head commit of the pull request that someone
+        # else pushed; a CI recorded before that was watched only on the pushed commit.
         return bool(ci and ci['status'] == 'pending' and publication
-                    and ci['commit'] == publication.get('commit'))
+                    and (ci['commit'] == publication.get('commit') or 'pushed_outside' in ci))
+
+    async def _read_checks(self) -> dict[str, Any]:
+        """The checks of the pull request's current head commit, moving the watch to it
+        when it changed; of the watched commit itself without a pull request."""
+        ci = self.progress.ci
+        repository = self.spec.repository
+        pull = self.progress.pull_request
+        publication = self.progress.publication
+        assert ci is not None and repository is not None  # only a pushed delivery watches CI
+        if not pull or not publication or not workflow.patched(CI_HEAD_PATCH):
+            return await workflow.execute_activity(
+                'commit_checks', args=[repository['full_name'], ci['commit']],
+                result_type=dict, start_to_close_timeout=timedelta(minutes=1),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        own = publication['commit']
+        result = await workflow.execute_activity(
+            'pull_request_checks', args=[repository['full_name'], pull['number'], own],
+            result_type=dict, start_to_close_timeout=timedelta(minutes=1),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )
+        head = result.get('commit')
+        if isinstance(head, str) and head and head != ci['commit']:
+            outside = bool(result.get('pushed_outside'))
+            workflow.logger.info('Pull request head moved to %s%s', _short(head),
+                                 ' (pushed outside the delivery)' if outside else '')
+            # The grace period and the timeout count from when this head was first seen.
+            ci['commit'] = head
+            ci['since'] = workflow.now().isoformat()
+            ci['checks'] = []
+            ci['error'] = None
+            if head != own:
+                ci['fix_round'] = 0
+        ci['pushed_outside'] = bool(result.get('pushed_outside'))
+        return result
 
     async def _check_ci(self) -> None:
         """Read the checks of the watched commit, and act on them once they finished."""
@@ -80,11 +121,7 @@ class CiWatch(FlowBase):
         repository = self.spec.repository
         assert ci is not None and repository is not None  # only a pushed delivery watches CI
         try:
-            result = await workflow.execute_activity(
-                'commit_checks', args=[repository['full_name'], ci['commit']],
-                result_type=dict, start_to_close_timeout=timedelta(minutes=1),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
+            result = await self._read_checks()
         except ActivityError as exc:
             cause = exc.cause
             if isinstance(cause, ApplicationError) and cause.type == CHECKS_UNAVAILABLE:
@@ -106,6 +143,16 @@ class CiWatch(FlowBase):
         if status == 'pending' and watched >= CI_CHECK_TIMEOUT:
             status = 'timed_out'
         ci['status'] = status
+        if ci.get('pushed_outside'):
+            # A commit someone else pushed: a failure is only reported in the progress,
+            # and a pass starts the count of automatic fix rounds over, as on the
+            # delivery's own commit.
+            workflow.logger.info('CI %s on %s, pushed outside the delivery', status,
+                                 _short(ci['commit']))
+            if status == 'passed':
+                self.state.ci_history = []
+                self.state.ci_fixes = 0
+            return
         if status == 'failed':
             workflow.logger.info('CI failed on %s', _short(ci['commit']))
             assert result is not None  # a status was read

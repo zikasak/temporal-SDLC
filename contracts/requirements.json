@@ -1489,5 +1489,41 @@
     "priority": "must",
     "rationale": "User's acceptance criterion.",
     "title": "Acceptance: a second cancellation during the reap leaves no running process"
+  },
+  {
+    "category": "functional",
+    "description": "While a delivery waits on CI, it reads the CI checks of its pull request's current head, so a commit pushed to the pull request branch by someone other than the delivery ends the wait once that commit's checks finish, instead of waiting until CI_CHECK_TIMEOUT on the delivery's own commit.",
+    "id": "FR-210",
+    "priority": "must",
+    "rationale": "Today commit_checks reads /commits/{commit}/check-runs for the commit the delivery pushed; an outside push leaves that commit's checks unfinished and the wait never ends.",
+    "title": "Watch CI checks of the pull request, not of the delivery's pushed commit"
+  },
+  {
+    "category": "functional",
+    "description": "When the CI checks of a pull request head commit that someone other than the delivery pushed fail, the delivery only updates its CI status: it starts no automatic fix round and posts no pull request comment about it.",
+    "id": "FR-211",
+    "priority": "must",
+    "title": "No automatic fix round or comment for CI on an outside commit"
+  },
+  {
+    "category": "functional",
+    "description": "After someone else pushes to the pull request, the delivery's `ci.commit` field and the commit shown in the CI line of the delivery page hold the pull request's current head commit whose checks are reported, not the delivery's own pushed commit.",
+    "id": "FR-3",
+    "priority": "must",
+    "title": "ci.commit holds the pull request's current head"
+  },
+  {
+    "category": "functional",
+    "description": "When the pull request's head commit changes, the delivery resets `ci.since` to that moment, so the 10-minute registration grace period (CI_REGISTRATION_GRACE) and the 3-hour timeout (CI_CHECK_TIMEOUT) count from when the new head commit was first seen.",
+    "id": "FR-212",
+    "priority": "must",
+    "title": "Grace period and timeout restart for each new head commit"
+  },
+  {
+    "category": "functional",
+    "description": "When the commit whose checks the CI line of the delivery page reports was pushed by someone other than the delivery, the line shows the note \"(pushed outside the delivery)\" after the commit hash; it shows no such note for a commit the delivery pushed.",
+    "id": "FR-213",
+    "priority": "should",
+    "title": "Delivery page notes CI commits pushed outside the delivery"
   }
 ]

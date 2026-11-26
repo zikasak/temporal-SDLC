@@ -10,7 +10,8 @@ paths:
       operationId: getApiDesignSessionsBySessionId
       summary: Get a API design session
       description: The session's conversation, state and delivery progress, with lookup_requirements
-        for explaining requirement IDs.
+        for explaining requirement IDs. The delivery progress's ci reports the CI
+        of the pull request's current head commit.
       tags:
       - api-design
       parameters:
@@ -63,6 +64,11 @@ paths:
       - FR-188
       - FR-191
       - TR-8
+      - FR-210
+      - FR-211
+      - FR-3
+      - FR-212
+      - FR-213
   /api-design/sessions/{session_id}/answers:
     post:
       operationId: postApiDesignSessionsBySessionIdAnswers
@@ -2196,7 +2202,8 @@ paths:
       operationId: getOnboardingSessionsBySessionId
       summary: Get an onboarding
       description: The onboarding's drafts, conversation, state and delivery progress,
-        with lookup_requirements for explaining requirement IDs.
+        with lookup_requirements for explaining requirement IDs. The delivery progress's
+        ci reports the CI of the pull request's current head commit.
       tags:
       - onboarding
       parameters:
@@ -2241,6 +2248,11 @@ paths:
       - FR-188
       - FR-191
       - TR-8
+      - FR-210
+      - FR-211
+      - FR-3
+      - FR-212
+      - FR-213
   /onboarding/sessions/{session_id}/answers:
     post:
       operationId: postOnboardingSessionsBySessionIdAnswers
@@ -3138,7 +3150,8 @@ paths:
       operationId: getRequirementsSessionsBySessionId
       summary: Get a requirements session
       description: The session's conversation, state and delivery progress, with lookup_requirements
-        for explaining requirement IDs.
+        for explaining requirement IDs. The delivery progress's ci reports the CI
+        of the pull request's current head commit.
       tags:
       - requirements
       parameters:
@@ -3189,6 +3202,11 @@ paths:
       - FR-188
       - FR-191
       - TR-8
+      - FR-210
+      - FR-211
+      - FR-3
+      - FR-212
+      - FR-213
   /requirements/sessions/{session_id}/answers:
     post:
       operationId: postRequirementsSessionsBySessionIdAnswers
@@ -4785,19 +4803,20 @@ components:
             session.
         delivery:
           type: object
-          description: Progress of the delivery of a bugfix or documentation task,
+          description: 'Progress of the delivery of a bugfix or documentation task,
             which runs as the delivery child of the task flow, started for a bugfix
             once its requirements review passed or the user continued despite it.
-            A bugfix's progress also holds reviews (ReviewRound list), review_error,
+            A bugfix''s progress also holds reviews (ReviewRound list), review_error,
             the open_findings flag, findings_acceptance (FindingsAcceptance), the
             reviewing and findings_open verification_status values and the publication
             (RepositoryPublication) with its verified flag, the first 20 open findings
             its commit message lists and findings_count, as in ApiDesignSession. Every
-            delivery's progress also holds pull_request_status and, once a pushed
-            delivery's pull request is open, pull_request (PullRequest), pull_request_error,
+            delivery''s progress also holds pull_request_status and, once a pushed
+            delivery''s pull request is open, pull_request (PullRequest), pull_request_error,
             pull_request_text_error, mentions (PullRequestMention list) of the app
-            on that pull request and fix_flow_ids (the new task flows started by fix
-            rounds after the flow closed), as in ApiDesignSession.
+            on that pull request, fix_flow_ids (the new task flows started by fix
+            rounds after the flow closed) and ci (CiChecks: the CI of the pull request''s
+            current head commit, with pushed_outside), as in ApiDesignSession.'
       required:
       - session_id
       - status
@@ -5019,6 +5038,12 @@ components:
             with a " (fix)" suffix, that holds the fix delivery as its child and links
             to the original task''s stages, for a task''s delivery and an onboarding''s
             alike. Empty or absent while none was started.'
+        ci:
+          $ref: '#/components/schemas/CiChecks'
+          description: The repository's CI on the pull request's current head commit
+            while the delivery waits after its push (null before a pull request exists).
+            Follows the head commit when someone else pushes to the pull request branch,
+            resetting since for the new commit.
       required:
       - session_id
       - status
@@ -5596,12 +5621,13 @@ components:
             whether a failing test reveals a bug in the existing code, which waits
             for an answer without a timeout), reviews, review_error, open_findings,
             findings_acceptance, pull_request_status, pull_request, pull_request_error,
-            pull_request_text_error, mentions and fix_flow_ids (the new onboarding
-            task flows started by fix rounds after the onboarding closed). When the
-            existing code was changed after the user confirmed a bug, the result is
-            still verified as usual once the tests pass, and the pushed commit''s
-            message and the pull request''s description say that the existing code
-            was changed. For an architecture-only onboarding, verification_status
+            pull_request_text_error, mentions, fix_flow_ids (the new onboarding task
+            flows started by fix rounds after the onboarding closed) and ci (CiChecks:
+            the CI of the pull request''s current head commit, with pushed_outside).
+            When the existing code was changed after the user confirmed a bug, the
+            result is still verified as usual once the tests pass, and the pushed
+            commit''s message and the pull request''s description say that the existing
+            code was changed. For an architecture-only onboarding, verification_status
             is not_applicable, reviews stay empty and open_findings is never raised;
             only the publication of contracts/architecture.md and contracts/architecture.json
             and its pull request are reported.'
@@ -6141,6 +6167,92 @@ components:
       required:
       - detail
       - workflow_types
+    CiCheck:
+      type: object
+      description: One GitHub check of the commit whose CI is reported, such as a
+        GitHub Actions job.
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          description: queued, in_progress or completed, as GitHub reports it.
+        conclusion:
+          type: string
+          description: success, failure, timed_out, cancelled, skipped, neutral...
+            once completed; null before.
+        url:
+          type: string
+      required:
+      - name
+      - status
+    CiChecks:
+      type: object
+      description: The repository's CI on the pull request's current head commit while
+        the delivery waits after its push. When someone other than the delivery pushes
+        to the pull request branch, the watch moves to that new head commit; when
+        the delivery later pushes its own commit on top, the watch moves to that one,
+        with pushed_outside false, and automatic fix rounds resume. Deliveries already
+        waiting on CI when this change is deployed switch to the pull request's head
+        commit at their next check, and pushed_outside is computed then.
+      properties:
+        commit:
+          type: string
+          description: 'SHA of the pull request''s current head commit whose checks
+            are reported: the delivery''s own pushed commit until someone else pushes
+            to the pull request branch, then that newer head commit (breaking change:
+            before, always the delivery''s own pushed commit).'
+        status:
+          type: string
+          enum:
+          - pending
+          - passed
+          - failed
+          - inconclusive
+          - none
+          - timed_out
+          - unavailable
+          description: 'pending while the head commit''s checks run or none has appeared
+            yet; passed when all succeeded or were skipped; failed when one failed
+            or timed out; inconclusive when they finished otherwise; none when no
+            check appeared within the 10-minute grace period (CI_REGISTRATION_GRACE);
+            timed_out when they ran longer than 3 hours (CI_CHECK_TIMEOUT); unavailable
+            when the GitHub App may not read them. On a commit pushed outside the
+            delivery: passed is treated like a pass on the delivery''s own commit
+            (the count of automatic fix rounds starts over); failed and timed_out
+            are only reported here, with no automatic fix round and no pull request
+            comment.'
+        since:
+          type: string
+          format: date-time
+          description: When the delivery first saw this head commit; reset each time
+            the pull request's head commit changes. The grace period and the timeout
+            count from it.
+        checks:
+          type: array
+          items:
+            $ref: '#/components/schemas/CiCheck'
+        error:
+          type: string
+          description: Why the checks could not be read, while unavailable.
+        fix_round:
+          type: integer
+          description: The automatic fix round that pushed the commit; 0 for any other
+            push, including a commit pushed outside the delivery.
+        pushed_outside:
+          type: boolean
+          description: True when the head commit's GitHub author or committer is not
+            the GitHub App's bot account, that is, someone other than the delivery
+            pushed it; the delivery page then shows "(pushed outside the delivery)"
+            after the commit hash. False for a commit the delivery pushed, including
+            one it pushes on top of an outside commit.
+      required:
+      - commit
+      - status
+      - since
+      - checks
+      - fix_round
+      - pushed_outside
     Error:
       type: object
       properties:

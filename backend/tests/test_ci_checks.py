@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from app.delivery.ci_activities import log_excerpt, summarize_checks
+from app.delivery.ci_activities import log_excerpt, pushed_outside, summarize_checks
 from app.github import client
 from app.github.errors import GitHubError
 
@@ -128,3 +128,23 @@ async def test_check_runs_beyond_the_page_limit_are_reported_incomplete(github_h
                                        "conclusion": "success"}], True)
     runs, complete = await client.list_check_runs("token", "octocat/private-project", COMMIT)
     assert not complete and len(runs) == 2 and len(requests) == 2
+
+
+async def test_the_head_of_a_pull_request_is_read_with_its_author_and_committer(github_http):
+    responses, _ = github_http
+    responses["/repos/octocat/private-project/pulls/5"] = httpx.Response(
+        200, json={"state": "open", "head": {"sha": COMMIT}})
+    responses[f"/repos/octocat/private-project/commits/{COMMIT}"] = httpx.Response(
+        200, json={"author": {"login": "octocat"}, "committer": None})
+    head = await client.get_pull_request_head("token", "octocat/private-project", 5)
+    assert head == {"sha": COMMIT, "author": "octocat", "committer": None}
+
+
+def test_a_head_commit_is_pushed_outside_unless_the_app_pushed_it():
+    bot = "sdlc[bot]"
+    own = {"sha": COMMIT, "author": "octocat", "committer": "octocat"}
+    assert not pushed_outside(own, COMMIT, bot)
+    other = "b" * 40
+    assert not pushed_outside({"sha": other, "author": bot, "committer": bot}, COMMIT, bot)
+    assert pushed_outside({"sha": other, "author": "octocat", "committer": bot}, COMMIT, bot)
+    assert pushed_outside({"sha": other, "author": bot, "committer": None}, COMMIT, bot)

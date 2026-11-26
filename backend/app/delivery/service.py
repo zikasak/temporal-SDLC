@@ -20,7 +20,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from app.config import GENERATED_CODE_DIR
 from app.delivery.models import (
     DELIVERY_CLOSING, FOLLOW_UP_PREFIX, MENTION_HANDLED, OUTCOME_OWED, RETRY_STAGES, DeliveryProgress, DeliveryState, RetryStage, delivery_id, interrupted,
-    restorable_tests,
+    restorable_tests, with_ci_defaults,
 )
 from app.delivery import acceptances
 from app.delivery import mentions as mention_history
@@ -78,7 +78,8 @@ async def get_state(session_id: str) -> DeliveryState | None:
                                   WorkflowExecutionStatus.COMPLETED):
         state = interrupted(state)
     state = await _with_acceptance(client, session_id, description, state)
-    state.progress = await with_mention_history(session_id, state.progress)
+    state.progress = with_ci_defaults(
+        await with_mention_history(session_id, state.progress))
     state.progress.fix_flow_ids = await fix_flow_ids(client, session_id)
     return state
 

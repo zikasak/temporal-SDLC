@@ -399,6 +399,34 @@ async def get_pull_request_state(token: str, full_name: str,
             "author": author if isinstance(author, str) else None}
 
 
+def _login(value: Any) -> str | None:
+    login = value.get("login") if isinstance(value, dict) else None
+    return login if isinstance(login, str) and login else None
+
+
+async def get_pull_request_head(token: str, full_name: str,
+                                number: int) -> dict[str, Any] | None:
+    """The pull request's current head commit: {'sha', 'author', 'committer'}, the logins
+    of the GitHub accounts the commit's author and committer are linked to, None for one
+    linked to no account. None when the pull request is gone."""
+    validate_selection(full_name, "main")
+    try:
+        data, _ = await _request("GET", token, f"{_repo_path(full_name)}/pulls/{number}")
+    except GitHubError as exc:
+        if exc.status_code == 404:
+            return None
+        raise
+    head = data.get("head") if isinstance(data, dict) else None
+    sha = head.get("sha") if isinstance(head, dict) else None
+    if not isinstance(sha, str) or not COMMIT_PATTERN.fullmatch(sha):
+        raise _invalid_response()
+    commit, _ = await _request("GET", token, f"{_repo_path(full_name)}/commits/{sha}")
+    if not isinstance(commit, dict):
+        raise _invalid_response()
+    return {"sha": sha, "author": _login(commit.get("author")),
+            "committer": _login(commit.get("committer"))}
+
+
 WRITE_PERMISSIONS = frozenset({"admin", "maintain", "write"})
 COMMENT_CHARS = 65000
 

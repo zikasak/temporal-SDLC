@@ -3,7 +3,7 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 from app.api_design.models import ApiModel
 from app.config import PULL_REQUEST_CHECK_INTERVAL_SECONDS
@@ -88,20 +88,32 @@ class CiCheck(TypedDict):
 
 
 class CiChecks(TypedDict):
-    """The repository's CI on the commit the delivery last pushed: the GitHub checks
-    of the commit, which run what verification does not, such as the repository's own
-    unit tests."""
+    """The repository's CI on the pull request's current head commit while the delivery
+    waits after its push: the GitHub checks of the commit, which run what verification
+    does not, such as the repository's own unit tests. The delivery's own pushed commit
+    until someone else pushes to the pull request branch, then that newer head commit."""
 
     commit: str
     status: CiStatus
-    # When the delivery began to watch them (ISO 8601), what the grace period and the
-    # timeout count from.
+    # When the delivery first saw this head commit (ISO 8601), what the grace period and
+    # the timeout count from; reset each time the head commit changes.
     since: str
     checks: list[CiCheck]
     # Why the checks could not be read, while `unavailable`.
     error: str | None
     # The automatic fix round that pushed the commit, 0 for any other push.
     fix_round: int
+    # Whether someone other than the delivery pushed the commit: its CI is then only
+    # reported, with no automatic fix round and no pull request comment. Missing from
+    # states recorded before it was, which with_ci_defaults fills in.
+    pushed_outside: NotRequired[bool]
+
+
+def with_ci_defaults(progress: 'DeliveryProgress') -> 'DeliveryProgress':
+    """The progress with the fields its CI lacks when it was recorded before they were."""
+    if progress.ci is not None and 'pushed_outside' not in progress.ci:
+        progress.ci['pushed_outside'] = False
+    return progress
 
 
 class Brief(TypedDict):
