@@ -7,6 +7,7 @@ Each session has one directory, `<GENERATED_CODE_DIR>/<session_id>/`:
     tests/suite/             the contract tests their author wrote
     component-tests/suite/   the component tests, per part of the repository
     documentation/files/     the documentation its author changed
+    base-merge/              the contract a base merge combined (see merged_sources)
 
 The stages write these; publication reads them into `repository/` and pushes it.
 """

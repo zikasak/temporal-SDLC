@@ -1,4 +1,5 @@
 import difflib
+import json
 import re
 import shutil
 import time
@@ -25,6 +26,7 @@ from app.delivery.contract import (
     ContractError, RepositoryContract, read_contract, read_service_contract, write_architecture,
     write_contract,
 )
+from app.documentation.activities import SUFFIXES as DOCUMENTATION_SUFFIXES
 from app.documentation.activities import is_documentation_file
 from app.documents import (
     DocumentConflict,
@@ -41,6 +43,9 @@ from app.documents import (
 )
 from app.delivery.pull_request import PullRequestText
 from app.delivery.workspace import SessionWorkspace
+from app.delivery.merged_sources import (
+    SourceMapping, keep_merged_contract, record_merged_contract, refresh_sources,
+)
 from app.delivery.pull_request import describe as pull_request_description
 from app.github import checkout as repository_checkout
 from app.github import client as github_client
@@ -354,6 +359,9 @@ async def _publish(workspace: SessionWorkspace, session_id: str,
         with_git = await run_sync(_git_diffable, target)
         before = None if with_git else await run_sync(_tree_snapshot, target)
         await run_sync(update)
+        # What a base merge combined in the contract stays, though `update` wrote the
+        # delivery's own.
+        await run_sync(keep_merged_contract, workspace.root, target)
         written = await _commit_message(target, before, verified)
         result = await repository_checkout.push(
             target, repository, token,
@@ -375,6 +383,94 @@ async def _publish(workspace: SessionWorkspace, session_id: str,
     activity.logger.info("Pushed session %s to %s (%s)", session_id, result["branch"],
                          result["commit"])
     return result
+
+
+def _component_sources(
+    registered: Any, workspace: SessionWorkspace,
+) -> list[tuple[Path, Path, frozenset[Path], Path, Path]]:
+    """Each part with routes: its component tests, where the suite has them and where the
+    repository keeps them, the files its suite publishes, and its stubs, as the routing
+    kept and the repository publishes them. Raises ValueError when the routing cannot
+    be read."""
+    target, tests = workspace.checkout, workspace.component_tests
+    parts = read_routed_parts(registered, workspace.root)
+    components_suite = component_suite(registered, parts)
+    by_name = {part.key: part for part in parts}
+    found = []
+    for member in suite_members(components_suite):
+        part = by_name[member.name]
+        found.append((tests / member.directory, target / part.tests_dir(),
+                      frozenset(Path(item) for item in member.suite.published),
+                      part.routed_contract(workspace.root), target / part.published_dir()))
+    return found
+
+
+def _merged_source_mappings(workspace: SessionWorkspace,
+                            language: str | None) -> list[SourceMapping]:
+    """Where the sources later pushes are built from keep the repository's files: the
+    service (with its unit tests when it carries them), the contract tests, the
+    component tests and their stubs, and the documentation; those the session has."""
+    target = workspace.checkout
+    try:
+        registered = session_language(language) if language else None
+    except ApplicationError:
+        registered = None
+    mappings: list[SourceMapping] = []
+    if registered is not None and workspace.service.is_dir():
+        mappings.append(SourceMapping('', workspace.service,
+                                      published_files(registered, workspace.service)))
+    if workspace.suite.is_dir():
+        mappings.append(SourceMapping(repository_checkout.TESTS_DIR, workspace.suite,
+                                      lambda relative: True))
+    if workspace.documentation.is_dir():
+        mappings.append(SourceMapping(
+            '', workspace.documentation,
+            partial(is_documentation_file, registered) if registered is not None
+            else lambda relative: (
+                relative.suffix.lower() in DOCUMENTATION_SUFFIXES
+                and relative.parts[0] not in (repository_checkout.TESTS_DIR,
+                                              repository_checkout.CONTRACTS_DIR))))
+    if registered is not None and workspace.component_tests.is_dir():
+        try:
+            components = _component_sources(registered, workspace)
+        except (ValueError, OSError):
+            components = []
+        for own, destination, published, stubs, stubs_destination in components:
+            mappings.append(SourceMapping(
+                destination.relative_to(target).as_posix(), own,
+                lambda relative, published=published: relative in published
+                or not published.isdisjoint(relative.parents)))
+            if stubs.is_dir():
+                mappings.append(SourceMapping(
+                    stubs_destination.relative_to(target).as_posix(), stubs,
+                    lambda relative: True))
+    return mappings
+
+
+async def _refresh_merged_sources(workspace: SessionWorkspace, base_commit: str) -> None:
+    """Bring the sources the session's later pushes are built from up to the base merge
+    just made in its checkout, and record the contract the merge combined, so that no
+    later push takes the base branch's changes out again."""
+    target = workspace.checkout
+    ours, changed = await repository_checkout.base_merge_changes(target, base_commit)
+    if ours is None:
+        return
+    own_contract = await repository_checkout.contract_files(target, ours)
+    merged_contract = await repository_checkout.contract_files(target, 'HEAD')
+    language_file = own_contract.get('language.json')
+    try:
+        language = json.loads(language_file)['name'] if language_file else None
+    except (ValueError, KeyError, TypeError):
+        language = None
+    if not isinstance(language, str):
+        language = None
+
+    def refresh() -> None:
+        mappings = _merged_source_mappings(workspace, language)
+        refresh_sources(target, changed, mappings)
+        record_merged_contract(workspace.root, own_contract, merged_contract)
+
+    await run_sync(refresh)
 
 
 @activity.defn
@@ -422,17 +518,10 @@ async def publish_repository_from(
     if components is not None:
         tests = workspace.component_tests
         try:
-            parts = await run_sync(read_routed_parts, registered, workspace.root)
-            components_suite = component_suite(registered, parts)
+            pushed = await run_sync(_component_sources, registered, workspace)
         except ValueError as exc:
             raise ApplicationError(f"The component tests cannot be pushed: {exc}",
                                    non_retryable=True) from exc
-        by_name = {part.key: part for part in parts}
-        for member in suite_members(components_suite):
-            part = by_name[member.name]
-            pushed.append((tests / member.directory, target / part.tests_dir(),
-                           frozenset(Path(item) for item in member.suite.published),
-                           part.routed_contract(workspace.root), target / part.published_dir()))
         sources += [tests, *(stubs for *_, stubs, _ in pushed)]
     if not await run_sync(all, (item.is_dir() for item in sources)):
         raise ApplicationError("The verified sources or the repository checkout are unavailable.",
@@ -739,6 +828,17 @@ async def publish_base_merge(
         raise ApplicationError(str(exc), type='BaseMergeError', non_retryable=True) from exc
     activity.logger.info("Merged %s into %s of %s (%s)", base_commit[:12], result["branch"],
                          repository["full_name"], result["commit"])
+    try:
+        # The session's later pushes are built from its sources and its own contract:
+        # they keep what the merge took in only once the sources have it too.
+        await _refresh_merged_sources(workspace, base_commit)
+    except (repository_checkout.CheckoutError, OSError) as exc:
+        activity.logger.warning("Could not take the base merge into the sources of %s: %s",
+                                session_id, exc)
+        # Another attempt finds the merge pushed and takes it in again.
+        raise ApplicationError(
+            f'The base branch was merged, but the session could not take the merge into '
+            f'its sources: {exc}', type='BaseMergeError') from exc
     return result
 
 

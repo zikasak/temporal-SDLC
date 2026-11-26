@@ -459,6 +459,34 @@ async def merge_base_commit(target: Path, repository: RepositorySelection, token
             'ignored': [], 'ignored_count': 0}
 
 
+async def base_merge_changes(target: Path, base_commit: str) -> tuple[str | None, list[str]]:
+    """What the merge of `base_commit` at the working copy's HEAD took into the branch:
+    the branch's own tip it was merged into (its first parent), and the paths the merge
+    changed from that tip. (None, []) when HEAD is no such merge, as nothing was merged."""
+    parents = (await _git('rev-list', '--parents', '-n', '1', 'HEAD', cwd=target)).split()
+    if len(parents) != 3 or parents[2] != base_commit:
+        return None, []
+    ours = parents[1]
+    changed = await _git('diff', '--name-only', '-z', '--no-renames', ours, 'HEAD',
+                         cwd=target)
+    return ours, [path for path in changed.split('\0') if path]
+
+
+async def contract_files(target: Path, revision: str) -> dict[str, bytes]:
+    """The files directly in the contract directory (contracts/, without its component
+    and part contracts) at `revision` of the working copy, by name."""
+    listed = await _git_bytes('ls-tree', '-z', f'{revision}:{CONTRACTS_DIR}', cwd=target)
+    files: dict[str, bytes] = {}
+    for entry in (listed or b'').decode('utf-8', 'replace').split('\0'):
+        meta, _, name = entry.partition('\t')
+        if not name or meta.split()[1:2] != ['blob']:
+            continue
+        shown = await _git_bytes('show', f'{revision}:{CONTRACTS_DIR}/{name}', cwd=target)
+        if shown is not None:
+            files[name] = shown
+    return files
+
+
 def replace_files(source: Path, target: Path, include: Callable[[Path], bool]) -> None:
     """Make the included files under `target` exactly those of `source`.
 
