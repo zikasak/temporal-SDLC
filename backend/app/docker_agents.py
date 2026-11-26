@@ -332,6 +332,44 @@ async def forward_logs(name: str, label: str, env: Mapping[str, str] | None = No
         await stop()
 
 
+STOP_GRACE_SECONDS = 10
+
+
+async def _stop_process(process: asyncio.subprocess.Process) -> None:
+    """Stop a running process: SIGTERM, then SIGKILL if it is still running after
+    STOP_GRACE_SECONDS; always wait until it has exited and been reaped, even when the
+    calling task is cancelled again meanwhile (the cancellation is raised afterwards)."""
+
+    async def stop() -> None:
+        if process.returncode is not None:
+            return
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(process.wait(), STOP_GRACE_SECONDS)
+        except TimeoutError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
+
+    task = asyncio.ensure_future(stop())
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                break
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError
+    task.result()
+
+
 async def docker(*args: str, timeout: int = 1800, env: dict | None = None,
                  stdin: Any = None, log_path: Path | None = None) -> str:
     # Never log argv/environment: -e and --build-arg may contain credentials.
@@ -350,8 +388,7 @@ async def docker(*args: str, timeout: int = 1800, env: dict | None = None,
         except BaseException as exc:
             failure = exc
             if process is not None and process.returncode is None:
-                process.kill()
-                await process.wait()
+                await _stop_process(process)
             raise
         finally:
             def read_tail() -> str:

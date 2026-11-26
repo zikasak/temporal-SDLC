@@ -4,6 +4,8 @@ import { RequirementText } from "./RequirementLookup";
 /** A question the model asked with ask_user: the user picks an option or writes their own. */
 export type Question = { question: string; options: string[] };
 
+const MAX_ANSWER_CHARS = 50000;
+
 const OTHER = "\u0000other";
 
 function isQuestion(value: unknown): value is Question {
@@ -100,7 +102,7 @@ export function QuestionField({ name, question, value, disabled, onChange }: {
         <span>Other</span>
       </label>
       {value.option === OTHER && (
-        <textarea className="question-other" rows={2} maxLength={2000} autoFocus
+        <textarea className="question-other" rows={3} maxLength={MAX_ANSWER_CHARS} autoFocus
           aria-label={`Your answer to: ${question.question}`} value={value.other}
           placeholder="Write your own answer…"
           onChange={(event) => onChange({ ...value, other: event.target.value })} />
