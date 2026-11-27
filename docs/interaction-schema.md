@@ -120,8 +120,7 @@ The browser uses `/api` in front of these backend routes. Vite removes that pref
 | `GET /llm/requests/{request_id}` | Poll status, conversation, and generated document metadata. |
 | `POST /llm/requests/{request_id}/{retry,fork}` | Retry or branch a conversation. |
 | `GET /llm/requests/{request_id}/documents/{document_id}` | Download an attachment or generated document. |
-| `GET /requirements/intake` | The questions every requirements interview starts with: the task kinds, each kind's questions, and the task question. |
-| `POST /requirements/sessions` | Start a requirements interview from the repository, the chosen kind, the answers to its questions, and the task. |
+| `POST /requirements/sessions` | Start a requirements interview from the repository, its branch and what needs to be done; the interviewer proposes the kind of task and records it once the user confirms. |
 | `GET /{requirements,api-design}/sessions/{session_id}` | Retrieve session state. |
 | `POST /{requirements,api-design}/sessions/{session_id}/{messages,retry,finalize,fork}` | Update, retry, finalize, or branch a session. |
 | `POST /{requirements,api-design}/sessions/{session_id}/answers` | Answer the questions the model asked with `ask_user`. |

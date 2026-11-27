@@ -251,8 +251,8 @@
       "request_schema": "ForkInput",
       "requirement_ids": [
         "FR-112",
-        "FR-137",
-        "FR-140"
+        "FR-140",
+        "FR-235"
       ],
       "response_array": false,
       "response_schema": "SessionCreated",
@@ -514,8 +514,8 @@
         "FR-86",
         "FR-88",
         "FR-112",
-        "FR-137",
-        "FR-140"
+        "FR-140",
+        "FR-235"
       ],
       "response_array": false,
       "response_schema": "SessionCreated",
@@ -610,7 +610,7 @@
         "FR-85",
         "FR-86",
         "FR-134",
-        "FR-135"
+        "FR-232"
       ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
@@ -1168,7 +1168,6 @@
         "FR-93",
         "FR-95",
         "FR-96",
-        "FR-155",
         "FR-159",
         "FR-166"
       ],
@@ -1603,26 +1602,7 @@
       "tag": "onboarding"
     },
     {
-      "description": "The questions a requirements session starts with.",
-      "error_statuses": [
-        401,
-        503
-      ],
-      "method": "GET",
-      "parameters": [],
-      "path": "/requirements/intake",
-      "request_schema": null,
-      "requirement_ids": [
-        "FR-11"
-      ],
-      "response_array": false,
-      "response_schema": "Intake",
-      "response_status": 200,
-      "summary": "Requirements intake",
-      "tag": "requirements"
-    },
-    {
-      "description": "Starts a new top-level task flow (TaskWorkflow with origin requirements, its ID returned as task_flow_id), named by an LLM from the intake's task, which starts the interview in the repository from the intake's answers as its requirements child. It creates its other children up front as pending: requirements review, architecture, API design and delivery for a new service or an API change; requirements review and delivery for a bugfix; delivery for a documentation change.",
+      "description": "Starts a new top-level task flow (TaskWorkflow with origin requirements, its ID returned as task_flow_id) from the repository, its branch and what needs to be done (task) only, named by an LLM from the task, which starts the interview as its requirements child. A body with any other field, such as the removed kind or answers, answers 422. The session starts without a kind of task: the interviewer proposes one from the task and records it only after the user confirms it or names another. The task flow creates only its requirements child at start; the other children are created when the session is finalized, for the kind recorded then.",
       "error_statuses": [
         401,
         404,
@@ -1641,8 +1621,12 @@
         "FR-128",
         "FR-129",
         "FR-149",
-        "FR-155",
-        "FR-166"
+        "FR-166",
+        "FR-224",
+        "FR-225",
+        "FR-226",
+        "FR-228",
+        "FR-229"
       ],
       "response_array": false,
       "response_schema": "SessionCreated",
@@ -1651,7 +1635,7 @@
       "tag": "requirements"
     },
     {
-      "description": "The session's conversation, state and delivery progress, with lookup_requirements for explaining requirement IDs. The delivery progress's ci reports the CI of the pull request's current head commit.",
+      "description": "The session's conversation, state, the kind of task currently recorded (null while none is) and delivery progress, with lookup_requirements for explaining requirement IDs. The delivery progress's ci reports the CI of the pull request's current head commit.",
       "error_statuses": [
         401,
         404,
@@ -1689,7 +1673,11 @@
         "FR-211",
         "FR-3",
         "FR-212",
-        "FR-213"
+        "FR-213",
+        "FR-224",
+        "FR-228",
+        "FR-230",
+        "FR-234"
       ],
       "response_array": false,
       "response_schema": "RequirementsSession",
@@ -1880,7 +1868,7 @@
       "tag": "requirements"
     },
     {
-      "description": "For a new service, API change or bugfix, starts the task flow's pending requirements review child (review.status running) instead of writing the document; each contradiction found is asked in the interview as a question, and once all are answered the review runs again with the diff of the requirements and the answers, without a limit on rounds. After a free message dropped the open contradiction questions (review.status contradictions_found with questions_open false), calling it again starts the next round, given the diff of the requirements since the previous round and the dropped questions marked unanswered. After a failed round (review.status failed), calling it starts a new round on the current requirements, including any changes made by messages since the failure, given the diff since the last finished round; POST .../review/retry instead reruns the failed round with its original input. The document is written, and the session completed, only once a round finds no contradictions or the user finalizes with force=true. Without force=true, calling it while a round is running or while the contradiction questions are open (questions_open true) answers 409. A documentation task writes the document at once, as before, and its review is not created. Once the document is written the task flow's name is rewritten by the LLM from the finalized requirements, and the task flow starts its next pending child: the architecture (architecture_session_id) of a new service or an API change on a repository, or the delivery of a bugfix or documentation task. An API change, bugfix or documentation task is specified against the repository's contract in contracts/, which must include contracts/architecture.md and contracts/architecture.json; 409 when the contract is missing or unreadable, including when either architecture file is missing. The coding agents of a bugfix or documentation delivery receive the repository's existing contracts/architecture.md and contracts/architecture.json read-only, as context, and never change them. When the document is written because the session was idle for a day, no review runs and the task flow's pending children, review included, close as skipped.",
+      "description": "While the session has no kind recorded, answers 409 with the detail \"The kind of task is not set yet; confirm it in the interview before finalizing.\", also with force=true. Otherwise the task flow creates its remaining children, pending, for the kind recorded at that moment: requirements review, architecture, API design and delivery for a new service or an API change; requirements review and delivery for a bugfix; delivery for a documentation change. For a new service, API change or bugfix, it then starts the requirements review child (review.status running) instead of writing the document; each contradiction found is asked in the interview as a question, and once all are answered the review runs again with the diff of the requirements and the answers, without a limit on rounds. After a free message dropped the open contradiction questions (review.status contradictions_found with questions_open false), calling it again starts the next round, given the diff of the requirements since the previous round and the dropped questions marked unanswered. After a failed round (review.status failed), calling it starts a new round on the current requirements, including any changes made by messages since the failure, given the diff since the last finished round; POST .../review/retry instead reruns the failed round with its original input. The document is written, and the session completed, only once a round finds no contradictions or the user finalizes with force=true. Without force=true, calling it while a round is running or while the contradiction questions are open (questions_open true) answers 409. A documentation task writes the document at once, as before, and has no review child. Once the document is written the task flow's name is rewritten by the LLM from the finalized requirements, and the task flow starts its next pending child: the architecture (architecture_session_id) of a new service or an API change on a repository, or the delivery of a bugfix or documentation task. An API change, bugfix or documentation task is specified against the repository's contract in contracts/, which must include contracts/architecture.md and contracts/architecture.json; 409 when the contract is missing or unreadable, including when either architecture file is missing. The coding agents of a bugfix or documentation delivery receive the repository's existing contracts/architecture.md and contracts/architecture.json read-only, as context, and never change them. When the document is written because the session was idle for a day, it is written whether or not a kind is recorded, no review runs, and the task flow creates no further children and closes as cancelled.",
       "error_statuses": [
         401,
         404,
@@ -1916,13 +1904,16 @@
         "FR-146",
         "FR-147",
         "FR-151",
-        "FR-152",
-        "FR-154",
         "FR-156",
         "FR-157",
         "FR-158",
         "FR-162",
-        "FR-168"
+        "FR-168",
+        "FR-229",
+        "FR-230",
+        "FR-231",
+        "FR-233",
+        "FR-236"
       ],
       "response_array": false,
       "response_schema": "SessionStatusChange",
@@ -1931,7 +1922,7 @@
       "tag": "requirements"
     },
     {
-      "description": "Starts a new session with the conversation up to the given message, in a new top-level task flow of its own (task_flow_id) named after the original with a \" (fork)\" suffix, with pending children for the stages after requirements; the original task flow and its children are left unchanged. 409 when the session's flow has completed or been cancelled.",
+      "description": "Starts a new session with the conversation, the kind of task recorded at the fork point (or none) and the review state up to the given message, in a new top-level task flow of its own (task_flow_id) named after the original with a \" (fork)\" suffix. Like a new session, the new task flow starts with only its requirements child and creates the rest at finalize from the kind recorded then; the original task flow and its children are left unchanged. 409 when the session's flow has completed or been cancelled.",
       "error_statuses": [
         401,
         404,
@@ -1953,8 +1944,8 @@
       "request_schema": "ForkInput",
       "requirement_ids": [
         "FR-112",
-        "FR-114",
-        "FR-137"
+        "FR-228",
+        "FR-235"
       ],
       "response_array": false,
       "response_schema": "SessionCreated",
@@ -2147,7 +2138,7 @@
       "tag": "settings"
     },
     {
-      "description": "Newest first, 50 per page. type TaskWorkflow lists only task flows (the top-level flow of each task or onboarding), not RequirementsWorkflow or OnboardingWorkflow executions, which are reached by opening their task flow; type RequirementsWorkflow lists requirements sessions, OnboardingWorkflow onboarding interviews (workflow_id is the onboarding's session_id), RequirementsReviewWorkflow requirements reviews and ArchitectureWorkflow architecture sessions. Every execution also carries repository, branch, name, origin, linked, waiting_for_user and unresolved_findings, each null when it does not apply; the onboarding_id field and filter are removed. The existing fields keep their names and meaning, and status additionally takes the values pending and skipped for stages of a task flow. The optional repository, branch and origin filters combine with type and with each other (all must match); executions whose field is null never match a filter on it, so origin lists only task flows. The repository filter is compared case-insensitively, as on GitHub; the branch filter must match exactly. A malformed filter value (a repository that is not owner/name, an empty branch, or an origin other than requirements or onboarding) answers 422 with a detail, like an invalid type or page_token. Pass the same filters with page_token when continuing. top_level=true lists only executions without a parent: task flows, chats, and the requirements and onboarding flows started before onboardings ran under task flows; no stage of a task (requirements or onboarding interview, requirements review, architecture, API design or delivery, including a delivery started again on its own) is ever top-level. parent=<workflow_id> lists only the direct children of that execution: for a task flow, its requirements (or, for an onboarding's task flow, its onboarding interview), requirements review, architecture, API design and delivery children (including a delivery started again on its own) and, for a forked or fix-round task flow, the original task's earlier stages it links to, with linked true; parent=<a stage's workflow_id> never lists another stage of the task (a requirements, onboarding interview, review or API design session lists none, a delivery its code generation and stage workflows). For a requirements or onboarding flow started before this change, parent lists its children as before. parent and top_level cannot be combined; an empty or malformed parent, or parent with top_level, answers 422.",
+      "description": "Newest first, 50 per page. type TaskWorkflow lists only task flows (the top-level flow of each task or onboarding), not RequirementsWorkflow or OnboardingWorkflow executions, which are reached by opening their task flow; type RequirementsWorkflow lists requirements sessions, OnboardingWorkflow onboarding interviews (workflow_id is the onboarding's session_id), RequirementsReviewWorkflow requirements reviews and ArchitectureWorkflow architecture sessions. Every execution also carries repository, branch, name, origin, linked, waiting_for_user and unresolved_findings, each null when it does not apply; the onboarding_id field and filter are removed. The existing fields keep their names and meaning, and status additionally takes the values pending and skipped for stages of a task flow. The optional repository, branch and origin filters combine with type and with each other (all must match); executions whose field is null never match a filter on it, so origin lists only task flows. The repository filter is compared case-insensitively, as on GitHub; the branch filter must match exactly. A malformed filter value (a repository that is not owner/name, an empty branch, or an origin other than requirements or onboarding) answers 422 with a detail, like an invalid type or page_token. Pass the same filters with page_token when continuing. top_level=true lists only executions without a parent: task flows, chats, and the requirements and onboarding flows started before onboardings ran under task flows; no stage of a task (requirements or onboarding interview, requirements review, architecture, API design or delivery, including a delivery started again on its own) is ever top-level. parent=<workflow_id> lists only the direct children of that execution: for a task flow, its requirements (or, for an onboarding's task flow, its onboarding interview), requirements review, architecture, API design and delivery children (including a delivery started again on its own) and, for a forked or fix-round task flow, the original task's earlier stages it links to, with linked true; a requirements task flow (new or forked from a requirements session) lists only its requirements child until the session is finalized, when its other children are created for the kind recorded then, and none after a session whose document was written because it was idle for a day. parent=<a stage's workflow_id> never lists another stage of the task (a requirements, onboarding interview, review or API design session lists none, a delivery its code generation and stage workflows). For a requirements or onboarding flow started before this change, parent lists its children as before. parent and top_level cannot be combined; an empty or malformed parent, or parent with top_level, answers 422.",
       "error_statuses": [
         401,
         422,
@@ -2218,8 +2209,6 @@
         "FR-128",
         "FR-129",
         "FR-132",
-        "FR-135",
-        "FR-136",
         "FR-140",
         "FR-143",
         "FR-149",
@@ -2228,7 +2217,11 @@
         "FR-163",
         "FR-164",
         "FR-166",
-        "FR-167"
+        "FR-167",
+        "FR-229",
+        "FR-232",
+        "FR-233",
+        "FR-235"
       ],
       "response_array": false,
       "response_schema": "WorkflowPage",
@@ -2692,62 +2685,7 @@
       ]
     },
     {
-      "description": "A kind of task.",
-      "name": "TaskKindOption",
-      "properties": [
-        {
-          "array": false,
-          "enum": [
-            "new_service",
-            "api_change",
-            "bugfix",
-            "docs"
-          ],
-          "name": "kind",
-          "required": true,
-          "type": "string"
-        },
-        {
-          "array": false,
-          "name": "label",
-          "required": true,
-          "type": "string"
-        }
-      ]
-    },
-    {
-      "description": "The questions every requirements session starts with.",
-      "name": "Intake",
-      "properties": [
-        {
-          "array": false,
-          "name": "kind_question",
-          "required": true,
-          "type": "string"
-        },
-        {
-          "array": true,
-          "name": "kinds",
-          "required": true,
-          "type": "TaskKindOption"
-        },
-        {
-          "array": false,
-          "description": "The questions of each kind, by kind, as Question lists.",
-          "name": "questions",
-          "required": true,
-          "type": "object"
-        },
-        {
-          "array": false,
-          "name": "task_question",
-          "required": true,
-          "type": "string"
-        }
-      ]
-    },
-    {
-      "description": "The intake of a new requirements session.",
+      "description": "A new requirements session: the repository, its branch and what needs to be done, and nothing else. Any other field, including the removed kind and answers, answers 422. The kind of task is recorded by the interviewer in the conversation.",
       "name": "CreateRequirementsSession",
       "properties": [
         {
@@ -2755,25 +2693,6 @@
           "name": "repository",
           "required": true,
           "type": "RepositoryInput"
-        },
-        {
-          "array": false,
-          "enum": [
-            "new_service",
-            "api_change",
-            "bugfix",
-            "docs"
-          ],
-          "name": "kind",
-          "required": true,
-          "type": "string"
-        },
-        {
-          "array": true,
-          "description": "One answer per question of the kind, in order.",
-          "name": "answers",
-          "required": true,
-          "type": "string"
         },
         {
           "array": false,
@@ -2999,6 +2918,7 @@
         },
         {
           "array": false,
+          "description": "The kind of task currently recorded by the interviewer with set_task_kind after the user confirmed it or named another; null while none is recorded (the panel shows \"not set yet\"). It can change any number of times until the session is finalized; finalizing without it answers 409. A fork starts with the kind recorded at the fork point. A session started before the kind moved into the interview returns the kind chosen in its intake as its recorded kind.",
           "enum": [
             "new_service",
             "api_change",
@@ -3081,14 +3001,14 @@
         },
         {
           "array": false,
-          "description": "The workflow_id of the top-level task flow (TaskWorkflow) the session is a child of. Null only for sessions started before task flows existed. The requirements review and the delivery of a bugfix or documentation task are found with GET /workflows?parent=<task_flow_id>; no separate review or delivery ID is returned.",
+          "description": "The workflow_id of the top-level task flow (TaskWorkflow) the session is a child of. Null only for sessions started before task flows existed. The requirements review and the delivery of a bugfix or documentation task, created when the session is finalized, are found with GET /workflows?parent=<task_flow_id>; no separate review or delivery ID is returned.",
           "name": "task_flow_id",
           "required": false,
           "type": "string"
         },
         {
           "array": false,
-          "description": "The architecture session the task flow started from its pending architecture child once the requirements review of a new service or an API change passed or the user continued despite it; it drafts the architecture at once, as a child of the task flow (task_flow_id). Null until then, for any other kind of task, for a session without a repository, and for one whose document was written because it was idle for a day (its later stages are then skipped). The API design is found through the architecture session.",
+          "description": "The architecture session the task flow started from its architecture child once the requirements review of a new service or an API change passed or the user continued despite it; it drafts the architecture at once, as a child of the task flow (task_flow_id). Null until then, for any other kind of task, for a session without a repository, and for one whose document was written because it was idle for a day (no later stages are then created). The API design is found through the architecture session.",
           "name": "architecture_session_id",
           "required": false,
           "type": "string"
@@ -3506,7 +3426,7 @@
         },
         {
           "array": false,
-          "description": "The Temporal status in lower case (running, completed, cancelled, ...), except that a stage child of a task flow that was created but still waits for the stages it depends on is listed as pending, and one that will never run (such as a confirmed architecture skip, the review of a documentation task or an architecture-only onboarding, or the stages after a session whose document was written because it was idle for a day) as skipped. An open task flow is running; it closes with its delivery child's status (cancelled when the delivery was skipped) once every child, linked earlier stages included, has closed.",
+          "description": "The Temporal status in lower case (running, completed, cancelled, ...), except that a stage child of a task flow that was created but still waits for the stages it depends on is listed as pending, and one that will never run (such as a confirmed architecture skip, the review of an architecture-only onboarding, or the review and delivery of an onboarding interview idle for a day) as skipped. An open task flow is running; it closes with its delivery child's status once every child, linked earlier stages included, has closed, and as cancelled when the delivery was skipped or no delivery child was ever created because the requirements document was written after the session was idle for a day.",
           "name": "status",
           "required": true,
           "type": "string"
@@ -3554,7 +3474,7 @@
         },
         {
           "array": false,
-          "description": "Always present. For a TaskWorkflow, its current short name: written by an LLM from the intake's task at start and rewritten from the finalized requirements; a task flow started by a fork or a fix round copies the original task's name with a \" (fork)\" or \" (fix)\" suffix. Null for any other execution.",
+          "description": "Always present. For a TaskWorkflow, its current short name: written by an LLM from what needs to be done at start and rewritten from the finalized requirements; a task flow started by a fork or a fix round copies the original task's name with a \" (fork)\" or \" (fix)\" suffix. Null for any other execution.",
           "name": "name",
           "required": false,
           "type": "string"

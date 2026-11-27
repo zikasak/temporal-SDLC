@@ -78,6 +78,9 @@ class ReviewRoundInput:
     # Whether the existing requirements are those of the contract in the session's
     # checkout, read by the activity: an onboarding that replaces an existing contract.
     read_existing: bool = False
+    # The kind of task the interview recorded as it was finalized: the task flow creates
+    # the stages that kind needs with its first round. None for an onboarding.
+    kind: str | None = None
 
 
 @dataclass

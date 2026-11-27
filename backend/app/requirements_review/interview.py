@@ -97,7 +97,7 @@ class ReviewedInterview:
                 requirements=requirements, existing=existing,
                 diff=requirements_diff(review.reviewed, requirements),
                 previous=previous_round(review), next_number=review.next_number,
-                read_existing=read_existing)
+                read_existing=read_existing, kind=getattr(self.state, "kind", None))
         review.round = round_input.round
         review.round_input = round_input
         review.status = "running"
@@ -165,7 +165,8 @@ class ReviewedInterview:
         workflow.logger.info("Continuing despite %d contradictions", len(remaining))
         try:
             await workflow.get_external_workflow_handle(self.state.task_flow_id).signal(
-                "review_finish", args=["continued_anyway", remaining])
+                "review_finish",
+                args=["continued_anyway", remaining, getattr(self.state, "kind", None)])
         except Exception as exc:  # noqa: BLE001 - its task flow closes it as skipped then
             workflow.logger.warning("Requirements review not told to finish: %s", exc)
 

@@ -29,7 +29,7 @@ def test_profile_of_the_signed_in_user(admin_session, admin):
 
 
 def test_endpoints_require_sign_in(anonymous):
-    for path in ("/auth/me", "/requirements/intake", "/connectors/github/connection"):
+    for path in ("/auth/me", "/auth/users", "/connectors/github/connection"):
         response = anonymous.get(path)
         assert response.status_code == 401, path
         assert response.headers["www-authenticate"] == "Bearer"

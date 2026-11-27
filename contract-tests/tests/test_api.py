@@ -1,18 +1,5 @@
 """What the API answers without Temporal, an LLM provider or GitHub behind it."""
 
-TASK_KINDS = {"new_service", "api_change", "bugfix", "docs"}
-
-
-def test_intake_lists_every_kind_of_task(admin):
-    response = admin.get("/requirements/intake")
-    assert response.status_code == 200
-    intake = response.json()
-    assert {item["kind"] for item in intake["kinds"]} == TASK_KINDS
-    assert set(intake["questions"]) == TASK_KINDS
-    for questions in intake["questions"].values():
-        assert all(item["question"] and item["options"] for item in questions)
-    assert intake["kind_question"] and intake["task_question"]
-
 
 def test_github_connection_starts_unconfigured(admin):
     response = admin.get("/connectors/github/connection")

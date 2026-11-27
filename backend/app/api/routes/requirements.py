@@ -2,7 +2,7 @@ import re
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.api.downloads import session_document_download
 from app.api.errors import http_error
@@ -11,8 +11,6 @@ from app.api.routes.github import RepositoryInput
 from app.delivery import service as delivery_service
 from app.github.service import resolve_repository_selection
 from app.llm.questions import ANSWER_CHARS, MAX_QUESTIONS
-from app.requirements.models import TaskKind
-from app.requirements.prompt import INTAKE_QUESTIONS, intake
 from app.review.models import INSTRUCTIONS_CHARS
 from app.requirements.service import (
     accept_findings,
@@ -42,18 +40,13 @@ def _clean_answers(value: list[str]) -> list[str]:
 
 
 class CreateBody(BaseModel):
+    # The repository, its branch and what needs to be done, and nothing else: the kind
+    # of task is recorded by the interviewer in the conversation.
+    model_config = ConfigDict(extra="forbid")
+
     # Every session works in a repository; derived sessions inherit this one.
     repository: RepositoryInput
-    # The intake: the kind the user chose, their answers to its questions in order (a
-    # chosen option or their own), and what needs to be done.
-    kind: TaskKind
-    answers: list[str] = Field(max_length=MAX_QUESTIONS)
     task: str = Field(max_length=10000)
-
-    @field_validator("answers")
-    @classmethod
-    def require_answers(cls, value: list[str]) -> list[str]:
-        return _clean_answers(value)
 
     @field_validator("task")
     @classmethod
@@ -62,13 +55,6 @@ class CreateBody(BaseModel):
         if not value:
             raise ValueError("Say what needs to be done")
         return value
-
-    @model_validator(mode="after")
-    def answer_every_question(self) -> "CreateBody":
-        if len(self.answers) != len(INTAKE_QUESTIONS[self.kind]):
-            raise ValueError(f"Answer all {len(INTAKE_QUESTIONS[self.kind])} questions "
-                             "of this kind of task")
-        return self
 
 
 class MessageBody(BaseModel):
@@ -141,11 +127,6 @@ def _follow_up(session_id: str) -> bool:
     return False
 
 
-@router.get("/intake")
-async def retrieve_intake():
-    return intake()
-
-
 @router.post("/sessions", status_code=201)
 async def create_session(body: CreateBody):
     try:
@@ -153,8 +134,7 @@ async def create_session(body: CreateBody):
             body.repository.full_name, body.repository.branch,
         )
         # A new top-level task flow, whose requirements stage this session is.
-        created = await start_session(repository=repository, kind=body.kind,
-                                      answers=body.answers, task=body.task)
+        created = await start_session(repository=repository, task=body.task)
     except Exception as exc:
         raise http_error(exc) from exc
     return created

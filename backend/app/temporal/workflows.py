@@ -610,6 +610,9 @@ class RequirementsWorkflow(Interview[RequirementsState], ReviewedInterview, _Del
 
     @finalize.validator
     def validate_finalize(self, force: bool = False) -> None:
+        if not self.state.kind:
+            # Also with force: the task flow creates its later stages for the kind.
+            raise ValueError(KIND_PROBLEM)
         if not (force and self._review_running()):
             if (self.state.status != "interviewing"
                     or self.state.messages[-1]["role"] == "user"):
@@ -618,8 +621,6 @@ class RequirementsWorkflow(Interview[RequirementsState], ReviewedInterview, _Del
                 raise ValueError(
                     "Retry the unanswered message before generating the document.")
             self._review_check(force)
-        if not self.state.kind:
-            raise ValueError(KIND_PROBLEM)
         if not self.state.requirements:
             raise ValueError("No requirements have been recorded yet.")
 
@@ -844,7 +845,9 @@ class RequirementsWorkflow(Interview[RequirementsState], ReviewedInterview, _Del
         self._expired = True
         # A document written because the session was idle is not reviewed.
         self._review_skipped()
-        complete = bool(self.state.kind and self.state.requirements)
+        # The document is written whatever the kind: an idle session hands nothing on,
+        # so it needs no kind, only something to write down.
+        complete = bool(self.state.requirements)
         if complete and await self._write_document():
             return
         self.state.status = "failed"
@@ -852,8 +855,7 @@ class RequirementsWorkflow(Interview[RequirementsState], ReviewedInterview, _Del
             # Why it could not, when the repository is the reason.
             self.state.error or "The session expired and the document could not be generated."
             if complete
-            else "The session expired before the kind of task and any requirements "
-                 "were recorded."
+            else "The session expired before any requirements were recorded."
         )
 
 
