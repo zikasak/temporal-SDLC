@@ -904,6 +904,12 @@ async def test_the_routing_keeps_the_checked_page_contract_with_the_apis_operati
         await routing.publish_components(PYTHON, session_dir, output, routes, work,
                                          artifact_dir, [SERVICE, FRONTEND, BROWSER], DOCUMENT)
 
+    # The routing's next run publishes its corrected contract with the same work dir.
+    monkeypatch.setattr(routing, 'check_page_conformance', check_page_conformance)
+    assert await routing.publish_components(
+        PYTHON, session_dir, output, routes, work, artifact_dir,
+        [SERVICE, FRONTEND, BROWSER], DOCUMENT) == ['frontend~browser']
+
 
 async def test_the_routing_keeps_the_viewports_of_the_repositorys_browser_tests(
         tmp_path, monkeypatch):
