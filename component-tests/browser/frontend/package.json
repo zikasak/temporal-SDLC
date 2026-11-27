@@ -1,0 +1,10 @@
+{
+  "name": "browser-tests",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@playwright/test": "1.65.1",
+    "@types/node": "24.19.2",
+    "typescript": "5.9.3"
+  }
+}
