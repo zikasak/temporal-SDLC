@@ -27,12 +27,19 @@ service that already has accounts, supply the first user's credentials as
 `CONTRACT_TESTS_ADMIN_LOGIN` and `CONTRACT_TESTS_ADMIN_PASSWORD`.
 
 The API allows 10 sign-in and registration attempts per client address per minute by
-default. The suite's other tests make 8 (one is the non-administrator account of
-`tests/test_openai_endpoint.py`). `tests/test_zz_rate_limit.py` runs last (pytest
-runs modules in name order) and makes failed sign-ins until it gets 429 with
-`Retry-After`, using up the budget for that minute. Keep new sign-ins out of modules
-that sort after it. Wait a minute before running the suite again. The service must run
-with the default `AUTH_LOGIN_ATTEMPTS_PER_MINUTE` of 10.
+default. The modules before `tests/test_zy_session_renewal.py` make about 9 (one is the
+non-administrator account of `tests/test_openai_endpoint.py`, one replaces the
+administrator's session after `test_logout_while_signed_in_clears_the_cookie` signs it
+out). `tests/test_zy_session_renewal.py` starts about 10 sessions of its own. Sign-ins
+that set up test data go through `conftest.sign_in`, which waits once for `Retry-After`
+when it gets 429, so the run may pause for up to a minute. `tests/test_zz_rate_limit.py`
+then makes failed sign-ins until it gets 429 with `Retry-After`, using up the budget for
+that minute, and `tests/test_zz_refresh_rate_limit.py` does the same for `POST
+/auth/refresh` (NFR-13, 30 per minute by default). Keep new sign-ins and refreshes out
+of modules that sort after them. Wait a minute before running the suite again. The
+service must run with the default `AUTH_LOGIN_ATTEMPTS_PER_MINUTE` of 10 and the default
+refresh limit of 30. It must also run with the default access token lifetime of 15
+minutes or longer, because the administrator's token is used for the whole run.
 
 The webhook tests assume the connection has no webhook secret, so they run against a
 service without a connected app. Raw-body signature verification (a signature over the
@@ -86,7 +93,7 @@ Contract ambiguities and how the suite reads them:
   `review` in
   `test_delivery_review.py::test_review_stage_retry_of_an_unknown_session_is_not_found`.
   Together these cover all five stages of `RetryStageInput.stage`.
-- Token tests decode the issued JWT (HS256, NFR-3) and check that a changed signature, a
+- Token tests decode the issued JWT (HS256, NFR-14) and check that a changed signature, a
   changed `exp` or an unsigned (`alg: none`) token answers 401. The `exp` claim is the
   standard JWT claim. The suite checks only that `expires_at` lies in the future; it
   doesn't assume the configured TTL.
@@ -185,6 +192,54 @@ The verification worker starts both images on one network, supplies
 `SERVICE_WAIT_HOST=service` and `SERVICE_WAIT_PORT=8080`, and waits up to two minutes for
 TCP readiness before running pytest, which is limited to ten minutes. The JUnit XML
 report is written to `/tests/reports/junit.xml`.
+
+## Session renewal with refresh tokens (FR-237 to FR-246, NFR-10 to NFR-14, TR-13 to TR-16)
+
+Signing out now revokes the session on the server (FR-241, NFR-12). The `admin` fixture in
+`conftest.py` therefore watches for `POST /auth/logout` and signs the administrator in again
+afterwards. `test_logout_while_signed_in_clears_the_cookie` is kept unchanged. Tests that
+revoke sessions use sessions of their own, signed in as an account that
+`tests/test_zy_session_renewal.py` creates.
+
+Covered:
+
+- Sign-in returns `refresh_token` and sets the `refresh_token` cookie (HttpOnly,
+  SameSite=Strict, `Path=/api/auth/refresh`). The first account's Session also carries one.
+- Refresh by body and by cookie alone. The new access token works, and both tokens and
+  cookies are replaced. A body token is used instead of the cookie, and an unusable bearer
+  token is ignored.
+- A just-replaced token is accepted again at once (grace period). After waiting 40
+  seconds, reusing it answers 401 `revoked`, and the session's current refresh and access
+  tokens stop working.
+- A missing or unknown token answers 401 `invalid` with `WWW-Authenticate: Bearer`. A
+  non-string token or a non-object body answers 422.
+- Sign-out by bearer or cookie access token, or by refresh token in the body only, revokes
+  the session: its access token gets 401 and its refresh token gets 401 `revoked`. Both
+  cookies are cleared. When an access token is present, the session named in the body is
+  left alone.
+- The refresh rate limit is separate from the sign-in limit, and its 429 carries
+  `Retry-After`.
+
+Not testable over HTTP, so not tested:
+
+- Idle (7 days) and absolute (30 days) limits, the `idle` and `expired` reasons, and last
+  activity updates.
+- Access token lifetime and settings documentation (TR-13, TR-16).
+- The 503 without `AUTH_JWT_SECRET`.
+- Rejection of tokens without a session id claim (TR-15). A valid signature can't be forged
+  without the secret, and the claim's name is not specified.
+- Web client behaviour (FR-243 to FR-245).
+
+Contract readings:
+
+- The rejection that reuses a token past the grace period is expected to carry reason
+  `revoked`: the token is known, and the reason list names reuse under `revoked`.
+- The contract marks the request body of refresh and logout as required but also says it
+  is optional, so the suite always sends at least `{}`.
+- The cookie's path is `/api/auth/refresh` (the web app's proxy prefix), so cookie tests
+  send the `Cookie` header explicitly.
+- Whether the access token from before a refresh keeps working is not specified, so it is
+  not tested.
 
 ## Contract note: parent of an architecture stage
 
