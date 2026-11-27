@@ -756,12 +756,12 @@ export default function Onboarding() {
             )}
 
             {session && isDrafted && session.architecture_only && (
-              <ArchitectureSection key={session.session_id} structure={session.architecture_structure}
+              <ArchitectureSection key={`architecture-${session.session_id}`} structure={session.architecture_structure}
                 problems={finishedStatuses.includes(session.status) ? [] : session.problems} />
             )}
 
             {session && isDrafted && !session.architecture_only && (
-              <SpoilerSection key={session.session_id} className="requirements-list" label="Drafted requirements"
+              <SpoilerSection key={`requirements-${session.session_id}`} className="requirements-list" label="Drafted requirements"
                 testid="requirements"
                 heading={<>Drafted requirements ({session.requirements.length})</>}>
                 {categories.map(([category, label]) => {
@@ -793,14 +793,14 @@ export default function Onboarding() {
             )}
 
             {session && isDrafted && !session.architecture_only && (
-              <ApiModelSection key={session.session_id} api={session.api} problems={session.problems}
+              <ApiModelSection key={`api-${session.session_id}`} api={session.api} problems={session.problems}
                 requirements={session.requirements}>
                 <p className="api-auth">Language: {session.language ?? "not detected yet"}</p>
               </ApiModelSection>
             )}
 
             {session && isDrafted && !session.architecture_only && (
-              <ArchitectureSection key={session.session_id} structure={session.architecture_structure} problems={[]} />
+              <ArchitectureSection key={`architecture-${session.session_id}`} structure={session.architecture_structure} problems={[]} />
             )}
 
             {!session && !error && (

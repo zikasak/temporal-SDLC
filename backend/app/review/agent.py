@@ -227,7 +227,8 @@ proves its criterion, instead of searching for which test proves what.
 
 STATIC_PROMPT = """
 Trusted static tools (a secrets scanner, and for some languages a linter limited to errors,
-likely bugs and security rules) ran over the changes; the `static_findings` entry of the
+likely bugs and security rules, such as ESLint over TypeScript and JavaScript with React's
+rules and a check for sibling elements sharing a key) ran over the changes; the `static_findings` entry of the
 input lists what they reported on the lines the delivery added, each with the tool, rule,
 file, line and message. Judge each one: report those that are real problems of the
 delivery, as your own findings, and leave out those that are not, such as test data, a

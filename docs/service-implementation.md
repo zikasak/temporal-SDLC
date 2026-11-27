@@ -367,7 +367,10 @@ Every review trace carries `review_scope` (`review`, `seam` or `regression`) and
   and every seam of another part or language, goes to the reviewer.
 - `REVIEW_STATIC_CHECKS`: before the delivery review, the language's `static_checks`
   (gitleaks, and ruff limited to rules `F`, `B` and `S` for Python, pinned in the agent
-  image) run over the review workspace in the agent image without a network
+  image) and those of every part language (ESLint for TypeScript, limited to errors and
+  likely bugs such as two sibling React elements with one key, configured in
+  `app/languages/typescript/static_check/`), each only when the changes touch a file it
+  reads, run over the review workspace in the agent image without a network
   (`docker_agents.run_tool`). Their results on the lines the run's diff adds reach the
   reviewer as `static_findings` (never a matched secret), and it judges each one; a tool
   that fails is left out.

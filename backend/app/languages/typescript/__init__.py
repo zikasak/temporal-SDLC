@@ -3,6 +3,7 @@ client, whose criteria component contracts describe at seams of its own code, an
 web client Vite builds, page contracts at its pages in a real browser."""
 
 from app.languages import PartLanguage, register_part
+from app.languages.static_checks import ESLINT
 from app.languages.typescript.browser import (
     BROWSER_CONTRACT, BROWSER_SUITE, detect_browser,
 )
@@ -16,4 +17,5 @@ TYPESCRIPT = register_part(PartLanguage(
     component_contract=COMPONENT_CONTRACT, component_suite=COMPONENT_SUITE,
     detect_browser=detect_browser,
     browser_contract=BROWSER_CONTRACT, browser_suite=BROWSER_SUITE,
+    static_checks=(ESLINT,),
 ))

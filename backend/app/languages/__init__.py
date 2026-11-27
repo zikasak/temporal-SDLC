@@ -193,6 +193,9 @@ class StaticCheck:
     # The report as findings: dicts of `rule`, `path` (relative to that directory),
     # `line` and `message`, never the matched text itself.
     parse: Callable[[str], list[dict]]
+    # File name endings the tool reads: it runs only when the changes reviewed touch such
+    # a file. Empty: every change.
+    suffixes: tuple[str, ...] = ()
 
 
 # The contract's file that says how to import the code the stubs describe.
@@ -251,6 +254,10 @@ class PartLanguage:
     # The page contract and the browser suite of such a part; given with `detect_browser`.
     browser_contract: BrowserContract | None = None
     browser_suite: BrowserSuite | None = None
+    # Trusted tools run before the delivery review of any service, as its language's are:
+    # a part may sit beside the service in any repository. Run in the service language's
+    # agent image, which installs them.
+    static_checks: tuple[StaticCheck, ...] = ()
 
 
 # Dependencies and build output of the other projects a repository may hold beside the
