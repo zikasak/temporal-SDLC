@@ -69,6 +69,77 @@ def fake_docker(monkeypatch, routes, sent: dict):
     monkeypatch.setattr(docker_agents, 'docker', docker)
 
 
+async def test_a_rejected_routing_is_routed_again_told_why_from_what_it_wrote(
+        session, monkeypatch):
+    from app.routing.models import RoutingRejected
+    runs: list[dict] = []
+
+    async def docker(*args, **kwargs):
+        if args[0] == 'inspect':
+            return json.dumps({'ExitCode': 0})
+        if args[0] == 'cp' and args[1] == '-a':
+            with tarfile.open(fileobj=kwargs['stdin']) as archive:
+                runs.append({item.name: archive.extractfile(item).read().decode()
+                             for item in archive.getmembers() if item.isfile()})
+        if args[0] == 'cp' and args[1].endswith(':/workspace/routing/.'):
+            output = Path(args[2])
+            (output / 'routes.json').write_text(json.dumps(ROUTES))
+            (output / 'parts/frontend/browser').mkdir(parents=True)
+            (output / 'parts/frontend/browser/pages.json').write_text(f'run {len(runs)}')
+            (output / 'repository').mkdir()
+            (output / 'repository/stale.txt').write_text('NOT KEPT')
+        return ''
+
+    rejections = ['role=button[name="Architecture"] is present already']
+
+    async def publish_components(*args):
+        if rejections:
+            raise RoutingRejected(rejections.pop())
+        return []
+
+    monkeypatch.setattr(docker_agents, 'docker', docker)
+    monkeypatch.setattr(activities, 'publish_components', publish_components)
+    result = await ActivityEnvironment().run(activities.route_requirements, 'session', CONTEXT)
+    assert set(result['routes']) == {'FR-2', 'FR-3'}
+    assert len(runs) == 2
+    assert 'rejected' not in json.loads(runs[0]['input.json'])
+    assert json.loads(runs[1]['input.json'])['rejected'] == (
+        'role=button[name="Architecture"] is present already')
+    # The second run starts from the routing the first wrote, with the repository afresh.
+    assert runs[1]['routing/parts/frontend/browser/pages.json'] == 'run 1'
+    assert 'routing/repository/stale.txt' not in runs[1]
+    assert runs[1]['routing/repository/Dockerfile'] == 'FROM eclipse-temurin'
+
+    # Rejected every time, the routing stops with the last reason.
+    runs.clear()
+    rejections[:] = ['third', 'second', 'first']
+    with pytest.raises(ApplicationError, match='third') as raised:
+        await ActivityEnvironment().run(activities.route_requirements, 'session', CONTEXT)
+    assert raised.value.message == 'third'
+    assert raised.value.type == ROUTING_ERROR and raised.value.non_retryable
+    assert len(runs) == activities.ROUTING_ATTEMPTS == 3
+
+    # Nor once another run as long as the last would not fit in the stage's time.
+    runs.clear()
+    rejections[:] = ['second', 'first']
+    monkeypatch.setattr(activities, 'ROUTING_SECONDS', 0)
+    with pytest.raises(ApplicationError, match='first'):
+        await ActivityEnvironment().run(activities.route_requirements, 'session', CONTEXT)
+    assert len(runs) == 1
+    monkeypatch.setattr(activities, 'ROUTING_SECONDS', 85 * 60)
+
+    # What the repository itself lacks is not routed again.
+    runs.clear()
+
+    async def unusable(*args):
+        raise RuntimeError('no published page contract')
+
+    monkeypatch.setattr(activities, 'publish_components', unusable)
+    with pytest.raises(ApplicationError, match='no published page contract'):
+        await ActivityEnvironment().run(activities.route_requirements, 'session', CONTEXT)
+    assert len(runs) == 1
+
+
 async def test_routing_reads_the_repository_and_returns_one_route_per_criterion(session, monkeypatch):
     sent: dict = {}
     fake_docker(monkeypatch, ROUTES, sent)

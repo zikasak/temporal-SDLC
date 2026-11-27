@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -38,7 +39,8 @@ from app.routing.components import (
     check_conformance, check_published, check_seams, read_components,
 )
 from app.routing.models import (
-    ROUTES as ALL_ROUTES, ROUTING_ERROR, PageContractError, added_seams, read_routes,
+    ROUTES as ALL_ROUTES, ROUTING_ERROR, PageContractError, RoutingRejected, added_seams,
+    read_routes,
 )
 from app.routing.parts import (
     PARTS_DIR, PARTS_KEY, SERVICE_PART, ComponentPart, component_parts,
@@ -264,18 +266,27 @@ async def _publish_pages(part: ComponentPart, session_dir: Path, output: Path,
     checkout = session_dir / CHECKOUT_DIR
     try:
         await run_sync(check_published_pages, part, checkout)
+    except PageContractError as exc:
+        # The repository's own: another run of the agent cannot restore it.
+        raise RuntimeError(str(exc)) from exc
+    try:
         read = await run_sync(read_page_contract, output / part.contract_dir(),
                               checkout / part.published_dir(), document, clean)
         check_page_routes(routes, read)
         await run_sync(check_repository_viewports, part, checkout, read['viewports'])
     except PageContractError as exc:
-        raise RuntimeError(str(exc)) from exc
+        raise RoutingRejected(str(exc)) from exc
     operations = operations_list(document)
     check = work / 'checks' / part.key
     await run_sync(check.mkdir, parents=True)
     log_dir = artifact_dir / PARTS_DIR / part.name / 'browser-logs'
-    await check_page_conformance(contract, repository, part.root, clean, operations,
-                                 absent_elements(routes), check, log_dir)
+    try:
+        await check_page_conformance(contract, repository, part.root, clean, operations,
+                                     absent_elements(routes), check, log_dir)
+    except PageContractError as exc:
+        # Elements the client shows that the routing says it lacks, or the reverse: only
+        # the built client tells, which the agent cannot run.
+        raise RoutingRejected(str(exc)) from exc
     target = artifact_dir / part.contract_dir()
     await run_sync(target.parent.mkdir, parents=True, exist_ok=True)
     await run_sync(shutil.move, clean, target)
@@ -363,7 +374,8 @@ async def publish_components(language: Language, session_dir: Path, output: Path
             if part.is_service:
                 raise
             what = 'page contract' if part.browser else 'component contract'
-            raise RuntimeError(f'The {what} of part {part.name} is unusable: {exc}') from exc
+            error = RoutingRejected if isinstance(exc, RoutingRejected) else RuntimeError
+            raise error(f'The {what} of part {part.name} is unusable: {exc}') from exc
     return [part.key for part, _ in routed]
 
 
@@ -389,6 +401,31 @@ async def check_published_contracts(language: Language, session_dir: Path,
                    else artifact_dir / PARTS_DIR / part.name) / 'published'
         await check_published(contract, published, part.published_dir().as_posix(),
                               repository, check, log_dir)
+
+
+# How many times the agent routes a change whose contract the host rejects for what it
+# can correct (RoutingRejected), told why each time but the first.
+ROUTING_ATTEMPTS = 3
+# The time the routing's runs may take together, short of its activity's 100 minutes
+# (agent_workflows.workflows) with room for the last check: a run is only started again
+# when one as long as the last still fits, so a stage that times out never hides why.
+ROUTING_SECONDS = 85 * 60
+# The input entry that tells the agent why its last routing was rejected.
+REJECTED_KEY = 'rejected'
+
+
+def keep_routing(output: Path, routing: Path) -> None:
+    """Put the routing a rejected run wrote (`output`) in the next run's `routing`, over
+    the published contracts there, but for the repository, which `routing` holds
+    afresh. Resolved first: a link above it (macOS's /var) is no link the agent made."""
+    for source in sorted(output.resolve().iterdir()):
+        if source.name == 'repository' or source.is_symlink():
+            continue
+        target = routing / source.name
+        if source.is_dir():
+            copy_regular_files(source, target, include=lambda relative: True)
+        elif source.is_file():
+            copy_file(source, target)
 
 
 async def run_routing(session_id: str, context: dict[str, Any]) -> dict[str, Any]:
@@ -431,33 +468,56 @@ async def run_routing(session_id: str, context: dict[str, Any]) -> dict[str, Any
                 # The repository's own contract: routing again cannot help until it changes.
                 raise ApplicationError(str(exc), type=ROUTING_ERROR,
                                        non_retryable=True) from exc
-        async with docker_agents.keep_activity_alive('Routing the acceptance criteria'):
-            output = work / 'output'
+        started = time.monotonic()
+        for attempt in range(1, ROUTING_ATTEMPTS + 1):
+            run_started = time.monotonic()
+            async with docker_agents.keep_activity_alive('Routing the acceptance criteria'):
+                output = work / f'output-{attempt}'
+                try:
+                    await docker_agents.run_agent(
+                        'routing', session_id, workspace, output, 'routing',
+                        artifact_dir / ('agent.log' if attempt == 1
+                                        else f'agent-{attempt}.log'), paused=paused,
+                        image_build=dataclasses.replace(
+                            docker_agents.default_agent_image('routing', 'routing'),
+                            dockerfile=language.agent_dockerfile))
+                except docker_agents.AgentPaused as exc:
+                    return paused_result(session_id, exc)
+                except docker_agents.AgentLimited as exc:
+                    return limited_result(session_id, exc)
+                except docker_agents.AgentCredentialsError as exc:
+                    # Routing again cannot help until the settings or the worker change.
+                    raise ApplicationError(str(exc), type=ROUTING_ERROR,
+                                           non_retryable=True) from exc
             try:
-                await docker_agents.run_agent(
-                    'routing', session_id, workspace, output, 'routing',
-                    artifact_dir / 'agent.log', paused=paused,
-                    image_build=dataclasses.replace(
-                        docker_agents.default_agent_image('routing', 'routing'),
-                        dockerfile=language.agent_dockerfile))
-            except docker_agents.AgentPaused as exc:
-                return paused_result(session_id, exc)
-            except docker_agents.AgentLimited as exc:
-                return limited_result(session_id, exc)
-            except docker_agents.AgentCredentialsError as exc:
-                # Routing again cannot help until the settings or the worker change.
+                routes = await run_sync(read_output, output, brief_ids(context), language,
+                                        parts)
+                document = (await run_sync(api_document, context, checkout)
+                            if any(part.browser for part in parts) else None)
+                async with docker_agents.keep_activity_alive('Checking the component contract'):
+                    routed = await publish_components(language, session_dir, output, routes,
+                                                      work, artifact_dir, parts, document)
+                break
+            except RoutingRejected as exc:
+                now = time.monotonic()
+                if (attempt == ROUTING_ATTEMPTS
+                        or now - started + (now - run_started) > ROUTING_SECONDS):
+                    raise ApplicationError(str(exc), type=ROUTING_ERROR,
+                                           non_retryable=True) from exc
+                # Only the host can build the client the contract is checked against: the
+                # agent is run again, told why, from the routing it wrote.
+                logger.info('Routing rejected, routing again (session=%s, attempt=%s): %s',
+                            session_id, attempt, exc)
+                workspace = work / f'workspace-{attempt + 1}'
+                await run_sync(workspace.mkdir)
+                await run_sync(prepare_routing, language, session_dir,
+                               {**context, REJECTED_KEY: str(exc)}, workspace, parts,
+                               embed_chars=(await get_agent_settings()).contract_embed_chars)
+                await run_sync(keep_routing, output, workspace / 'routing')
+            except RuntimeError as exc:
+                # The same routing fails the same way again: the user is told why.
                 raise ApplicationError(str(exc), type=ROUTING_ERROR,
                                        non_retryable=True) from exc
-        try:
-            routes = await run_sync(read_output, output, brief_ids(context), language, parts)
-            document = (await run_sync(api_document, context, checkout)
-                        if any(part.browser for part in parts) else None)
-            async with docker_agents.keep_activity_alive('Checking the component contract'):
-                routed = await publish_components(language, session_dir, output, routes,
-                                                  work, artifact_dir, parts, document)
-        except RuntimeError as exc:
-            # The same routing fails the same way again: the user is told why.
-            raise ApplicationError(str(exc), type=ROUTING_ERROR, non_retryable=True) from exc
     components = artifact_dir / COMPONENTS_DIR
     # The parts with routes, which the stages after the routing read from this file.
     result = {'session_id': session_id, 'routes': routes, 'path': str(artifact_dir),

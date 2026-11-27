@@ -28,7 +28,8 @@ from app.routing.browser import (
     read_page_contract,
 )
 from app.routing.models import (
-    RequirementRoute, added_seams, judge_routes, read_page, read_routes,
+    PageContractError, RequirementRoute, RoutingRejected, added_seams, judge_routes,
+    read_page, read_routes,
 )
 from app.routing.parts import (
     SERVICE_PART, ComponentPart, component_parts, component_suite, routed_parts,
@@ -884,8 +885,22 @@ async def test_the_routing_keeps_the_checked_page_contract_with_the_apis_operati
         **VIEWPORTS, 'tablet': {'width': 768, 'height': 1024, 'input': 'touch'}}))
     work = tmp_path / 'work-2'
     work.mkdir()
-    with pytest.raises(RuntimeError, match='The page contract of part frontend is unusable: No '
-                                           'route names the viewports tablet'):
+    with pytest.raises(RoutingRejected, match='The page contract of part frontend is unusable: No '
+                                              'route names the viewports tablet'):
+        await routing.publish_components(PYTHON, session_dir, output, routes, work,
+                                         artifact_dir, [SERVICE, FRONTEND, BROWSER], DOCUMENT)
+
+    # What only the built client shows wrong is rejected for the agent to correct.
+    async def mismatch(*args):
+        raise PageContractError('The page contract does not match the web client: Page '
+                                '/rooms/1 at desktop: testid=popup is present already')
+
+    monkeypatch.setattr(routing, 'check_page_conformance', mismatch)
+    write(output / 'parts/frontend/browser', contract_files())
+    work = tmp_path / 'work-3'
+    work.mkdir()
+    with pytest.raises(RoutingRejected, match='of part frontend is unusable: The page contract '
+                                              'does not match the web client: .*present already'):
         await routing.publish_components(PYTHON, session_dir, output, routes, work,
                                          artifact_dir, [SERVICE, FRONTEND, BROWSER], DOCUMENT)
 
@@ -916,8 +931,10 @@ async def test_the_routing_keeps_the_viewports_of_the_repositorys_browser_tests(
 
     with pytest.raises(RuntimeError, match=re.escape(
             'The repository has browser tests in frontend/browser-tests/ but no published '
-            'page contract in contracts/parts/frontend/browser/')):
+            'page contract in contracts/parts/frontend/browser/')) as raised:
         await publish('work-0')
+    # The repository's own: routing again cannot restore it.
+    assert not isinstance(raised.value, RoutingRejected)
     # Published without the viewport the tests use, as no published contract may be.
     write(session_dir / 'repository/contracts/parts/frontend/browser', contract_files(
         viewports={'desktop': VIEWPORTS['desktop']}))
