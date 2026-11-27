@@ -100,13 +100,6 @@
   },
   {
     "category": "non_functional",
-    "description": "Session tokens are HS256 JWTs signed with AUTH_JWT_SECRET (at least 32 characters) that expire after AUTH_TOKEN_TTL_HOURS, 12 by default. Without a usable secret, sign-in and authenticated endpoints answer 503.",
-    "id": "NFR-3",
-    "priority": "must",
-    "title": "Expiring sessions"
-  },
-  {
-    "category": "non_functional",
     "description": "When Temporal answers a request with an error or the request storage cannot be reached, an endpoint answers 503 with a detail saying which.",
     "id": "NFR-4",
     "priority": "must",
@@ -306,14 +299,6 @@
     "priority": "must",
     "rationale": "User chose: only PRs the app opened, from users with write access.",
     "title": "Act only on authorised mentions on the app's PRs"
-  },
-  {
-    "category": "functional",
-    "description": "Every endpoint other than sign-in, registration, its status, sign-out and POST /connectors/github/events requires a valid, unexpired token, sent as a bearer token or the session cookie, and answers 401 with WWW-Authenticate: Bearer otherwise.",
-    "id": "FR-43",
-    "priority": "must",
-    "rationale": "Replaces FR-3: GitHub must be able to deliver webhook events without a user token.",
-    "title": "Require a signed-in user"
   },
   {
     "category": "functional",
@@ -1646,5 +1631,145 @@
     "priority": "must",
     "rationale": "Replaces FR-154: resolving C-1, the user chose that the review rule applies only to finalizing, and an idle session's document is written without a review.",
     "title": "Finalize requirements"
+  },
+  {
+    "category": "functional",
+    "description": "When a signed-in user's access token expires during active use, the session is renewed with a new access token, so the user is not signed out and the request they were making is not lost.",
+    "id": "FR-237",
+    "priority": "must",
+    "rationale": "The user's request: users should not be suddenly logged out.",
+    "title": "Refresh the access token on expiration"
+  },
+  {
+    "category": "functional",
+    "description": "Sign-in and first-account registration issue a short-lived access token together with a long-lived refresh token, and a new endpoint POST /auth/refresh exchanges a valid refresh token for a new access token.",
+    "id": "FR-238",
+    "priority": "should",
+    "rationale": "The user chose this renewal mechanism.",
+    "title": "Refresh token issued at sign-in and exchanged at POST /auth/refresh"
+  },
+  {
+    "category": "functional",
+    "description": "Every authenticated request updates its session's last activity time. A session whose last activity is older than the configured idle limit (default 7 days) can no longer be refreshed, and POST /auth/refresh rejects it with 401, so the user must sign in again.",
+    "id": "FR-239",
+    "priority": "should",
+    "title": "Configurable idle timeout, default 7 days"
+  },
+  {
+    "category": "functional",
+    "description": "Once the configured absolute limit (default 30 days) has passed since the sign-in that started a session, the session can no longer be refreshed, however active the user is, and POST /auth/refresh responds with 401.",
+    "id": "FR-240",
+    "priority": "should",
+    "title": "Configurable absolute session limit, default 30 days"
+  },
+  {
+    "category": "functional",
+    "description": "Access tokens carry a session id claim. POST /auth/logout revokes the session that claim names, or the session of a refresh token an API client sends in the request body, and clears both the access token cookie and the refresh token cookie.",
+    "id": "FR-241",
+    "priority": "must",
+    "title": "Sign-out revokes the session identified by the access token"
+  },
+  {
+    "category": "functional",
+    "description": "Both the web app, which uses the session cookie, and API clients, which send bearer tokens, can renew their access token through POST /auth/refresh.",
+    "id": "FR-242",
+    "priority": "should",
+    "title": "Refresh available to the web app and API clients"
+  },
+  {
+    "category": "functional",
+    "description": "The web app calls POST /auth/refresh shortly before the access token's expires_at instead of returning to the sign-in form, and when an API request gets a 401 it refreshes once and retries that request a single time.",
+    "id": "FR-243",
+    "priority": "should",
+    "title": "Web app refreshes before expiry and retries on 401"
+  },
+  {
+    "category": "functional",
+    "description": "When a refresh is rejected (idle limit, 30-day limit or revocation), the web app shows the sign-in form with a short \"session expired\" notice, and after the user signs in again it returns them to the page they were on.",
+    "id": "FR-244",
+    "priority": "should",
+    "title": "Session-expired notice and return to the previous page"
+  },
+  {
+    "category": "functional",
+    "description": "The web app runs at most one POST /auth/refresh at a time across all of its open tabs; other tabs and concurrent 401 retries wait for that refresh and use its result instead of starting their own.",
+    "id": "FR-245",
+    "priority": "should",
+    "title": "Single refresh at a time across tabs"
+  },
+  {
+    "category": "functional",
+    "description": "Every endpoint other than sign-in, registration, its status, sign-out, POST /connectors/github/events and POST /auth/refresh requires a valid, unexpired access token, sent as a bearer token or the session cookie, and answers 401 with WWW-Authenticate: Bearer otherwise. POST /auth/refresh authenticates by the refresh token alone, whether the access token is expired or missing.",
+    "id": "FR-246",
+    "priority": "must",
+    "rationale": "Replaces the retired FR-43, adding POST /auth/refresh to its exceptions as the user decided.",
+    "title": "Require a signed-in user, with refresh as an exception"
+  },
+  {
+    "category": "non_functional",
+    "description": "Refresh tokens are tracked on the server, so that once a session is revoked, for example by signing out, POST /auth/refresh rejects its refresh token with 401.",
+    "id": "NFR-10",
+    "priority": "must",
+    "rationale": "The user said server-side revocation is required, so a stolen refresh token stops working.",
+    "title": "Server-side revocation of refresh tokens"
+  },
+  {
+    "category": "non_functional",
+    "description": "Each successful POST /auth/refresh issues a new refresh token and invalidates the one presented. A just-replaced refresh token is still accepted for a short grace period (about 30 seconds). After that, presenting an already-used refresh token is rejected with 401 and revokes the whole session it belongs to.",
+    "id": "NFR-11",
+    "priority": "should",
+    "title": "Refresh token rotation with reuse detection and grace period"
+  },
+  {
+    "category": "non_functional",
+    "description": "Every authenticated request checks on the server that the session named by its access token is still active, and responds with 401 as soon as that session has been revoked, even if the access token has not yet expired.",
+    "id": "NFR-12",
+    "priority": "must",
+    "rationale": "The user said every request must check that its session is still active, so an access token stops working immediately after sign-out.",
+    "title": "Every request checks that its session is active"
+  },
+  {
+    "category": "non_functional",
+    "description": "POST /auth/refresh counts every attempt, successful or not, per client address using the existing sliding-window attempt limiter. It has its own configurable limit, default 30 attempts per minute, kept separate from the sign-in limit. Once the limit is reached it responds with 429 and a Retry-After header.",
+    "id": "NFR-13",
+    "priority": "should",
+    "title": "Rate limit on POST /auth/refresh"
+  },
+  {
+    "category": "non_functional",
+    "description": "Access tokens are HS256 JWTs signed with AUTH_JWT_SECRET (at least 32 characters) that expire after the configured access token lifetime. Without a usable secret, sign-in, refresh and authenticated endpoints answer 503.",
+    "id": "NFR-14",
+    "priority": "must",
+    "rationale": "Keeps the parts of the retired NFR-3 that still hold; only the lifetime setting changes (TR-13).",
+    "title": "Signed, expiring access tokens"
+  },
+  {
+    "category": "technical",
+    "description": "A new backend setting configures the access token's lifetime with a default of 15 minutes and replaces AUTH_TOKEN_TTL_HOURS, which is no longer used.",
+    "id": "TR-13",
+    "priority": "should",
+    "rationale": "Replaces the retired NFR-3 (12-hour AUTH_TOKEN_TTL_HOURS default), as the user decided.",
+    "title": "New access token lifetime setting, default 15 minutes"
+  },
+  {
+    "category": "technical",
+    "description": "For the web app, login, registration and refresh set the refresh token in an HttpOnly, SameSite=Strict cookie scoped to the path /api/auth/refresh; for API clients, the same responses also return the refresh token in their JSON body, and POST /auth/refresh accepts it from either the cookie or the request body.",
+    "id": "TR-14",
+    "priority": "should",
+    "title": "Refresh token delivery per client type"
+  },
+  {
+    "category": "technical",
+    "description": "Access tokens without a session id claim, including all tokens issued before this change is deployed, are rejected with 401, so every user signs in again once after deployment.",
+    "id": "TR-15",
+    "priority": "should",
+    "title": "Tokens issued before deployment are rejected"
+  },
+  {
+    "category": "technical",
+    "description": "README.md and backend/.env.example describe every new or changed session setting with its default: the access token lifetime (15 minutes), the idle limit (7 days), the absolute session limit (30 days) and the refresh rate limit (30 per minute).",
+    "id": "TR-16",
+    "priority": "should",
+    "title": "Document the new session settings"
   }
 ]

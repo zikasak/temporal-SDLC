@@ -132,9 +132,16 @@ PULL_REQUEST_CHECK_INTERVAL_SECONDS = _check_interval_seconds()
 # Signs session tokens: at least 32 random characters, the same for every API replica.
 # Changing it signs everyone out.
 AUTH_JWT_SECRET = os.getenv("AUTH_JWT_SECRET", "")
-AUTH_TOKEN_TTL_HOURS = float(os.getenv("AUTH_TOKEN_TTL_HOURS", "12"))
+# How long an access token lasts; the web app renews it with its refresh token before then.
+AUTH_ACCESS_TOKEN_TTL_MINUTES = float(os.getenv("AUTH_ACCESS_TOKEN_TTL_MINUTES", "15"))
+# A session without activity for this long can no longer be renewed.
+AUTH_SESSION_IDLE_DAYS = float(os.getenv("AUTH_SESSION_IDLE_DAYS", "7"))
+# A session can no longer be renewed this long after the sign-in that started it.
+AUTH_SESSION_MAX_DAYS = float(os.getenv("AUTH_SESSION_MAX_DAYS", "30"))
 # Sign-in attempts allowed per client address per minute, successful or not.
 AUTH_LOGIN_ATTEMPTS_PER_MINUTE = int(os.getenv("AUTH_LOGIN_ATTEMPTS_PER_MINUTE", "10"))
+# Refresh attempts allowed per client address per minute, successful or not.
+AUTH_REFRESH_ATTEMPTS_PER_MINUTE = int(os.getenv("AUTH_REFRESH_ATTEMPTS_PER_MINUTE", "30"))
 # Reverse proxies between the client and the API that append to X-Forwarded-For. With 0
 # the header is ignored and the connecting address is the client.
 AUTH_TRUSTED_PROXY_HOPS = int(os.getenv("AUTH_TRUSTED_PROXY_HOPS", "0"))

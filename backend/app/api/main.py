@@ -14,6 +14,7 @@ from app.api.routes import (
     api_design, architecture, auth, github, llm_requests, onboarding, requirements, settings,
     workflows,
 )
+from app.auth.sessions import ensure_schema as ensure_session_schema
 from app.auth.storage import ensure_schema as ensure_auth_schema
 from app.delivery.acceptances import ensure_schema as ensure_acceptance_schema
 from app.delivery.mentions import ensure_schema as ensure_mention_schema
@@ -45,6 +46,7 @@ async def lifespan(_: FastAPI):
     await ensure_document_schema()
     await ensure_github_schema()
     await ensure_auth_schema()
+    await ensure_session_schema()
     await ensure_registry_schema()
     await ensure_settings_schema()
     await ensure_mention_schema()

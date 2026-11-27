@@ -1122,8 +1122,9 @@ paths:
     post:
       operationId: postAuthLogin
       summary: Sign in
-      description: No sign-in required. Returns a session and sets the access_token
-        cookie.
+      description: No sign-in required. Starts a server-side session and returns a
+        short-lived access token with a long-lived refresh token; sets the access_token
+        cookie and the refresh_token cookie (HttpOnly, SameSite=Strict, path /api/auth/refresh).
       tags:
       - auth
       requestBody:
@@ -1166,24 +1167,45 @@ paths:
       x-requirements:
       - FR-2
       - NFR-1
-      - NFR-3
+      - FR-238
+      - NFR-14
+      - TR-14
   /auth/logout:
     post:
       operationId: postAuthLogout
       summary: Sign out
-      description: No sign-in required. Clears the session cookie.
+      description: No sign-in required; answers 204 signed in or not. Revokes the
+        session named by the session id claim of a valid access token (bearer or cookie);
+        only when the request carries no such token is the session of the refresh
+        token in the optional body revoked instead, so a body naming another session
+        is ignored when an access token is present. The revoked session's access token
+        stops working at once and its refresh token is rejected. Clears both the access_token
+        and refresh_token cookies.
       tags:
       - auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshInput'
       responses:
         '204':
           description: No Content
       x-requirements:
       - FR-5
+      - FR-241
+      - NFR-10
+      - NFR-12
   /auth/me:
     get:
       operationId: getAuthMe
       summary: Current user
-      description: The signed-in user.
+      description: 'The signed-in user; expires_at is when the access token expires.
+        Like every authenticated endpoint, answers 401 with WWW-Authenticate: Bearer
+        when the access token is expired, lacks a session id claim (any token issued
+        before session renewal) or names a session that was revoked, and updates the
+        session''s last activity time.'
       tags:
       - auth
       responses:
@@ -1207,12 +1229,88 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-4
+      - FR-246
+      - FR-239
+      - NFR-12
+      - NFR-14
+      - TR-15
+  /auth/refresh:
+    post:
+      operationId: postAuthRefresh
+      summary: Refresh the access token
+      description: 'No access token required: authenticates by the refresh token alone,
+        from the JSON body (API clients) or the refresh_token cookie (web app), whether
+        the access token is expired or missing; the body is optional. Exchanges it
+        for a new access token and a new refresh token (rotation), sets both cookies
+        again and returns the same Session body as sign-in. The just-replaced refresh
+        token is still accepted for a 30-second grace period; presenting an already-used
+        refresh token after that revokes the whole session. 401 with WWW-Authenticate:
+        Bearer and a RefreshRejection body (detail and reason): idle when the session
+        is past its idle limit (no activity for 7 days by default), expired when past
+        its absolute limit (30 days since sign-in by default), revoked when the session
+        was revoked (sign-out or refresh token reuse), invalid when the refresh token
+        is missing or unknown. Every attempt, successful or not, counts toward its
+        own per-client-address limit (30 per minute by default), separate from the
+        sign-in limit; beyond it 429 with Retry-After. 503 without a usable AUTH_JWT_SECRET.'
+      tags:
+      - auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshInput'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Too Many Requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      x-requirements:
+      - FR-237
+      - FR-238
+      - FR-239
+      - FR-240
+      - FR-242
+      - FR-244
+      - FR-246
+      - NFR-10
+      - NFR-11
+      - NFR-13
+      - NFR-14
+      - TR-14
   /auth/register:
     post:
       operationId: postAuthRegister
       summary: Register the first account
       description: No sign-in required. Registers and signs in the first account;
-        403 once any account exists.
+        403 once any account exists. Like sign-in, starts a server-side session, returns
+        the access and refresh tokens and sets both cookies.
       tags:
       - auth
       requestBody:
@@ -1256,6 +1354,8 @@ paths:
       - FR-1
       - FR-7
       - NFR-1
+      - FR-238
+      - TR-14
   /auth/registration:
     get:
       operationId: getAuthRegistration
@@ -1748,7 +1848,6 @@ paths:
       x-requirements:
       - FR-41
       - FR-42
-      - FR-43
       - FR-44
       - FR-45
       - FR-46
@@ -4255,11 +4354,14 @@ components:
       - password
     Session:
       type: object
-      description: A signed-in session.
+      description: 'A signed-in session: a short-lived access token and a long-lived,
+        rotating refresh token.'
       properties:
         access_token:
           type: string
-          description: Bearer token, also set as the access_token cookie.
+          description: Bearer token, also set as the access_token cookie. An HS256
+            JWT carrying the session id claim; expires at expires_at (access token
+            lifetime, 15 minutes by default).
         token_type:
           type: string
           enum:
@@ -4269,15 +4371,22 @@ components:
         expires_at:
           type: string
           format: date-time
+          description: When the access token expires.
         admin:
           type: boolean
           description: Whether the user is the first user.
+        refresh_token:
+          type: string
+          description: Opaque refresh token for POST /auth/refresh, also set as the
+            HttpOnly, SameSite=Strict refresh_token cookie scoped to /api/auth/refresh.
+            Replaced by every successful refresh; only its hash is stored on the server.
       required:
       - access_token
       - token_type
       - login
       - expires_at
       - admin
+      - refresh_token
     Profile:
       type: object
       description: The signed-in user.
@@ -6213,6 +6322,39 @@ components:
       - checks
       - fix_round
       - pushed_outside
+    RefreshInput:
+      type: object
+      description: The refresh token of an API client. The web app sends no body (or
+        an empty object) and relies on the refresh_token cookie.
+      properties:
+        refresh_token:
+          type: string
+          description: The refresh token returned by sign-in, registration or the
+            last refresh; when present it is used instead of the refresh_token cookie.
+    RefreshRejection:
+      type: object
+      description: 'The 401 body of POST /auth/refresh: why the session could not
+        be renewed. Sent with WWW-Authenticate: Bearer.'
+      properties:
+        detail:
+          type: string
+          description: Human-readable reason, such as that the session expired and
+            the user must sign in again.
+        reason:
+          type: string
+          enum:
+          - idle
+          - expired
+          - revoked
+          - invalid
+          description: 'idle: no activity for longer than the idle limit (7 days by
+            default); expired: the absolute limit (30 days since sign-in by default)
+            has passed; revoked: the session was signed out or revoked, including
+            because an already-used refresh token was presented after the grace period;
+            invalid: no refresh token was sent, or it is unknown.'
+      required:
+      - detail
+      - reason
     Error:
       type: object
       properties:

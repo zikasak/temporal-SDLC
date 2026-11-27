@@ -13,7 +13,11 @@ export function userRecord(value: unknown): User {
     admin: (value as User).admin === true };
 }
 
-export default function Login({ onSignedIn }: { onSignedIn: (user: User) => void }) {
+/** notice: why the user has to sign in again, such as an expired session. */
+export default function Login({ onSignedIn, notice = "" }: {
+  onSignedIn: (user: User) => void;
+  notice?: string;
+}) {
   const [login, setLogin] = useState("");
   const [password, setPassword] = useState("");
   const [repeated, setRepeated] = useState("");
@@ -72,6 +76,7 @@ export default function Login({ onSignedIn }: { onSignedIn: (user: User) => void
     <header className="page-heading">
       <h1>{registering ? "Create the first account" : "Sign in"}</h1>
       {registering && <p className="page-intro">No one has an account yet. This one will register everyone else.</p>}
+      {notice && !registering && <p className="page-intro" role="status">{notice}</p>}
     </header>
     <section className="github-settings" aria-busy={busy}>
       <form className="message-form login-form" onSubmit={submit}>
