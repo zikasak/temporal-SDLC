@@ -217,6 +217,26 @@ requirements are not tested, and no test is written that would only check its ow
 existing tests are unaffected: this change adds a response field and no endpoint, parameter or
 status code.
 
+## Task kind recorded in the interview (FR-224 to FR-236)
+
+- `GET /requirements/intake` was removed (FR-227). `test_intake_lists_every_kind_of_task`
+  was deleted, and the sign-in check in `test_auth.py::test_endpoints_require_sign_in` uses
+  `/auth/users` now instead of the intake. `tests/test_task_kind_in_interview.py` checks that
+  the intake answers 404 to a signed-in user. The contract does not say what an anonymous
+  request to the removed route answers, so that is not tested.
+- `POST /requirements/sessions` takes only `repository` (`full_name`, `branch`) and `task`.
+  Any other field, including the removed `kind` and `answers`, answers 422. Older tests that
+  send `kind`/`answers` and expect 422 still hold under this rule, so they are kept unchanged.
+  A body with just the three fields must pass validation. Without GitHub the service can't
+  reach the repository, so 404, 409 or 503 (with a `detail`) is accepted, and 201 when it can.
+  The suite reads 401 for an anonymous request as taking priority over body validation
+  (FastAPI resolves the sign-in dependency first). Whether a blank task is rejected is not
+  documented, so it is not tested.
+- Proposing and recording the kind (`set_task_kind`), `RequirementsSession.kind`, finalize
+  answering 409 while no kind is recorded, the children created at finalize per kind, idle
+  sessions, the `skipped` status and task flow closing all need a running interview (GitHub,
+  Temporal and an LLM), so they are not tested.
+
 ## Requirements review, settings and the `origin` filter
 
 - `tests/test_requirements_review.py` (FR-144 to FR-147, FR-153, FR-157, FR-158, FR-168, FR-169):
