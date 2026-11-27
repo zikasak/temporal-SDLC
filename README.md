@@ -44,6 +44,17 @@ docker compose -f backend/docker-compose.yml up
 
 Then install the backend dependencies and start a worker, the API and the frontend, as described in [frontend/README.md](frontend/README.md#start-locally). Set `AUTH_JWT_SECRET` (at least 32 characters) in `backend/.env` before signing in, and create the first account on the sign-in page.
 
+Sign-in sessions are kept on the server and renewed with rotating refresh tokens. Their settings, in `backend/.env` (see `backend/.env.example`):
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `AUTH_ACCESS_TOKEN_TTL_MINUTES` | 15 minutes | Lifetime of an access token; replaces `AUTH_TOKEN_TTL_HOURS`, which is no longer read. |
+| `AUTH_SESSION_IDLE_DAYS` | 7 days | A session without activity for this long can no longer be refreshed. |
+| `AUTH_SESSION_MAX_DAYS` | 30 days | A session can no longer be refreshed this long after its sign-in. |
+| `AUTH_REFRESH_ATTEMPTS_PER_MINUTE` | 30 per minute | `POST /auth/refresh` attempts per client address, separate from the sign-in limit. |
+
+Tokens issued before sessions were tracked are rejected, so every user signs in once again after upgrading.
+
 ### On Coolify
 
 Deploy `docker-compose.coolify.yml`, configure the provider keys (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`), `AUTH_JWT_SECRET` and the S3 storage (`S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`; `S3_ENDPOINT_URL` defaults to `https://s3.zikasak.uk`) in Coolify, and create the first account before exposing the deployment. For ChatGPT OAuth models see [Pi OAuth in Coolify](docs/pi-oauth.md). Agent containers cannot reach private addresses; if the OpenAI-compatible endpoint in Settings is on one (such as `http://192.168.1.191:1234/v1`), set `SANDBOX_ALLOWED_PRIVATE` to its `address:port` (comma-separated for several) and redeploy the `sandbox` service.

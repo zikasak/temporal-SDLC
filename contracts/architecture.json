@@ -5,6 +5,9 @@
       "responsibilities": [
         "React and TypeScript single-page app in frontend/, built with Vite and served by nginx in deployment",
         "Sign-in, registration of the first account and user administration",
+        "Keeps the session alive: calls POST /auth/refresh once 80% of the access token's lifetime (from sign-in or the last refresh to its expires_at) has passed, 12 minutes for the 15-minute default, and on a 401 from an API request refreshes once and retries that request a single time",
+        "Runs at most one refresh at a time across all its open tabs: tabs coordinate through the browser's Web Locks API and share the refresh's result through a BroadcastChannel, so other tabs and concurrent 401 retries wait for and reuse it",
+        "When a refresh is rejected, shows the sign-in form with a short 'session expired' notice and returns the user to the page they were on after signing in again",
         "Start form of a requirements interview asks only for the repository, the branch and what needs to be done; it no longer loads an intake or asks for the kind of task and per-kind answers",
         "Flows page: lists top-level task flows (by their current name) and chats, and a task flow's requirements or onboarding interview, requirements review, architecture, API design and delivery children with pending, skipped and linked-from-another-task marks (a requirements task flow lists only its requirements child until it is finalized); opens chats, sessions and onboardings in a panel; the Requirements and Onboarding filters list task flows of that origin through the origin filter, and old-shape requirements and onboarding flows from before this change are shown only in the All view",
         "Requirements session panel shows the kind of task currently recorded, or 'not set yet' while none is, updated as the interviewer records or changes it, and shows the 409 detail when finalizing without a kind",
@@ -22,10 +25,11 @@
       "name": "HTTP API",
       "responsibilities": [
         "FastAPI application (app.api.main) exposing the auth, chat, requirements, architecture, API design, onboarding, workflows, settings and GitHub connector routes",
-        "Requires a signed-in user on every router except auth and the GitHub webhook endpoint",
+        "Requires a valid access token of an active session on every router except sign-in, registration, its status, sign-out, POST /auth/refresh and the GitHub webhook endpoint; POST /auth/refresh authenticates by the refresh token alone, from the path-scoped refresh_token cookie or the JSON body",
+        "Auth routes set and clear both the access_token cookie and the refresh_token cookie (HttpOnly, SameSite=Strict, path /api/auth/refresh) and also return the refresh token in the JSON body for API clients",
         "Validates input, bounds request sizes and maps Temporal and storage failures to 503 and session errors to 404/409/422",
         "Starts, queries, signals and updates Temporal workflows for each session through the session services",
-        "Creates the database schemas at startup (including the model settings table and the OpenAI endpoint storage), runs the one-time model settings migration of old openai defaults to pi, and runs background loops: expired-document cleanup, Pi OAuth credential refresh, recovery of interrupted webhook mentions and deletion of superseded OpenAI endpoint versions no open execution pins (looked up by the OpenAIEndpointVersion search attribute)",
+        "Creates the database schemas at startup (including the auth sessions table, the model settings table and the OpenAI endpoint storage), runs the one-time model settings migration of old openai defaults to pi, and runs background loops: expired-document cleanup, expired and revoked auth session cleanup, Pi OAuth credential refresh, recovery of interrupted webhook mentions and deletion of superseded OpenAI endpoint versions no open execution pins (looked up by the OpenAIEndpointVersion search attribute)",
         "At startup, cancels every still-running old-shape OnboardingWorkflow (top-level, without a parent task flow) started before this change; the step is idempotent, so later startups find none",
         "Settings routes: return the OpenAI endpoint section shaped by role (base URL, display name and whether a key is set for the administrator; only the display name for anyone else), answer 403 to a non-administrator whose PUT contains the openai_endpoint section, and map a failed endpoint check or a changed base URL without a new key to 422, a blocked removal to 409, a removal with no endpoint saved to success and a missing SETTINGS_ENCRYPTION_KEY to 503"
       ]
@@ -35,8 +39,14 @@
       "responsibilities": [
         "Registers the first account as administrator and lets the administrator create and list accounts (app.auth)",
         "Hashes passwords with salted scrypt and verifies them at sign-in",
-        "Issues and checks HS256 JWT session tokens signed with AUTH_JWT_SECRET, sent as bearer tokens or the HttpOnly access_token cookie",
-        "Rate-limits sign-in and registration attempts per client address"
+        "Starts a server-side session at sign-in and first-account registration, with its start time and last activity time, and issues a short-lived HS256 JWT access token signed with AUTH_JWT_SECRET carrying the session id claim, sent as a bearer token or the HttpOnly access_token cookie, together with a long-lived opaque refresh token",
+        "Keeps sessions and their refresh tokens in PostgreSQL (app.auth.sessions), storing only a SHA-256 hash of each refresh token, never the token itself; a user's sessions are deleted with the user's account (foreign key cascade), so its tokens stop working at once",
+        "On every authenticated request, checks the access token's signature, expiry and session id claim and that its session still exists and is not revoked, rejecting tokens without a session id claim (issued before this change), and updates the session's last activity time, writing it at most once a minute per session (the write is skipped while the stored time is fresher)",
+        "Exchanges a refresh token at POST /auth/refresh for a new access token and a rotated refresh token, refusing a session past its idle limit or its absolute limit or one that is revoked; accepts the just-replaced refresh token for a grace period fixed at 30 seconds in code and revokes the whole session when an already-used refresh token is presented after it",
+        "Revokes the session named by the access token's session id claim, or by a refresh token in the request body, at sign-out",
+        "Rate-limits sign-in and registration attempts (AUTH_LOGIN_ATTEMPTS_PER_MINUTE), and separately every refresh attempt (AUTH_REFRESH_ATTEMPTS_PER_MINUTE), per client address with the in-process sliding-window attempt limiter",
+        "Reads AUTH_ACCESS_TOKEN_TTL_MINUTES (default 15, replacing AUTH_TOKEN_TTL_HOURS, which is no longer read), AUTH_SESSION_IDLE_DAYS (default 7), AUTH_SESSION_MAX_DAYS (default 30) and AUTH_REFRESH_ATTEMPTS_PER_MINUTE (default 30) from the backend configuration (app.config), documented in README.md and backend/.env.example",
+        "Deletes a session one day after it was revoked or passed its idle or absolute limit, run from the API's background cleanup"
       ]
     },
     {
@@ -196,17 +206,17 @@
     {
       "source": "Web client",
       "target": "HTTP API",
-      "description": "JSON (and multipart for chat attachments) over HTTP under /api through the frontend's proxy, with the access_token cookie; the client polls sessions and workflow lists for progress."
+      "description": "JSON (and multipart for chat attachments) over HTTP under /api through the frontend's proxy, with the access_token cookie on every request and the refresh_token cookie only on POST /api/auth/refresh; the client polls sessions and workflow lists for progress."
     },
     {
       "source": "HTTP API",
       "target": "Auth module",
-      "description": "In-process calls: credentials for registration and sign-in, and the bearer token or cookie of every protected request to resolve the signed-in user."
+      "description": "In-process calls: credentials for registration and sign-in, refresh tokens to exchange, session ids or refresh tokens to revoke at sign-out, and the access token (bearer or cookie) of every protected request to resolve the signed-in user and its active session."
     },
     {
       "source": "Auth module",
       "target": "PostgreSQL",
-      "description": "Users with their scrypt password hashes and creation times, read and written with psycopg."
+      "description": "Users with their scrypt password hashes and creation times, and auth sessions with their user, start time, last activity time, revocation and the hashes of the current and just-replaced refresh tokens with the replacement time, read and written with psycopg; a session check on every authenticated request and a last-activity write at most once a minute per session."
     },
     {
       "source": "HTTP API",
@@ -397,8 +407,8 @@
     },
     {
       "topic": "Authentication and secrets",
-      "choice": "HS256 JWTs via PyJWT, scrypt password hashes from hashlib, Fernet (cryptography) encryption of the GitHub App key and webhook secret with GITHUB_TOKEN_ENCRYPTION_KEY, and of the OpenAI API key with a new dedicated SETTINGS_ENCRYPTION_KEY",
-      "rationale": "NFR-2, NFR-3 and NFR-8; the user chose a dedicated key so the settings secret is independent of the GitHub connection's key."
+      "choice": "Short-lived HS256 access JWTs via PyJWT with a session id claim, opaque random refresh tokens (secrets module) stored only as SHA-256 hashes, scrypt password hashes from hashlib, Fernet (cryptography) encryption of the GitHub App key and webhook secret with GITHUB_TOKEN_ENCRYPTION_KEY, and of the OpenAI API key with a dedicated SETTINGS_ENCRYPTION_KEY",
+      "rationale": "NFR-2, NFR-8, NFR-10 to NFR-14 and TR-13 to TR-15: the access token stays a stateless JWT for its signature and expiry, while the session id lets every request check revocation; a refresh token only has to be looked up, so an opaque value whose hash is stored keeps a database leak from yielding usable tokens."
     },
     {
       "topic": "Observability",
@@ -439,6 +449,16 @@
       "topic": "Migration of in-flight requirements task flows",
       "choice": "No migration and no Temporal workflow versioning: requirements task flows already running at deploy (started with a kind, with all children created up front) are left as they are and replay against the new TaskWorkflow and RequirementsWorkflow code; any that fail on replay (non-determinism) are accepted as lost and have to be started again.",
       "rationale": "User's choice; the change is breaking anyway and keeping the old code paths behind workflow.patched is not worth it."
+    },
+    {
+      "topic": "Session storage and refresh rotation",
+      "choice": "An auth sessions table in the app schema of PostgreSQL, one row per sign-in with a cascading foreign key to its user, holding the start and last activity times, revocation and the current and just-replaced refresh token hashes with the replacement time; rotation replaces the hash in one transaction with a row lock, the replaced token stays valid for a fixed 30-second grace period, and reuse of an older token revokes the row; last activity is written at most once a minute per session; the API's background cleanup deletes a session one day after it was revoked or passed its idle or absolute limit",
+      "rationale": "NFR-10 to NFR-12 and FR-239 to FR-241: PostgreSQL is already the app's store and is reached on each request anyway; keeping the previous hash allows the grace period without a token history table; the row lock keeps concurrent refreshes from both rotating. The user chose a fixed grace period, a throttled last-activity write (one read per request; a minute is negligible against a 7-day idle limit), keeping dead sessions one day before deletion, and deleting a user's sessions with the account."
+    },
+    {
+      "topic": "Cross-tab refresh coordination",
+      "choice": "Browser Web Locks API (navigator.locks) around each refresh, with a BroadcastChannel announcing its result to the other tabs",
+      "rationale": "FR-245: a named lock serialises refreshes across tabs of the same origin without a server change, and the broadcast lets waiting tabs reuse the new expiry instead of refreshing again."
     }
   ]
 }
