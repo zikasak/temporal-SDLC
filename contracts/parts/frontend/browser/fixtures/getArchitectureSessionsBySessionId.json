@@ -1,0 +1,22 @@
+{
+  "status": 200,
+  "body": {
+    "session_id": "architecture-session-1a2b3c4d5e6f40718293a4b5c6d7e8f9",
+    "status": "interviewing",
+    "source_session_id": "requirements-session-7d3e9a1c5b8f4e2a9d6c0b1f3e5a7c9d",
+    "kind": "new_service",
+    "messages": [
+      {"role": "assistant", "content": "Here is a first draft of the architecture."}
+    ],
+    "requirements": [],
+    "lookup_requirements": [],
+    "architecture": "# Architecture",
+    "structure": {
+      "components": [{"name": "API", "responsibilities": ["Serves the HTTP API"]}],
+      "data_flows": [{"source": "Client", "target": "API", "description": "Requests and responses"}],
+      "technology_choices": [{"topic": "Storage", "choice": "PostgreSQL", "rationale": "Relational data"}]
+    },
+    "skip_declined": false,
+    "problems": []
+  }
+}

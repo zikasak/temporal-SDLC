@@ -1581,5 +1581,29 @@
     "priority": "must",
     "rationale": "User's acceptance criteria.",
     "title": "Acceptance: conflicting PR becomes mergeable"
+  },
+  {
+    "category": "functional",
+    "description": "In the requirements, architecture, API design and onboarding interviews, the listed gathered requirements, the designed API endpoints (together with the rest of the API model content) and the architecture section are hidden under a spoiler: the section heading stays visible as the toggle, the list content is hidden until the user clicks it, and a further click closes it again. The spoiler always starts closed when the interview is opened and applies whenever the interview is open.",
+    "id": "FR-221",
+    "priority": "must",
+    "rationale": "User confirmed: all four interview surfaces, always while the interview is open, only the list content hidden with the heading as the toggle, architecture interview included, always closed when opened.",
+    "title": "Hide gathered requirements and endpoints under a spoiler"
+  },
+  {
+    "category": "functional",
+    "description": "Today, when a requirements, architecture, API design or onboarding interview is opened (for example from a flow panel on the Flows page), the gathered requirements, the designed API model (endpoints, schemas, open problems, uncovered requirements) and the architecture (components, data flow, technology choices) are rendered openly below the discussion, so the interview's results are visible before the user has gone through the conversation.",
+    "id": "FR-222",
+    "priority": "must",
+    "rationale": "User: during the interview, gathered requirements or API endpoints should be hidden under a spoiler.",
+    "title": "Problem: interview results visible openly during the interview"
+  },
+  {
+    "category": "functional",
+    "description": "In each of the requirements, architecture, API design and onboarding interviews, on a desktop window with a mouse and a phone window with a tap, the section heading of the requirements, API model and architecture sections (for example the 'Requirements gathered' heading) is a toggle that stays inside the visible window and is not cut off; clicking or tapping it reveals the section's hidden list content below the heading, and clicking or tapping it again hides it again; the spoiler always starts closed when the interview is opened.",
+    "id": "FR-223",
+    "priority": "must",
+    "rationale": "User's acceptance criteria: desktop and phone, by tap/mouse; the toggle opens and closes the content.",
+    "title": "Acceptance: spoiler toggles at desktop and phone"
   }
 ]

@@ -1174,6 +1174,51 @@ h2 {
   font-size: 0.86rem;
 }
 
+.requirements-list h3.spoiler-heading {
+  margin: 0;
+}
+
+.spoiler-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  min-height: 32px;
+  margin: 0;
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.spoiler-toggle:hover .spoiler-label {
+  text-decoration: underline;
+}
+
+.spoiler-toggle:focus-visible {
+  outline: 2px solid var(--green-dark);
+  outline-offset: 2px;
+}
+
+.spoiler-marker {
+  flex: none;
+  width: 1em;
+}
+
+.spoiler-label {
+  min-width: 0;
+}
+
+.spoiler-content {
+  margin-top: 14px;
+}
+
 .requirement-group + .requirement-group {
   margin-top: 16px;
   padding-top: 14px;

@@ -12,14 +12,26 @@
         {"role": "button", "name": "FR-118"},
         {"role": "button", "name": "FR-120"},
         {"role": "button", "name": "FR-121"},
-        {"role": "button", "name": "FR-122"}
+        {"role": "button", "name": "FR-122"},
+        {"testid": "requirements-spoiler-toggle"}
       ],
       "actions": [
         {"target": {"role": "button", "name": "FR-117"}, "input": "reveal", "shows": [{"role": "tooltip"}], "operations": []},
         {"target": {"role": "button", "name": "FR-118"}, "input": "reveal", "shows": [{"role": "tooltip"}], "operations": []},
         {"target": {"role": "button", "name": "FR-120"}, "input": "reveal", "shows": [{"role": "tooltip"}], "operations": []},
         {"target": {"role": "button", "name": "FR-121"}, "input": "reveal", "shows": [{"role": "tooltip"}], "operations": []},
-        {"target": {"role": "button", "name": "FR-122"}, "input": "reveal", "shows": [{"role": "tooltip"}], "operations": []}
+        {"target": {"role": "button", "name": "FR-122"}, "input": "reveal", "shows": [{"role": "tooltip"}], "operations": []},
+        {"target": {"testid": "requirements-spoiler-toggle"}, "input": "click", "shows": [{"testid": "requirements-spoiler-content"}], "operations": []}
+      ]
+    },
+    {
+      "entry": "/?mode=architecture&session_id=architecture-session-1a2b3c4d5e6f40718293a4b5c6d7e8f9",
+      "operations": ["getAuthMe", "getWorkflows", "getArchitectureSessionsBySessionId"],
+      "elements": [
+        {"testid": "architecture-spoiler-toggle"}
+      ],
+      "actions": [
+        {"target": {"testid": "architecture-spoiler-toggle"}, "input": "click", "shows": [{"testid": "architecture-spoiler-content"}], "operations": []}
       ]
     }
   ]
