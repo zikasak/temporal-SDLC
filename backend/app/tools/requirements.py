@@ -133,10 +133,11 @@ class RequirementsContext:
 def build(ctx: RequirementsContext) -> list[BaseTool]:
     @tool
     async def set_task_kind(kind: str) -> str:
-        """Record what kind of task this is, exactly as the user named it.
+        """Record what kind of task this is, once the user has confirmed the kind you
+        proposed or named another one themselves.
 
         kind: new_service, api_change, bugfix (also any other change that leaves
-            the API as it is), or docs. Never call this with a guess.
+            the API as it is), or docs. Never call this with an unconfirmed guess.
         """
         try:
             renumbered = ctx.set_kind(kind)

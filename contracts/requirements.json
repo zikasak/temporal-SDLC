@@ -51,13 +51,6 @@
   },
   {
     "category": "functional",
-    "description": "GET /requirements/intake returns the kind question, the kinds of task, the questions asked for each kind and the task question, for the page to show before a session starts.",
-    "id": "FR-11",
-    "priority": "must",
-    "title": "Requirements intake"
-  },
-  {
-    "category": "functional",
     "description": "A finalized task is delivered: code is generated or changed, the service and its contract tests are written by separate coding agents, and verification runs the tests against the built service, repairing the failing side a bounded number of times. A bugfix's new tests must first fail against the service as the repository holds it. The session shows the delivery's progress, its agents' questions can be answered, and a failed stage can be retried.",
     "id": "FR-14",
     "priority": "must",
@@ -732,14 +725,6 @@
   },
   {
     "category": "functional",
-    "description": "A requirements session starts in a chosen repository and branch from the intake: the kind of task (new service, API change, bugfix or documentation), the answers to that kind's questions and what needs to be done. An LLM interviewer then records requirements while the user sends messages or answers its questions. A failed turn can be retried, and a session can be forked after any message while its flow has not completed or been cancelled.",
-    "id": "FR-114",
-    "priority": "must",
-    "rationale": "Replaces FR-10: the user confirmed forking works only while the session's flow is not closed (FR-112).",
-    "title": "Specify a task in a requirements session"
-  },
-  {
-    "category": "functional",
     "description": "The web client shows every flow on one Flows page instead of separate Chat, Requirements, API design, Onboarding and Workflows tabs. The page lists the top-level flows; opening one lists its child flows and steps with their statuses, highlights each one of a flow that has not completed or been cancelled that is waiting for the user (unanswered questions, a coding agent's questions, open review findings or a contract decision) with a button that opens its questions, shows a completed or cancelled flow with open review findings only with an \"unresolved findings\" marker, and opens a flow's conversation, session or onboarding in a panel on the same page. New chats, requirements interviews and onboardings are started from that page.",
     "id": "FR-115",
     "priority": "must",
@@ -868,30 +853,6 @@
   },
   {
     "category": "functional",
-    "description": "A pending child flow that will never run, such as an architecture stage whose skip was confirmed or the stages after a requirements session whose document was written because it was idle for a day, closes with a new \"skipped\" status, shown by GET /workflows and on the Flows page.",
-    "id": "FR-135",
-    "priority": "must",
-    "rationale": "User chose a \"skipped\" status.",
-    "title": "Skipped status for children that will never run"
-  },
-  {
-    "category": "functional",
-    "description": "The top-level task flow stays open until every one of its child flows has closed, and then closes with the status of its delivery child (completed when the pull request was merged, cancelled when it was closed without merging); when its delivery child was skipped, the task flow closes as cancelled.",
-    "id": "FR-136",
-    "priority": "must",
-    "rationale": "User chose: the task flow takes the delivery's status, and is cancelled when the task ends without a delivery.",
-    "title": "Task flow closes with its delivery's status"
-  },
-  {
-    "category": "functional",
-    "description": "Forking a requirements, architecture or API design session starts a new top-level task flow of its own, which holds the forked session, links to the original task's earlier stages and pending children for the stages after the forked one; the original task flow and its children are left unchanged.",
-    "id": "FR-137",
-    "priority": "must",
-    "rationale": "User chose: every fork starts a new task flow with the forked session, links to the earlier stages and pending later stages.",
-    "title": "A fork starts a new task flow"
-  },
-  {
-    "category": "functional",
     "description": "GET /workflows?parent=<forked task flow> lists the original task's earlier stages that the fork links to as children of the forked task flow too, each marked as linked from another task flow; the Flows page shows them with that mark.",
     "id": "FR-140",
     "priority": "must",
@@ -972,35 +933,11 @@
   },
   {
     "category": "functional",
-    "description": "When a requirements session's document is written because the session was idle for a day, no requirements review runs: the document is written, and the review and the later stages close as skipped.",
-    "id": "FR-152",
-    "priority": "must",
-    "rationale": "User chose: no review; the document is written and later stages are skipped, as today.",
-    "title": "No review for a session written because it was idle"
-  },
-  {
-    "category": "functional",
     "description": "When an onboarding is finalized, an LLM reviews its drafted requirements for contradictions before the onboarding proceeds; each contradiction found is asked to the user as a question in the onboarding interview, and after the answers the review runs again, knowing what changed.",
     "id": "FR-153",
     "priority": "must",
     "rationale": "User chose: yes, in the onboarding interview before finalizing.",
     "title": "Onboarding requirements are reviewed for contradictions"
-  },
-  {
-    "category": "functional",
-    "description": "Finalizing a session writes its requirements document, available for download once ready; for a new service, API change or bugfix it is written only after the requirements review finds no contradictions or the user continues despite them. A task on an existing service (API change, bugfix or documentation) is specified against the contract the repository holds in contracts/, which includes contracts/architecture.md; a repository without a readable contract, including one without contracts/architecture.md, cannot be finalized for one.",
-    "id": "FR-154",
-    "priority": "must",
-    "rationale": "Replaces FR-92: the user confirmed the document is written only after the review passes.",
-    "title": "Finalize requirements"
-  },
-  {
-    "category": "functional",
-    "description": "When the task flow starts, it creates the requirements, requirements review, architecture, API design and delivery child flows for a new service or an API change, the requirements, requirements review and delivery child flows for a bugfix, and the requirements and delivery child flows for a documentation change.",
-    "id": "FR-155",
-    "priority": "must",
-    "rationale": "Replaces FR-130: the user confirmed a review child is created up front for new service, API change and bugfix.",
-    "title": "Children created up front per task kind"
   },
   {
     "category": "functional",
@@ -1605,5 +1542,109 @@
     "priority": "must",
     "rationale": "User's acceptance criteria: desktop and phone, by tap/mouse; the toggle opens and closes the content.",
     "title": "Acceptance: spoiler toggles at desktop and phone"
+  },
+  {
+    "category": "functional",
+    "description": "A requirements session starts without the kind of task. In the conversation the LLM interviewer proposes a kind from \"what needs to be done\" and records it with set_task_kind only after the user has confirmed it or named another kind.",
+    "id": "FR-224",
+    "priority": "must",
+    "rationale": "User: the kind is set during the conversation; chose that the LLM proposes it and records it only after the user confirms.",
+    "title": "Task kind proposed and confirmed during the interview"
+  },
+  {
+    "category": "functional",
+    "description": "The fixed questions asked today for each kind of task before a session starts (for example \"Which part of the API does the change touch?\") are no longer asked, either before the session or as fixed questions in it; the LLM interviewer gathers what it needs in the conversation.",
+    "id": "FR-225",
+    "priority": "must",
+    "rationale": "User chose to drop them and let the LLM gather what it needs.",
+    "title": "Per-kind starting questions dropped"
+  },
+  {
+    "category": "functional",
+    "description": "POST /requirements/sessions takes only the repository, its branch and \"what needs to be done\" (task); it no longer accepts the kind and answers fields, and the web client's start form asks only for these three.",
+    "id": "FR-226",
+    "priority": "must",
+    "rationale": "User chose: repository, branch and \"What needs to be done\"; remove the kind and answers fields (breaking).",
+    "title": "Session start takes repository, branch and the task"
+  },
+  {
+    "category": "functional",
+    "description": "GET /requirements/intake is removed and answers 404.",
+    "id": "FR-227",
+    "priority": "must",
+    "rationale": "User chose to remove the endpoint (breaking).",
+    "title": "Intake endpoint removed"
+  },
+  {
+    "category": "functional",
+    "description": "A requirements session starts in a chosen repository and branch from \"what needs to be done\". An LLM interviewer then records the kind of task (new service, API change, bugfix or documentation) and the requirements while the user sends messages or answers its questions. A failed turn can be retried, and a session can be forked after any message while its flow has not completed or been cancelled.",
+    "id": "FR-228",
+    "priority": "must",
+    "rationale": "Replaces FR-114: the user confirmed the session starts from the task alone and the kind is recorded in the interview.",
+    "title": "Specify a task in a requirements session"
+  },
+  {
+    "category": "functional",
+    "description": "When the task flow starts, it creates only the requirements child flow. When the requirements session is finalized, it creates the requirements review, architecture, API design and delivery child flows for a new service or an API change, the requirements review and delivery child flows for a bugfix, and the delivery child flow for a documentation change, according to the kind recorded at that moment.",
+    "id": "FR-229",
+    "priority": "must",
+    "rationale": "Replaces FR-155: the user chose to create the other children only when the requirements are finalized.",
+    "title": "Child flows created at finalize per task kind"
+  },
+  {
+    "category": "functional",
+    "description": "The kind of task can be changed in the interview any number of times until the session is finalized, and the interview follows the kind's guidance from then on; finalizing a requirements session that has no kind recorded answers 409 with a detail saying the kind is missing.",
+    "id": "FR-230",
+    "priority": "must",
+    "rationale": "User chose: the kind can change until finalize; finalize without a kind answers 409.",
+    "title": "Kind can change until finalize; finalize needs a kind"
+  },
+  {
+    "category": "functional",
+    "description": "When a requirements session's document is written because the session was idle for a day, the document is written whether or not a kind is recorded, no requirements review runs, and the task flow creates no further child flows.",
+    "id": "FR-231",
+    "priority": "must",
+    "rationale": "Replaces FR-152: the user chose to write the document as today and create no further children, with or without a kind.",
+    "title": "Idle session writes its document and creates no further stages"
+  },
+  {
+    "category": "functional",
+    "description": "A pending child flow that will never run, such as an architecture stage whose skip was confirmed, closes with a \"skipped\" status, shown by GET /workflows and on the Flows page.",
+    "id": "FR-232",
+    "priority": "must",
+    "rationale": "Replaces FR-135: after an idle session no later children exist to skip.",
+    "title": "Skipped status for children that will never run"
+  },
+  {
+    "category": "functional",
+    "description": "The top-level task flow stays open until every one of its child flows has closed, and then closes with the status of its delivery child (completed when the pull request was merged, cancelled when it was closed without merging); when its delivery child was skipped, or it has no delivery child because the requirements document was written after the session was idle for a day, the task flow closes as cancelled.",
+    "id": "FR-233",
+    "priority": "must",
+    "rationale": "Replaces FR-136: the user chose that a task flow without a delivery child after an idle session closes as cancelled.",
+    "title": "Task flow closes with its delivery's status"
+  },
+  {
+    "category": "functional",
+    "description": "The requirements session's panel on the Flows page shows the kind of task currently recorded, or \"not set yet\" while none is recorded, and shows the new kind after the interviewer records or changes it.",
+    "id": "FR-234",
+    "priority": "must",
+    "rationale": "User chose to show the recorded kind or \"not set yet\".",
+    "title": "Recorded kind shown in the session panel"
+  },
+  {
+    "category": "functional",
+    "description": "Forking a requirements, architecture or API design session starts a new top-level task flow of its own, which holds the forked session and links to the original task's earlier stages; the original task flow and its children are left unchanged. A forked architecture or API design session's task flow gets pending children for the stages after the forked one at once, while a forked requirements session's task flow starts with only its requirements child and creates the rest at finalize from the kind recorded then, like a new session.",
+    "id": "FR-235",
+    "priority": "must",
+    "rationale": "Replaces FR-137: the user chose that a forked requirements session creates its later children at finalize, like a new session.",
+    "title": "A fork starts a new task flow"
+  },
+  {
+    "category": "functional",
+    "description": "Finalizing a session writes its requirements document, available for download once ready; when the session is finalized as a new service, API change or bugfix, the document is written only after the requirements review finds no contradictions or the user continues despite them. This review rule applies only to finalizing: a document written because the session was idle for a day is written without a review, whatever kind is recorded. A task on an existing service (API change, bugfix or documentation) is specified against the contract the repository holds in contracts/, which includes contracts/architecture.md; a repository without a readable contract, including one without contracts/architecture.md, cannot be finalized for one.",
+    "id": "FR-236",
+    "priority": "must",
+    "rationale": "Replaces FR-154: resolving C-1, the user chose that the review rule applies only to finalizing, and an idle session's document is written without a review.",
+    "title": "Finalize requirements"
   }
 ]

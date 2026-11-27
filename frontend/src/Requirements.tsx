@@ -550,9 +550,9 @@ export default function Requirements() {
       <header className="page-heading">
         <h1>Requirements interview</h1>
         <p className="page-intro">
-          Choose the kind of task, answer a few questions about it, and describe it. The
-          LLM then asks follow-up questions, records requirements as you go, and writes
-          them up as a document. A bugfix is then delivered from here: regression tests,
+          Choose the repository and say what needs to be done. The LLM proposes the kind
+          of task for you to confirm, asks follow-up questions, records requirements as
+          you go, and writes them up as a document. A bugfix is then delivered from here: regression tests,
           the fix, and a new branch.
         </p>
       </header>
@@ -705,7 +705,7 @@ export default function Requirements() {
 
           {session && (
             <p className="request-id">
-              Task kind <strong>{session.kind ? kindLabels[session.kind] : "Not chosen yet"}</strong>
+              Task kind <strong>{session.kind ? kindLabels[session.kind] : "not set yet"}</strong>
             </p>
           )}
 

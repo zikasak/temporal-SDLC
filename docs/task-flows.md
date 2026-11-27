@@ -5,12 +5,24 @@ Every new requirements interview and every onboarding starts a top-level **task 
 of them is a child of another stage. The task flow carries the `TaskOrigin` search attribute
 (`requirements` or `onboarding`), which GET /workflows returns as `origin` and filters on.
 
-| Kind of task | Stages created when the task flow starts |
+A requirements session starts from the repository, its branch and what needs to be done
+alone; its task flow creates only the requirements stage at start. The interviewer proposes
+the kind of task and records it (`set_task_kind`) once the user confirms it or names another;
+it can change until the session is finalized, and finalizing without a kind answers 409.
+When the session is finalized (with the first review round, or with the document of a
+documentation task), the task flow creates the other stages for the kind recorded then:
+
+| Kind of task | Stages created at finalize |
 | --- | --- |
-| New service, API change | requirements, requirements review, architecture, API design, delivery |
-| Bugfix | requirements, requirements review, delivery |
-| Documentation | requirements, delivery |
-| Onboarding | onboarding interview, requirements review, delivery |
+| New service, API change | requirements review, architecture, API design, delivery |
+| Bugfix | requirements review, delivery |
+| Documentation | delivery |
+| Onboarding | onboarding interview, requirements review, delivery (all at start) |
+
+A session written because it was idle for a day creates no further stages, and its task
+flow closes as cancelled. A fork of a requirements session starts like a new session, with
+the kind recorded at the fork point; a fork of an architecture or API design session gets
+pending stages for the stages after it at once.
 
 ## The requirements review
 

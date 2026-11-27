@@ -138,7 +138,7 @@ async def workers(env, **options):
     activities = FakeActivities()
     async with Worker(
         env.client, task_queue=TASK_QUEUE,
-        # Sessions started from the intake or forked are stages of a task flow.
+        # Sessions started from a task or forked are stages of a task flow.
         workflows=[TaskWorkflow, RequirementsWorkflow, FakeApiDesign, FakeArchitecture],
         activities=[activities.requirements_turn, activities.write_requirements_document,
                     activities.checkout_repository, activities.read_requirements_document,
@@ -353,6 +353,8 @@ class HeldArchitecture:
 
     @workflow.run
     async def run(self, state: ArchitectureState) -> None:
+        # Created at finalize without a review, it starts at once.
+        self.started = self.started or not state.pending
         await workflow.wait_condition(lambda: self.started)
         held_architectures[workflow.info().workflow_id] = True
         await workflow.wait_condition(lambda: self.finished)
@@ -467,7 +469,7 @@ async def test_kind_must_be_recorded_before_the_document_is_generated(env, worke
     await handle.execute_update(RequirementsWorkflow.answer_questions, ["Book rooms"])
     with pytest.raises(WorkflowUpdateFailedError) as refused:
         await handle.execute_update(RequirementsWorkflow.finalize)
-    assert "kind of task is not recorded" in str(refused.value.cause)
+    assert "kind of task is not set yet" in str(refused.value.cause)
 
     worker.kind = "new_service"
     await handle.execute_update(RequirementsWorkflow.send_message, "It is a new service")
@@ -480,13 +482,15 @@ async def test_kind_must_be_recorded_before_the_document_is_generated(env, worke
     assert state.document == DOCUMENT and state.kind == "new_service"
 
 
-async def test_idle_session_without_kind_fails(server, idle):
+async def test_idle_session_without_kind_writes_its_document(server, idle):
     handle = await start(server)
     idle.kind = None
     await handle.execute_update(RequirementsWorkflow.answer_questions, ["Book rooms"])
     await abandoned(handle)
-    assert idle.documents == []
-    assert (await handle.query(RequirementsWorkflow.get_state)).status == "failed"
+    assert idle.documents == [handle.id]
+    state = await handle.query(RequirementsWorkflow.get_state)
+    assert state.status == "completed" and state.kind is None
+    assert state.document == DOCUMENT and state.api_design_session_id is None
 
 
 async def test_idle_session_without_requirements_fails(server, idle):
@@ -510,37 +514,35 @@ def titles(state: RequirementsState) -> list[str]:
     return [item["title"] for item in state.requirements]
 
 
-async def start_from_intake(env, repository, task: str):
+async def start_from_task(env, repository, task: str):
     return env.client.get_workflow_handle(await service.start_session(
-        repository=repository, kind="bugfix",
-        answers=["Data storage and retrieval", "Rooms vanish"], task=task))
+        repository=repository, task=task))
 
 
-async def test_session_starts_from_the_intake(server, live, live_temporal, repository_selection):
+async def test_session_starts_from_the_task(server, live, live_temporal, repository_selection):
     live.kind = None
-    handle = await start_from_intake(server, repository_selection, "  Keep booked rooms  ")
+    handle = await start_from_task(server, repository_selection, "  Keep booked rooms  ")
     state = await wait_for_status(handle, "interviewing")
-    # The intake is the opening of the transcript, and the analyst answers it at once.
+    # What needs to be done is the user's first message, and the analyst answers it at once.
     assert [item["role"] for item in state.messages] == ["assistant", "user", "assistant"]
-    assert [item["question"] for item in state.messages[0].get("questions", [])] == [
-        "What kind of task is this?", "Which area of the service is affected?",
-        "What is the nature of the change?"]
-    assert state.messages[1]["content"] == (
-        "What kind of task is this?\n→ A bugfix or another change that leaves the API as it is"
-        "\n\nWhich area of the service is affected?\n→ Data storage and retrieval"
-        "\n\nWhat is the nature of the change?\n→ Rooms vanish"
-        "\n\nWhat needs to be done?\n→ Keep booked rooms")
-    # The user chose the kind, so the session records it without asking.
-    assert state.kind == "bugfix" and titles(state) == ["Keep booked rooms"]
-    await handle.terminate()
+    # No fixed questions are asked before or at the start of the interview.
+    assert not state.messages[0].get("questions")
+    assert state.messages[1]["content"] == "Keep booked rooms"
+    # The session starts without a kind: the interviewer records it once confirmed.
+    assert state.kind is None and titles(state) == ["Keep booked rooms"]
+    # The task flow creates only its requirements stage at start.
+    flow = await server.client.get_workflow_handle(state.task_flow_id).query(
+        "get_state", result_type=TaskFlowState)
+    assert list(flow.created) == ["requirements"] and flow.kind is None
+    await server.client.get_workflow_handle(state.task_flow_id).terminate()
 
 
 async def test_fork_keeps_requirements_as_they_were_at_the_message(server, live, live_temporal, repository_selection):
-    source = await start_from_intake(server, repository_selection, "A")
+    source = await start_from_task(server, repository_selection, "A")
     # No message is accepted until the repository is checked out.
     assert (await wait_for_status(source, "interviewing")).repository == repository_selection
     await source.execute_update(RequirementsWorkflow.send_message, "B")
-    # intake, A, Question 1?, B, Question 2?
+    # greeting, A, Question 1?, B, Question 2?
 
     fork = server.client.get_workflow_handle(await service.fork_session(source.id, 2))
     state = await wait_for_status(fork, "interviewing")

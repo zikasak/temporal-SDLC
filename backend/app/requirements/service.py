@@ -9,8 +9,8 @@ from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, RetryStage
 from app.github.models import RepositorySelection
 from app.requirements.lookup import requirements_session_lookup
-from app.requirements.models import DIRECT_KINDS, RequirementsState, TaskKind
-from app.requirements.prompt import intake_messages, opening_message
+from app.requirements.models import DIRECT_KINDS, RequirementsState
+from app.requirements.prompt import opening_message, task_messages
 from app.requirements_review.models import forked_review, review_id, review_view
 from app.tasks.models import FORK_SUFFIX, TaskFlowState
 from app.tasks.service import (
@@ -27,19 +27,19 @@ logger = logging.getLogger(__name__)
 
 async def create_session(
     state: RequirementsState | None = None, *, repository: RepositorySelection | None = None,
-    kind: TaskKind | None = None, answers: list[str] | None = None, task: str = "",
-    name: str = "", origin: str = "new", task_queue: str | None = None,
+    task: str = "", name: str = "", origin: str = "new", task_queue: str | None = None,
 ) -> dict[str, str | None]:
     """Start a new top-level task flow whose requirements stage interviews in `repository`
-    from the user's answers to the intake questions of `kind` and their `task`, or from a
-    prepared `state` such as a fork. Returns the session's and the task flow's IDs."""
+    from what needs to be done (`task`), without a kind of task, which the interviewer
+    proposes and records once the user confirms it; or from a prepared `state` such as a
+    fork. The task flow creates only this requirements stage at start, and its other
+    stages when the session is finalized. Returns the session's and the task flow's IDs."""
     if state is None:
         if repository is None:
             raise ValueError("A requirements session needs a repository.")
-        if kind is None or answers is None or not task.strip():
-            raise ValueError("A requirements session starts from the intake questions.")
-        state = RequirementsState(messages=intake_messages(kind, answers, task), kind=kind,
-                                  repository=repository)
+        if not task.strip():
+            raise ValueError("Say what needs to be done.")
+        state = RequirementsState(messages=task_messages(task), repository=repository)
     ids = new_ids()
     session_id = ids["requirements_session_id"]
     state.task_flow_id = ids["task_flow_id"]
@@ -65,11 +65,10 @@ async def create_session(
 
 async def start_session(
     state: RequirementsState | None = None, *, repository: RepositorySelection | None = None,
-    kind: TaskKind | None = None, answers: list[str] | None = None, task: str = "",
+    task: str = "",
 ) -> str:
     """create_session, returning the session's ID alone."""
-    created = await create_session(state, repository=repository, kind=kind,
-                                   answers=answers, task=task)
+    created = await create_session(state, repository=repository, task=task)
     return created["session_id"]
 
 
@@ -93,14 +92,21 @@ async def fork(session_id: str, message_index: int) -> dict[str, str]:
         activity="requirements_turn",
         key="requirements",
     )
+    # The kind recorded at the fork point, None when the interviewer had recorded none.
+    kind = await state_at_message(
+        session_id, source.messages, message_index,
+        input_type=RequirementsState | None,
+        default_input=RequirementsState(messages=[opening_message()]),
+        activity="requirements_turn",
+        key="kind",
+    )
     name = await derived_name(
         source.task_flow_id, fork_name_source(source.requirements, "Requirements"),
         FORK_SUFFIX, await connect_temporal())
     created = await create_session(RequirementsState(
         messages=messages,
         requirements=requirements,
-        # The choice is kept even when the fork point precedes it; the user can change it.
-        kind=source.kind,
+        kind=kind,
         retired=source.retired,
         repository=source.repository,
         forked_from={"session_id": session_id, "message_index": message_index},
