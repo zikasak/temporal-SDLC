@@ -524,7 +524,9 @@ async def check_page_conformance(contract: BrowserContract, repository: Path, pr
         await docker_agents.docker('run', '--rm', *CONSTRAINTS, image, timeout=CHECK_SECONDS,
                                    log_path=log_dir / 'page-conformance.log')
     except RuntimeError as exc:
-        raise RuntimeError('The page contract does not match the web client: '
+        # What the contract says that the client does not show: the routing's agent,
+        # told it, can correct it.
+        raise PageContractError('The page contract does not match the web client: '
                            f'{str(exc).removeprefix("Docker run failed: ")[-MESSAGE_CHARS:]}'
                            ) from exc
     finally:

@@ -164,6 +164,16 @@ them unobservable there for the `reason` it gives, having seen only the stubs, t
 contract or the API. Read each reason as what the stubs or the page contract lacked:
 route the criterion again with a contract that gives the author what it names, at that
 seam or page or at a better one, and route it `unobservable` only when none could.
+
+When the input has a `rejected` entry, /workspace/routing already holds the routing you
+wrote before (routes.json and the contracts), and the host rejected it for the message the
+entry gives: checked against the code or the built web client, which only the host can
+build and run. Correct exactly what it names and keep the rest. An element that "is
+present already" is not one the change adds: drop it from the route's `added`. An element
+that "is not present" is not shown as the page's fixtures render it: read the client's
+source for the role and accessible name it really renders from those fixtures, and correct
+the element, the fixtures or the entry, or list the element in `added` when the change
+adds it.
 """
 
 PARTS_PROMPT = """

@@ -169,6 +169,11 @@ class PageContractError(RuntimeError):
     """Why a page contract, or a route's page, is unusable."""
 
 
+class RoutingRejected(RuntimeError):
+    """Why the host rejected the contract the routing's agent wrote, for what another run
+    of the agent, told it, can correct: never what the repository itself lacks."""
+
+
 def element_key(element: Element | dict[str, str]) -> str:
     """How an element is named in messages, added seams and the conformance check, as
     check-pages.mjs names it: `role=button[name="FR-1"]`, `role=tooltip` or
