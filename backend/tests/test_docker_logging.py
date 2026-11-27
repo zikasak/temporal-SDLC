@@ -22,7 +22,9 @@ async def test_docker_preserves_redacted_bounded_diagnostics_and_reaps_process(
         'print(os.environ["OPENAI_API_KEY"], flush=True)\n'
         'print(os.environ["PRIVATE_TOKEN"], file=sys.stderr, flush=True)\n'
         'print("compiler or Docker diagnostics", file=sys.stderr, flush=True)\n'
-        f'pathlib.Path({str(ready)!r}).write_text(str(os.getpid()))\n'
+        # Written whole, then renamed: the test polls for it and must never read it empty.
+        f'pathlib.Path({str(ready) + ".tmp"!r}).write_text(str(os.getpid()))\n'
+        f'os.replace({str(ready) + ".tmp"!r}, {str(ready)!r})\n'
         'if os.environ["OUTCOME"] in {"timeout", "cancel"}: time.sleep(10)\n'
         'sys.exit(1 if os.environ["OUTCOME"] == "failure" else 0)\n'
     )
