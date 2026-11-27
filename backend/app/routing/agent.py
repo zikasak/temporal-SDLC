@@ -165,6 +165,12 @@ contract or the API. Read each reason as what the stubs or the page contract lac
 route the criterion again with a contract that gives the author what it names, at that
 seam or page or at a better one, and route it `unobservable` only when none could.
 
+An element the change adds is found by a role and name, or a testid, that nothing on the
+page has today: one the page already shows under that role and name (a navigation button
+named like a new toggle, say) is found instead, and the check rejects it as present
+already. Read the page's source before you name one, and give it a testid when its name is
+taken.
+
 When the input has a `rejected` entry, /workspace/routing already holds the routing you
 wrote before (routes.json and the contracts), and the host rejected it for the message the
 entry gives: checked against the code or the built web client, which only the host can
@@ -382,6 +388,8 @@ def _check_routing(root: Path, seam_modules: bool) -> None:
         raise RuntimeError('routes.json does not hold a list of routes')
     # The seam modules no stub matches, by the contract they were looked up in.
     unmatched: dict[Path, list[str]] = {}
+    # The `browser` routes by the part whose page they name.
+    browser_routes: dict[str, list[dict[str, Any]]] = {}
     for item in routes['routes']:
         if isinstance(item, dict) and item.get('route') == 'browser':
             page = item.get('page')
@@ -394,6 +402,7 @@ def _check_routing(root: Path, seam_modules: bool) -> None:
                                        f'{PARTS}/{part}/{BROWSER}/{name} is missing')
             if seam_modules:
                 _check_page(root, part, item)
+                browser_routes.setdefault(part, []).append(item)
             continue
         if not isinstance(item, dict) or item.get('route') != 'component':
             continue
@@ -417,6 +426,8 @@ def _check_routing(root: Path, seam_modules: bool) -> None:
                     module.strip(), modules) is None:
                 unmatched.setdefault(components, []).append(
                     f'{module.strip()[:200]} (seam of {requirement})')
+    for part, items in browser_routes.items():
+        _check_unrouted(root, part, items)
     if unmatched and seam_modules:
         problems = []
         for components, names in unmatched.items():
@@ -495,6 +506,44 @@ def _check_page(root: Path, part: str, item: dict[str, Any]) -> None:
             f'of {browser}/pages.json does not declare: {", ".join(missing)[:400]}. Declare '
             'each in the page\'s `elements` (or an action\'s `shows`), and list those the '
             'page lacks yet in the route\'s `added`, or use elements the page declares.')
+
+
+def _pages(file: Path) -> dict[str, dict[str, Any]]:
+    """The pages of a pages.json by entry; none when it is absent or unreadable."""
+    try:
+        data = json.loads(file.read_text())
+    except (OSError, ValueError):
+        return {}
+    listed = data.get('pages') if isinstance(data, dict) else None
+    return {page['entry']: page for page in listed or []
+            if isinstance(page, dict) and isinstance(page.get('entry'), str)}
+
+
+def _check_unrouted(root: Path, part: str, items: list[dict[str, Any]]) -> None:
+    """Every element the page contract declares beyond the published one is used by a
+    route: the host checks the built client for each element no route lists in `added`
+    as present already, so one the change adds that no route names is rejected."""
+    pages = _pages(root / PARTS / part / BROWSER / 'pages.json')
+    published = _pages(root / 'repository' / 'contracts' / PARTS / part / BROWSER / 'pages.json')
+    used: dict[str, set[str]] = {}
+    for item in items:
+        page = item['page']
+        used.setdefault(page.get('entry'), set()).update(
+            element_key(role) for role in page.get('roles') or [] if isinstance(role, dict))
+    unrouted = []
+    for entry, page in pages.items():
+        before = _declared(published[entry]) if entry in published else set()
+        extra = sorted(_declared(page) - before - used.get(entry, set()))
+        if extra:
+            unrouted.append(f'page {entry}: {", ".join(extra)}')
+    if unrouted:
+        raise RuntimeError(
+            f'{PARTS}/{part}/{BROWSER}/pages.json declares elements the published page '
+            f'contract does not have and no route uses: {"; ".join(unrouted)[:1500]}. The '
+            'host checks the current web client for every element no route lists in '
+            '`added`, so one the change adds there fails that check. Name each in the '
+            '`roles` of a route on its page (and in `added` when the change adds it), or '
+            'remove it from pages.json.')
 
 
 def _check_python_stubs(root: Path) -> None:

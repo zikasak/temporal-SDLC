@@ -890,6 +890,20 @@ def test_the_router_is_told_while_it_runs_of_elements_its_page_contract_does_not
     with pytest.raises(RuntimeError, match='is not in parts/frontend/browser/pages.json'):
         agent.validate_completion(tmp_path)
 
+    # A page the routes never open, declaring a toggle the change adds: the host would
+    # look for it in today's client. Its published elements need no route.
+    published = tmp_path / 'repository/contracts/parts/frontend/browser'
+    published.mkdir(parents=True)
+    old_page = {'entry': '/?mode=api-design', 'elements': [{'role': 'heading'}]}
+    (published / 'pages.json').write_text(json.dumps({'pages': [old_page]}))
+    new_page = {**old_page, 'elements': [{'role': 'heading'}, {'testid': 'api-toggle'}]}
+    (browser / 'pages.json').write_text(json.dumps({'pages': [page, new_page]}))
+    with pytest.raises(RuntimeError, match=re.escape(
+            'no route uses: page /?mode=api-design: testid=api-toggle')):
+        agent.validate_completion(tmp_path)
+    (browser / 'pages.json').write_text(json.dumps({'pages': [page, old_page]}))
+    agent.validate_completion(tmp_path)
+
 
 def test_a_mismatch_names_the_differing_symbols_first_and_what_a_stub_lacks_before_the_rest():
     from app.routing.components import describe_differences
