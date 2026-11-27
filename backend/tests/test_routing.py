@@ -792,6 +792,34 @@ def test_the_router_is_told_of_the_other_parts_only_when_the_repository_has_them
     agent.validate_completion(tmp_path)
 
 
+def test_the_router_is_told_while_it_runs_of_elements_its_page_contract_does_not_declare(
+        tmp_path):
+    from app.routing import agent
+    entry = '/?mode=onboarding'
+    roles = [{'testid': 'spoiler'}, {'role': 'button', 'name': 'Show'}]
+    (tmp_path / 'routes.json').write_text(json.dumps({'routes': [
+        {'requirement_id': 'FR-1', 'route': 'browser', 'reason': 'Shown on tap.',
+         'page': {'part': 'frontend', 'entry': entry, 'viewports': ['phone'],
+                  'roles': roles, 'added': [roles[0]]}}]}))
+    browser = tmp_path / 'parts/frontend/browser'
+    browser.mkdir(parents=True)
+    (browser / 'viewports.json').write_text(json.dumps(
+        {'phone': {'width': 390, 'height': 844, 'input': 'touch'}}))
+    page = {'entry': entry, 'elements': [{'role': 'button', 'name': 'Show'}]}
+    (browser / 'pages.json').write_text(json.dumps({'pages': [page]}))
+    with pytest.raises(RuntimeError, match='does not declare: testid=spoiler'):
+        agent.validate_completion(tmp_path)
+    # The host rejects it with its own message once no feedback is left.
+    agent.validate_final(tmp_path)
+    page['actions'] = [{'target': {'role': 'button', 'name': 'Show'}, 'input': 'tap',
+                        'shows': [{'testid': 'spoiler'}]}]
+    (browser / 'pages.json').write_text(json.dumps({'pages': [page]}))
+    agent.validate_completion(tmp_path)
+    (browser / 'pages.json').write_text(json.dumps({'pages': [{**page, 'entry': '/'}]}))
+    with pytest.raises(RuntimeError, match='is not in parts/frontend/browser/pages.json'):
+        agent.validate_completion(tmp_path)
+
+
 def test_a_mismatch_names_the_differing_symbols_first_and_what_a_stub_lacks_before_the_rest():
     from app.routing.components import describe_differences
     output = '\n'.join([
