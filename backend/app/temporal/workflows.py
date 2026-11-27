@@ -845,7 +845,9 @@ class RequirementsWorkflow(Interview[RequirementsState], ReviewedInterview, _Del
         self._expired = True
         # A document written because the session was idle is not reviewed.
         self._review_skipped()
-        complete = bool(self.state.kind and self.state.requirements)
+        # The document is written whatever the kind: an idle session hands nothing on,
+        # so it needs no kind, only something to write down.
+        complete = bool(self.state.requirements)
         if complete and await self._write_document():
             return
         self.state.status = "failed"
@@ -853,8 +855,7 @@ class RequirementsWorkflow(Interview[RequirementsState], ReviewedInterview, _Del
             # Why it could not, when the repository is the reason.
             self.state.error or "The session expired and the document could not be generated."
             if complete
-            else "The session expired before the kind of task and any requirements "
-                 "were recorded."
+            else "The session expired before any requirements were recorded."
         )
 
 

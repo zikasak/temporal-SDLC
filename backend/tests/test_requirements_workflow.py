@@ -482,13 +482,15 @@ async def test_kind_must_be_recorded_before_the_document_is_generated(env, worke
     assert state.document == DOCUMENT and state.kind == "new_service"
 
 
-async def test_idle_session_without_kind_fails(server, idle):
+async def test_idle_session_without_kind_writes_its_document(server, idle):
     handle = await start(server)
     idle.kind = None
     await handle.execute_update(RequirementsWorkflow.answer_questions, ["Book rooms"])
     await abandoned(handle)
-    assert idle.documents == []
-    assert (await handle.query(RequirementsWorkflow.get_state)).status == "failed"
+    assert idle.documents == [handle.id]
+    state = await handle.query(RequirementsWorkflow.get_state)
+    assert state.status == "completed" and state.kind is None
+    assert state.document == DOCUMENT and state.api_design_session_id is None
 
 
 async def test_idle_session_without_requirements_fails(server, idle):
