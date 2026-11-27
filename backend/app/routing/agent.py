@@ -6,9 +6,11 @@ import subprocess
 import sys
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 from app.asyncio_utils import run_sync
 from app.agent_workflows.runtime import AgentProfile, configure_container_logging, run_agent
+from app.routing.models import element_key
 
 ROOT = Path('/workspace/routing')
 # Present only when the contracts were too large to embed in input.json.
@@ -381,6 +383,8 @@ def _check_routing(root: Path, seam_modules: bool) -> None:
                 if not (root / PARTS / part / BROWSER / name).is_file():
                     raise RuntimeError(f'A requirement is routed to a page, but '
                                        f'{PARTS}/{part}/{BROWSER}/{name} is missing')
+            if seam_modules:
+                _check_page(root, part, item)
             continue
         if not isinstance(item, dict) or item.get('route') != 'component':
             continue
@@ -421,6 +425,56 @@ def _check_routing(root: Path, seam_modules: bool) -> None:
     if seam_modules and (root / 'repository').is_dir() and (
             root / COMPONENTS / 'runtime.json').is_file():
         _check_python_stubs(root)
+
+
+def _declared(page: dict[str, Any]) -> set[str]:
+    """The keys of the elements a page of pages.json declares, on load or after an
+    action, as browser.page_elements names them."""
+    found: list[Any] = list(page.get('elements') or [])
+    for action in page.get('actions') or []:
+        if isinstance(action, dict):
+            found.append(action.get('target'))
+            found += list(action.get('shows') or [])
+    return {element_key(item) for item in found if isinstance(item, dict)}
+
+
+def _check_page(root: Path, part: str, item: dict[str, Any]) -> None:
+    """The page a `browser` route names is in its part's page contract, at viewports it
+    has, and declares every element the route uses, as the host's check_page_routes
+    requires: caught here, the agent can still declare them."""
+    page = item['page']
+    requirement = str(item.get('requirement_id') or item.get('id') or '?')[:40]
+    browser = Path(PARTS, part, BROWSER)
+    try:
+        pages = json.loads((root / browser / 'pages.json').read_text())
+        viewports = json.loads((root / browser / 'viewports.json').read_text())
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f'{browser}/pages.json or viewports.json is not readable JSON') from exc
+    listed = pages.get('pages') if isinstance(pages, dict) else None
+    entries = {entry['entry']: entry for entry in listed or []
+               if isinstance(entry, dict) and isinstance(entry.get('entry'), str)}
+    declared = entries.get(page.get('entry'))
+    if declared is None:
+        raise RuntimeError(
+            f'The page of requirement {requirement} is not in {browser}/pages.json: '
+            f'{str(page.get("entry"))[:200]}; its pages are '
+            f'{", ".join(sorted(entries))[:400] or "none"}. Use one of their entries '
+            'exactly, or declare the page.')
+    known = set(viewports) if isinstance(viewports, dict) else set()
+    unknown = [name for name in page.get('viewports') or []
+               if isinstance(name, str) and name not in known]
+    if known and unknown:
+        raise RuntimeError(f'The page of requirement {requirement} names viewports '
+                           f'{browser}/viewports.json does not have: {", ".join(unknown)}')
+    elements = _declared(declared)
+    missing = [element_key(role) for role in page.get('roles') or []
+               if isinstance(role, dict) and element_key(role) not in elements]
+    if missing:
+        raise RuntimeError(
+            f'The page of requirement {requirement} uses elements page {declared["entry"]} '
+            f'of {browser}/pages.json does not declare: {", ".join(missing)[:400]}. Declare '
+            'each in the page\'s `elements` (or an action\'s `shows`), and list those the '
+            'page lacks yet in the route\'s `added`, or use elements the page declares.')
 
 
 def _check_python_stubs(root: Path) -> None:
