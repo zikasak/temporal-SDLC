@@ -362,6 +362,10 @@ async def publish_components(language: Language, session_dir: Path, output: Path
     if not routed:
         return []
     repository = await run_sync(record_baseline, language, session_dir)
+    # Its own directory each time: a routing rejected and run again publishes into the
+    # same `work`, where the last publishing left its checked contracts.
+    work = work / f'publish-{uuid.uuid4().hex}'
+    await run_sync(work.mkdir)
     for part, part_routes in routed:
         try:
             if part.browser:
