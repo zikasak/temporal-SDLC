@@ -1174,40 +1174,48 @@ h2 {
   font-size: 0.86rem;
 }
 
-/* A section hidden behind its heading: the h3 stays visible as the toggle. */
 .requirements-list h3.spoiler-heading {
   margin: 0;
-  cursor: pointer;
+}
+
+.spoiler-open h3.spoiler-heading {
+  margin-bottom: 14px;
 }
 
 .spoiler-toggle {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
-  padding: 0;
+  max-width: 100%;
+  min-height: 32px;
+  padding: 4px 0;
   border: 0;
-  background: none;
-  cursor: pointer;
-  font: inherit;
   color: inherit;
-  letter-spacing: inherit;
+  background: transparent;
+  font-weight: inherit;
   text-align: left;
   overflow-wrap: anywhere;
+  cursor: pointer;
 }
 
-.spoiler-toggle:focus-visible {
-  outline: 2px solid var(--green-dark);
-  outline-offset: 3px;
+.spoiler-toggle::before {
+  content: "";
+  flex: none;
+  width: 0;
+  height: 0;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 7px solid currentColor;
+  transition: transform 0.15s ease;
 }
 
-.spoiler-caret {
-  margin-left: 6px;
-  color: var(--muted);
-  font-size: 0.72rem;
-  vertical-align: middle;
+.spoiler-toggle[aria-expanded="true"]::before {
+  transform: rotate(90deg);
 }
 
-.spoiler-content {
-  margin-top: 14px;
+.spoiler-content[hidden] {
+  display: none;
 }
 
 .requirement-group + .requirement-group {

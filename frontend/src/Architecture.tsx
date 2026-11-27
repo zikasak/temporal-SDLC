@@ -9,8 +9,8 @@ import {
 import {
   ConversationMarkdown, RequirementLookupProvider, lookupRequirementList, type LookupRequirement,
 } from "./RequirementLookup";
-import Spoiler from "./Spoiler";
 import { flowStepsLink, rememberSessionId, urlParam } from "./url";
+import { SpoilerSection } from "./Spoiler";
 
 type SessionStatus =
   | "preparing" | "drafting" | "interviewing" | "turn_running" | "finalizing" | "completed"
@@ -146,11 +146,8 @@ export function ArchitectureSection({ structure, problems }: {
   problems: string[];
 }) {
   return (
-    <Spoiler
-      className="requirements-list api-model architecture-model"
-      ariaLabel="Architecture"
-      heading="Architecture"
-    >
+    <SpoilerSection className="requirements-list api-model architecture-model" label="Architecture"
+      heading="Architecture">
       {problems.length > 0 && (
         <div className="requirement-group api-problems">
           <h4>Open problems</h4>
@@ -202,7 +199,7 @@ export function ArchitectureSection({ structure, problems }: {
           </div>
         </>
       )}
-    </Spoiler>
+    </SpoilerSection>
   );
 }
 
@@ -578,7 +575,7 @@ export default function Architecture() {
             )}
 
             {session && session.status !== "skipped" && (
-              <ArchitectureSection key={session.session_id} structure={session.structure}
+              <ArchitectureSection key={sessionId} structure={session.structure}
                 problems={session.status === "completed" ? [] : session.problems} />
             )}
 

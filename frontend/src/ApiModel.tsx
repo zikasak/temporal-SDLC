@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { isObject } from "./api";
-import Spoiler from "./Spoiler";
+import { SpoilerSection } from "./Spoiler";
 
 /** The designed endpoints and schemas of an API design or an onboarding's drafts. */
 
@@ -68,11 +68,8 @@ export function ApiModelSection({ api, problems, requirements, children }: {
     (item) => item.category === "functional" && !linked.has(item.id),
   );
   return (
-    <Spoiler
-      className="requirements-list api-model"
-      ariaLabel="API model"
-      heading={<>{api.info.title} <small>v{api.info.version}</small></>}
-    >
+    <SpoilerSection className="requirements-list api-model" label="API model"
+      heading={<span>{api.info.title} <small>v{api.info.version}</small></span>}>
       <p className="api-auth">
         {authLabels[api.info.auth] ?? api.info.auth}
       </p>
@@ -176,6 +173,6 @@ export function ApiModelSection({ api, problems, requirements, children }: {
           </ul>
         </div>
       )}
-    </Spoiler>
+    </SpoilerSection>
   );
 }

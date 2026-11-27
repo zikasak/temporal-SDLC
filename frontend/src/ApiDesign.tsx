@@ -639,11 +639,11 @@ export default function ApiDesign() {
             )}
 
             {session && (
-              <ApiModelSection key={`${session.session_id}-api`} api={session.api} problems={session.problems} requirements={session.requirements} />
+              <ApiModelSection key={sessionId} api={session.api} problems={session.problems} requirements={session.requirements} />
             )}
 
             {session?.architecture_structure && (
-              <ArchitectureSection key={`${session.session_id}-architecture`} structure={session.architecture_structure} problems={[]} />
+              <ArchitectureSection key={sessionId} structure={session.architecture_structure} problems={[]} />
             )}
 
             {!session && !error && (

@@ -13,11 +13,11 @@ import { repositoryCheckout, repositorySelection, selectionInput, type Repositor
 import {
   ConversationMarkdown, RequirementLookupProvider, lookupRequirementList, type LookupRequirement,
 } from "./RequirementLookup";
-import Spoiler from "./Spoiler";
 import {
   ForceDialog, MessageBox, ReviewPanel, messageWarning, requirementsReview, type RequirementsReview,
 } from "./RequirementsReview";
 import { flowStepsLink, rememberSessionId, urlParam } from "./url";
+import { SpoilerSection } from "./Spoiler";
 
 type SessionStatus = "preparing" | "interviewing" | "turn_running" | "finalizing" | "completed" | "failed";
 type Category = "functional" | "non_functional" | "technical";
@@ -822,12 +822,9 @@ export default function Requirements() {
             )}
 
             {session && (
-              <Spoiler
-                key={session.session_id}
-                className="requirements-list"
-                ariaLabel="Requirements gathered"
-                heading={<>Requirements gathered ({session.requirements.length})</>}
-              >
+              <SpoilerSection key={sessionId} className="requirements-list"
+                label="Requirements gathered"
+                heading={`Requirements gathered (${session.requirements.length})`}>
                 {categories.map(([category, label]) => {
                   const items = session.requirements.filter(
                     (item) => item.category === category,
@@ -873,7 +870,7 @@ export default function Requirements() {
                     </ul>
                   </div>
                 )}
-              </Spoiler>
+              </SpoilerSection>
             )}
 
             {!session && !error && (
