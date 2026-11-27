@@ -146,16 +146,16 @@ export function ArchitectureSection({ structure, problems }: {
 }) {
   return (
     <section className="requirements-list api-model architecture-model" aria-label="Architecture">
-      <h3>Architecture</h3>
+      <h3 data-testid="architecture-spoiler-toggle">Architecture</h3>
       {problems.length > 0 && (
         <div className="requirement-group api-problems">
           <h4>Open problems</h4>
           <ul>{problems.map((item) => <li key={item}><p>{item}</p></li>)}</ul>
         </div>
       )}
-      {!structure ? <p className="requirement-empty">Not drafted yet.</p> : (
+      {!structure ? <p className="requirement-empty" data-testid="architecture-spoiler-content">Not drafted yet.</p> : (
         <>
-          <div className="requirement-group">
+          <div className="requirement-group" data-testid="architecture-spoiler-content">
             <h4>Components ({structure.components.length})</h4>
             {structure.components.length === 0 ? <p className="requirement-empty">None yet.</p> : (
               <ul>

@@ -822,13 +822,14 @@ export default function Requirements() {
 
             {session && (
               <section className="requirements-list" aria-label="Requirements gathered">
-                <h3>Requirements gathered ({session.requirements.length})</h3>
-                {categories.map(([category, label]) => {
+                <h3 data-testid="requirements-spoiler-toggle">Requirements gathered ({session.requirements.length})</h3>
+                {categories.map(([category, label], index) => {
                   const items = session.requirements.filter(
                     (item) => item.category === category,
                   );
                   return (
-                    <div className="requirement-group" key={category}>
+                    <div className="requirement-group" key={category}
+                      data-testid={index === 0 ? "requirements-spoiler-content" : undefined}>
                       <h4>{label}</h4>
                       {items.length === 0 ? (
                         <p className="requirement-empty">None yet.</p>
