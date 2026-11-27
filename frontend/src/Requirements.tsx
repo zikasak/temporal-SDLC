@@ -17,6 +17,7 @@ import {
   ForceDialog, MessageBox, ReviewPanel, messageWarning, requirementsReview, type RequirementsReview,
 } from "./RequirementsReview";
 import { flowStepsLink, rememberSessionId, urlParam } from "./url";
+import { SpoilerSection } from "./Spoiler";
 
 type SessionStatus = "preparing" | "interviewing" | "turn_running" | "finalizing" | "completed" | "failed";
 type Category = "functional" | "non_functional" | "technical";
@@ -821,8 +822,9 @@ export default function Requirements() {
             )}
 
             {session && (
-              <section className="requirements-list" aria-label="Requirements gathered">
-                <h3>Requirements gathered ({session.requirements.length})</h3>
+              <SpoilerSection key={session.session_id} className="requirements-list" label="Requirements gathered"
+                testid="requirements"
+                heading={<>Requirements gathered ({session.requirements.length})</>}>
                 {categories.map(([category, label]) => {
                   const items = session.requirements.filter(
                     (item) => item.category === category,
@@ -868,7 +870,7 @@ export default function Requirements() {
                     </ul>
                   </div>
                 )}
-              </section>
+              </SpoilerSection>
             )}
 
             {!session && !error && (
