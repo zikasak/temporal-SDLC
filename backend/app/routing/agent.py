@@ -10,7 +10,6 @@ from typing import Any
 
 from app.asyncio_utils import run_sync
 from app.agent_workflows.runtime import AgentProfile, configure_container_logging, run_agent
-from app.routing.models import element_key
 
 ROOT = Path('/workspace/routing')
 # Present only when the contracts were too large to embed in input.json.
@@ -425,6 +424,17 @@ def _check_routing(root: Path, seam_modules: bool) -> None:
     if seam_modules and (root / 'repository').is_dir() and (
             root / COMPONENTS / 'runtime.json').is_file():
         _check_python_stubs(root)
+
+
+def element_key(element: dict[str, Any]) -> str:
+    """An element as app.routing.models.element_key names it, which the agent's image
+    does not hold: `role=button[name="FR-1"]`, `role=tooltip` or `testid=popup`."""
+    if 'testid' in element:
+        return f'testid={element.get("testid")}'
+    if 'name' in element:
+        return (f'role={element.get("role")}'
+                f'[name={json.dumps(element.get("name"), ensure_ascii=False)}]')
+    return f'role={element.get("role")}'
 
 
 def _declared(page: dict[str, Any]) -> set[str]:
