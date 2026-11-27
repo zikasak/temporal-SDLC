@@ -18,8 +18,8 @@ with workflow.unsafe.imports_passed_through():
     )
     from app.tasks.activities import name_task_flow
     from app.tasks.models import (
-        DesignResult, OnboardingResult, RequirementsResult, TaskFlowState, bounded_name,
-        fallback_name, stages_for,
+        DESIGNED_KINDS, DesignResult, OnboardingResult, RequirementsResult, TaskFlowState,
+        bounded_name, fallback_name, stages_for,
     )
     from app.temporal.activities import register_session
     from app.temporal.closing import end_cancelled
@@ -36,17 +36,19 @@ STAGE_TYPES = {
     "api_design": "ApiDesignWorkflow",
     "delivery": "DeliveryWorkflow",
 }
+# Task flows from before this create only their requirements stage at start.
+CHILDREN_AT_FINALIZE = "children-at-finalize"
 TASK_CANCELLED = "The task ended without a delivery, or its pull request was closed."
 
 
 @workflow.defn
 class TaskWorkflow(FlowFlags):
-    """The top-level flow of one task or onboarding. It creates its stages as its children
-    up front for the kind of task (requirements, requirements review, architecture, API
-    design and delivery for a new service or an API change; requirements, requirements
-    review and delivery for a bugfix; requirements and delivery for documentation;
-    onboarding interview, requirements review and delivery for an onboarding),
-    each one pending until the stages it depends on have finished, then starts it with
+    """The top-level flow of one task or onboarding. A task starts with its requirements
+    stage alone; once the session is finalized it creates the other stages as its children
+    for the kind of task recorded then (requirements review, architecture, API design and
+    delivery for a new service or an API change; requirements review and delivery for a
+    bugfix; delivery for documentation). An onboarding creates its onboarding interview,
+    requirements review and delivery up front. Each stage is pending until the stages it depends on have finished, then starts it with
     what the stage before handed on, and closes the stages that will never run as skipped.
     It keeps the task's short name, aggregates its children's waiting-for-user and
     unresolved-findings flags, and closes once every child has, with its delivery's
@@ -185,10 +187,34 @@ class TaskWorkflow(FlowFlags):
         """The stages this task flow creates: its first and every one after it."""
         if self.state.origin == "fix" or first == "delivery":
             return ["delivery"]
+        if first == "requirements" and workflow.patched(CHILDREN_AT_FINALIZE):
+            # The kind of task is recorded in the interview: the other stages are created
+            # when the session is finalized, for the kind recorded then.
+            return ["requirements"]
         stages = (["architecture", "api_design", "delivery"]
                   if first in ("architecture", "api_design")
                   else list(stages_for(self.state.kind, self.state.source)))
         return stages[stages.index(first):]
+
+    async def _prepare_stages(self, kind: Any) -> None:
+        """Create the stages a requirements session finalized as `kind` needs after the
+        review, pending: architecture, API design and delivery for a new service or an
+        API change, the delivery for a bugfix or documentation task. Only once, before
+        the requirements stage hands on its result, which then starts or replaces them
+        should the kind have changed since."""
+        if (self.state.source != "requirements" or not kind
+                or self._id("requirements") not in self._handles
+                or self.state.delivery_session_id):
+            return
+        self.state.kind = kind
+        if kind in DESIGNED_KINDS:
+            await self._create("architecture", self._placeholder("architecture"), True)
+            await self._create("api_design", self._placeholder("api_design"), True)
+            self.state.delivery_session_id = self.state.api_design_session_id
+        else:
+            self.state.delivery_session_id = self.state.requirements_session_id
+        self._remember()
+        await self._create("delivery", self._placeholder("delivery"), True)
 
     def _reviewed_session(self) -> str:
         """The interview the requirements review checks."""
@@ -411,13 +437,19 @@ class TaskWorkflow(FlowFlags):
 
     @workflow.signal
     async def review_round(self, round_input: ReviewRoundInput) -> None:
-        """A round of the requirements review, from the interview it checks."""
+        """A round of the requirements review, from the interview it checks; the first
+        one, as the session is finalized, also creates the stages its kind needs."""
         await self._to_review("review_round", round_input)
+        async with self._review_lock:
+            await self._prepare_stages(round_input.kind)
 
     @workflow.signal
-    async def review_finish(self, status: str, contradictions: list[Contradiction]) -> None:
+    async def review_finish(self, status: str, contradictions: list[Contradiction],
+                            kind: str | None = None) -> None:
         """The user continued despite the requirements review."""
         await self._to_review("finish", status, contradictions)
+        async with self._review_lock:
+            await self._prepare_stages(kind)
 
     async def _after_onboarding(self) -> str | None:
         result: OnboardingResult | None = await self._closed(self._id("onboarding"))

@@ -18,7 +18,7 @@ CATEGORY_PREFIXES: dict[str, str] = {
     "technical": "TR",
 }
 PRIORITIES = ("must", "should", "could")
-KIND_PROBLEM = "The kind of task is not recorded. Tell the interviewer what kind it is."
+KIND_PROBLEM = "The kind of task is not set yet; confirm it in the interview before finalizing."
 
 # What the session's task is. Only the user can say which; it is never inferred.
 TaskKind = Literal["new_service", "api_change", "bugfix", "docs"]

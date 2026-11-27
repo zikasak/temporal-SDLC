@@ -610,6 +610,9 @@ class RequirementsWorkflow(Interview[RequirementsState], ReviewedInterview, _Del
 
     @finalize.validator
     def validate_finalize(self, force: bool = False) -> None:
+        if not self.state.kind:
+            # Also with force: the task flow creates its later stages for the kind.
+            raise ValueError(KIND_PROBLEM)
         if not (force and self._review_running()):
             if (self.state.status != "interviewing"
                     or self.state.messages[-1]["role"] == "user"):
@@ -618,8 +621,6 @@ class RequirementsWorkflow(Interview[RequirementsState], ReviewedInterview, _Del
                 raise ValueError(
                     "Retry the unanswered message before generating the document.")
             self._review_check(force)
-        if not self.state.kind:
-            raise ValueError(KIND_PROBLEM)
         if not self.state.requirements:
             raise ValueError("No requirements have been recorded yet.")
 
