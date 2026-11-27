@@ -51,3 +51,27 @@ RUFF = StaticCheck(
     command=('ruff check --isolated --no-cache --select F,B,S --ignore S101 '
              '--output-format json --exit-zero . > "$REPORT"'),
     parse=parse_ruff)
+
+
+def parse_eslint(report: str) -> list[dict]:
+    """ESLint's JSON report. A file it could not parse (no rule) is left out, and so is
+    the source text the report carries."""
+    return [{'rule': str(message.get('ruleId')), 'path': _relative(item.get('filePath')),
+             'line': message.get('line'), 'message': str(message.get('message') or '')}
+            for item in _items(report) if isinstance(item, dict)
+            for message in item.get('messages') or []
+            if isinstance(message, dict) and message.get('ruleId')]
+
+
+# Where the agent image installs the TypeScript check (typescript/static_check/).
+ESLINT_DIR = '/opt/eslint'
+# Errors and likely bugs only, such as two sibling React elements with one key, never
+# style; the code under review cannot switch a rule off. ESLint exits 1 when it reports
+# something and 2 when it cannot run.
+ESLINT = StaticCheck(
+    name='eslint',
+    command=(f'{ESLINT_DIR}/node_modules/.bin/eslint --config {ESLINT_DIR}/eslint.config.mjs '
+             '--format json --output-file "$REPORT" --no-error-on-unmatched-pattern '
+             '--no-warn-ignored .; [ $? -le 1 ]'),
+    parse=parse_eslint,
+    suffixes=('.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts'))

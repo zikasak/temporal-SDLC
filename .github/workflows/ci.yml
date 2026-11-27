@@ -43,9 +43,18 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: |
+            frontend/package-lock.json
+            backend/app/languages/typescript/static_check/package-lock.json
       - working-directory: frontend
         run: npm ci
+      - name: Static check
+        # The ESLint configuration the delivery review runs over TypeScript parts.
+        run: |
+          npm ci --prefix backend/app/languages/typescript/static_check --no-audit --no-fund
+          (cd backend/app/languages/typescript/static_check && node --test)
+          backend/app/languages/typescript/static_check/node_modules/.bin/eslint \
+            --config backend/app/languages/typescript/static_check/eslint.config.mjs frontend
       - name: Typecheck and build
         working-directory: frontend
         run: npm run build

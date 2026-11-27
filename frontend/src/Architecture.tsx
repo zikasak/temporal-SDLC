@@ -575,7 +575,7 @@ export default function Architecture() {
             )}
 
             {session && session.status !== "skipped" && (
-              <ArchitectureSection key={session.session_id} structure={session.structure}
+              <ArchitectureSection key={`architecture-${session.session_id}`} structure={session.structure}
                 problems={session.status === "completed" ? [] : session.problems} />
             )}
 

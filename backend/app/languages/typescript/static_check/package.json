@@ -1,0 +1,13 @@
+{
+  "name": "sdlc-typescript-static-check",
+  "private": true,
+  "type": "module",
+  "description": "ESLint limited to errors and likely bugs: the TypeScript static check of the delivery review and of this repository's CI.",
+  "dependencies": {
+    "@typescript-eslint/parser": "8.74.0",
+    "eslint": "9.39.5",
+    "eslint-plugin-react": "7.37.5",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "typescript": "6.0.3"
+  }
+}

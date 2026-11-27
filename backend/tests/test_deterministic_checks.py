@@ -215,6 +215,41 @@ def test_static_results_reach_the_reviewer_only_on_added_lines_and_never_the_sec
     assert 'ghp_secret' not in json.dumps(kept)
 
 
+async def test_a_typescript_part_beside_the_service_is_linted_when_its_files_change(
+        tmp_path, agent, monkeypatch):
+    monkeypatch.setattr(config, 'REVIEW_STATIC_CHECKS', True)
+    service = tmp_path / 'session/implementation/service'
+    _write(service, {'app/a.py': 'A = 1\n',
+                     'frontend/src/Page.tsx': 'export const page = (\n  <main />\n);\n'})
+    shutil.copytree(PYTHON.test_suite.template, tmp_path / 'session/tests/suite')
+    run: list[str] = []
+
+    async def run_tool(role, session_id, workspace, command, report, *args, **kwargs):
+        tool = command.split()[0].rsplit('/', 1)[-1]
+        run.append(tool)
+        source = 'export const page = (\n  <main />\n);\n'
+        return json.dumps([{
+            'filePath': '/workspace/review/service/frontend/src/Page.tsx', 'source': source,
+            'messages': [{'ruleId': 'sdlc/no-duplicate-sibling-keys', 'line': 2,
+                          'message': 'Another child has the same key'}]}]
+            if tool == 'eslint' else [])
+
+    monkeypatch.setattr(docker_agents, 'run_tool', run_tool)
+    await review.run_review('session', {'language': 'python'})
+    assert 'eslint' in run
+    assert agent.inputs[-1]['static_findings'] == [{
+        'tool': 'eslint', 'rule': 'sdlc/no-duplicate-sibling-keys',
+        'path': 'service/frontend/src/Page.tsx', 'line': 2,
+        'message': 'Another child has the same key'}]
+
+    # A delivery that changes Python alone gives ESLint nothing to read: it is not run.
+    run.clear()
+    _write(tmp_path / 'python-only/implementation/service', {'app/a.py': 'A = 1\n'})
+    shutil.copytree(PYTHON.test_suite.template, tmp_path / 'python-only/tests/suite')
+    await review.run_review('python-only', {'language': 'python'})
+    assert run and 'eslint' not in run
+
+
 # -- 5: stubs generated from the code ----------------------------------------------------
 
 SOURCE = '''from __future__ import annotations

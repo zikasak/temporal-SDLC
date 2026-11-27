@@ -29,7 +29,7 @@ from app.github.checkout import (
     CHECKOUT_DIR, COMPONENT_SNAPSHOT, COMPONENT_TESTS_DIR, SNAPSHOT_DIR,
 )
 from app.implementation.activities import SEAM_DIR, checkout_parts, copy_service
-from app.languages import RUNTIME_FILE, Language
+from app.languages import RUNTIME_FILE, Language, StaticCheck, part_languages
 from app.requirements.document import without_repeated_tables
 from app.routing.parts import component_suite, read_routed_parts
 from app.test_generation.activities import copy_test_suite
@@ -477,15 +477,24 @@ def _round_id() -> str:
     return (activity.info().workflow_id or '') if activity.in_activity() else ''
 
 
+def static_checks(language: Language, own: dict[str, str]) -> list[StaticCheck]:
+    """The static tools for the changes reviewed: the service language's and the part
+    languages', each only where the changes touch a file it reads."""
+    candidates = [*language.static_checks,
+                  *(check for part in part_languages() for check in part.static_checks)]
+    return [check for check in candidates
+            if not check.suffixes or any(path.endswith(check.suffixes) for path in own)]
+
+
 async def _static_findings(language: Language, session_id: str, workspace: Path,
                            own: dict[str, str], artifact_dir: Path) -> list[dict[str, Any]]:
-    """The language's static tools over the trees under review, in its agent image without
+    """The static tools over the trees under review, in the language's agent image without
     a network, cut to the lines the run's changes add. A tool that fails is left out: the
     reviewer then looks for those problems itself, as without the tools."""
     results: list[dict[str, Any]] = []
     image = dataclasses.replace(docker_agents.default_agent_image('review', 'review'),
                                 dockerfile=language.agent_dockerfile)
-    for check in language.static_checks:
+    for check in static_checks(language, own):
         try:
             report = await docker_agents.run_tool(
                 'review', session_id, workspace, check.command, STATIC_REPORT,
@@ -574,8 +583,8 @@ async def run_review(session_id: str, context: dict[str, Any]) -> dict[str, Any]
             changes, count = prepared.changes, prepared.count
             await run_sync(settled.write_pending, artifact_dir, part, _round_id(),
                            prepared.key, prepared.own)
-            if (scope is None and config.REVIEW_STATIC_CHECKS and language.static_checks
-                    and prepared.own):
+            if (scope is None and config.REVIEW_STATIC_CHECKS
+                    and static_checks(language, prepared.own)):
                 static = await _static_findings(language, session_id, workspace,
                                                 prepared.own, artifact_dir)
                 if static:

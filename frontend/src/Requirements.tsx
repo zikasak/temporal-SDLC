@@ -822,7 +822,7 @@ export default function Requirements() {
             )}
 
             {session && (
-              <SpoilerSection key={session.session_id} className="requirements-list" label="Requirements gathered"
+              <SpoilerSection key={`requirements-${session.session_id}`} className="requirements-list" label="Requirements gathered"
                 testid="requirements"
                 heading={<>Requirements gathered ({session.requirements.length})</>}>
                 {categories.map(([category, label]) => {

@@ -32,3 +32,9 @@
 !app/diagnosis/agent.py
 !app/review/
 !app/review/agent.py
+# The TypeScript static check the review runs; never its local node_modules.
+!app/languages/typescript/static_check/package.json
+!app/languages/typescript/static_check/package-lock.json
+!app/languages/typescript/static_check/eslint.config.mjs
+!app/languages/typescript/static_check/no-duplicate-sibling-keys.mjs
+app/languages/typescript/static_check/node_modules

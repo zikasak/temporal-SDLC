@@ -22,13 +22,16 @@ RUN pip install --no-cache-dir langchain==1.4.2 langfuse==4.16.0
 # flow's tools to Pi as well.
 RUN pip install --no-cache-dir claude-agent-sdk==0.2.186
 # Static tools the host runs over a delivery before its review, without a network
-# (app/languages/static_checks.py): a secrets scanner and Python's linter.
+# (app/languages/static_checks.py): a secrets scanner, Python's linter and, for
+# TypeScript parts, ESLint with its pinned configuration.
 RUN arch="$(uname -m | sed 's/x86_64/x64/; s/aarch64/arm64/')" \
     && python -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], '/tmp/gitleaks.tgz')" \
         "https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_${arch}.tar.gz" \
     && tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks && rm /tmp/gitleaks.tgz \
     && gitleaks version
 RUN pip install --no-cache-dir ruff==0.8.4
+COPY app/languages/typescript/static_check/package.json app/languages/typescript/static_check/package-lock.json app/languages/typescript/static_check/eslint.config.mjs app/languages/typescript/static_check/no-duplicate-sibling-keys.mjs /opt/eslint/
+RUN cd /opt/eslint && npm ci --no-audit --no-fund && npm cache clean --force
 ARG AGENT_ROLE
 ARG WORKSPACE_NAME
 COPY app/__init__.py app/asyncio_utils.py app/tracing.py /opt/app/

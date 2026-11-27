@@ -31,6 +31,18 @@ echo '== Backend tests'
 echo '== Component tests'
 (cd component-tests && PYTHONPATH=../backend python -m pytest -q -p no:cacheprovider --tb=short -n "$workers" --dist worksteal)
 
+echo '== Frontend static check'
+(
+  tool=backend/app/languages/typescript/static_check
+  stamp=$tool/node_modules/.sdlc-dependencies
+  if ! cat $tool/package.json $tool/package-lock.json | cmp -s - "$stamp" 2>/dev/null; then
+    npm ci --prefix $tool --no-audit --no-fund
+    cat $tool/package.json $tool/package-lock.json > "$stamp"
+  fi
+  (cd $tool && node --test)
+  $tool/node_modules/.bin/eslint --config $tool/eslint.config.mjs frontend
+)
+
 echo '== Frontend typecheck and build'
 (
   cd frontend
