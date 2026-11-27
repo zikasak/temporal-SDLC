@@ -1,13 +1,18 @@
 import logging
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.api.errors import http_error
-from app.auth import storage
+from app.auth import sessions, storage
 from app.auth.limits import AttemptLimiter, SignInBusy, check_password, new_password_hash
 from app.auth.passwords import MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, UNKNOWN_USER_HASH
-from app.config import AUTH_LOGIN_ATTEMPTS_PER_MINUTE, AUTH_TRUSTED_PROXY_HOPS
+from app.config import (
+    AUTH_LOGIN_ATTEMPTS_PER_MINUTE, AUTH_REFRESH_ATTEMPTS_PER_MINUTE, AUTH_SESSION_MAX_DAYS,
+    AUTH_TRUSTED_PROXY_HOPS,
+)
 from app.auth.tokens import (
     AuthNotConfigured, InvalidToken, check_configured, issue_token, read_token,
 )
@@ -17,7 +22,19 @@ router = APIRouter(prefix="/auth")
 # The browser keeps the token here, out of reach of page scripts, so that plain download
 # links are authenticated too. API clients send it as a bearer token instead.
 COOKIE = "access_token"
+# The refresh token's cookie only accompanies refreshes, at the path the web client
+# reaches the API under.
+REFRESH_COOKIE = "refresh_token"
+REFRESH_COOKIE_PATH = "/api/auth/refresh"
 login_attempts = AttemptLimiter(AUTH_LOGIN_ATTEMPTS_PER_MINUTE)
+refresh_attempts = AttemptLimiter(AUTH_REFRESH_ATTEMPTS_PER_MINUTE)
+
+_REJECTIONS = {
+    "idle": "Your session ended after a period of inactivity. Sign in again.",
+    "expired": "Your session expired. Sign in again.",
+    "revoked": "Your session was signed out. Sign in again.",
+    "invalid": "Sign in to continue.",
+}
 
 
 class Credentials(BaseModel):
@@ -26,19 +43,33 @@ class Credentials(BaseModel):
     password: str
 
 
-async def require_user(request: Request) -> dict:
-    """Dependency: the signed-in user, from a bearer token or the session cookie."""
+class RefreshInput(BaseModel):
+    refresh_token: str | None = None
+
+
+def _access_token(request: Request) -> str | None:
     scheme, _, bearer = request.headers.get("authorization", "").partition(" ")
-    token = bearer.strip() if scheme.lower() == "bearer" else request.cookies.get(COOKIE)
+    return bearer.strip() if scheme.lower() == "bearer" else request.cookies.get(COOKIE)
+
+
+async def require_user(request: Request) -> dict:
+    """Dependency: the signed-in user, from a bearer token or the session cookie, whose
+    session is still active. Records the session's activity."""
+    token = _access_token(request)
     try:
         if not token:
             raise InvalidToken
-        return read_token(token)
+        user = read_token(token)
+        if not await sessions.touch_session(user["session_id"], user["id"]):
+            raise InvalidToken
+        return user
     except AuthNotConfigured as exc:
         raise HTTPException(503, str(exc)) from None
     except InvalidToken:
         raise HTTPException(401, "Sign in to continue.",
                             headers={"WWW-Authenticate": "Bearer"}) from None
+    except Exception as exc:
+        raise http_error(exc) from None
 
 
 async def require_first_user(user: dict = Depends(require_user)) -> dict:
@@ -66,10 +97,11 @@ def _profile(user: dict) -> dict:
     return {"login": user["login"], "expires_at": user["expires_at"], "admin": user["admin"]}
 
 
-def _limit_attempts(request: Request) -> None:
-    wait = login_attempts.retry_after(_client_address(request))
+def _limit_attempts(request: Request, limiter: AttemptLimiter | None = None,
+                    what: str = "sign-in") -> None:
+    wait = (limiter or login_attempts).retry_after(_client_address(request))
     if wait is not None:
-        raise HTTPException(429, f"Too many sign-in attempts. Try again in {wait} seconds.",
+        raise HTTPException(429, f"Too many {what} attempts. Try again in {wait} seconds.",
                             headers={"Retry-After": str(wait)})
 
 
@@ -84,14 +116,33 @@ def _new_account(body: Credentials) -> tuple[str, str]:
     return login, body.password
 
 
-def _start_session(request: Request, response: Response, user: dict, admin: bool) -> dict:
-    token, expires = issue_token(user, admin)
-    # Strict: the cookie never accompanies a request another site initiates.
-    response.set_cookie(
-        COOKIE, token, expires=expires, httponly=True, samesite="strict", path="/",
-        secure="https" in (request.url.scheme, request.headers.get("x-forwarded-proto")))
+def _issue(request: Request, response: Response, user: dict, admin: bool, session_id: str,
+           refresh_token: str, started: datetime | None = None) -> dict:
+    """The Session body for a new access token of the session, with both cookies set."""
+    token, expires = issue_token(user, session_id, admin)
+    secure = "https" in (request.url.scheme, request.headers.get("x-forwarded-proto"))
+    # Strict: the cookies never accompany a request another site initiates.
+    response.set_cookie(COOKIE, token, expires=expires, httponly=True, samesite="strict",
+                        path="/", secure=secure)
+    refresh_expires = (started or datetime.now(timezone.utc)) + timedelta(
+        days=AUTH_SESSION_MAX_DAYS)
+    response.set_cookie(REFRESH_COOKIE, refresh_token, expires=refresh_expires, httponly=True,
+                        samesite="strict", path=REFRESH_COOKIE_PATH, secure=secure)
     return {"access_token": token, "token_type": "bearer",
-            **_profile({**user, "expires_at": expires, "admin": admin})}
+            **_profile({**user, "expires_at": expires, "admin": admin}),
+            "refresh_token": refresh_token}
+
+
+async def _start_session(request: Request, response: Response, user: dict,
+                         admin: bool) -> dict:
+    session_id, refresh_token = await sessions.start_session(user["id"])
+    return _issue(request, response, user, admin, session_id, refresh_token)
+
+
+def _clear_cookies(response: Response) -> None:
+    response.delete_cookie(COOKIE, path="/", httponly=True, samesite="strict")
+    response.delete_cookie(REFRESH_COOKIE, path=REFRESH_COOKIE_PATH, httponly=True,
+                           samesite="strict")
 
 
 def _auth_error(exc: Exception) -> HTTPException:
@@ -121,7 +172,7 @@ async def login(body: Credentials, request: Request, response: Response):
             raise HTTPException(401, "Incorrect login or password.")
         check_configured()
         admin = user["id"] == await storage.first_user_id()
-        return _start_session(request, response, user, admin)
+        return await _start_session(request, response, user, admin)
     except Exception as exc:
         raise _auth_error(exc) from None
 
@@ -151,16 +202,72 @@ async def register(body: Credentials, request: Request, response: Response):
         if not user:
             raise closed
         logger.info("Registered the first user")
-        return _start_session(request, response, user, True)
+        return await _start_session(request, response, user, True)
     except Exception as exc:
         raise _auth_error(exc) from None
 
 
 @router.post("/logout", status_code=204)
-async def logout():
+async def logout(request: Request, body: RefreshInput | None = Body(None)):
+    """Revoke the session of the access token, or else of the refresh token in the body,
+    and clear both cookies. 204 signed in or not."""
+    session_id = None
+    token = _access_token(request)
+    try:
+        if token:
+            try:
+                session_id = read_token(token)["session_id"]
+            except (InvalidToken, AuthNotConfigured):
+                session_id = None
+        if session_id is None and body is not None and body.refresh_token:
+            session_id = await sessions.session_of_refresh_token(body.refresh_token)
+        if session_id is None and token:
+            # Expired but signed here: signing out still ends the session it names.
+            try:
+                session_id = read_token(token, verify_expiry=False)["session_id"]
+            except (InvalidToken, AuthNotConfigured):
+                session_id = None
+        if session_id is not None:
+            await sessions.revoke_session(session_id)
+    except Exception as exc:
+        raise http_error(exc) from None
     response = Response(status_code=204)
-    response.delete_cookie(COOKIE, path="/", httponly=True, samesite="strict")
+    _clear_cookies(response)
     return response
+
+
+def _refresh_rejected(reason: str) -> JSONResponse:
+    response = JSONResponse(status_code=401, headers={"WWW-Authenticate": "Bearer"},
+                            content={"detail": _REJECTIONS[reason], "reason": reason})
+    # A cookie that can no longer renew anything is not sent again.
+    response.delete_cookie(REFRESH_COOKIE, path=REFRESH_COOKIE_PATH, httponly=True,
+                           samesite="strict")
+    return response
+
+
+@router.post("/refresh")
+async def refresh(request: Request, response: Response,
+                  body: RefreshInput | None = Body(None)):
+    """Exchange a refresh token, from the body or the cookie, for a new access token and
+    a new refresh token. Needs no access token."""
+    try:
+        _limit_attempts(request, refresh_attempts, "refresh")
+        check_configured()
+        token = (body.refresh_token if body is not None and body.refresh_token
+                 else request.cookies.get(REFRESH_COOKIE))
+        if not token:
+            return _refresh_rejected("invalid")
+        try:
+            session, new_token = await sessions.rotate(token)
+        except sessions.RefreshRejected as exc:
+            if exc.reason == "revoked":
+                logger.warning("Refresh rejected: the session was revoked")
+            return _refresh_rejected(exc.reason)
+        admin = session["id"] == await storage.first_user_id()
+        return _issue(request, response, session, admin, session["session_id"], new_token,
+                      session["created_at"])
+    except Exception as exc:
+        raise _auth_error(exc) from None
 
 
 @router.get("/me")

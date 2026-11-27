@@ -1,6 +1,7 @@
 """Sign-in and the API-wide authentication requirement, through the real application."""
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import jwt
 import pytest
@@ -9,13 +10,13 @@ from httpx import ASGITransport, AsyncClient
 
 from app.api.main import app
 from app.api.routes import auth as auth_routes
-from app.auth import limits, storage, tokens
+from app.auth import limits, sessions, storage, tokens
 from app.auth.passwords import hash_password
 from app.github import storage as github_storage
 
 PASSWORD = "correct horse battery"
 PUBLIC = {("POST", "/auth/login"), ("POST", "/auth/logout"), ("GET", "/auth/registration"),
-          ("POST", "/auth/register")}
+          ("POST", "/auth/register"), ("POST", "/auth/refresh")}
 
 
 @pytest.fixture
@@ -25,6 +26,7 @@ def http(monkeypatch):
         "created_at": "2026-01-01T00:00:00Z"}})
     monkeypatch.setattr(tokens, "AUTH_JWT_SECRET", "s" * 32)
     monkeypatch.setattr(auth_routes, "login_attempts", limits.AttemptLimiter(10))
+    monkeypatch.setattr(auth_routes, "refresh_attempts", limits.AttemptLimiter(30))
     # No GitHub connection: webhook deliveries cannot be signed with its secret.
     monkeypatch.setattr(github_storage, "get_connection", no_connection)
     # No lifespan: these requests never reach PostgreSQL or Temporal.
@@ -55,6 +57,66 @@ def use_accounts(monkeypatch, users):
 
     for function in (get_user, first_user_id, create_user, list_users):
         monkeypatch.setattr(storage, function.__name__, function)
+    return use_sessions(monkeypatch, users)
+
+
+def use_sessions(monkeypatch, users):
+    """Replace the session tables with dictionaries, with the storage's semantics."""
+    table, refresh_tokens = {}, {}
+    clock = {"now": datetime.now(timezone.utc)}
+
+    async def start_session(user_id):
+        session_id, token = f"session-{len(table)}", sessions.new_refresh_token()
+        table[session_id] = {"user_id": user_id, "created_at": clock["now"],
+                             "last_active_at": clock["now"], "revoked": False}
+        refresh_tokens[token] = {"session_id": session_id, "replaced_at": None}
+        return session_id, token
+
+    async def touch_session(session_id, user_id):
+        session = table.get(session_id)
+        if not session or session["revoked"] or session["user_id"] != user_id:
+            return False
+        session["last_active_at"] = clock["now"]
+        return True
+
+    async def revoke_session(session_id):
+        if session_id in table:
+            table[session_id]["revoked"] = True
+
+    async def session_of_refresh_token(token):
+        entry = refresh_tokens.get(token)
+        return entry["session_id"] if entry else None
+
+    async def rotate(token):
+        entry = refresh_tokens.get(token)
+        if entry is None:
+            raise sessions.RefreshRejected("invalid")
+        session, now = table[entry["session_id"]], clock["now"]
+        if session["revoked"]:
+            raise sessions.RefreshRejected("revoked")
+        if now - session["created_at"] > timedelta(days=30):
+            raise sessions.RefreshRejected("expired")
+        if now - session["last_active_at"] > timedelta(days=7):
+            raise sessions.RefreshRejected("idle")
+        replaced = entry["replaced_at"]
+        if replaced is not None and now - replaced > timedelta(
+                seconds=sessions.REFRESH_GRACE_SECONDS):
+            session["revoked"] = True
+            raise sessions.RefreshRejected("revoked")
+        for other in refresh_tokens.values():
+            if other["session_id"] == entry["session_id"] and other["replaced_at"] is None:
+                other["replaced_at"] = now
+        new_token = sessions.new_refresh_token()
+        refresh_tokens[new_token] = {"session_id": entry["session_id"], "replaced_at": None}
+        session["last_active_at"] = now
+        user = next(user for user in users.values() if user["id"] == session["user_id"])
+        return ({"session_id": entry["session_id"], "id": user["id"], "login": user["login"],
+                 "created_at": session["created_at"]}, new_token)
+
+    for function in (start_session, touch_session, revoke_session, session_of_refresh_token,
+                     rotate):
+        monkeypatch.setattr(sessions, function.__name__, function)
+    return clock
 
 
 def sign_in(http, login="alice@example.com", password=PASSWORD):
@@ -68,6 +130,19 @@ def test_every_route_but_sign_in_requires_authentication(http):
     for method, path in routes - PUBLIC:
         response = http.request(method, path)
         assert response.status_code == 401, f"{method} {path} is reachable without signing in"
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """Accounts with alice and the session tables' clock, which tests move forward."""
+    clock = use_accounts(monkeypatch, {"alice@example.com": {
+        "id": 7, "login": "alice@example.com", "password_hash": hash_password(PASSWORD),
+        "created_at": "2026-01-01T00:00:00Z"}})
+    return clock
+
+
+def refresh(http, token=None):
+    return http.post("/auth/refresh", json={"refresh_token": token} if token else {})
 
 
 def test_email_login_issues_a_token_accepted_as_cookie_or_bearer(http):
@@ -98,7 +173,7 @@ def test_forged_unsigned_and_expired_tokens_are_rejected(http, monkeypatch):
     claims = {"sub": "7", "login": "alice@example.com", "exp": 4102444800}
     forged = jwt.encode(claims, "another-secret-of-sufficient-length!", algorithm="HS256")
     unsigned = jwt.encode(claims, "", algorithm="none")
-    monkeypatch.setattr(tokens, "AUTH_TOKEN_TTL_HOURS", -1)
+    monkeypatch.setattr(tokens, "AUTH_ACCESS_TOKEN_TTL_MINUTES", -1)
     expired = sign_in(http).json()["access_token"]
     http.cookies.clear()
     for token in (forged, unsigned, expired):
@@ -190,8 +265,100 @@ def test_only_the_first_user_registers_the_others(http):
     assert http.post("/auth/users", json=dave).status_code == 403
     assert http.get("/auth/users").status_code == 403
     # A token is not enough on its own: the claim is checked against the accounts.
+    session_id = jwt.decode(signed_in.json()["access_token"], "s" * 32,
+                            algorithms=["HS256"])["sid"]
     forged = jwt.encode({"sub": "101", "login": "carol@example.com", "admin": True,
-                         "exp": 4102444800}, "s" * 32, algorithm="HS256")
+                         "sid": session_id, "exp": 4102444800}, "s" * 32, algorithm="HS256")
     http.cookies.clear()
     assert http.post("/auth/users", json=dave,
                      headers={"Authorization": f"Bearer {forged}"}).status_code == 403
+
+
+def test_sign_in_returns_a_refresh_token_in_the_body_and_a_scoped_cookie(http):
+    response = sign_in(http)
+    body = response.json()
+    assert body["refresh_token"] and body["token_type"] == "bearer"
+    cookies = [value.lower() for key, value in response.headers.multi_items()
+               if key == "set-cookie"]
+    refresh_cookie = next(cookie for cookie in cookies if cookie.startswith("refresh_token="))
+    assert "httponly" in refresh_cookie and "samesite=strict" in refresh_cookie
+    assert "path=/api/auth/refresh" in refresh_cookie
+    expires = datetime.fromisoformat(body["expires_at"].replace("Z", "+00:00"))
+    lifetime = expires - datetime.now(timezone.utc)
+    assert timedelta(minutes=14) < lifetime <= timedelta(minutes=15)
+
+
+def test_refresh_rotates_the_token_and_rejects_reuse_after_the_grace_period(http, clock):
+    first = sign_in(http).json()["refresh_token"]
+    http.cookies.clear()
+    renewed = refresh(http, first)
+    assert renewed.status_code == 200
+    second = renewed.json()["refresh_token"]
+    assert second != first and renewed.json()["login"] == "alice@example.com"
+    bearer = {"Authorization": f"Bearer {renewed.json()['access_token']}"}
+    http.cookies.clear()
+    assert http.get("/auth/me", headers=bearer).status_code == 200
+    # A replaced token still works within the grace period...
+    assert refresh(http, first).status_code == 200
+    clock["now"] += timedelta(seconds=sessions.REFRESH_GRACE_SECONDS + 1)
+    # ...and afterwards its reuse revokes the whole session.
+    reused = refresh(http, first)
+    assert reused.status_code == 401 and reused.json()["reason"] == "revoked"
+    assert reused.headers["www-authenticate"] == "Bearer"
+    http.cookies.clear()
+    assert http.get("/auth/me", headers=bearer).status_code == 401
+
+
+def test_refresh_rejects_missing_unknown_idle_and_expired_sessions(http, clock):
+    assert refresh(http).json()["reason"] == "invalid"
+    assert refresh(http, "unknown").json()["reason"] == "invalid"
+    idle = sign_in(http).json()["refresh_token"]
+    clock["now"] += timedelta(days=8)
+    response = refresh(http, idle)
+    assert response.status_code == 401 and response.json()["reason"] == "idle"
+
+    token = sign_in(http).json()["refresh_token"]
+    for _ in range(6):  # active every few days, yet past the absolute limit
+        clock["now"] += timedelta(days=5)
+        renewed = refresh(http, token)
+        assert renewed.status_code == 200
+        token = renewed.json()["refresh_token"]
+    clock["now"] += timedelta(days=1)
+    assert refresh(http, token).json()["reason"] == "expired"
+
+
+def test_sign_out_revokes_the_session_of_a_bearer_token_at_once(http, clock):
+    session = sign_in(http).json()
+    http.cookies.clear()
+    bearer = {"Authorization": f"Bearer {session['access_token']}"}
+    assert http.get("/auth/me", headers=bearer).status_code == 200
+    assert http.post("/auth/logout", headers=bearer, json={}).status_code == 204
+    assert http.get("/auth/me", headers=bearer).status_code == 401
+    assert refresh(http, session["refresh_token"]).json()["reason"] == "revoked"
+    # An API client without its access token signs out with the refresh token.
+    other = sign_in(http).json()
+    http.cookies.clear()
+    assert http.post("/auth/logout", json={"refresh_token": other["refresh_token"]}
+                     ).status_code == 204
+    assert refresh(http, other["refresh_token"]).json()["reason"] == "revoked"
+
+
+def test_tokens_without_a_session_id_are_rejected(http):
+    old = jwt.encode({"sub": "7", "login": "alice@example.com", "exp": 4102444800},
+                     "s" * 32, algorithm="HS256")
+    response = http.get("/auth/me", headers={"Authorization": f"Bearer {old}"})
+    assert response.status_code == 401 and response.headers["www-authenticate"] == "Bearer"
+
+
+def test_refresh_attempts_are_limited_separately_from_sign_in(http, monkeypatch):
+    monkeypatch.setattr(auth_routes, "refresh_attempts", limits.AttemptLimiter(3))
+    assert {refresh(http, "unknown").status_code for _ in range(3)} == {401}
+    limited = refresh(http, "unknown")
+    assert limited.status_code == 429 and 0 < int(limited.headers["retry-after"]) <= 60
+    assert sign_in(http).status_code == 200
+
+
+def test_refresh_without_a_signing_secret_is_unavailable(http, monkeypatch):
+    token = sign_in(http).json()["refresh_token"]
+    monkeypatch.setattr(tokens, "AUTH_JWT_SECRET", "")
+    assert refresh(http, token).status_code == 503

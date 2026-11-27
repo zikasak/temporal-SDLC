@@ -11,8 +11,9 @@ import Users from "./Users";
 import Settings from "./Settings";
 import { errorMessage, failure, readBody } from "./api";
 import { APP_RETURN_PATH } from "./github";
+import { broadcast, installSessionRenewal, onSessionMessage, refreshSession } from "./session";
 import "./styles.css";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 type Page = "flows" | "github" | "users" | "settings";
 // The views of a flow, opened in a panel over the Flows page.
@@ -25,6 +26,11 @@ const pages: [Page, string][] = [
   // Shown to the first user only.
   ["users", "Users"],
 ];
+// Shown on the sign-in form when a session could not be renewed.
+const SESSION_EXPIRED = "Your session expired. Sign in again to continue where you left off.";
+// How long before the access token expires it is renewed, at most.
+const RENEW_LEAD_MS = 60_000;
+
 const panels: [Panel, string][] = [
   ["chat", "Chat"],
   ["requirements", "Requirements interview"],
@@ -61,11 +67,44 @@ function Shell() {
   const [user, setUser] = useState<User | null>();
   const [error, setError] = useState("");
 
+  // Why the sign-in form is shown again, if the session ended without signing out.
+  const [notice, setNotice] = useState("");
+  const userRef = useRef<User | null | undefined>(undefined);
+  userRef.current = user;
+
+  // A session that can no longer be renewed: back to the sign-in form, on the same page,
+  // which the app shows again once the user has signed in.
+  function expire(reason: string, fromOtherTab = false) {
+    // Without a refresh token at the first check, the user was simply not signed in.
+    const signedIn = Boolean(userRef.current);
+    if (signedIn || reason !== "invalid") setNotice(SESSION_EXPIRED);
+    if (signedIn && !fromOtherTab) broadcast({ type: "expired", reason });
+    setUser(null);
+  }
+  const expireRef = useRef(expire);
+  expireRef.current = expire;
+
+  useEffect(() => {
+    installSessionRenewal((reason) => expireRef.current(reason));
+    return onSessionMessage((message) => {
+      if (message.type === "refreshed") {
+        // The cookies are shared: another tab's refresh renewed this one's session too.
+        if (userRef.current) setUser(message.user);
+      } else if (message.type === "signed-out") {
+        setNotice("");
+        setUser(null);
+      } else if (userRef.current) {
+        expireRef.current(message.reason, true);
+      }
+    });
+  }, []);
+
   useEffect(() => {
     if (user !== undefined) return;
     const controller = new AbortController();
     void (async () => {
       try {
+        // An expired access token is renewed by the request itself (installSessionRenewal).
         const response = await fetch("/api/auth/me", { signal: controller.signal });
         const body = await readBody(response);
         if (response.status === 401) setUser(null);
@@ -78,20 +117,48 @@ function Shell() {
     return () => controller.abort();
   }, [user]);
 
-  // Return to the sign-in form when the token expires instead of failing request by request.
+  // Renew the access token shortly before it expires instead of signing the user out.
   useEffect(() => {
     if (!user) return;
     const remaining = new Date(user.expires_at).getTime() - Date.now();
-    const timer = window.setTimeout(() => setUser(undefined), Math.min(Math.max(remaining, 0), 2 ** 31 - 1));
-    return () => window.clearTimeout(timer);
+    const lead = Math.min(RENEW_LEAD_MS, Math.max(remaining / 4, 0));
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void refreshSession().then((outcome) => {
+        if (cancelled) return;
+        if ("user" in outcome) setUser(outcome.user);
+        else expireRef.current(outcome.rejected);
+      }, () => {
+        // Unreachable for now: the next request that gets a 401 refreshes again.
+      });
+    }, Math.min(Math.max(remaining - lead, 0), 2 ** 31 - 1));
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [user]);
 
   async function signOut() {
     try {
-      await fetch("/api/auth/logout", { method: "POST" });
+      // An expired access token no longer reaches the server: renew it to name the session.
+      if (user && new Date(user.expires_at).getTime() - Date.now() < 5_000) {
+        await refreshSession().catch(() => null);
+      }
+      await fetch("/api/auth/logout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      broadcast({ type: "signed-out" });
     } finally {
-      setUser(undefined);
+      setNotice("");
+      setUser(null);
     }
+  }
+
+  function signedIn(next: User) {
+    setNotice("");
+    setUser(next);
   }
 
   function show(next: string) {
@@ -150,7 +217,7 @@ function Shell() {
 
   if (error) return <main className="page-shell"><p className="connector-error" role="alert">{error}</p></main>;
   if (user === undefined) return null;
-  if (user === null) return <Login onSignedIn={setUser} />;
+  if (user === null) return <Login onSignedIn={signedIn} notice={notice} />;
   const available = pages.filter(([item]) => item !== "users" || user.admin);
   const shown = available.some(([item]) => item === page) ? page : "flows";
 
