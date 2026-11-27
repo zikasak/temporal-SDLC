@@ -9,6 +9,7 @@ import {
 import {
   ConversationMarkdown, RequirementLookupProvider, lookupRequirementList, type LookupRequirement,
 } from "./RequirementLookup";
+import Spoiler from "./Spoiler";
 import { flowStepsLink, rememberSessionId, urlParam } from "./url";
 
 type SessionStatus =
@@ -145,8 +146,11 @@ export function ArchitectureSection({ structure, problems }: {
   problems: string[];
 }) {
   return (
-    <section className="requirements-list api-model architecture-model" aria-label="Architecture">
-      <h3>Architecture</h3>
+    <Spoiler
+      className="requirements-list api-model architecture-model"
+      ariaLabel="Architecture"
+      heading="Architecture"
+    >
       {problems.length > 0 && (
         <div className="requirement-group api-problems">
           <h4>Open problems</h4>
@@ -198,7 +202,7 @@ export function ArchitectureSection({ structure, problems }: {
           </div>
         </>
       )}
-    </section>
+    </Spoiler>
   );
 }
 
@@ -574,7 +578,7 @@ export default function Architecture() {
             )}
 
             {session && session.status !== "skipped" && (
-              <ArchitectureSection structure={session.structure}
+              <ArchitectureSection key={session.session_id} structure={session.structure}
                 problems={session.status === "completed" ? [] : session.problems} />
             )}
 

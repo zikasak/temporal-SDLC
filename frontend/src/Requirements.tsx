@@ -13,6 +13,7 @@ import { repositoryCheckout, repositorySelection, selectionInput, type Repositor
 import {
   ConversationMarkdown, RequirementLookupProvider, lookupRequirementList, type LookupRequirement,
 } from "./RequirementLookup";
+import Spoiler from "./Spoiler";
 import {
   ForceDialog, MessageBox, ReviewPanel, messageWarning, requirementsReview, type RequirementsReview,
 } from "./RequirementsReview";
@@ -821,8 +822,12 @@ export default function Requirements() {
             )}
 
             {session && (
-              <section className="requirements-list" aria-label="Requirements gathered">
-                <h3>Requirements gathered ({session.requirements.length})</h3>
+              <Spoiler
+                key={session.session_id}
+                className="requirements-list"
+                ariaLabel="Requirements gathered"
+                heading={<>Requirements gathered ({session.requirements.length})</>}
+              >
                 {categories.map(([category, label]) => {
                   const items = session.requirements.filter(
                     (item) => item.category === category,
@@ -868,7 +873,7 @@ export default function Requirements() {
                     </ul>
                   </div>
                 )}
-              </section>
+              </Spoiler>
             )}
 
             {!session && !error && (

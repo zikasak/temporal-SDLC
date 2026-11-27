@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { errorMessage, failure, isObject, readBody } from "./api";
 import { ApiModelSection, isApiModel, type ApiModel } from "./ApiModel";
 import { ArchitectureSection, architectureStructure, type ArchitectureStructure } from "./Architecture";
+import Spoiler from "./Spoiler";
 import {
   DeliveryResults, OpenQuestionsForm, answeredProgress, decidedProgress, deliveryPending, deliveryProgress, retriedProgress,
   type DeliveryProgress, type GenerationStage, type OpenAnswers,
@@ -755,13 +756,17 @@ export default function Onboarding() {
             )}
 
             {session && isDrafted && session.architecture_only && (
-              <ArchitectureSection structure={session.architecture_structure}
+              <ArchitectureSection key={session.session_id} structure={session.architecture_structure}
                 problems={finishedStatuses.includes(session.status) ? [] : session.problems} />
             )}
 
             {session && isDrafted && !session.architecture_only && (
-              <section className="requirements-list" aria-label="Drafted requirements">
-                <h3>Drafted requirements ({session.requirements.length})</h3>
+              <Spoiler
+                key={`${session.session_id}-requirements`}
+                className="requirements-list"
+                ariaLabel="Drafted requirements"
+                heading={<>Drafted requirements ({session.requirements.length})</>}
+              >
                 {categories.map(([category, label]) => {
                   const items = session.requirements.filter((item) => item.category === category);
                   return (
@@ -787,18 +792,18 @@ export default function Onboarding() {
                     </div>
                   );
                 })}
-              </section>
+              </Spoiler>
             )}
 
             {session && isDrafted && !session.architecture_only && (
-              <ApiModelSection api={session.api} problems={session.problems}
+              <ApiModelSection key={`${session.session_id}-api`} api={session.api} problems={session.problems}
                 requirements={session.requirements}>
                 <p className="api-auth">Language: {session.language ?? "not detected yet"}</p>
               </ApiModelSection>
             )}
 
             {session && isDrafted && !session.architecture_only && (
-              <ArchitectureSection structure={session.architecture_structure} problems={[]} />
+              <ArchitectureSection key={`${session.session_id}-architecture`} structure={session.architecture_structure} problems={[]} />
             )}
 
             {!session && !error && (
