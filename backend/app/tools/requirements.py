@@ -6,6 +6,7 @@ Not part of the chat TOOLSETS: the requirements activity builds these itself.
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from langchain_core.tools import BaseTool, tool
@@ -30,13 +31,56 @@ class RequirementsContext:
     published: tuple[Requirement, ...] = ()
     # IDs of those the change ends.
     retired: set[str] = field(default_factory=set)
+    # The architecture components a requirement can be grouped under: those of the
+    # repository's contracts/architecture.json, or of the task's architecture once it
+    # defines them; none while the flow has no components, and every component is then
+    # empty (null).
+    components: tuple[str, ...] = ()
+    # Writes the requirements to the task flow's layer of the requirements store, called
+    # after every change; None outside a task flow.
+    persist: Callable[["RequirementsContext"], Awaitable[None]] | None = None
+    # The components as they are now, for a turn that drafts the architecture alongside
+    # the requirements (an onboarding); `components` otherwise.
+    component_source: Callable[[], tuple[str, ...]] | None = None
+
+    def available_components(self) -> tuple[str, ...]:
+        return self.component_source() if self.component_source else self.components
 
     @classmethod
     def from_list(cls, requirements: list[Requirement], kind: TaskKind | None = None,
                   published: tuple[Requirement, ...] = (),
-                  retired: list[Requirement] | None = None) -> "RequirementsContext":
+                  retired: list[Requirement] | None = None,
+                  components: tuple[str, ...] = ()) -> "RequirementsContext":
         return cls({item["id"]: dict(item) for item in requirements}, kind,  # type: ignore[misc]
-                   published, {item["id"] for item in retired or []})
+                   published, {item["id"] for item in retired or []}, tuple(components))
+
+    async def changed(self) -> None:
+        """Write the change just made to the requirements store at once; a store that
+        cannot be written to does not stop the interview, which keeps the requirements."""
+        if self.persist is None:
+            return
+        try:
+            await self.persist(self)
+        except Exception as exc:  # noqa: BLE001 - written again with the next change
+            logger.warning("Requirements change not stored: %s: %s", type(exc).__name__, exc)
+
+    def component_of(self, component: str | None,
+                     current: str | None = None) -> str | None:
+        """The component name `component` stands for; with none given, `current` (the
+        requirement's component so far). Always None while there are no components."""
+        components = self.available_components()
+        if not components:
+            return None
+        text = " ".join(str(component or "").split())
+        if not text:
+            return current if current in components else None
+        if text.lower() in ("none", "null"):
+            return None
+        for name in components:
+            if name.casefold() == text.casefold():
+                return name
+        raise ValueError(f"unknown component {text!r}; use one of: "
+                         + ", ".join(components) + ".")
 
     def service_requirements(self) -> tuple[Requirement, ...]:
         """The contract a task that changes the repository's service starts from."""
@@ -95,6 +139,7 @@ class RequirementsContext:
     def record(
         self, category: str, title: str, description: str, priority: str,
         rationale: str = "", requirement_id: str | None = None,
+        component: str | None = None,
     ) -> Requirement:
         category = category.strip().lower().replace("-", "_").replace(" ", "_")
         if category not in CATEGORY_PREFIXES:
@@ -105,6 +150,10 @@ class RequirementsContext:
         title, description = title.strip(), description.strip()
         if not title or not description:
             raise ValueError("title and description cannot be empty.")
+        previous = (self.requirements.get(requirement_id.strip().upper())
+                    if requirement_id else None)
+        assigned = self.component_of(component,
+                                     previous.get("component") if previous else None)
         if requirement_id:
             requirement_id = requirement_id.strip().upper()
             if requirement_id not in self.requirements:
@@ -121,6 +170,8 @@ class RequirementsContext:
         }
         if rationale.strip():
             requirement["rationale"] = rationale.strip()
+        if self.available_components() or (previous and "component" in previous):
+            requirement["component"] = assigned
         self.requirements[requirement_id] = requirement
         return requirement
 
@@ -144,6 +195,7 @@ def build(ctx: RequirementsContext) -> list[BaseTool]:
         except ValueError as exc:
             logger.warning("Task kind not recorded: %s", exc)
             return f"Task kind not recorded: {exc}"
+        await ctx.changed()
         result: dict[str, object] = {"action": "recorded", "kind": ctx.kind}
         if renumbered:
             result["renumbered"] = renumbered
@@ -155,7 +207,7 @@ def build(ctx: RequirementsContext) -> list[BaseTool]:
     @tool
     async def record_requirement(
         category: str, title: str, description: str, priority: str,
-        rationale: str = "", id: str | None = None,
+        rationale: str = "", id: str | None = None, component: str | None = None,
     ) -> str:
         """Add a requirement, or update one by passing its existing id.
 
@@ -163,12 +215,17 @@ def build(ctx: RequirementsContext) -> list[BaseTool]:
         priority: must (the user said it is mandatory or required), should
             (important but negotiable), or could (nice to have).
         description: one testable statement of what is required.
+        component: the name of the architecture component the requirement belongs
+            to, when the guidance lists components; leave it out while none are
+            listed. Updating without it keeps the requirement's component.
         """
         try:
-            requirement = ctx.record(category, title, description, priority, rationale, id)
+            requirement = ctx.record(category, title, description, priority, rationale, id,
+                                     component)
         except ValueError as exc:
             logger.warning("Requirement not recorded: %s", exc)
             return f"Requirement not recorded: {exc}"
+        await ctx.changed()
         return json.dumps({"action": "recorded", **requirement}, ensure_ascii=False)
 
     @tool
@@ -179,6 +236,7 @@ def build(ctx: RequirementsContext) -> list[BaseTool]:
         except ValueError as exc:
             logger.warning("Requirement not removed: %s", exc)
             return f"Requirement not removed: {exc}"
+        await ctx.changed()
         return json.dumps({"action": "removed", "id": id.strip().upper()})
 
     @tool
@@ -199,6 +257,7 @@ def build(ctx: RequirementsContext) -> list[BaseTool]:
         except ValueError as exc:
             logger.warning("Requirement not retired: %s", exc)
             return f"Requirement not retired: {exc}"
+        await ctx.changed()
         return json.dumps({"action": "retired", **requirement}, ensure_ascii=False)
 
     @tool
@@ -209,6 +268,7 @@ def build(ctx: RequirementsContext) -> list[BaseTool]:
         except ValueError as exc:
             logger.warning("Requirement not kept: %s", exc)
             return f"Requirement not kept: {exc}"
+        await ctx.changed()
         return json.dumps({"action": "kept", **requirement}, ensure_ascii=False)
 
     return [set_task_kind, record_requirement, remove_requirement, list_requirements,

@@ -38,6 +38,13 @@ class RepositoryPublication(TypedDict):
     # of all of them; empty and 0 for a commit pushed without open findings.
     findings: NotRequired[list[dict[str, Any]]]
     findings_count: NotRequired[int]
+    # Only in the push activity's result: the questions to ask the user about the flow's
+    # requirements without a counterpart after the base branch was merged in. The
+    # workflow takes them off before the publication is shown.
+    requirement_questions: NotRequired[list[dict[str, Any]]]
+
+
+REQUIREMENT_QUESTIONS = 'requirement_questions'
 
 
 class PullRequest(TypedDict):

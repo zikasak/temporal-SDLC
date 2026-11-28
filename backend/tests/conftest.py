@@ -306,6 +306,28 @@ def workflow_registry(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def requirements_store(monkeypatch):
+    """The requirements store, without PostgreSQL: it knows no task flow, so lookups and
+    agents resolve requirements as they do without it, and writes are dropped. A test of
+    the store replaces these with stand-ins of its own."""
+    from app.requirements import store
+
+    async def nothing(*args, **kwargs):
+        return None
+
+    async def none_found(*args, **kwargs):
+        return []
+
+    for name in ("ensure_schema", "link_flow", "flow_baseline", "sync_baseline",
+                 "write_session", "assign_components", "apply_mapping", "copy_flow", "read",
+                 "components_of", "delete_flows"):
+        monkeypatch.setattr(store, name, nothing)
+    for name in ("baseline", "flows_linked_before"):
+        monkeypatch.setattr(store, name, none_found)
+    return store
+
+
+@pytest.fixture(autouse=True)
 def mention_history(monkeypatch):
     """Each delivery's mentions, oldest first, in memory instead of PostgreSQL: keyed by
     session, then by (comment type, comment id), holding (mention, recorded_by)."""

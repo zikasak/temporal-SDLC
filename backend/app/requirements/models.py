@@ -47,6 +47,9 @@ class Requirement(TypedDict):
     description: str
     priority: Priority
     rationale: NotRequired[str]
+    # The architecture component the requirement is grouped under; None (or absent) while
+    # it has none, such as while the task's flow has no architecture components.
+    component: NotRequired[str | None]
 
 
 @dataclass

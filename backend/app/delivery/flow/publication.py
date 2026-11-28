@@ -5,6 +5,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError
 
+from app.agent_workflows.workflows import ANSWER_TIMEOUT
 from app.delivery.flow.stages import COMPONENT_REPAIRS_PATCH
 
 from app.delivery.flow.base import FlowBase
@@ -12,14 +13,18 @@ from app.delivery.flow.merge_conflicts import push_conflict
 
 with workflow.unsafe.imports_passed_through():
     from app.delivery.contract import RepositoryContract, with_requirements
-    from app.delivery.models import open_review_findings
+    from app.delivery.models import MAX_AGENT_ANSWERS, open_review_findings
+    from app.github.models import REQUIREMENT_QUESTIONS
+    from app.llm.questions import MAX_QUESTIONS, Question
     from app.requirements.models import CHANGE_KINDS
     from app.temporal.activities import (
-        open_pull_request, publish_documentation, publish_onboarding,
-        publish_onboarding_architecture, publish_repository,
+        apply_requirement_mapping, open_pull_request, publish_documentation,
+        publish_onboarding, publish_onboarding_architecture, publish_repository,
     )
 
 COMPONENT_PUSHES_PATCH = 'component-pushes'
+# Which asker the delivery's questions about the merged requirements show.
+MAPPING_STAGE = 'requirements'
 
 
 class Publication(FlowBase):
@@ -135,6 +140,7 @@ class Publication(FlowBase):
             # Nothing new was pushed, so no pull request step runs for it.
             self.progress.pull_request_status = 'skipped'
         else:
+            mapping = self._take_mapping_questions()
             workflow.logger.info('Sources pushed to %s', self.progress.publication['branch'])
             self.progress.publication_status = 'completed'
             self._pushed = True
@@ -150,6 +156,96 @@ class Publication(FlowBase):
                     self.progress.findings_acceptance = None
             workflow.deprecate_patch('pull-request')
             await self._pull_request()
+            self._queue_requirement_mapping(mapping)
+
+    def _take_mapping_questions(self) -> list[dict[str, Any]]:
+        """Take the questions about the task flow's requirements without a counterpart
+        after the merge off the publication the push activity returned."""
+        publication = cast(dict[str, Any], self.progress.publication or {})
+        entries = publication.pop(REQUIREMENT_QUESTIONS, None)
+        return [item for item in entries or [] if isinstance(item, dict)]
+
+    def _queue_requirement_mapping(self, entries: list[dict[str, Any]]) -> None:
+        """Keep the questions about the task flow's requirements without a counterpart
+        after the base branch was merged in for the user: they are asked once the
+        delivery waits, beside its CI, pull request and mention handling, never holding
+        any of them up. A push without such questions keeps those still open."""
+        if entries:
+            self.state.requirement_mapping = entries
+
+    def _show_requirement_mapping(self) -> None:
+        """Ask the user, as the delivery's agents ask, the next questions which
+        requirement each of those requirements corresponds to, up to MAX_QUESTIONS at a
+        time; for ANSWER_TIMEOUT from now. Nothing is asked when none are open."""
+        workflow_id = workflow.info().workflow_id
+        batch = list(self.state.requirement_mapping[:MAX_QUESTIONS])
+        self._mapping_questions, self._mapping_answers = batch, None
+        others = [item for item in self.progress.agent_questions
+                  if item['workflow_id'] != workflow_id]
+        if not batch:
+            self._mapping_deadline = None
+            self.progress.agent_questions = others
+            return
+        self._mapping_deadline = workflow.now() + ANSWER_TIMEOUT
+        questions: list[Question] = [
+            {'question': str(item['question']), 'options': list(item['options'])}
+            for item in batch]
+        self.progress.agent_questions = [
+            *others, {'workflow_id': workflow_id, 'stage': MAPPING_STAGE,
+                      'questions': questions}]
+        workflow.logger.info('Asked the user to map %d merged requirements', len(batch))
+
+    def _hide_requirement_mapping(self, *, drop: bool) -> None:
+        """Take the open mapping questions off the delivery: kept for the next run unless
+        `drop`, when the requirements stay as they are, such as when the flow ends."""
+        workflow_id = workflow.info().workflow_id
+        if self._mapping_questions or any(
+                item['workflow_id'] == workflow_id and item.get('stage') == MAPPING_STAGE
+                for item in self.progress.agent_questions):
+            self.progress.agent_questions = [
+                item for item in self.progress.agent_questions
+                if not (item['workflow_id'] == workflow_id
+                        and item.get('stage') == MAPPING_STAGE)]
+        self._mapping_questions, self._mapping_answers = [], None
+        self._mapping_deadline = None
+        if drop and self.state.requirement_mapping:
+            workflow.logger.info('The mapping of the merged requirements was not answered')
+            self.state.requirement_mapping = []
+
+    def _mapping_due(self) -> bool:
+        """Whether the open mapping questions were answered or have timed out."""
+        return bool(self._mapping_questions) and (
+            self._mapping_answers is not None
+            or self._mapping_deadline is not None and workflow.now() >= self._mapping_deadline)
+
+    async def _settle_requirement_mapping(self) -> None:
+        """Apply the user's answers to the open mapping questions to the requirements
+        store: renumbered to the requirement named, removed, or kept; then ask the next
+        ones. Questions left unanswered for ANSWER_TIMEOUT keep the requirements as they
+        are."""
+        answers = self._mapping_answers
+        batch = self._mapping_questions
+        if answers is None:
+            self._hide_requirement_mapping(drop=True)
+            return
+        questions: list[Question] = [
+            {'question': str(item['question']), 'options': list(item['options'])}
+            for item in batch]
+        self.state.requirement_mapping = self.state.requirement_mapping[len(batch):]
+        self._hide_requirement_mapping(drop=False)
+        self.state.agent_answers = [*self.state.agent_answers, {
+            'stage': MAPPING_STAGE, 'questions': questions,
+            'answers': answers}][-MAX_AGENT_ANSWERS:]
+        try:
+            await workflow.execute_activity(
+                apply_requirement_mapping, args=[batch, answers],
+                start_to_close_timeout=timedelta(minutes=2),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except ActivityError as exc:
+            workflow.logger.warning('The mapping of the merged requirements was not '
+                                    'applied: %s', exc.cause or exc)
+        self._show_requirement_mapping()
 
     async def _revise_architecture(self, instructions: str) -> bool:
         """Change the architecture of an architecture-only onboarding as a comment on its
@@ -197,10 +293,12 @@ class Publication(FlowBase):
             self.progress.publication_status = 'error'
             self.progress.pull_request_status = 'skipped'
             return
+        mapping = self._take_mapping_questions()
         workflow.logger.info('Architecture pushed to %s', self.progress.publication['branch'])
         self.progress.publication_status = 'completed'
         self._pushed = True
         await self._pull_request()
+        self._queue_requirement_mapping(mapping)
 
     async def _pull_request(self) -> None:
         """Open the pull request of the pushed branch, or update the open one. Its failure

@@ -30,6 +30,8 @@ type Requirement = {
   description: string;
   priority: "must" | "should" | "could";
   rationale?: string;
+  /** The architecture component it is grouped under; null or absent while it has none. */
+  component?: string | null;
 };
 
 type RequirementsDocument = {
@@ -847,6 +849,11 @@ export default function Requirements() {
                               </div>
                               <p>{item.description}</p>
                               {item.rationale && <small>{item.rationale}</small>}
+                              {item.component && (
+                                <small className="requirement-component">
+                                  Component: {item.component}
+                                </small>
+                              )}
                             </li>
                           ))}
                         </ul>

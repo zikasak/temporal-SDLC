@@ -120,13 +120,18 @@ class PullRequestWait(FlowBase):
             self.state.waiting = False
             await workflow.wait_condition(workflow.all_handlers_finished)
             if not self._fix_pending():
+                self._hide_requirement_mapping(drop=True)
                 return False
             self.state.waiting = True
             self._start_queued()
         if (self._next is None and self._is_follow_up() and not self.progress.pull_request
                 and workflow.patched(FOLLOW_UP_CLOSES_PATCH)):
             if not await self._follow_up_continues():
+                self._hide_requirement_mapping(drop=True)
                 return False
+        # Questions about the requirements a merge of the base branch left without a
+        # counterpart are asked now, while everything below goes on.
+        self._show_requirement_mapping()
         deadline = workflow.now() + TASK_IDLE_TIMEOUT
         # While the pushed commit's CI runs, its checks are read every CI_CHECK_INTERVAL,
         # the first time at once, and the pull request's state every
@@ -136,11 +141,16 @@ class PullRequestWait(FlowBase):
         next_pull_request = workflow.now() + PULL_REQUEST_CHECK_INTERVAL
         while True:
             if self._next is not None:
+                self._hide_requirement_mapping(drop=False)
                 return True
             merged = self._closing()
             if merged is not None:
+                self._hide_requirement_mapping(drop=True)
                 await self._close(merged)
                 return False
+            if self._mapping_due():
+                await self._settle_requirement_mapping()
+                continue
             if watching and workflow.now() >= next_ci:
                 await self._check_ci()
                 watching = self._ci_pending()
@@ -152,6 +162,7 @@ class PullRequestWait(FlowBase):
                 self.state.waiting = False
                 await workflow.wait_condition(workflow.all_handlers_finished)
                 if not self._fix_pending():
+                    self._hide_requirement_mapping(drop=True)
                     return False
                 workflow.logger.info('Fix request queued while closing; continuing')
                 self.state.waiting = True
@@ -164,14 +175,18 @@ class PullRequestWait(FlowBase):
                 timeout = min(remaining, next_ci - workflow.now())
                 if checking:
                     timeout = min(timeout, next_pull_request - workflow.now())
+            if self._mapping_questions and self._mapping_deadline is not None:
+                timeout = max(min(timeout, self._mapping_deadline - workflow.now()),
+                              timedelta(seconds=1))
             try:
                 await workflow.wait_condition(
                     lambda: (self._next is not None or self._closing() is not None
-                             or self._check_requested or self._conflict_requested),
+                             or self._check_requested or self._conflict_requested
+                             or self._mapping_due()),
                     timeout=timeout)
             except asyncio.TimeoutError:
                 pass
-            if self._next is not None or self._closing() is not None:
+            if self._next is not None or self._closing() is not None or self._mapping_due():
                 continue
             if self._conflict_requested:
                 # GitHub reported that the pull request may conflict with its base branch.

@@ -1,8 +1,10 @@
 """Activities of the architecture session: the LLM's turns and the finalized document."""
 
 import time
+from functools import partial
 from typing import Any
 
+import psycopg
 from langgraph.errors import GraphRecursionError
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -22,8 +24,10 @@ from app.asyncio_utils import run_sync
 from app.llm.graph import get_message_graph, interview, native_session
 from app.llm.model import get_model
 from app.temporal.activities import _conversation, _repository_tools, _save_session_document
+from app.requirements import store as requirements_store
 from app.temporal.tracing import trace_activity
 from app.tools import architecture as architecture_tools
+from app.tools import requirements_read as requirements_read_tools
 from app.tools import questions as question_tools
 from app.tools import repository as repository_tools
 from app.llm.limits import AGENT_RECURSION_LIMIT
@@ -39,8 +43,13 @@ async def architecture_turn(state: ArchitectureState) -> dict[str, Any]:
     drafting = state.structure is None
     may_skip = (can_skip(state) and not state.skip_declined and drafting
                 and not any(item["role"] == "assistant" for item in state.messages))
+    task_flow_id = await requirements_store.activity_task_flow()
+    requirements = await _requirements_with_components(task_flow_id, state.requirements)
     ctx = architecture_tools.ArchitectureContext(
-        state.structure, base=state.existing_structure, may_skip=may_skip)
+        state.structure, base=state.existing_structure, may_skip=may_skip,
+        requirements=requirements)
+    if task_flow_id:
+        ctx.persist = partial(requirements_store.assign_components, task_flow_id)
     asked = question_tools.QuestionsContext()
     repository = await run_sync(_repository_tools)
     started = time.perf_counter()
@@ -48,12 +57,14 @@ async def architecture_turn(state: ArchitectureState) -> dict[str, Any]:
         # The architecture is drafted with the model of the API design it leads to.
         model = await get_model('api_design')
         graph = get_message_graph(
-            [*architecture_tools.build(ctx), *question_tools.build(asked), *repository],
+            [*architecture_tools.build(ctx), *question_tools.build(asked), *repository,
+             *requirements_read_tools.build(task_flow_id)],
             until=lambda: bool(asked.questions) or bool(ctx.skip_reason), model=model)
         async with native_session(model, _conversation("architecture")):
             reply = await interview(
                 graph, turn_messages(state, may_skip,
-                                     repository_tools.GUIDANCE if repository else ""),
+                                     (repository_tools.GUIDANCE if repository else "")
+                                     + ASSIGNMENT_GUIDANCE),
                 langchain_config(recursion_limit=AGENT_RECURSION_LIMIT, run_name='draft-architecture-with-tools'),
                 lambda: bool(asked.questions) or bool(ctx.skip_reason))
     except GraphRecursionError:
@@ -76,13 +87,41 @@ async def architecture_turn(state: ArchitectureState) -> dict[str, Any]:
                          time.perf_counter() - started,
                          len(structure["components"]) if structure else 0)
     if not reply and not asked.questions:
-        if structure == state.structure:
+        if structure == state.structure and ctx.requirements == requirements:
             raise ApplicationError("The model returned no text", non_retryable=True)
         reply = draft_fallback(structure) if structure else ""
     if not reply and not asked.questions:
         raise ApplicationError("The model returned no text", non_retryable=True)
+    # The task's requirements, each with the component the architect assigned it.
     return {"reply": reply, "questions": asked.questions, "structure": structure,
-            "skip_reason": None}
+            "skip_reason": None, "requirements": ctx.requirements}
+
+
+# What the architect is told about grouping the task's requirements by component.
+ASSIGNMENT_GUIDANCE = (
+    "\nOnce the architecture has components, assign every requirement of the task that "
+    "has no component yet to the component responsible for it with assign_requirements; "
+    "the tool results list them under requirements_without_component. "
+    "Use list_requirement_components to see the assignments so far."
+)
+
+
+async def _requirements_with_components(task_flow_id: str | None,
+                                        requirements: list[Any]) -> list[dict[str, Any]]:
+    """The task's requirements, each with its component: its own, else the one the task
+    flow's requirements store holds, such as one inferred for the branch's contract."""
+    records = [dict(item) for item in requirements]
+    if not task_flow_id:
+        return records
+    try:
+        stored = await requirements_store.components_of(task_flow_id) or {}
+    except (OSError, psycopg.Error) as exc:
+        activity.logger.warning("Components of task flow %s unavailable: %s",
+                                task_flow_id, exc)
+        return records
+    for item in records:
+        item["component"] = item.get("component") or stored.get(str(item.get("id")))
+    return records
 
 
 @activity.defn

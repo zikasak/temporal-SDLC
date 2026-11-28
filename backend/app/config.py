@@ -145,3 +145,7 @@ AUTH_REFRESH_ATTEMPTS_PER_MINUTE = int(os.getenv("AUTH_REFRESH_ATTEMPTS_PER_MINU
 # Reverse proxies between the client and the API that append to X-Forwarded-For. With 0
 # the header is ignored and the connecting address is the client.
 AUTH_TRUSTED_PROXY_HOPS = int(os.getenv("AUTH_TRUSTED_PROXY_HOPS", "0"))
+
+# Days a task flow's own requirements are kept in the requirements store after the flow
+# completed or was cancelled; the branch baselines they overlaid are kept.
+REQUIREMENTS_RETENTION_DAYS = float(os.getenv("REQUIREMENTS_RETENTION_DAYS", "30"))

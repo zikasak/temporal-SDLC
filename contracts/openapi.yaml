@@ -10,8 +10,9 @@ paths:
       operationId: getApiDesignSessionsBySessionId
       summary: Get a API design session
       description: The session's conversation, state and delivery progress, with lookup_requirements
-        for explaining requirement IDs. The delivery progress's ci reports the CI
-        of the pull request's current head commit.
+        for explaining requirement IDs, resolved from the requirements stored for
+        the session's task flow, each with its component. The delivery progress's
+        ci reports the CI of the pull request's current head commit.
       tags:
       - api-design
       parameters:
@@ -57,9 +58,7 @@ paths:
       - FR-54
       - FR-55
       - FR-83
-      - FR-85
       - FR-119
-      - FR-120
       - FR-185
       - FR-188
       - FR-191
@@ -69,6 +68,9 @@ paths:
       - FR-3
       - FR-212
       - FR-213
+      - FR-254
+      - FR-262
+      - FR-265
   /api-design/sessions/{session_id}/answers:
     post:
       operationId: postApiDesignSessionsBySessionIdAnswers
@@ -658,9 +660,10 @@ paths:
       operationId: getArchitectureSessionsBySessionId
       summary: Get an architecture session
       description: 'The session''s draft, conversation, skip proposal and state, with
-        lookup_requirements for explaining requirement IDs. Architecture sessions
-        are started only by their requirements session (there is no POST /architecture/sessions)
-        and have no idle timeout: they wait for the user indefinitely.'
+        lookup_requirements for explaining requirement IDs, resolved from the requirements
+        stored for the session''s task flow, each with its component. Architecture
+        sessions are started only by their requirements session (there is no POST
+        /architecture/sessions) and have no idle timeout: they wait for the user indefinitely.'
       tags:
       - architecture
       parameters:
@@ -702,8 +705,10 @@ paths:
       - FR-84
       - FR-86
       - FR-119
-      - FR-120
       - FR-188
+      - FR-254
+      - FR-261
+      - FR-265
   /architecture/sessions/{session_id}/answers:
     post:
       operationId: postArchitectureSessionsBySessionIdAnswers
@@ -870,10 +875,12 @@ paths:
       x-requirements:
       - FR-83
       - FR-84
-      - FR-85
       - FR-86
       - FR-126
       - FR-134
+      - FR-261
+      - FR-262
+      - FR-264
   /architecture/sessions/{session_id}/fork:
     post:
       operationId: postArchitectureSessionsBySessionIdFork
@@ -1114,10 +1121,10 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-80
-      - FR-85
       - FR-86
       - FR-134
       - FR-232
+      - FR-262
   /auth/login:
     post:
       operationId: postAuthLogin
@@ -2290,18 +2297,20 @@ paths:
       - FR-56
       - FR-61
       - FR-66
-      - FR-93
       - FR-95
       - FR-96
       - FR-159
       - FR-166
+      - FR-263
   /onboarding/sessions/{session_id}:
     get:
       operationId: getOnboardingSessionsBySessionId
       summary: Get an onboarding
       description: The onboarding's drafts, conversation, state and delivery progress,
-        with lookup_requirements for explaining requirement IDs. The delivery progress's
-        ci reports the CI of the pull request's current head commit.
+        with lookup_requirements for explaining requirement IDs, resolved from the
+        requirements stored for the onboarding's task flow, each with its component.
+        The delivery progress's ci reports the CI of the pull request's current head
+        commit.
       tags:
       - onboarding
       parameters:
@@ -2340,7 +2349,6 @@ paths:
       - FR-65
       - FR-66
       - FR-119
-      - FR-120
       - FR-185
       - FR-187
       - FR-188
@@ -2351,6 +2359,9 @@ paths:
       - FR-3
       - FR-212
       - FR-213
+      - FR-254
+      - FR-263
+      - FR-265
   /onboarding/sessions/{session_id}/answers:
     post:
       operationId: postOnboardingSessionsBySessionIdAnswers
@@ -2763,20 +2774,21 @@ paths:
         changes made by messages since the failure, given the diff since the last
         finished round; POST .../review/retry instead reruns the failed round with
         its original input. Only once a round finds no contradictions, or with force=true,
-        are the reviewed drafts fixed as the contract, including contracts/architecture.md,
-        and handed to the task flow, which starts its pending delivery child: contract
-        tests and a root Dockerfile are written and verified against the existing
-        code, then code review, push to a new branch named onboarding/<source branch>-<short
-        id> (the short id taken from the onboarding''s session ID) and a pull request
-        to the default branch, as for a delivery. Without force=true, calling it while
-        a round is running or while the contradiction questions are open (questions_open
-        true) answers 409. For an architecture-only onboarding no review runs (its
-        review child closes as skipped), and only contracts/architecture.md (and contracts/architecture.json)
-        is pushed to that branch with a pull request to the default branch, without
-        contract tests, verification or code review; the rest of the existing contract
-        is left unchanged, and disagreements between the drafted architecture and
-        the existing api.json or requirements.json are among the problems that block
-        finalizing. 409 while problems remain or a turn is running.'
+        are the reviewed drafts fixed as the contract, including contracts/architecture.md
+        and contracts/architecture.json, and handed to the task flow, which starts
+        its pending delivery child: contract tests and a root Dockerfile are written
+        and verified against the existing code, then code review, push to a new branch
+        named onboarding/<source branch>-<short id> (the short id taken from the onboarding''s
+        session ID) and a pull request to the default branch, as for a delivery. Without
+        force=true, calling it while a round is running or while the contradiction
+        questions are open (questions_open true) answers 409. For an architecture-only
+        onboarding no review runs (its review child closes as skipped), and only contracts/architecture.md
+        (and contracts/architecture.json) is pushed to that branch with a pull request
+        to the default branch, without contract tests, verification or code review;
+        the rest of the existing contract is left unchanged, and disagreements between
+        the drafted architecture and the existing api.json or requirements.json are
+        among the problems that block finalizing. 409 while problems remain or a turn
+        is running.'
       tags:
       - onboarding
       parameters:
@@ -2835,7 +2847,6 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-65
-      - FR-93
       - FR-98
       - FR-99
       - FR-100
@@ -2843,6 +2854,7 @@ paths:
       - FR-159
       - FR-165
       - FR-168
+      - FR-263
   /onboarding/sessions/{session_id}/fork:
     post:
       operationId: postOnboardingSessionsBySessionIdFork
@@ -3227,8 +3239,9 @@ paths:
       summary: Get a requirements session
       description: The session's conversation, state, the kind of task currently recorded
         (null while none is) and delivery progress, with lookup_requirements for explaining
-        requirement IDs. The delivery progress's ci reports the CI of the pull request's
-        current head commit.
+        requirement IDs, resolved from the requirements stored for the session's task
+        flow, each with its component. The delivery progress's ci reports the CI of
+        the pull request's current head commit.
       tags:
       - requirements
       parameters:
@@ -3274,7 +3287,6 @@ paths:
       - FR-54
       - FR-55
       - FR-119
-      - FR-120
       - FR-185
       - FR-188
       - FR-191
@@ -3288,6 +3300,9 @@ paths:
       - FR-228
       - FR-230
       - FR-234
+      - FR-254
+      - FR-255
+      - FR-265
   /requirements/sessions/{session_id}/answers:
     post:
       operationId: postRequirementsSessionsBySessionIdAnswers
@@ -3735,7 +3750,6 @@ paths:
                 $ref: '#/components/schemas/Error'
       x-requirements:
       - FR-78
-      - FR-85
       - FR-126
       - FR-128
       - FR-144
@@ -3752,6 +3766,8 @@ paths:
       - FR-231
       - FR-233
       - FR-236
+      - FR-257
+      - FR-262
   /requirements/sessions/{session_id}/fork:
     post:
       operationId: postRequirementsSessionsBySessionIdFork
@@ -4774,6 +4790,13 @@ components:
           - could
         rationale:
           type: string
+        component:
+          type: string
+          description: The architecture component (from contracts/architecture.json,
+            or the task's architecture once it defines components) the requirement
+            is grouped under, as stored for the session's task flow and written to
+            contracts/requirements.json; null or absent when it is not assigned to
+            a component yet.
       required:
       - id
       - category
@@ -5925,13 +5948,16 @@ components:
     LookupRequirement:
       type: object
       description: 'A requirement a requirement ID mentioned in the conversation can
-        refer to, for the web client to show on hover or tap. The list holds one entry
-        per ID and every requirement that applies, without a size limit: when the
-        session records a requirement with the same ID as one of the existing service,
-        the session''s version is listed, and an ID the task retires is listed with
-        retired true. For a session without an existing service (a new service, or
-        an onboarding of a branch without a contract), it holds only the requirements
-        recorded or drafted in the session.'
+        refer to, for the web client to show on hover or tap. Resolved from the requirements
+        stored in the database for the session''s task flow (its branch''s synced
+        baseline overlaid by the flow''s own changes), not from the session state
+        or the checkout''s contract files. The list holds one entry per ID and every
+        requirement that applies, without a size limit: when the session records a
+        requirement with the same ID as one of the existing service, the session''s
+        version is listed, and an ID the task retires is listed with retired true.
+        For a session without an existing service (a new service, or an onboarding
+        of a branch without a contract), it holds only the requirements recorded or
+        drafted in the session.'
       properties:
         id:
           type: string
@@ -5955,6 +5981,12 @@ components:
           - must
           - should
           - could
+        component:
+          type: string
+          description: Always present. The name of the architecture component (from
+            contracts/architecture.json, or the task's architecture once it defines
+            components) the requirement is grouped under; null when it is not assigned
+            to a component yet, such as while the flow has no architecture components.
         retired:
           type: boolean
           description: True when the task retires this requirement of the existing
