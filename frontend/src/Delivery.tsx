@@ -510,6 +510,7 @@ const agentLabels: Record<string, string> = {
   documentation: "The documentation agent",
   diagnosis: "The reviewer of the failed tests",
   routing: "The router of the acceptance criteria",
+  requirements: "The mapping of the requirements after the base branch merge",
 };
 
 /** The order the agent groups are shown in: by stage, whatever order the agents asked in. */

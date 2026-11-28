@@ -204,6 +204,90 @@ def map_requirements(own: Sequence[Mapping[str, Any]], merged: Sequence[Mapping[
     return renumbered, unmatched
 
 
+# How many merged requirements a mapping question offers as counterparts.
+MAPPING_CANDIDATES = 4
+MAPPING_TITLE_CHARS = 120
+# The answers of a mapping question that keep the requirement as it is, or remove it.
+KEEP_ANSWER = "Keep it under {id}"
+REMOVE_ANSWER = "Remove it"
+_ANSWER_ID = re.compile(r"\b([A-Za-z]+-\d+)\b")
+_REMOVAL_WORDS = ("remove", "delete", "drop")
+
+
+def _short(text: str, limit: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def mapping_questions(own: Sequence[Mapping[str, Any]], merged: Sequence[Mapping[str, Any]],
+                      unmatched: Sequence[str], renumbered: Mapping[str, str] | None = None,
+                      ) -> list[dict[str, Any]]:
+    """What the user is asked about each of the flow's requirements in `unmatched` (those
+    `map_requirements` found no counterpart for): which requirement of the merged
+    contract it corresponds to. Each entry has the requirement's `id`, its `title`, the
+    `question` and its `options`: the most similar merged requirements no other of the
+    flow's requirements maps to, keeping it under its ID, or removing it."""
+    from difflib import SequenceMatcher
+
+    own_by_id = {store.canonical_id(item.get("id")): item for item in own}
+    claimed = set((renumbered or {}).values()) | {
+        requirement_id for requirement_id in own_by_id
+        if requirement_id and requirement_id not in unmatched}
+    entries: list[dict[str, Any]] = []
+    for requirement_id in unmatched:
+        item = own_by_id.get(requirement_id)
+        if item is None:
+            continue
+        text = _text(item)
+        scored = []
+        for candidate in merged:
+            candidate_id = store.canonical_id(candidate.get("id"))
+            if candidate_id is None or candidate_id in claimed:
+                continue
+            ratio = SequenceMatcher(None, text, _text(candidate)).ratio()
+            scored.append((-ratio, candidate_id, str(candidate.get("title") or "")))
+        scored.sort()
+        options = [f"{candidate_id}: {_short(title, MAPPING_TITLE_CHARS)}" if title
+                   else candidate_id for _, candidate_id, title in scored[:MAPPING_CANDIDATES]]
+        options += [KEEP_ANSWER.format(id=requirement_id), REMOVE_ANSWER]
+        title = _short(str(item.get("title") or ""), MAPPING_TITLE_CHARS)
+        entries.append({
+            "id": requirement_id, "title": title,
+            "question": (
+                f"After the base branch was merged, the requirement {requirement_id}"
+                f"{f' ({title})' if title else ''} of this change no longer matches the "
+                "merged contracts/requirements.json. Which requirement does it "
+                "correspond to?"),
+            "options": options,
+        })
+    return entries
+
+
+def answer_mapping(entries: Sequence[Mapping[str, Any]], answers: Sequence[str],
+                   ) -> tuple[dict[str, str], list[str]]:
+    """The renumbering (old to new ID) and the removals the user's answers to the
+    `mapping_questions` decide, in the same order. An answer naming another requirement
+    ID renumbers the requirement to it; one asking to remove it removes it; any other
+    answer keeps it under its ID."""
+    renumbered: dict[str, str] = {}
+    removed: list[str] = []
+    for entry, answer in zip(entries, answers, strict=False):
+        requirement_id = str(entry["id"])
+        text = str(answer or "").strip()
+        if not text or text == KEEP_ANSWER.format(id=requirement_id):
+            continue
+        if text == REMOVE_ANSWER:
+            removed.append(requirement_id)
+            continue
+        named = [store.canonical_id(match) for match in _ANSWER_ID.findall(text)]
+        target = next((value for value in named if value and value != requirement_id), None)
+        if target is not None:
+            renumbered[requirement_id] = target
+        elif any(word in text.casefold() for word in _REMOVAL_WORDS):
+            removed.append(requirement_id)
+    return renumbered, removed
+
+
 async def sync_branch(task_flow_id: str, repository: str, branch: str,
                       checkout: Path) -> int:
     """Sync the checkout's contracts/requirements.json into the baseline of `repository`

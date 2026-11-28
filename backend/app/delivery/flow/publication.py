@@ -1,3 +1,4 @@
+import asyncio
 from datetime import timedelta
 from typing import Any, cast
 
@@ -5,6 +6,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError
 
+from app.agent_workflows.workflows import ANSWER_TIMEOUT
 from app.delivery.flow.stages import COMPONENT_REPAIRS_PATCH
 
 from app.delivery.flow.base import FlowBase
@@ -12,14 +14,18 @@ from app.delivery.flow.merge_conflicts import push_conflict
 
 with workflow.unsafe.imports_passed_through():
     from app.delivery.contract import RepositoryContract, with_requirements
-    from app.delivery.models import open_review_findings
+    from app.delivery.models import MAX_AGENT_ANSWERS, open_review_findings
+    from app.github.models import REQUIREMENT_QUESTIONS
+    from app.llm.questions import MAX_QUESTIONS, Question
     from app.requirements.models import CHANGE_KINDS
     from app.temporal.activities import (
-        open_pull_request, publish_documentation, publish_onboarding,
-        publish_onboarding_architecture, publish_repository,
+        apply_requirement_mapping, open_pull_request, publish_documentation,
+        publish_onboarding, publish_onboarding_architecture, publish_repository,
     )
 
 COMPONENT_PUSHES_PATCH = 'component-pushes'
+# Which asker the delivery's questions about the merged requirements show.
+MAPPING_STAGE = 'requirements'
 
 
 class Publication(FlowBase):
@@ -135,6 +141,7 @@ class Publication(FlowBase):
             # Nothing new was pushed, so no pull request step runs for it.
             self.progress.pull_request_status = 'skipped'
         else:
+            mapping = self._take_mapping_questions()
             workflow.logger.info('Sources pushed to %s', self.progress.publication['branch'])
             self.progress.publication_status = 'completed'
             self._pushed = True
@@ -150,6 +157,59 @@ class Publication(FlowBase):
                     self.progress.findings_acceptance = None
             workflow.deprecate_patch('pull-request')
             await self._pull_request()
+            await self._ask_requirement_mapping(mapping)
+
+    def _take_mapping_questions(self) -> list[dict[str, Any]]:
+        """Take the questions about the task flow's requirements without a counterpart
+        after the merge off the publication the push activity returned."""
+        publication = cast(dict[str, Any], self.progress.publication or {})
+        entries = publication.pop(REQUIREMENT_QUESTIONS, None)
+        return [item for item in entries or [] if isinstance(item, dict)]
+
+    async def _ask_requirement_mapping(self, entries: list[dict[str, Any]]) -> None:
+        """Ask the user, as the delivery's agents ask, which requirement each of the task
+        flow's requirements without a counterpart after the base branch was merged in
+        corresponds to, and apply the answers to the requirements store: renumbered to
+        the requirement named, removed, or kept. Questions left unanswered (for
+        ANSWER_TIMEOUT, or until the pull request closes) keep the requirements as they
+        are."""
+        workflow_id = workflow.info().workflow_id
+        for start in range(0, len(entries), MAX_QUESTIONS):
+            batch = entries[start:start + MAX_QUESTIONS]
+            questions: list[Question] = [
+                {'question': str(item['question']), 'options': list(item['options'])}
+                for item in batch]
+            self._mapping_questions, self._mapping_answers = batch, None
+            self.progress.agent_questions = [
+                *(item for item in self.progress.agent_questions
+                  if item['workflow_id'] != workflow_id),
+                {'workflow_id': workflow_id, 'stage': MAPPING_STAGE, 'questions': questions}]
+            workflow.logger.info('Asked the user to map %d merged requirements', len(batch))
+            try:
+                await workflow.wait_condition(
+                    lambda: self._mapping_answers is not None or self._closing() is not None,
+                    timeout=ANSWER_TIMEOUT)
+            except asyncio.TimeoutError:
+                pass
+            answers = self._mapping_answers
+            self._mapping_questions, self._mapping_answers = [], None
+            self.progress.agent_questions = [item for item in self.progress.agent_questions
+                                             if item['workflow_id'] != workflow_id]
+            if answers is None:
+                workflow.logger.info('The mapping of the merged requirements was not answered')
+                return
+            self.state.agent_answers = [*self.state.agent_answers, {
+                'stage': MAPPING_STAGE, 'questions': questions,
+                'answers': answers}][-MAX_AGENT_ANSWERS:]
+            try:
+                await workflow.execute_activity(
+                    apply_requirement_mapping, args=[batch, answers],
+                    start_to_close_timeout=timedelta(minutes=2),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            except ActivityError as exc:
+                workflow.logger.warning('The mapping of the merged requirements was not '
+                                        'applied: %s', exc.cause or exc)
 
     async def _revise_architecture(self, instructions: str) -> bool:
         """Change the architecture of an architecture-only onboarding as a comment on its
@@ -197,10 +257,12 @@ class Publication(FlowBase):
             self.progress.publication_status = 'error'
             self.progress.pull_request_status = 'skipped'
             return
+        mapping = self._take_mapping_questions()
         workflow.logger.info('Architecture pushed to %s', self.progress.publication['branch'])
         self.progress.publication_status = 'completed'
         self._pushed = True
         await self._pull_request()
+        await self._ask_requirement_mapping(mapping)
 
     async def _pull_request(self) -> None:
         """Open the pull request of the pushed branch, or update the open one. Its failure

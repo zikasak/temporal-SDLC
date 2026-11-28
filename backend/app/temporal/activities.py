@@ -50,8 +50,8 @@ from app.github import work_refs
 from app.github import storage as github_storage
 from app.github.errors import GitHubError
 from app.github.models import (
-    PUSH_CONFLICT, PullRequest, RepositoryCheckout, RepositoryPublication,
-    RepositorySelection,
+    PUSH_CONFLICT, REQUIREMENT_QUESTIONS, PullRequest, RepositoryCheckout,
+    RepositoryPublication, RepositorySelection,
 )
 from app.implementation.activities import is_service_file, published_files
 from app.onboarding.models import onboarding_branch
@@ -403,7 +403,7 @@ async def _publish(workspace: SessionWorkspace, session_id: str,
         # The sources were written as they were made, which may be before the base
         # branch was merged into the branch: what that merge brought in stays.
         await repository_checkout.keep_base_merge(target, merge_contracts)
-        await _map_merged_requirements(target)
+        mapping = await _map_merged_requirements(target)
         written = await _commit_message(target, before, verified)
         result = await repository_checkout.push(
             target, repository, token,
@@ -424,6 +424,9 @@ async def _publish(workspace: SessionWorkspace, session_id: str,
         raise ApplicationError(str(exc)) from exc
     activity.logger.info("Pushed session %s to %s (%s)", session_id, result["branch"],
                          result["commit"])
+    if mapping:
+        # Asked of the user by the workflow, which takes them off the publication.
+        result = cast(RepositoryPublication, {**result, REQUIREMENT_QUESTIONS: mapping})
     return result
 
 
@@ -456,31 +459,57 @@ async def _stored_components(contract: RepositoryContract) -> RepositoryContract
     return with_components(contract, components) if components else contract
 
 
-async def _map_merged_requirements(target: Path) -> None:
+async def _map_merged_requirements(target: Path) -> list[dict[str, Any]]:
     """After the base branch was merged into the delivery's branch: map the task flow's
     own requirements to their counterparts in the merged contracts/requirements.json
     (the same ID with similar content, or the same title and description under another
-    ID) and update the requirements store with the mapping. Never fails the push."""
+    ID) and update the requirements store with the mapping. Returns the questions to ask
+    the user about those without a counterpart (`requirements_sync.mapping_questions`),
+    whose answers `apply_requirement_mapping` applies. Never fails the push."""
     task_flow_id = await requirements_store.activity_task_flow()
     if not task_flow_id:
-        return
+        return []
     try:
         merged = await run_sync(requirements_sync.read_branch_requirements, target)
         own = await requirements_store.read(task_flow_id, own_only=True)
         if not merged or not own:
-            return
+            return []
         renumbered, unmatched = requirements_sync.map_requirements(own, merged)
         if renumbered:
             await requirements_store.apply_mapping(task_flow_id, renumbered)
             activity.logger.info("Mapped renumbered requirements of task flow %s: %s",
                                  task_flow_id, renumbered)
         if unmatched:
-            activity.logger.warning(
-                "Requirements of task flow %s without a counterpart after the merge: %s",
-                task_flow_id, ", ".join(unmatched))
+            activity.logger.info(
+                "Requirements of task flow %s without a counterpart after the merge, "
+                "asked of the user: %s", task_flow_id, ", ".join(unmatched))
+            return requirements_sync.mapping_questions(own, merged, unmatched, renumbered)
     except Exception as exc:  # noqa: BLE001 - the store keeps the flow's own version
         activity.logger.warning("Could not map the merged requirements: %s: %s",
                                 type(exc).__name__, exc)
+    return []
+
+
+@activity.defn
+@trace_activity('apply-requirement-mapping', feature='repository')
+async def apply_requirement_mapping(entries: list[dict[str, Any]],
+                                    answers: list[str]) -> dict[str, Any]:
+    """Activity: apply the user's `answers` to the questions about the task flow's
+    requirements without a counterpart after a merge (`entries`, as the publication's
+    REQUIREMENT_QUESTIONS listed them) to the requirements store: renumber those the
+    user mapped to another requirement and remove those the user removed. Returns
+    {'renumbered': {old: new}, 'removed': [ids]}."""
+    renumbered, removed = requirements_sync.answer_mapping(entries, answers)
+    task_flow_id = await requirements_store.activity_task_flow()
+    if not task_flow_id or not (renumbered or removed):
+        return {'renumbered': renumbered, 'removed': removed}
+    try:
+        await requirements_store.apply_mapping(task_flow_id, renumbered, removed)
+    except (OSError, psycopg.Error) as exc:
+        raise ApplicationError(f"The requirements store could not be updated: {exc}") from exc
+    activity.logger.info("Applied the user's mapping of task flow %s: renumbered %s, "
+                         "removed %s", task_flow_id, renumbered, removed)
+    return {'renumbered': renumbered, 'removed': removed}
 
 
 async def publish_repository_from(

@@ -36,6 +36,7 @@ with workflow.unsafe.imports_passed_through():
     from app.tasks.workflows import TaskWorkflow
     from app.temporal.activities import (
         api_design_turn,
+        apply_requirement_mapping,
         checkout_repository,
         open_pull_request,
         parse_document,
@@ -86,6 +87,7 @@ async def main():
             architecture_turn, write_architecture_document,
             api_design_turn, write_openapi_document,
             checkout_repository, update_repository_checkout, publish_repository,
+            apply_requirement_mapping,
             publish_documentation, publish_onboarding, publish_onboarding_architecture,
             open_pull_request, write_pull_request_text,
             read_repository_contract, read_requirements_document, register_session,

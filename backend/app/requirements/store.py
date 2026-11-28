@@ -340,27 +340,62 @@ async def assign_components(task_flow_id: str,
     return count
 
 
+# Prefix of the IDs rows have for a moment while a renumbering is applied.
+_TEMPORARY = "~renumbering-"
+
+
+def mapping_renames(renumbered: Mapping[str, str]) -> dict[str, str]:
+    """The renames of a renumbering, by canonical IDs: without pairs that keep their ID or
+    have an unusable one, and with only the first requirement mapped to a given ID."""
+    renames: dict[str, str] = {}
+    targets: set[str] = set()
+    for old, new in renumbered.items():
+        old_id, new_id = canonical_id(old), canonical_id(new)
+        if (old_id is None or new_id is None or old_id == new_id or old_id in renames
+                or new_id in targets):
+            continue
+        renames[old_id] = new_id
+        targets.add(new_id)
+    return renames
+
+
 async def apply_mapping(task_flow_id: str, renumbered: Mapping[str, str],
                         removed: Iterable[str] = ()) -> None:
     """Apply what resolving merge conflicts found: each of the flow's requirements in
-    `renumbered` now has the ID it maps to, and those `removed` are gone."""
+    `renumbered` now has the ID it maps to, and those `removed` are gone.
+
+    The renumbering is applied at once, so that chains (FR-5 -> FR-6 -> FR-7) and swaps
+    keep every requirement: the rows renamed move to temporary IDs first, then to their
+    targets, and a row is replaced only at a target ID that is not itself renamed."""
+    renames = mapping_renames(renumbered)
     async with await connect() as conn:
         async with conn.transaction():
             await _ensure_flow(conn, task_flow_id)
             base = await _baseline_ids(conn, task_flow_id)
-            for old, new in renumbered.items():
-                old_id, new_id = canonical_id(old), canonical_id(new)
-                if old_id is None or new_id is None or old_id == new_id:
-                    continue
-                await conn.execute(
-                    "DELETE FROM app.requirement_changes WHERE task_flow_id = %s AND id = %s",
-                    (task_flow_id, new_id))
-                await conn.execute(
-                    "UPDATE app.requirement_changes SET id = %s, change = CASE WHEN "
-                    "change IN (%s, %s) THEN %s ELSE change END, updated_at = now() "
-                    "WHERE task_flow_id = %s AND id = %s",
-                    (new_id, CREATED, CHANGED, CHANGED if new_id in base else CREATED,
-                     task_flow_id, old_id))
+            if renames:
+                sources = list(renames)
+                # Rows at target IDs that move away themselves are kept; the others give
+                # way to the requirement renamed onto them.
+                replaced = [new for new in renames.values() if new not in renames]
+                if replaced:
+                    await conn.execute(
+                        "DELETE FROM app.requirement_changes WHERE task_flow_id = %s "
+                        "AND id = ANY(%s)", (task_flow_id, replaced))
+                # Phase 1: every renamed row to a temporary ID no requirement can have.
+                for index, old_id in enumerate(sources):
+                    await conn.execute(
+                        "UPDATE app.requirement_changes SET id = %s "
+                        "WHERE task_flow_id = %s AND id = %s",
+                        (f"{_TEMPORARY}{index}", task_flow_id, old_id))
+                # Phase 2: from the temporary IDs to the targets.
+                for index, old_id in enumerate(sources):
+                    new_id = renames[old_id]
+                    await conn.execute(
+                        "UPDATE app.requirement_changes SET id = %s, change = CASE WHEN "
+                        "change IN (%s, %s) THEN %s ELSE change END, updated_at = now() "
+                        "WHERE task_flow_id = %s AND id = %s",
+                        (new_id, CREATED, CHANGED, CHANGED if new_id in base else CREATED,
+                         task_flow_id, f"{_TEMPORARY}{index}"))
             for raw_id in removed:
                 requirement_id = canonical_id(raw_id)
                 if requirement_id is None:
@@ -514,17 +549,23 @@ async def delete_flows(task_flow_ids: Iterable[str]) -> int:
         return cursor.rowcount or 0
 
 
-async def flows_linked_before(cutoff: datetime, limit: int = CLEANUP_BATCH) -> list[str]:
+async def flows_linked_before(cutoff: datetime, limit: int = CLEANUP_BATCH,
+                              after: str | None = None) -> list[str]:
+    """Up to `limit` task flows linked before `cutoff`, in the order of their IDs and
+    after the ID `after` when given: one page of the flows a cleanup run looks at."""
     async with await connect() as conn:
         cursor = await conn.execute(
             "SELECT task_flow_id FROM app.requirement_flows WHERE created_at < %s "
-            "ORDER BY created_at LIMIT %s", (cutoff, limit))
+            "AND (%s::text IS NULL OR task_flow_id > %s) ORDER BY task_flow_id LIMIT %s",
+            (cutoff, after, after, limit))
         return [row["task_flow_id"] for row in await cursor.fetchall()]
 
 
 async def delete_closed_flows(retention_days: float) -> int:
-    """Delete the layers of task flows completed or cancelled longer than
-    `retention_days` ago, and of those Temporal no longer knows."""
+    """Delete the layers of task flows closed (completed, cancelled, failed, terminated,
+    timed out or continued away) longer than `retention_days` ago, and of those Temporal
+    no longer knows. Pages through every flow linked before the retention, so that flows
+    still running or closed too recently never keep the others from being looked at."""
     from temporalio.client import WorkflowExecutionStatus
     from temporalio.service import RPCError, RPCStatusCode
 
@@ -535,19 +576,24 @@ async def delete_closed_flows(retention_days: float) -> int:
     if not candidates:
         return 0
     client = await connect_temporal()
-    expired = []
-    for task_flow_id in candidates:
-        try:
-            description = await client.get_workflow_handle(task_flow_id).describe()
-        except RPCError as exc:
-            if exc.status == RPCStatusCode.NOT_FOUND:
+    deleted = 0
+    while candidates:
+        expired = []
+        for task_flow_id in candidates:
+            try:
+                description = await client.get_workflow_handle(task_flow_id).describe()
+            except RPCError as exc:
+                if exc.status == RPCStatusCode.NOT_FOUND:
+                    expired.append(task_flow_id)
+                continue
+            if (description.status not in (None, WorkflowExecutionStatus.RUNNING)
+                    and description.close_time is not None
+                    and description.close_time < cutoff):
                 expired.append(task_flow_id)
-            continue
-        if (description.status in (WorkflowExecutionStatus.COMPLETED,
-                                   WorkflowExecutionStatus.CANCELED)
-                and description.close_time is not None and description.close_time < cutoff):
-            expired.append(task_flow_id)
-    deleted = await delete_flows(expired)
+        deleted += await delete_flows(expired)
+        if len(candidates) < CLEANUP_BATCH:
+            break
+        candidates = await flows_linked_before(cutoff, after=candidates[-1])
     if deleted:
         logger.info("Deleted the requirements of %d closed task flows", deleted)
     return deleted
