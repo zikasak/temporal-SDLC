@@ -652,14 +652,20 @@ class Verification(FlowBase):
         """The user's answer to the onboarding's question whether a failing contract test
         reveals a bug in the existing code, or to the questions which requirement the task
         flow's requirements without a counterpart after a merge correspond to."""
-        if self._mapping_questions and self._mapping_answers is None:
+        if self._mapping_open():
             self._mapping_answers = [answer.strip() for answer in answers]
             return
         self._bug_answer = answers[0].strip()
 
+    def _mapping_open(self) -> bool:
+        """Whether the questions about the merged requirements wait for an answer: they
+        are asked only while the delivery waits."""
+        return bool(self._mapping_questions and self._mapping_answers is None
+                    and self.state.waiting)
+
     @answer_questions.validator
     def validate_answer_questions(self, answers: list[str]) -> None:
-        if self._mapping_questions and self._mapping_answers is None:
+        if self._mapping_open():
             problem = answer_problem(
                 [{'question': item['question'], 'options': item['options']}
                  for item in self._mapping_questions], answers)
