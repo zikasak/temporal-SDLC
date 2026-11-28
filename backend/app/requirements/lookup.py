@@ -8,10 +8,13 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, TypedDict
 
+import psycopg
+
 from app.asyncio_utils import run_sync
 from app.config import GENERATED_CODE_DIR
 from app.delivery.contract import ContractError, read_service_contract
 from app.github.checkout import CheckoutError, checkout_path
+from app.requirements import store as requirements_store
 from app.requirements.models import CATEGORY_PREFIXES, PRIORITIES
 
 logger = logging.getLogger(__name__)
@@ -27,6 +30,8 @@ class LookupRequirement(TypedDict):
     title: str
     description: str
     priority: str
+    # The architecture component it is grouped under; None while it has none.
+    component: str | None
     retired: bool
 
 
@@ -50,12 +55,14 @@ def _entry(item: Any, retired: bool) -> LookupRequirement | None:
     priority = item.get("priority")
     if priority not in PRIORITIES:
         priority = "must"
+    component = item.get("component")
     return {
         "id": requirement_id,
         "category": category,
         "title": str(item.get("title") or ""),
         "description": str(item.get("description") or ""),
         "priority": priority,
+        "component": str(component) if component else None,
         "retired": retired,
     }
 
@@ -113,8 +120,41 @@ async def checkout_requirements(session_id: str) -> list[Any]:
         return []
 
 
+async def stored_lookup(task_flow_id: str | None, own_only: bool = False,
+                        ) -> list[LookupRequirement] | None:
+    """The lookup list of a session of task flow `task_flow_id`, resolved from the
+    requirements store: the flow's baseline (the existing service's requirements) overlaid
+    by its own changes, those it retires marked retired; with `own_only`, for a session
+    without an existing service, only those the flow recorded. None when the store does
+    not know the flow or cannot be read, so the caller resolves it as before."""
+    if not task_flow_id:
+        return None
+    try:
+        # A flow whose branch was never synced, such as when the store was unreachable
+        # as it started, cannot list the existing service's requirements from it.
+        stored = await requirements_store.read(task_flow_id, own_only=own_only,
+                                               require_baseline=not own_only)
+    except (OSError, psycopg.Error) as exc:
+        logger.warning("Requirements of task flow %s unavailable for the lookup: %s",
+                       task_flow_id, exc)
+        return None
+    if stored is None:
+        return None
+    entries: dict[str, LookupRequirement] = {}
+    for item in stored:
+        entry = _entry(item, item["retired"])
+        if entry is not None:
+            entries[entry["id"]] = entry
+    return list(entries.values())
+
+
 async def requirements_session_lookup(session_id: str, state: Any) -> list[LookupRequirement]:
-    """The lookup list of a requirements session (RequirementsState)."""
+    """The lookup list of a requirements session (RequirementsState): from the
+    requirements store of its task flow, else from its state and checkout."""
+    stored = await stored_lookup(getattr(state, "task_flow_id", None),
+                                 own_only=state.kind == "new_service")
+    if stored is not None:
+        return stored
     existing: list[Any] = []
     if state.kind != "new_service":
         if state.contract:
@@ -127,10 +167,16 @@ async def requirements_session_lookup(session_id: str, state: Any) -> list[Looku
 async def source_session_lookup(source_session_id: str | None,
                                 fallback: Iterable[Any],
                                 fallback_existing: Iterable[Any] | None = None,
+                                *, task_flow_id: str | None = None,
+                                kind: str | None = None,
                                 ) -> list[LookupRequirement]:
     """The lookup list of a session derived from a requirements session, such as an
-    architecture or API design session: that of its requirements session, or the
-    derived session's own requirements when that cannot be read."""
+    architecture or API design session: from the requirements store of its task flow,
+    else that of its requirements session, or the derived session's own requirements
+    when that cannot be read."""
+    stored = await stored_lookup(task_flow_id, own_only=kind == "new_service")
+    if stored is not None:
+        return stored
     if source_session_id:
         # Imported here: the service imports the delivery service, which imports this.
         from app.requirements import service as requirements_service

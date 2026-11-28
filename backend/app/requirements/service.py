@@ -8,6 +8,7 @@ from app.config import TASK_QUEUE
 from app.delivery import service as delivery_service
 from app.delivery.models import DeliveryProgress, RetryStage
 from app.github.models import RepositorySelection
+from app.requirements import store as requirements_store
 from app.requirements.lookup import requirements_session_lookup
 from app.requirements.models import DIRECT_KINDS, RequirementsState
 from app.requirements.prompt import opening_message, task_messages
@@ -114,6 +115,10 @@ async def fork(session_id: str, message_index: int) -> dict[str, str]:
         review=forked_review(source.review, messages),
     ), name=name, origin="fork",
         task_queue=await task_queue_of(session_id, await connect_temporal()))
+    # The fork's task flow gets the requirements the session had created at the fork point.
+    await requirements_store.fork_flow(source.task_flow_id, created.get("task_flow_id"),
+                                       source.repository, requirements or [],
+                                       source.retired)
     logger.info("Forked requirements session %s after message %d as %s",
                 session_id, message_index, created["session_id"])
     return created

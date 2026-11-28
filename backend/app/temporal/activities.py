@@ -24,7 +24,7 @@ from app.conversations.models import ConversationMessage
 from app.config import GENERATED_CODE_DIR
 from app.delivery.contract import (
     ContractError, RepositoryContract, merge_contracts, read_contract, read_service_contract,
-    write_architecture, write_contract,
+    with_components, write_architecture, write_contract,
 )
 from app.documentation.activities import is_documentation_file
 from app.documents import (
@@ -64,6 +64,8 @@ from app.temporal.registry import register
 from app.temporal.tracing import trace_activity
 from app.llm.limits import AGENT_RECURSION_LIMIT
 from app.tracing import langchain_config
+from app.requirements import store as requirements_store
+from app.requirements import sync as requirements_sync
 from app.requirements.document import DOCUMENT_FILENAME, render_requirements_markdown
 from app.requirements.models import Requirement, TaskKind
 from app.requirements.prompt import document_messages, interview_messages
@@ -75,6 +77,7 @@ from app.tools import api_design as api_design_tools
 from app.tools import questions as question_tools
 from app.tools import repository as repository_tools
 from app.tools import requirements as requirements_tools
+from app.tools import requirements_read as requirements_read_tools
 from app.tools.document_write import summarize_tool_results
 
 COMMIT_SUBJECT = "Add generated service, contract tests and contract"
@@ -174,6 +177,45 @@ def _published_requirements() -> tuple[Requirement, ...]:
     return tuple(contract["requirements"])
 
 
+def _checkout_components() -> tuple[str, ...]:
+    """The architecture components of the session's repository (contracts/architecture
+    .json); none when it has none."""
+    if not activity.in_activity():
+        return ()
+    return requirements_sync.component_names(repository_checkout.checkout_path(
+        GENERATED_CODE_DIR, _workflow_id()))
+
+
+async def _store_interview(task_flow_id: str,
+                           ctx: requirements_tools.RequirementsContext) -> None:
+    """Write the interview's requirements to the task flow's layer of the store."""
+    await requirements_store.write_session(
+        task_flow_id, cast(list[dict[str, Any]], ctx.as_list()),
+        cast(list[dict[str, Any]], ctx.retired_list()))
+
+
+# The stage workflows whose start syncs the branch's requirements into the store.
+SYNCED_WORKFLOWS = ("RequirementsWorkflow", "OnboardingWorkflow")
+
+
+async def _sync_requirements(target: Path, repository: RepositorySelection) -> None:
+    """Sync the checked-out branch's requirements into the store's baseline, linking the
+    activity's task flow to it, when a requirements or onboarding flow starts; never
+    fails the checkout."""
+    if not activity.in_activity() or activity.info().workflow_type not in SYNCED_WORKFLOWS:
+        return
+    task_flow_id = await requirements_store.activity_task_flow()
+    if not task_flow_id:
+        return
+    try:
+        await requirements_sync.sync_branch(task_flow_id, repository["full_name"],
+                                            repository["branch"], target)
+    except Exception as exc:  # noqa: BLE001 - the flow goes on; lookups fall back
+        activity.logger.warning("Could not sync the requirements of %s@%s: %s: %s",
+                                repository["full_name"], repository["branch"],
+                                type(exc).__name__, exc)
+
+
 async def _github_token() -> tuple[str, dict[str, Any]]:
     """A fresh installation token and the saved connection it belongs to."""
     try:
@@ -222,6 +264,7 @@ async def _checkout(session_id: str, repository: RepositorySelection,
         raise ApplicationError(str(exc)) from exc
     activity.logger.info("Checked out %s@%s at %s for session %s", repository["full_name"],
                          repository["branch"], result["commit"], session_id)
+    await _sync_requirements(target, repository)
     return result
 
 
@@ -360,6 +403,7 @@ async def _publish(workspace: SessionWorkspace, session_id: str,
         # The sources were written as they were made, which may be before the base
         # branch was merged into the branch: what that merge brought in stays.
         await repository_checkout.keep_base_merge(target, merge_contracts)
+        await _map_merged_requirements(target)
         written = await _commit_message(target, before, verified)
         result = await repository_checkout.push(
             target, repository, token,
@@ -390,9 +434,53 @@ async def publish_repository(
     kind: str | None = None, findings: list[ReviewFinding] | None = None,
     components: dict[str, Any] | None = None, resolved: str | None = None,
 ) -> RepositoryPublication:
-    """Activity: `publish_repository_from` the session's workspace on this worker."""
+    """Activity: `publish_repository_from` the session's workspace on this worker, its
+    requirements with the components the task flow's requirements store holds."""
     return await publish_repository_from(_workspace(session_id), session_id, repository,
-                                         contract, kind, findings, components, resolved)
+                                         await _stored_components(contract), kind, findings,
+                                         components, resolved)
+
+
+async def _stored_components(contract: RepositoryContract) -> RepositoryContract:
+    """The contract with the components its requirements have in the requirements store
+    of the activity's task flow; as it is outside a task flow or without the store."""
+    task_flow_id = await requirements_store.activity_task_flow()
+    if not task_flow_id:
+        return contract
+    try:
+        components = await requirements_store.components_of(task_flow_id)
+    except (OSError, psycopg.Error) as exc:
+        activity.logger.warning("Components of task flow %s unavailable: %s",
+                                task_flow_id, exc)
+        return contract
+    return with_components(contract, components) if components else contract
+
+
+async def _map_merged_requirements(target: Path) -> None:
+    """After the base branch was merged into the delivery's branch: map the task flow's
+    own requirements to their counterparts in the merged contracts/requirements.json
+    (the same ID with similar content, or the same title and description under another
+    ID) and update the requirements store with the mapping. Never fails the push."""
+    task_flow_id = await requirements_store.activity_task_flow()
+    if not task_flow_id:
+        return
+    try:
+        merged = await run_sync(requirements_sync.read_branch_requirements, target)
+        own = await requirements_store.read(task_flow_id, own_only=True)
+        if not merged or not own:
+            return
+        renumbered, unmatched = requirements_sync.map_requirements(own, merged)
+        if renumbered:
+            await requirements_store.apply_mapping(task_flow_id, renumbered)
+            activity.logger.info("Mapped renumbered requirements of task flow %s: %s",
+                                 task_flow_id, renumbered)
+        if unmatched:
+            activity.logger.warning(
+                "Requirements of task flow %s without a counterpart after the merge: %s",
+                task_flow_id, ", ".join(unmatched))
+    except Exception as exc:  # noqa: BLE001 - the store keeps the flow's own version
+        activity.logger.warning("Could not map the merged requirements: %s: %s",
+                                type(exc).__name__, exc)
 
 
 async def publish_repository_from(
@@ -481,9 +569,11 @@ async def publish_onboarding(
     findings: list[ReviewFinding] | None = None, code_changed: bool = False,
     resolved: str | None = None,
 ) -> RepositoryPublication:
-    """Activity: `publish_onboarding_from` the session's workspace on this worker."""
+    """Activity: `publish_onboarding_from` the session's workspace on this worker, its
+    requirements with the components the task flow's requirements store holds."""
     return await publish_onboarding_from(_workspace(session_id), session_id, repository,
-                                         contract, findings, code_changed, resolved)
+                                         await _stored_components(contract), findings,
+                                         code_changed, resolved)
 
 
 async def publish_onboarding_from(
@@ -879,27 +969,37 @@ async def requirements_turn(
     gathered = cast(list[Requirement], requirements)
     task_kind = cast(TaskKind | None, kind)
     ended = cast(list[Requirement], retired or [])
+    task_flow_id = await requirements_store.activity_task_flow()
     ctx = requirements_tools.RequirementsContext.from_list(
-        gathered, task_kind, await run_sync(_published_requirements), ended)
+        gathered, task_kind, await run_sync(_published_requirements), ended,
+        # A new service has no architecture components until its architecture stage.
+        components=() if task_kind == "new_service" else await run_sync(_checkout_components))
+    if task_flow_id:
+        ctx.persist = partial(_store_interview, task_flow_id)
     repository = await run_sync(_repository_tools)
     asked = question_tools.QuestionsContext()
     started = time.perf_counter()
     try:
         model = await get_model('requirements')
         graph = get_message_graph(
-            [*requirements_tools.build(ctx), *question_tools.build(asked), *repository],
+            [*requirements_tools.build(ctx), *question_tools.build(asked), *repository,
+             *requirements_read_tools.build(task_flow_id)],
             until=lambda: bool(asked.questions), model=model)
         async with native_session(model, _conversation("requirements")):
             reply = await interview(
                 graph, interview_messages(
                     conversation, gathered, task_kind,
                     repository_tools.GUIDANCE if repository else "",
-                    list(ctx.service_requirements()), ctx.retired_list()),
+                    list(ctx.service_requirements()), ctx.retired_list(),
+                    components=ctx.components),
                 langchain_config(recursion_limit=AGENT_RECURSION_LIMIT, run_name='interview-with-tools'),
                 lambda: bool(asked.questions))
     except ValueError as exc:
         activity.logger.warning("Requirements turn failed: %s", exc)
         raise ApplicationError(str(exc), non_retryable=True) from exc
+    # The store holds what the turn ended with, also when no tool changed anything, such
+    # as the first turn of a fork.
+    await ctx.changed()
     updated = ctx.as_list()
     activity.logger.info("Requirements turn took %.1fs: %d -> %d requirements",
                          time.perf_counter() - started, len(requirements), len(updated))
@@ -997,7 +1097,8 @@ async def api_design_turn(state: ApiDesignState) -> dict[str, Any]:
     try:
         model = await get_model('api_design')
         graph = get_message_graph(
-            [*api_design_tools.build(ctx), *question_tools.build(asked), *repository],
+            [*api_design_tools.build(ctx), *question_tools.build(asked), *repository,
+             *requirements_read_tools.build(await requirements_store.activity_task_flow())],
             until=lambda: bool(asked.questions), model=model)
         async with native_session(model, _conversation("api-design")):
             reply = await interview(

@@ -11,6 +11,7 @@ from app.architecture.models import (
     FINISHED_STATUSES, SKIP_PROPOSAL_KEY, ArchitectureState, architecture_problems,
     render_architecture_markdown,
 )
+from app.requirements import store as requirements_store
 from app.requirements.lookup import source_session_lookup
 from app.requirements_review.models import review_id
 from app.config import TASK_QUEUE
@@ -115,6 +116,10 @@ async def fork(session_id: str, message_index: int) -> dict[str, str]:
         api_design_session_id=None,
         pending=False,
     ), source.task_flow_id, await task_queue_of(session_id, await connect_temporal()))
+    # The fork's task flow overlays the same baseline with a copy of the task's own
+    # requirements.
+    await requirements_store.fork_flow(source.task_flow_id, created.get("task_flow_id"),
+                                       source.repository)
     logger.info("Forked architecture session %s after message %d as %s",
                 session_id, message_index, created["session_id"])
     return created
@@ -170,6 +175,7 @@ async def get_session(session_id: str) -> dict[str, Any]:
         "structure": structure,
         "architecture": render_architecture_markdown(structure) if structure else None,
         "problems": problems(state),
-        "lookup_requirements": await source_session_lookup(state.source_session_id,
-                                                           state.requirements),
+        "lookup_requirements": await source_session_lookup(
+            state.source_session_id, state.requirements, task_flow_id=state.task_flow_id,
+            kind=state.kind),
     }

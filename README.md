@@ -55,6 +55,12 @@ Sign-in sessions are kept on the server and renewed with rotating refresh tokens
 
 Tokens issued before sessions were tracked are rejected, so every user signs in once again after upgrading.
 
+Each task flow's requirements are kept in PostgreSQL (the requirements store): a baseline per repository and branch, synced from the branch's `contracts/requirements.json` when a requirements or onboarding flow starts, and the flow's own changes on top of it. Its setting, in `backend/.env`:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `REQUIREMENTS_RETENTION_DAYS` | 30 days | How long a task flow's own requirements are kept after the flow completed or was cancelled; branch baselines are kept. |
+
 ### On Coolify
 
 Deploy `docker-compose.coolify.yml`, configure the provider keys (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`), `AUTH_JWT_SECRET` and the S3 storage (`S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`; `S3_ENDPOINT_URL` defaults to `https://s3.zikasak.uk`) in Coolify, and create the first account before exposing the deployment. For ChatGPT OAuth models see [Pi OAuth in Coolify](docs/pi-oauth.md). Agent containers cannot reach private addresses; if the OpenAI-compatible endpoint in Settings is on one (such as `http://192.168.1.191:1234/v1`), set `SANDBOX_ALLOWED_PRIVATE` to its `address:port` (comma-separated for several) and redeploy the `sandbox` service.

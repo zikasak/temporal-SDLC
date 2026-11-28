@@ -2,6 +2,7 @@
 
 import json
 import time
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -24,8 +25,10 @@ from app.onboarding.models import Artifact, OnboardingState
 from app.onboarding.prompt import (
     ARCHITECTURE_FIX_GUIDANCE, architecture_fallback, draft_fallback, turn_messages,
 )
+from app.requirements import store as requirements_store
 from app.temporal.activities import _conversation
 from app.temporal.tracing import trace_activity
+from app.tools import requirements_read as requirements_read_tools
 from app.tools import api_design as api_design_tools
 from app.tools import architecture as architecture_tools
 from app.tools import questions as question_tools
@@ -39,6 +42,13 @@ from app.tracing import langchain_config
 UNUSED_TOOLS = ("set_task_kind", "retire_requirement", "keep_requirement")
 # How much of the model's summary of an architecture fix goes into the reply.
 SUMMARY_CHARS = 2000
+
+
+async def _store_drafts(task_flow_id: str,
+                        ctx: requirements_tools.RequirementsContext) -> None:
+    """Write the drafted requirements to the task flow's layer of the store."""
+    await requirements_store.write_session(
+        task_flow_id, cast(list[dict[str, Any]], ctx.as_list()))
 
 
 def _has_files(directory: Path) -> bool:
@@ -112,11 +122,17 @@ async def onboarding_turn(state: OnboardingState) -> dict[str, Any]:
     api.requirement_ids = requirements.requirements.keys()  # type: ignore[assignment]
     architecture = architecture_tools.ArchitectureContext(
         cast(ArchitectureStructure | None, state.architecture_structure))
+    # A requirement is grouped under a component of the architecture drafted alongside.
+    requirements.component_source = lambda: tuple(architecture.component_names())
+    task_flow_id = await requirements_store.activity_task_flow()
+    if task_flow_id:
+        requirements.persist = partial(_store_drafts, task_flow_id)
     asked = question_tools.QuestionsContext()
     tools = [*(item for item in requirements_tools.build(requirements)
                if item.name not in UNUSED_TOOLS),
              *api_design_tools.build(api), *architecture_tools.build(architecture),
-             *question_tools.build(asked), *repository]
+             *question_tools.build(asked), *repository,
+             *requirements_read_tools.build(task_flow_id)]
     started = time.perf_counter()
     try:
         model = await get_model('api_design')
@@ -134,6 +150,7 @@ async def onboarding_turn(state: OnboardingState) -> dict[str, Any]:
     except ValueError as exc:
         activity.logger.warning("Onboarding turn failed: %s", exc)
         raise ApplicationError(str(exc), non_retryable=True) from exc
+    await requirements.changed()
     updated_requirements = requirements.as_list()
     updated_api = api.as_model()
     activity.logger.info("Onboarding turn took %.1fs: %d requirements, %d endpoints",
@@ -174,7 +191,8 @@ async def revise_onboarding_architecture(
         contract = {}
     current = normalize_structure(structure) if structure else None
     architecture = architecture_tools.ArchitectureContext(current)
-    tools = [*architecture_tools.build(architecture), *repository]
+    tools = [*architecture_tools.build(architecture), *repository,
+             *requirements_read_tools.build(await requirements_store.activity_task_flow())]
     guidance = (
         f"{ARCHITECTURE_FIX_GUIDANCE}"
         f"\n\nExisting requirements: "
@@ -229,7 +247,8 @@ async def _architecture_turn(state: OnboardingState, root: Path,
         cast(ArchitectureStructure | None, state.architecture_structure), conflicts=conflicts)
     asked = question_tools.QuestionsContext()
     tools = [*architecture_tools.build(architecture), *question_tools.build(asked),
-             *repository]
+             *repository,
+             *requirements_read_tools.build(await requirements_store.activity_task_flow())]
     started = time.perf_counter()
     try:
         model = await get_model('api_design')

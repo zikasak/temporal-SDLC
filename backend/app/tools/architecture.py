@@ -7,6 +7,7 @@ Not part of the chat TOOLSETS: the architecture and onboarding activities build 
 import copy
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Annotated, Any
 
@@ -46,10 +47,61 @@ class ArchitectureContext:
     # Disagreements between the architecture and an existing contract, recorded by the
     # model of an architecture-only onboarding; None when not tracked.
     conflicts: list[str] | None = None
+    # The task's requirements the architect assigns to its components, as plain records
+    # with their components; None when the architect assigns none.
+    requirements: list[dict[str, Any]] | None = None
+    # Writes each assignment ({requirement ID: component}) to the task flow's
+    # requirements store as it is made; None outside a task flow.
+    persist: Callable[[dict[str, str | None]], Awaitable[None]] | None = None
     _changed: bool = field(default=False, repr=False)
 
     def __post_init__(self) -> None:
         self.structure = copy.deepcopy(self.structure)
+        if self.requirements is not None:
+            self.requirements = [dict(item) for item in self.requirements]
+
+    def component_names(self) -> list[str]:
+        structure = self.result()
+        return [item["name"] for item in structure["components"]] if structure else []
+
+    def unassigned(self) -> list[str]:
+        """IDs of the requirements without one of the architecture's components."""
+        names = set(self.component_names())
+        return [str(item.get("id")) for item in self.requirements or []
+                if item.get("component") not in names]
+
+    def assign(self, requirement_ids: list[str], component: str) -> dict[str, Any]:
+        """Assign the requirements to one of the architecture's components."""
+        if self.requirements is None:
+            raise ValueError("this session assigns no requirements.")
+        if not self.component_names():
+            raise ValueError("record the architecture's components first.")
+        name = self._component(component)
+        by_id = {str(item.get("id")).upper(): item for item in self.requirements}
+        assigned, unknown = [], []
+        for raw in requirement_ids:
+            item = by_id.get(_text(raw).upper())
+            if item is None:
+                unknown.append(_text(raw))
+                continue
+            item["component"] = name
+            assigned.append(str(item["id"]))
+        if not assigned:
+            raise ValueError("no known requirement ID given"
+                             + (f" ({', '.join(unknown)})." if unknown else "."))
+        return {"component": name, "assigned": assigned, "unknown": unknown}
+
+    async def stored(self, assignment: dict[str, Any]) -> None:
+        """Write an assignment to the requirements store; a store that cannot be written
+        to does not stop the session, which keeps the assignment in its requirements."""
+        if self.persist is None:
+            return
+        try:
+            await self.persist({item: assignment["component"]
+                                for item in assignment["assigned"]})
+        except Exception as exc:  # noqa: BLE001 - kept in the session's requirements
+            logger.warning("Component assignment not stored: %s: %s",
+                           type(exc).__name__, exc)
 
     def _draft(self) -> ArchitectureStructure:
         if self.structure is None:
@@ -153,8 +205,10 @@ class ArchitectureContext:
 
 def build(ctx: ArchitectureContext) -> list[BaseTool]:
     def result(action: str, **values: Any) -> str:
-        return json.dumps({"action": action, **values, "problems": ctx.problems()},
-                          ensure_ascii=False)
+        payload = {"action": action, **values, "problems": ctx.problems()}
+        if ctx.requirements is not None and ctx.component_names():
+            payload["requirements_without_component"] = ctx.unassigned()
+        return json.dumps(payload, ensure_ascii=False)
 
     def guarded(action: str, call: Any) -> str:
         try:
@@ -211,6 +265,35 @@ def build(ctx: ArchitectureContext) -> list[BaseTool]:
     tools: list[BaseTool] = [record_component, remove_component, record_data_flow,
                              remove_data_flow, record_technology_choice,
                              remove_technology_choice, show_architecture]
+
+    if ctx.requirements is not None:
+        @tool
+        async def assign_requirements(
+            requirement_ids: Annotated[list[str], JsonArg], component: str,
+        ) -> str:
+            """Assign requirements to the recorded component responsible for them, or move
+            them to another one. Every requirement must belong to one component: assign
+            each one listed under requirements_without_component."""
+            try:
+                assignment = ctx.assign(requirement_ids, component)
+            except ValueError as exc:
+                logger.warning("Requirements not assigned: %s", exc)
+                return f"Not assigned: {exc}"
+            await ctx.stored(assignment)
+            return result("assigned", value=assignment)
+
+        @tool
+        async def list_requirement_components() -> str:
+            """List the task's requirements with the component each belongs to (null for
+            none yet)."""
+            return json.dumps({
+                "requirements": [{"id": item.get("id"), "title": item.get("title"),
+                                  "component": item.get("component")}
+                                 for item in ctx.requirements or []],
+                "requirements_without_component": ctx.unassigned(),
+            }, ensure_ascii=False)
+
+        tools += [assign_requirements, list_requirement_components]
 
     if ctx.may_skip:
         @tool

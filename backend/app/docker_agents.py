@@ -24,7 +24,7 @@ from temporalio.exceptions import ApplicationError
 
 from app.asyncio_utils import async_context, run_sync
 from app.agent_workflows.runtime import (
-    ANSWERS_FILENAME, INTERRUPTED_EXIT, PAUSE_EXIT, STATE_FILENAME,
+    ANSWERS_FILENAME, INTERRUPTED_EXIT, PAUSE_EXIT, REQUIREMENTS_SNAPSHOT, STATE_FILENAME,
 )
 # The images pulled ahead of use, by digest; the languages build their runners on them.
 from app.images import PLAYWRIGHT_IMAGE, PREPULLED_IMAGES  # noqa: F401
@@ -916,6 +916,29 @@ async def _stop_agent(name: str, role: str, session_id: str, reason: str) -> Non
         logger.warning('Could not stop agent container %s', name, exc_info=True)
 
 
+async def write_requirements_snapshot(workspace: Path) -> bool:
+    """Write the requirements of the running stage's task flow, as the requirements store
+    holds them now, into the agent's workspace for its read-requirements tool; True when
+    written. A stage outside a task flow, or without the store, runs without it."""
+    from app.requirements import store as requirements_store
+    snapshot = workspace / REQUIREMENTS_SNAPSHOT
+    task_flow_id = await requirements_store.activity_task_flow()
+    items = None
+    if task_flow_id:
+        try:
+            items = await requirements_store.read(task_flow_id)
+        except Exception as exc:  # noqa: BLE001 - the agent then runs without the tool
+            logger.warning('Requirements of task flow %s unavailable to the agent: %s',
+                           task_flow_id, exc)
+    if items is None:
+        # A snapshot from an earlier run in a resumed workspace is not passed on.
+        await run_sync(snapshot.unlink, missing_ok=True)
+        return False
+    await run_sync(snapshot.write_text, json.dumps(
+        {'task_flow_id': task_flow_id, 'requirements': items}, ensure_ascii=False))
+    return True
+
+
 async def run_agent(role: str, session_id: str, workspace: Path,
                     output: Path, output_name: str, log_path: Path, *,
                     image_build: AgentImageBuild, paused: Path) -> None:
@@ -929,6 +952,7 @@ async def run_agent(role: str, session_id: str, workspace: Path,
     settings = await get_workflow_settings(cast(WorkflowType, role))
     # The snapshot travels as input alongside the workspace, never as host selector env vars.
     await run_sync((workspace / SETTINGS_FILENAME).write_text, settings.model_dump_json())
+    await write_requirements_snapshot(workspace)
     try:
         openai = await openai_environment(settings)
         adapter_args = [*(await run_sync(pi_container_args, settings)),

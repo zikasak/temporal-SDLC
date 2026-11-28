@@ -23,7 +23,9 @@ from app.github.models import PullRequestMention, RepositorySelection
 from app.llm.graph import final_reply, get_message_graph, native_session
 from app.llm.model import get_model, one_shot
 from app.temporal.activities import _github_token
+from app.requirements import store as requirements_store
 from app.tools import repository as repository_tools
+from app.tools import requirements_read as requirements_read_tools
 from app.llm.limits import AGENT_RECURSION_LIMIT
 from app.tracing import langchain_config
 
@@ -143,7 +145,9 @@ async def _answer(session_id: str, body: str, context: dict[str, Any],
     details = _bounded(json.dumps(context, default=str, ensure_ascii=False), CONTEXT_CHARS)
     try:
         model = one_shot(await get_model('chat'))
-        graph = get_message_graph(tools, model=model)
+        graph = get_message_graph(
+            [*tools, *requirements_read_tools.build(
+                await requirements_store.activity_task_flow())], model=model)
         async with native_session(model):
             result = await graph.ainvoke(
                 {'messages': [

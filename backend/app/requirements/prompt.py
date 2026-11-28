@@ -147,6 +147,21 @@ def service_guidance(published: list[Requirement]) -> str:
             + json.dumps(published, ensure_ascii=False))
 
 
+COMPONENTS_GUIDANCE = (
+    "\nThe project's architecture groups its requirements under these components: {names}. "
+    "Whenever you record or update a requirement, pass the component it belongs to as the "
+    "component of record_requirement, written exactly as listed."
+)
+
+
+def components_guidance(components: tuple[str, ...] | list[str] | None) -> str:
+    """What the interviewer is told about the components it assigns; nothing while the
+    flow has none, when every recorded requirement's component stays empty."""
+    if not components:
+        return ""
+    return COMPONENTS_GUIDANCE.format(names="; ".join(components))
+
+
 def kind_guidance(kind: TaskKind | None) -> str:
     if kind is None:
         kinds = "; ".join(f"{name} ({text})" for name, text in TASK_KINDS.items())
@@ -179,10 +194,13 @@ def interview_messages(
     messages: list[ConversationMessage], requirements: list[Requirement],
     kind: TaskKind | None, extra_guidance: str = "",
     published: list[Requirement] | None = None, retired: list[Requirement] | None = None,
+    components: tuple[str, ...] = (),
 ) -> list[BaseMessage]:
-    """`published` are the requirements of the service a change starts from."""
+    """`published` are the requirements of the service a change starts from;
+    `components` the architecture components a requirement can be grouped under."""
     guidance = (INTERVIEWER_GUIDANCE + QUESTIONS_GUIDANCE + kind_guidance(kind) + extra_guidance
-                + service_guidance(published or []) + CURRENT_STATE_GUIDANCE)
+                + service_guidance(published or []) + components_guidance(components)
+                + CURRENT_STATE_GUIDANCE)
     state = "Requirements recorded so far: " + json.dumps(requirements, ensure_ascii=False)
     if published:
         state += ("\nRetired by this change so far: "

@@ -65,6 +65,22 @@ def with_requirements(contract: RepositoryContract, added: list[Requirement],
             'api': api}
 
 
+def published_requirements(requirements: list[Requirement]) -> list[dict[str, Any]]:
+    """The requirements as contracts/requirements.json holds them: each with its
+    component field, null for one not assigned to a component."""
+    return [{**item, 'component': item.get('component') or None} for item in requirements]
+
+
+def with_components(contract: RepositoryContract,
+                    components: dict[str, str | None]) -> RepositoryContract:
+    """The contract with the components the task flow's requirements have in the
+    requirements store, such as those the architecture stage assigned; a requirement the
+    store does not know keeps its own."""
+    return {**contract, 'requirements': [
+        {**item, 'component': components.get(item['id']) or item.get('component') or None}
+        for item in contract['requirements']]}  # type: ignore[typeddict-item]
+
+
 def write_architecture(repository: Path, architecture: str,
                        structure: dict[str, Any] | None) -> None:
     """Write contracts/architecture.md and contracts/architecture.json, replacing them;
@@ -102,7 +118,7 @@ def write_contract(repository: Path, contract: RepositoryContract) -> None:
     directory.mkdir(exist_ok=True)
     for name, text in {
         LANGUAGE_FILENAME: _json({'name': contract['language']}),
-        REQUIREMENTS_FILENAME: _json(contract['requirements']),
+        REQUIREMENTS_FILENAME: _json(published_requirements(contract['requirements'])),
         NARRATIVE_FILENAME: contract['requirements_document'],
         API_FILENAME: _json(contract['api']),
         OPENAPI_FILENAME: render_openapi(contract['api']),
