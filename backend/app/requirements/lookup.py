@@ -113,6 +113,96 @@ async def checkout_requirements(session_id: str) -> list[Any]:
         return []
 
 
+async def stored_requirements(task_flow_id: str | None) -> list[dict[str, Any]]:
+    """The requirements stored in the database for the task flow, as dicts with the keys
+    of app.requirements.models.Requirement plus "component" (str or None); an empty list
+    when `task_flow_id` is None."""
+    return []
+
+
+class RequirementStore:
+    """The database table of requirements, scoped per task flow and linked to a
+    repository and branch. A requirement is a dict with the keys of
+    app.requirements.models.Requirement plus "component" (str or None)."""
+
+    async def list_requirements(self, flow_id: str) -> list[dict[str, Any]]:
+        """Every requirement stored for `flow_id`, and no other flow's."""
+        return []
+
+    async def save_requirement(self, flow_id: str, requirement: dict[str, Any],
+                               repository: str, branch: str) -> None:
+        """Insert or replace (by id) the flow's requirement, linked to the repository
+        (full name, "owner/name") and branch."""
+        return None
+
+    async def delete_requirement(self, flow_id: str, requirement_id: str) -> None:
+        """Remove the flow's requirement with that id."""
+        return None
+
+
+def infer_component(requirement: dict[str, Any],
+                    architecture: dict[str, Any] | None) -> str | None:
+    """The name of the component of `architecture` (the structure of
+    contracts/architecture.json) whose name and responsibilities share the most words
+    with the requirement's title and description; None when none can be inferred."""
+    return None
+
+
+async def sync_repository_requirements(store: RequirementStore, flow_id: str,
+                                       repository: str, branch: str,
+                                       repository_requirements: list[dict[str, Any]],
+                                       architecture: dict[str, Any] | None) -> None:
+    """Called when a new requirements flow starts: store every requirement of the
+    branch's repository contract for `flow_id`, the repository's version overwriting."""
+    return None
+
+
+async def record_requirement(store: RequirementStore, flow_id: str, repository: str,
+                             branch: str, requirement: dict[str, Any],
+                             components: list[str]) -> dict[str, Any]:
+    """Record or update a requirement of the flow as the requirements interviewer does
+    and return the stored requirement."""
+    return dict(requirement)
+
+
+async def remove_requirement(store: RequirementStore, flow_id: str,
+                             requirement_id: str) -> None:
+    """Remove a requirement of the flow from the store immediately."""
+    return None
+
+
+async def read_requirements(store: RequirementStore, flow_id: str,
+                            component: str | None = None,
+                            requirement_id: str | None = None,
+                            query: str | None = None) -> list[dict[str, Any]]:
+    """The requirements of `flow_id` only, filtered by component, requirement ID and
+    free-text query, ordered by id."""
+    return []
+
+
+async def assign_components(store: RequirementStore, flow_id: str, repository: str,
+                            branch: str, components: list[str],
+                            assignments: dict[str, str]) -> list[str]:
+    """Called once the architecture stage has defined `components`: assign every stored
+    requirement of the flow without a component; returns the ids so assigned."""
+    return []
+
+
+def map_requirements(previous: list[dict[str, Any]],
+                     current: list[dict[str, Any]]) -> dict[str, Any]:
+    """Used when merge conflicts are resolved and requirements were changed or
+    renumbered. Returns {"mapped": {current_id: previous_id}, "ask": [current_id, ...]}."""
+    return {"mapped": {}, "ask": []}
+
+
+async def copy_created_requirements(store: RequirementStore, source_flow_id: str,
+                                    target_flow_id: str, repository: str, branch: str,
+                                    created_ids: list[str]) -> None:
+    """When a session is forked: copy the stored requirements of `source_flow_id` whose
+    ids are in `created_ids` to `target_flow_id`."""
+    return None
+
+
 async def requirements_session_lookup(session_id: str, state: Any) -> list[LookupRequirement]:
     """The lookup list of a requirements session (RequirementsState)."""
     existing: list[Any] = []

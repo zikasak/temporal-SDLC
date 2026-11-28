@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 import psycopg
 
@@ -37,3 +38,10 @@ class ToolContext:
             await save_session_passage(self.session_id, document_id, offset, text)
         except psycopg.Error:
             pass
+
+    async def flow_requirements(self) -> tuple[Any, str]:
+        """The requirement store (an app.requirements.lookup.RequirementStore) and the
+        ID of the task flow that this context's session belongs to."""
+        # Imported here: the lookup module imports the delivery and GitHub modules.
+        from app.requirements.lookup import RequirementStore
+        return RequirementStore(), self.session_id
