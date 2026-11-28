@@ -39,6 +39,10 @@ def handed_design(state: ArchitectureState, session_id: str) -> ApiDesignState:
         requirements_document=state.requirements_document, kind=state.kind,
         repository=state.repository))
     design.architecture_session_id = session_id
+    if state.requirements:
+        # The task's requirements as the architect left them: with the components it
+        # assigned, which the delivery writes to contracts/requirements.json.
+        design.requirements = list(state.requirements)
     if state.status == "skipped":
         # The repository's architecture stays as it is.
         design.architecture = state.existing_architecture

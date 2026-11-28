@@ -32,7 +32,10 @@ GUIDANCE = (
     "confirm in the code. Each requirement is one testable statement. Link each endpoint "
     "to the requirements it serves with requirement_ids. When a tool call fails, fix the "
     "arguments and call it again; only report changes whose tool call succeeded. Do not "
-    "paste the contract back to the user; they can see it."
+    "paste the contract back to the user; they can see it. Requirements are grouped by "
+    "the architecture's components: once components are recorded, pass the one each "
+    "requirement belongs to as the component of record_requirement, and update the "
+    "requirements recorded before with it."
 )
 
 DRAFT_MESSAGE = (

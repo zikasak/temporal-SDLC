@@ -169,6 +169,10 @@ class ArchitectureWorkflow(Interview[ArchitectureState], FlowFlags, PendingStage
         else:
             self.state.messages.append(message)
             self.state.structure = result["structure"]
+            if result.get("requirements") is not None:
+                # With the components the architect assigned them, which the API design
+                # and the delivery's contracts/requirements.json receive.
+                self.state.requirements = result["requirements"]
         self.state.status = "interviewing"
         return True
 

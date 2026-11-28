@@ -24,8 +24,10 @@ SESSION = "api-design-session-" + "a" * 32
 BRANCH = "generated/" + "a" * 12
 CONTRACT: RepositoryContract = {
     "language": "java",
+    # requirements.json carries each requirement's component, null without one.
     "requirements": [{"id": "FR-1", "category": "functional", "title": "Place an order",
-                      "description": "A customer places an order.", "priority": "must"}],
+                      "description": "A customer places an order.", "priority": "must",
+                      "component": None}],
     "requirements_document": "# Orders\n",
     "api": {
         "info": {"title": "Orders", "version": "1.0.0", "description": "", "auth": "none"},

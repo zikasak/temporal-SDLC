@@ -21,7 +21,8 @@ from app.onboarding.models import (
     FINISHED_STATUSES, OnboardingState, draft_kind_changed, drafted_architecture_only,
     onboarding_problems,
 )
-from app.requirements.lookup import checkout_requirements, lookup_requirements
+from app.requirements import store as requirements_store
+from app.requirements.lookup import checkout_requirements, lookup_requirements, stored_lookup
 from app.requirements_review.models import forked_review, review_id, review_view
 from app.tasks.models import FORK_SUFFIX, TaskFlowState, bounded_name, new_task_flow_id
 from app.tasks.service import derived_name, start_task_flow, task_queue_of
@@ -191,6 +192,8 @@ async def fork(session_id: str, message_index: int) -> dict[str, str]:
             # Leaving the lock's transaction with the error also drops the fork's record.
             await _discard(task_flow_id, fork_id)
             raise
+    await requirements_store.fork_flow(source.task_flow_id, task_flow_id, repository,
+                                       drafts["requirements"] or [])
     logger.info("Forked onboarding %s after message %d as %s in task flow %s", session_id,
                 message_index, fork_id, task_flow_id)
     return {"session_id": fork_id, **({"task_flow_id": task_flow_id} if task_flow_id else {})}
@@ -300,8 +303,16 @@ async def get_session(session_id: str) -> dict[str, Any]:
             "architecture": architecture,
             "problems": onboarding_problems(state), "delivery": delivery,
             # The drafted requirements and the existing contract's; none is retired.
-            "lookup_requirements": lookup_requirements(
-                state.requirements, await checkout_requirements(session_id))}
+            "lookup_requirements": await _lookup(session_id, state)}
+
+
+async def _lookup(session_id: str, state: OnboardingState) -> list[Any]:
+    """From the requirements store of the onboarding's task flow, else from its drafts
+    and its checkout's contract."""
+    stored = await stored_lookup(state.task_flow_id)
+    if stored is not None:
+        return stored
+    return lookup_requirements(state.requirements, await checkout_requirements(session_id))
 
 
 # The query of the onboardings from before they ran under task flows that still run.

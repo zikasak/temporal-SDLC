@@ -19,6 +19,7 @@ with workflow.unsafe.imports_passed_through():
     from app.delivery.causes import with_cause
     from app.delivery.rounds import RoundOutcome, decide, outcome
     from app.llm.limits import PROVIDER_LIMIT_ERROR
+    from app.llm.questions import answer_problem
     from app.verification.checks import fallback_analysis
     from app.config import DIAGNOSIS_TASK_QUEUE, VERIFICATION_TASK_QUEUE
     from app.delivery.models import (
@@ -649,11 +650,28 @@ class Verification(FlowBase):
     @workflow.update
     def answer_questions(self, answers: list[str]) -> None:
         """The user's answer to the onboarding's question whether a failing contract test
-        reveals a bug in the existing code."""
+        reveals a bug in the existing code, or to the questions which requirement the task
+        flow's requirements without a counterpart after a merge correspond to."""
+        if self._mapping_open():
+            self._mapping_answers = [answer.strip() for answer in answers]
+            return
         self._bug_answer = answers[0].strip()
+
+    def _mapping_open(self) -> bool:
+        """Whether the questions about the merged requirements wait for an answer: they
+        are asked only while the delivery waits."""
+        return bool(self._mapping_questions and self._mapping_answers is None
+                    and self.state.waiting)
 
     @answer_questions.validator
     def validate_answer_questions(self, answers: list[str]) -> None:
+        if self._mapping_open():
+            problem = answer_problem(
+                [{'question': item['question'], 'options': item['options']}
+                 for item in self._mapping_questions], answers)
+            if problem:
+                raise ValueError(problem)
+            return
         if not self._bug_question or self._bug_answer is not None:
             raise ValueError('These questions are no longer open.')
         if len(answers) != 1 or not answers[0].strip():

@@ -518,14 +518,6 @@
   },
   {
     "category": "functional",
-    "description": "The finalized architecture is given to the API design and to the delivery's coding agents, and is committed with the contract as contracts/architecture.md when the delivery is pushed. When an API change skips the stage, the repository's existing contracts/architecture.md is kept unchanged and is the architecture given to the API design and coding agents.",
-    "id": "FR-85",
-    "priority": "must",
-    "rationale": "User chose: fed to API design and coding agents, committed to contracts/; a skipped API change keeps the existing architecture.md.",
-    "title": "Architecture used downstream and committed"
-  },
-  {
-    "category": "functional",
     "description": "Architecture sessions are served under /architecture/sessions with the same actions as API design sessions (get the session, send a message, answer the interviewer's questions, retry a failed turn, finalize, fork after a message and download the document) plus an action that confirms the proposed skip of the stage.",
     "id": "FR-86",
     "priority": "must",
@@ -555,14 +547,6 @@
     "priority": "must",
     "rationale": "User chose to offer the architecture workflow as a filter.",
     "title": "Architecture filter on the Flows page"
-  },
-  {
-    "category": "functional",
-    "description": "Onboarding produces for the repository the full contract in contracts/ (requirements.json, requirements.md, api.json, openapi.yaml, language.json and architecture.md, the architecture drafted by an LLM from the existing code), contract tests and a root Dockerfile, and the contract tests are verified to pass against the existing code built with that Dockerfile.",
-    "id": "FR-93",
-    "priority": "must",
-    "rationale": "Replaces FR-57: user chose that onboarding drafts contracts/architecture.md, which is now required.",
-    "title": "Onboarding produces the full contract, tests and Dockerfile"
   },
   {
     "category": "functional",
@@ -747,14 +731,6 @@
     "priority": "must",
     "rationale": "User chose all of them.",
     "title": "Which requirements can be looked up"
-  },
-  {
-    "category": "functional",
-    "description": "The responses of GET for requirements, architecture, API design and onboarding sessions include a new field listing every requirement a mentioned ID can refer to (recorded in the session, the existing service's and those retired by the task), each with its ID, title, description, priority, category and whether it is retired.",
-    "id": "FR-120",
-    "priority": "must",
-    "rationale": "User chose a new field in each session response.",
-    "title": "Lookup requirements in session responses"
   },
   {
     "category": "functional",
@@ -1771,5 +1747,142 @@
     "id": "TR-16",
     "priority": "should",
     "title": "Document the new session settings"
+  },
+  {
+    "category": "functional",
+    "description": "Project requirements are stored in the platform's Postgres database in addition to the repository's contracts/requirements.json, scoped to each task flow and linked to that flow's repository and branch.",
+    "id": "FR-247",
+    "priority": "must",
+    "title": "Store requirements in Postgres"
+  },
+  {
+    "category": "functional",
+    "description": "Each requirement stored in the database has a component that is either one of the architecture components defined in contracts/architecture.json or empty (null) when it is not assigned to a component yet.",
+    "id": "FR-248",
+    "priority": "must",
+    "title": "Group requirements by component"
+  },
+  {
+    "category": "functional",
+    "description": "An LLM tool, available to every agent in every stage, reads requirements from the database and returns both the requirements that already existed in the branch and those created during flows in the platform.",
+    "id": "FR-249",
+    "priority": "must",
+    "title": "LLM tool to read requirements"
+  },
+  {
+    "category": "functional",
+    "description": "Delivery keeps writing requirements to the repository's contract files as it does today.",
+    "id": "FR-250",
+    "priority": "must",
+    "title": "Keep writing requirements to the repository"
+  },
+  {
+    "category": "functional",
+    "description": "When a new requirements flow starts, the requirements in the branch's repository contract are synced into the database; where the database and the repository differ, the repository's version overwrites the database's.",
+    "id": "FR-251",
+    "priority": "must",
+    "title": "Sync repository into database at flow start"
+  },
+  {
+    "category": "functional",
+    "description": "When merge conflicts are resolved and requirements were changed or renumbered, a requirement is mapped automatically to its counterpart when it has the same ID with similar content, or the same title and description under a different ID; otherwise the user is asked which requirement it corresponds to through the delivery's existing question mechanism.",
+    "id": "FR-252",
+    "priority": "must",
+    "title": "Map changed requirements during conflict resolution"
+  },
+  {
+    "category": "functional",
+    "description": "Forking a session copies all requirements created in that session into the database for the fork.",
+    "id": "FR-253",
+    "priority": "must",
+    "title": "Forking copies created requirements"
+  },
+  {
+    "category": "functional",
+    "description": "Every link to a requirement (such as the requirement lookups shown on hover or tap in conversations) resolves the requirement from the database instead of the session state or the checkout's contract files.",
+    "id": "FR-254",
+    "priority": "must",
+    "title": "Requirement links resolve from the database"
+  },
+  {
+    "category": "functional",
+    "description": "The requirements interviewer sets a requirement's component when it records or updates the requirement.",
+    "id": "FR-255",
+    "priority": "must",
+    "title": "Interviewer assigns the component"
+  },
+  {
+    "category": "functional",
+    "description": "When no architecture components exist yet for the flow, a recorded requirement's component is left empty (null).",
+    "id": "FR-256",
+    "priority": "must",
+    "title": "Empty component when none exist"
+  },
+  {
+    "category": "functional",
+    "description": "Each requirement written to the repository's contracts/requirements.json carries a component field holding its component.",
+    "id": "FR-257",
+    "priority": "must",
+    "title": "Component field in requirements.json"
+  },
+  {
+    "category": "functional",
+    "description": "The read-requirements tool filters by component, by requirement ID, or by free-text search, and never returns requirements belonging to another task flow.",
+    "id": "FR-258",
+    "priority": "must",
+    "title": "Read tool filters and flow isolation"
+  },
+  {
+    "category": "functional",
+    "description": "Every change to a flow's requirements (recorded, updated, removed, renumbered, retired or kept) is written to the database as soon as it happens.",
+    "id": "FR-259",
+    "priority": "must",
+    "title": "Write changes to the database immediately"
+  },
+  {
+    "category": "functional",
+    "description": "When a synced requirement from the repository has no component field, its component is inferred from the component responsibilities in contracts/architecture.json when possible, and is left empty (null) otherwise.",
+    "id": "FR-260",
+    "priority": "must",
+    "title": "Infer component for legacy requirements on sync"
+  },
+  {
+    "category": "functional",
+    "description": "Once the architecture stage defines components, the architecture agent assigns every requirement whose component is empty (null) to one of those components.",
+    "id": "FR-261",
+    "priority": "must",
+    "title": "Architecture agent assigns requirements without a component"
+  },
+  {
+    "category": "functional",
+    "description": "The finalized architecture is given to the API design and to the delivery's coding agents, and is committed with the contract as both contracts/architecture.md and contracts/architecture.json (its components, data flows and technology choices) when the delivery is pushed. When an API change skips the stage, the repository's existing contracts/architecture.md and contracts/architecture.json are kept unchanged and are the architecture given to the API design and coding agents.",
+    "id": "FR-262",
+    "priority": "must",
+    "rationale": "Replaces FR-85: user chose to add contracts/architecture.json alongside architecture.md so requirements can be grouped by its components.",
+    "title": "Architecture used downstream and committed (with architecture.json)"
+  },
+  {
+    "category": "functional",
+    "description": "Onboarding produces for the repository the full contract in contracts/ (requirements.json, requirements.md, api.json, openapi.yaml, language.json, architecture.md and architecture.json, the architecture drafted by an LLM from the existing code), contract tests and a root Dockerfile, and the contract tests are verified to pass against the existing code built with that Dockerfile.",
+    "id": "FR-263",
+    "priority": "must",
+    "rationale": "Replaces FR-93: user chose that onboarding also writes contracts/architecture.json.",
+    "title": "Onboarding produces the full contract including architecture.json"
+  },
+  {
+    "category": "functional",
+    "description": "For an API change, the finalized architecture replaces both contracts/architecture.md and contracts/architecture.json when the delivery is pushed.",
+    "id": "FR-264",
+    "priority": "must",
+    "rationale": "Extends FR-94 for the new contracts/architecture.json.",
+    "title": "API change replaces architecture.json too"
+  },
+  {
+    "category": "functional",
+    "description": "The responses of GET for requirements, architecture, API design and onboarding sessions include a field listing every requirement a mentioned ID can refer to (recorded in the session, the existing service's and those retired by the task), each with its ID, title, description, priority, category, component (an architecture component name, or null when it has none) and whether it is retired.",
+    "id": "FR-265",
+    "priority": "must",
+    "rationale": "Replaces FR-120: user chose that the session responses' requirements lookup field gains a component field.",
+    "title": "Lookup requirements in session responses, with component"
   }
 ]

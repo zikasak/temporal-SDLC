@@ -241,6 +241,22 @@ Contract readings:
 - Whether the access token from before a refresh keeps working is not specified, so it is
   not tested.
 
+## Requirements in the database and their components (FR-247 to FR-265)
+
+This version stores requirements in PostgreSQL per task flow and groups them by component. It
+also adds `contracts/architecture.json` next to `architecture.md`, and gives every
+`lookup_requirements` entry and `Requirement` a `component` (FR-265 replaces FR-120, FR-262 replaces
+FR-85, FR-263 replaces FR-93). All of this can only be seen on existing sessions, or in commits a
+delivery pushes. Those need GitHub, Temporal and an LLM, and the self-contained service image has
+none of them. The read-requirements tool, the sync at flow start, the copies made by a fork,
+component inference and the mapping done during conflict resolution are internal to the agents
+and not exposed over HTTP. So these requirements are not tested.
+
+The part this version touches that can be reached over HTTP is the architecture document's
+`format=json` (architecture.json). The existing tests in `tests/test_architecture.py` already
+cover it: sign-in, 404 for an unknown session with `md`, `json` and the default, and 404 or 422 for
+any other format. No existing test contradicts the new contract, so none was changed or removed.
+
 ## Contract note: parent of an architecture stage
 
 `WorkflowExecution.parent_workflow_id` says a stage of a task has the task flow as parent, so an

@@ -544,6 +544,73 @@ def _transcript(messages: Sequence[BaseMessage]) -> str:
     return '\n'.join(lines)
 
 
+# The task flow's requirements, which the sandbox worker writes into the workspace (beside
+# the project) at each agent run: the agent has no database access.
+REQUIREMENTS_SNAPSHOT = 'requirements-snapshot.json'
+REQUIREMENTS_TOOL = 'read_requirements'
+REQUIREMENTS_RESULTS = 100
+REQUIREMENTS_DESCRIPTION = """Read the project's requirements: those the branch's contract
+already had and those created or changed during this task, each with its ID, category,
+title, description, priority, component (the architecture component it belongs to, or
+null), origin and whether this task retires it. Filter by `component` (a component name,
+or "none" for requirements without one), by requirement `id`, or by free-text `search`
+over ID, title and description; with no filter every requirement is returned (at most
+100; narrow the filter for more)."""
+
+
+def filter_requirements(items: Sequence[dict[str, Any]], component: str | None = None,
+                        requirement_id: str | None = None,
+                        search: str | None = None) -> list[dict[str, Any]]:
+    """The requirements matching every filter given, as the requirements store's read
+    filters them: component by name ('none' for those without one), ID in any case and
+    with or without its dash, and every word of `search` in the ID, title, description or
+    component."""
+    selected = list(items)
+    if component and component.strip():
+        wanted = component.strip().casefold()
+        selected = [item for item in selected
+                    if (item.get('component') is None if wanted in ('none', 'null', 'unassigned')
+                        else str(item.get('component') or '').casefold() == wanted)]
+    if requirement_id and requirement_id.strip():
+        match = re.fullmatch(r'([A-Za-z]+)-?(\d+)', requirement_id.strip())
+        wanted = (f'{match.group(1).upper()}-{match.group(2)}' if match
+                  else requirement_id.strip())
+        selected = [item for item in selected if item.get('id') == wanted]
+    for term in (search or '').split()[:10]:
+        needle = term.casefold()
+        selected = [item for item in selected if needle in ' '.join(
+            str(item.get(key) or '') for key in ('id', 'title', 'description', 'component')
+        ).casefold()]
+    return selected
+
+
+def requirements_tools(directory: Path) -> list[BaseTool]:
+    """The read-requirements tool over the snapshot in `directory` (the workspace); none
+    when the stage's run has no snapshot, such as one outside a task flow."""
+    snapshot = directory / REQUIREMENTS_SNAPSHOT
+    if not snapshot.is_file():
+        return []
+
+    def read_requirements(component: str | None = None, id: str | None = None,
+                          search: str | None = None) -> str:
+        try:
+            items = json.loads(snapshot.read_text()).get('requirements') or []
+        except (OSError, ValueError, AttributeError):
+            return 'The requirements are unavailable.'
+        found = filter_requirements(items, component, id, search)
+        payload: dict[str, Any] = {'requirements': found[:REQUIREMENTS_RESULTS],
+                                   'count': len(found)}
+        if len(found) > REQUIREMENTS_RESULTS:
+            payload['note'] = (f'Only the first {REQUIREMENTS_RESULTS} of {len(found)} are '
+                               'shown; filter by component, id or search to see the rest.')
+        return json.dumps(payload, ensure_ascii=False)
+
+    result = StructuredTool.from_function(read_requirements, name=REQUIREMENTS_TOOL,
+                                          description=REQUIREMENTS_DESCRIPTION)
+    result.coroutine = partial(run_sync, read_requirements)
+    return [result]
+
+
 def ask_user_tool() -> BaseTool:
     """Declared to the model only: the loop pauses the run instead of calling it."""
     def ask_user(questions: list) -> str:
@@ -754,6 +821,7 @@ async def _run_native(profile: AgentProfile, provider, agent: str,
     # Kept across a pause or a stop, as the run's own state.
     working: list[str] = list(state.get('working', [])) if state else []
     tools = [*(await run_sync(workspace_tools, profile.root, profile.contracts, profile.build_dirs)),
+             *(await run_sync(requirements_tools, directory)),
              StructuredTool.from_function(ask_user, name=ASK_USER, description=DESCRIPTION,
                                           args_schema=AskUserInput),
              *([note_tool(working)] if profile.working_notes else [])]
@@ -874,6 +942,7 @@ async def _run_with_provider(profile: AgentProfile, provider, compaction_tokens:
     are in use; 0 never compacts."""
     working: list[str] = []
     tools = [*(await run_sync(workspace_tools, profile.root, profile.contracts, profile.build_dirs)),
+             *(await run_sync(requirements_tools, profile.root.parent)),
              ask_user_tool(), *([note_tool(working)] if profile.working_notes else [])]
     by_name = {item.name: item for item in tools}
     model = provider.bind_tools(tools)

@@ -732,6 +732,11 @@ class DeliveryState:
     # the user decided is not taken for a departure from the requirements. Retries keep
     # them, the most recent MAX_AGENT_ANSWERS only.
     agent_answers: list[AnsweredQuestions] = field(default_factory=list)
+    # The questions, not yet answered, which requirement each of the task flow's
+    # requirements without a counterpart after a push merged the base branch in
+    # corresponds to (REQUIREMENT_QUESTIONS of the publication). They are asked while
+    # the delivery waits and carried to its next run until answered or timed out.
+    requirement_mapping: list[dict[str, Any]] = field(default_factory=list)
 
 
 def mention_key(item: Any) -> tuple[str | None, int]:

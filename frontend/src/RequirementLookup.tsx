@@ -14,6 +14,8 @@ export type LookupRequirement = {
   title: string;
   description: string;
   priority: "must" | "should" | "could";
+  /** The architecture component it is grouped under; null while it has none. */
+  component?: string | null;
   retired: boolean;
 };
 
@@ -31,7 +33,9 @@ function isLookupRequirement(value: unknown): value is LookupRequirement {
     typeof value.category === "string" && value.category in categoryLabels &&
     typeof value.title === "string" && typeof value.description === "string" &&
     typeof value.priority === "string" && priorities.includes(value.priority) &&
-    typeof value.retired === "boolean";
+    typeof value.retired === "boolean" &&
+    (value.component === undefined || value.component === null ||
+      typeof value.component === "string");
 }
 
 /** The lookup requirements in `value`, skipping malformed entries; none for anything else. */
@@ -161,6 +165,9 @@ function RequirementPopup({ id, requirement, popupId, anchor }: {
           <span className="requirement-popup-meta">
             <span className={`priority priority-${requirement.priority}`}>{requirement.priority}</span>
             <span>{categoryLabels[requirement.category]}</span>
+            {requirement.component && (
+              <span className="requirement-popup-component">{requirement.component}</span>
+            )}
           </span>
         </>
       ) : (

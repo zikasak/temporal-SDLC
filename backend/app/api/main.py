@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager, suppress
 import psycopg
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from temporalio.service import RPCError
 
 from app.api.errors import (
     TemporalUnavailableError, request_validation_response, temporal_unavailable_response,
@@ -24,6 +25,8 @@ from app.github.storage import ensure_schema as ensure_github_schema
 from app.onboarding.service import cancel_old_shape_onboardings_loop
 from app.onboarding.storage import ensure_schema as ensure_onboarding_schema
 from app.llm.pi_credentials import refresh_pi_credentials_loop
+from app.config import REQUIREMENTS_RETENTION_DAYS
+from app.requirements import store as requirements_store
 from app.temporal.client import TemporalUnavailable
 from app.temporal.registry import ensure_schema as ensure_registry_schema
 from app.settings.storage import ensure_schema as ensure_settings_schema
@@ -38,6 +41,12 @@ async def _cleanup_loop() -> None:
             await cleanup_expired_documents()
         except (OSError, psycopg.Error):
             logger.exception("Could not clean up expired documents")
+        try:
+            # The requirement layers of task flows closed longer than the retention.
+            await requirements_store.delete_closed_flows(REQUIREMENTS_RETENTION_DAYS)
+        except (OSError, psycopg.Error, TemporalUnavailable, RPCError, RuntimeError):
+            logger.warning("Could not delete the requirements of closed task flows",
+                           exc_info=True)
         await asyncio.sleep(3600)
 
 
@@ -52,6 +61,7 @@ async def lifespan(_: FastAPI):
     await ensure_mention_schema()
     await ensure_acceptance_schema()
     await ensure_onboarding_schema()
+    await requirements_store.ensure_schema()
     tasks = [asyncio.create_task(_cleanup_loop()), asyncio.create_task(refresh_pi_credentials_loop()),
              asyncio.create_task(github.recover_mentions_loop()),
              # Onboardings from before they ran under task flows are cancelled once.

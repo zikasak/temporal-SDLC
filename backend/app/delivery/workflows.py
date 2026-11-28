@@ -1,5 +1,5 @@
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from temporalio import workflow
@@ -89,6 +89,12 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, MergeCon
         # code, and the user's answer to it.
         self._bug_question = False
         self._bug_answer: str | None = None
+        # The questions open about the task flow's requirements without a counterpart
+        # after the base branch was merged in, and the user's answers to them.
+        self._mapping_questions: list[dict[str, Any]] = []
+        self._mapping_answers: list[str] | None = None
+        # Until when the open ones are asked, ANSWER_TIMEOUT after they were.
+        self._mapping_deadline: datetime | None = None
         # Why this run's fix round of an architecture-only onboarding changed nothing,
         # and the model's summary of the change it made.
         self._fix_error: str | None = None
@@ -131,6 +137,8 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, MergeCon
             # Created by its task flow before the task was specified.
             await self._wait_pending()
             return self.progress
+        # Mapping questions an earlier run asked are asked again once this one waits.
+        self._hide_requirement_mapping(drop=False)
         self._keep_flags()
         # Mentions that ended before this run, such as in a stopped one, are kept in the
         # mention history and leave the workflow's state, once a fix round that was
@@ -203,6 +211,8 @@ class DeliveryWorkflow(Stages, PullRequestWait, CiWatch, MentionRounds, MergeCon
         if following is not self.state:
             # Mentions received since the user's decision was read stay with the delivery.
             following.progress.mentions = self.progress.mentions
+            # So do the questions about the merged requirements still open.
+            following.requirement_mapping = self.state.requirement_mapping
             running = (following.mention_type, following.mention)
             following.mention_queue = [
                 item for item in self.state.mention_queue
