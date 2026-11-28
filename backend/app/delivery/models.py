@@ -736,7 +736,10 @@ class DeliveryState:
     # requirements without a counterpart after a push merged the base branch in
     # corresponds to (REQUIREMENT_QUESTIONS of the publication). They are asked while
     # the delivery waits and carried to its next run until answered or timed out.
-    requirement_mapping: list[dict[str, Any]] = field(default_factory=list)
+    # Not a constructor parameter (init=False), so that the class keeps the signature of
+    # the published component contract; the payload converter still restores it, and a
+    # following run is given it by assignment.
+    requirement_mapping: list[dict[str, Any]] = field(default_factory=list, init=False)
 
 
 def mention_key(item: Any) -> tuple[str | None, int]:
